@@ -20,9 +20,7 @@ use crate::docx::model::{
     PresetShapeType, ShapeGeometry, ShapeProperties, StyleMatrixRef, TextAnchoringType,
     TextAutoFit, TextVerticalType, TextWrappingType, Transform2D, WordProcessingShape,
 };
-use crate::docx::parse::primitives::units::{
-    deserialize_nonnegative_dimension, deserialize_optional_nonnegative_dimension,
-};
+use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
 
 use super::color::DrawingColorXml;
 use super::effect::EffectListXml;
@@ -402,29 +400,16 @@ pub struct BodyPrXml {
     pub vert: Option<StTextVerticalType>,
     #[serde(rename = "@wrap", default)]
     pub wrap: Option<StTextWrappingType>,
-    #[serde(
-        rename = "@lIns",
-        default,
-        deserialize_with = "deserialize_optional_nonnegative_dimension"
-    )]
+    // §20.1.2.1.1: text insets are `ST_Coordinate32` (signed) — negative insets
+    // let text bleed past the shape's box, so they must not be clamped to zero.
+    // The default `Dimension` deserializer is signed and decimal-tolerant.
+    #[serde(rename = "@lIns", default)]
     pub l_ins: Option<Dimension<Emu>>,
-    #[serde(
-        rename = "@tIns",
-        default,
-        deserialize_with = "deserialize_optional_nonnegative_dimension"
-    )]
+    #[serde(rename = "@tIns", default)]
     pub t_ins: Option<Dimension<Emu>>,
-    #[serde(
-        rename = "@rIns",
-        default,
-        deserialize_with = "deserialize_optional_nonnegative_dimension"
-    )]
+    #[serde(rename = "@rIns", default)]
     pub r_ins: Option<Dimension<Emu>>,
-    #[serde(
-        rename = "@bIns",
-        default,
-        deserialize_with = "deserialize_optional_nonnegative_dimension"
-    )]
+    #[serde(rename = "@bIns", default)]
     pub b_ins: Option<Dimension<Emu>>,
     #[serde(rename = "@anchor", default)]
     pub anchor: Option<StTextAnchoringType>,
@@ -827,6 +812,18 @@ mod tests {
     fn body_pr_no_autofit() {
         let bp = parse_body_pr(r#"<bodyPr><noAutofit/></bodyPr>"#);
         assert_eq!(bp.auto_fit, Some(TextAutoFit::NoAutoFit));
+    }
+
+    #[test]
+    fn body_pr_preserves_signed_decimal_insets() {
+        // §20.1.2.1.1: lIns/tIns/rIns/bIns are ST_Coordinate32 (signed); a
+        // negative inset lets text overflow the shape box and must survive
+        // parsing (Word also emits decimal-valued measurements).
+        let bp = parse_body_pr(r#"<bodyPr lIns="-91440" tIns="-45720.0" rIns="91440" bIns="0"/>"#);
+        assert_eq!(bp.left_inset.unwrap().raw(), -91440);
+        assert_eq!(bp.top_inset.unwrap().raw(), -45720);
+        assert_eq!(bp.right_inset.unwrap().raw(), 91440);
+        assert_eq!(bp.bottom_inset.unwrap().raw(), 0);
     }
 
     // ── wsp ──
