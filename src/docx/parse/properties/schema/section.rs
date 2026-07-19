@@ -12,6 +12,7 @@ use crate::docx::model::{
     SectionRevisionIds, SectionType,
 };
 use crate::docx::parse::primitives::st_enums::{StNumberFormat, StPageOrientation, StSectionMark};
+use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
 use crate::docx::parse::primitives::OnOff;
 
 /// `<w:sectPr>` root.
@@ -59,9 +60,17 @@ pub(crate) enum SectChildXml {
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub(crate) struct PgSzXml {
-    #[serde(rename = "@w", default)]
+    #[serde(
+        rename = "@w",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     w: Option<Dimension<Twips>>,
-    #[serde(rename = "@h", default)]
+    #[serde(
+        rename = "@h",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     h: Option<Dimension<Twips>>,
     #[serde(rename = "@orient", default)]
     orient: Option<StPageOrientation>,
@@ -71,17 +80,37 @@ pub(crate) struct PgSzXml {
 pub(crate) struct PgMarXml {
     #[serde(rename = "@top", default)]
     top: Option<Dimension<Twips>>,
-    #[serde(rename = "@right", default)]
+    #[serde(
+        rename = "@right",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     right: Option<Dimension<Twips>>,
     #[serde(rename = "@bottom", default)]
     bottom: Option<Dimension<Twips>>,
-    #[serde(rename = "@left", default)]
+    #[serde(
+        rename = "@left",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     left: Option<Dimension<Twips>>,
-    #[serde(rename = "@header", default)]
+    #[serde(
+        rename = "@header",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     header: Option<Dimension<Twips>>,
-    #[serde(rename = "@footer", default)]
+    #[serde(
+        rename = "@footer",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     footer: Option<Dimension<Twips>>,
-    #[serde(rename = "@gutter", default)]
+    #[serde(
+        rename = "@gutter",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     gutter: Option<Dimension<Twips>>,
 }
 
@@ -89,7 +118,11 @@ pub(crate) struct PgMarXml {
 pub(crate) struct ColsXml {
     #[serde(rename = "@num", default)]
     num: Option<u32>,
-    #[serde(rename = "@space", default)]
+    #[serde(
+        rename = "@space",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     space: Option<Dimension<Twips>>,
     #[serde(rename = "@equalWidth", default)]
     equal_width: Option<OnOffFromAttr>,
@@ -101,9 +134,17 @@ use crate::docx::parse::primitives::AttrBool as OnOffFromAttr;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub(crate) struct ColXml {
-    #[serde(rename = "@w", default)]
+    #[serde(
+        rename = "@w",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     w: Option<Dimension<Twips>>,
-    #[serde(rename = "@space", default)]
+    #[serde(
+        rename = "@space",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_dimension"
+    )]
     space: Option<Dimension<Twips>>,
 }
 
@@ -345,6 +386,17 @@ mod tests {
     }
 
     #[test]
+    fn page_margins_preserve_signed_vertical_values() {
+        let s = parse(
+            r#"<sectPr><pgMar top="-720.0" right="1800" bottom="-360"
+                 left="1800" header="720" footer="720" gutter="0"/></sectPr>"#,
+        );
+        let pm = s.page_margins.unwrap();
+        assert_eq!(pm.top.unwrap().raw(), -720);
+        assert_eq!(pm.bottom.unwrap().raw(), -360);
+    }
+
+    #[test]
     fn cols_with_child_definitions() {
         let s = parse(
             r#"<sectPr><cols num="2" space="720" equalWidth="false">
@@ -365,6 +417,16 @@ mod tests {
         let g = s.doc_grid.unwrap();
         assert_eq!(g.grid_type, Some(DocGridType::Lines));
         assert_eq!(g.line_pitch.unwrap().raw(), 360);
+    }
+
+    #[test]
+    fn doc_grid_preserves_signed_decimal_values() {
+        let s = parse(
+            r#"<sectPr><docGrid type="linesAndChars" linePitch="-360.0" charSpace="-12"/></sectPr>"#,
+        );
+        let g = s.doc_grid.unwrap();
+        assert_eq!(g.line_pitch.unwrap().raw(), -360);
+        assert_eq!(g.char_space.unwrap().raw(), -12);
     }
 
     #[test]

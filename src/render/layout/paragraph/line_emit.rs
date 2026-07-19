@@ -117,6 +117,116 @@ pub(super) fn compute_line_placements(
     placements
 }
 
+fn stretchable_gap_after(fragments: &[Fragment], frag_idx: usize, line_end: usize) -> bool {
+    let Fragment::Text { text, .. } = &fragments[frag_idx] else {
+        return false;
+    };
+    text.ends_with(' ')
+        && fragments[frag_idx + 1..line_end]
+            .iter()
+            .any(|fragment| !matches!(fragment, Fragment::Bookmark { .. }))
+}
+
+fn line_has_justification_tab(fragments: &[Fragment], line_start: usize, line_end: usize) -> bool {
+    fragments[line_start..line_end].iter().any(|fragment| {
+        matches!(
+            fragment,
+            Fragment::Tab {
+                fitting_width: None,
+                ..
+            } | Fragment::PTab { .. }
+        ) || matches!(fragment, Fragment::Text { text, .. } if text.contains('\t'))
+    })
+}
+
+fn visible_line_width(fragments: &[Fragment], line: &super::super::line::FittedLine) -> Pt {
+    let last_visible = (line.start..line.end)
+        .rev()
+        .find(|&idx| !matches!(fragments[idx], Fragment::Bookmark { .. }));
+    (line.start..line.end)
+        .map(|idx| {
+            if Some(idx) == last_visible {
+                fragments[idx].trimmed_width()
+            } else {
+                fragments[idx].width()
+            }
+        })
+        .sum()
+}
+
+fn justification_extra_after(
+    fragments: &[Fragment],
+    line: &super::super::line::FittedLine,
+    line_idx: usize,
+    line_count: usize,
+    alignment: crate::model::Alignment,
+    line_has_tabs: bool,
+    remaining: Pt,
+) -> Pt {
+    if alignment != crate::model::Alignment::Both
+        || line.has_break
+        || line_idx + 1 == line_count
+        || line_has_tabs
+        || remaining <= Pt::ZERO
+    {
+        return Pt::ZERO;
+    }
+    let gaps = (line.start..line.end)
+        .filter(|&idx| stretchable_gap_after(fragments, idx, line.end))
+        .count();
+    if gaps == 0 {
+        Pt::ZERO
+    } else {
+        remaining / gaps as f32
+    }
+}
+
+fn distribution_unit_count(fragment: &Fragment, terminal: bool) -> usize {
+    match fragment {
+        Fragment::Text { text, .. } => {
+            if terminal {
+                text.trim_end().chars().count()
+            } else {
+                text.chars().count()
+            }
+        }
+        Fragment::Image { .. } | Fragment::Emoji { .. } => 1,
+        _ => 0,
+    }
+}
+
+fn distribution_gap_count_after(fragments: &[Fragment], frag_idx: usize, line_end: usize) -> usize {
+    let has_following_unit = fragments[frag_idx + 1..line_end]
+        .iter()
+        .any(|fragment| distribution_unit_count(fragment, false) > 0);
+    let units = distribution_unit_count(&fragments[frag_idx], !has_following_unit);
+    if has_following_unit {
+        units
+    } else {
+        units.saturating_sub(1)
+    }
+}
+
+fn distribution_extra_per_gap(
+    fragments: &[Fragment],
+    line: &super::super::line::FittedLine,
+    alignment: crate::model::Alignment,
+    line_has_tabs: bool,
+    remaining: Pt,
+) -> Pt {
+    if alignment != crate::model::Alignment::Distribute || line_has_tabs || remaining <= Pt::ZERO {
+        return Pt::ZERO;
+    }
+    let gaps = (line.start..line.end)
+        .map(|idx| distribution_gap_count_after(fragments, idx, line.end))
+        .sum::<usize>();
+    if gaps == 0 {
+        Pt::ZERO
+    } else {
+        remaining / gaps as f32
+    }
+}
+
 /// Emit `DrawCommand`s for all lines in a paragraph, advancing `cursor_y`
 /// by the total line height consumed.
 ///
@@ -174,13 +284,13 @@ pub(super) fn emit_line_commands(
         } else {
             (content_width - float_reduction - dc_offset).max(Pt::ZERO)
         };
-        let remaining = (line_available - line.width).max(Pt::ZERO);
+        let remaining = (line_available - visible_line_width(fragments, line)).max(Pt::ZERO);
         // §17.3.1.37: when a line contains tab characters, tab stops control
         // horizontal positioning — paragraph alignment does not apply. Absolute
         // position tabs (§17.3.1.30) place content explicitly for the same
         // reason, so they suppress paragraph alignment too.
-        let line_has_tabs = fragments[line.start..line.end].iter().any(is_tab_like);
-        let align_offset = if line_has_tabs {
+        let line_has_tab_placement = fragments[line.start..line.end].iter().any(is_tab_like);
+        let align_offset = if line_has_tab_placement {
             Pt::ZERO
         } else {
             match style.alignment {
@@ -194,6 +304,22 @@ pub(super) fn emit_line_commands(
                 _ => Pt::ZERO,
             }
         };
+        let extra_per_gap = justification_extra_after(
+            fragments,
+            line,
+            line_idx,
+            line_placements.len(),
+            style.alignment,
+            line_has_justification_tab(fragments, line.start, line.end),
+            remaining,
+        );
+        let distribution_extra = distribution_extra_per_gap(
+            fragments,
+            line,
+            style.alignment,
+            line_has_justification_tab(fragments, line.start, line.end),
+            remaining,
+        );
 
         let x_start = indent + align_offset;
 
@@ -214,6 +340,15 @@ pub(super) fn emit_line_commands(
                     text_offset,
                     ..
                 } => {
+                    let extra_after = if stretchable_gap_after(fragments, frag_idx, line.end) {
+                        extra_per_gap
+                    } else {
+                        Pt::ZERO
+                    };
+                    let distributed_width = distribution_extra
+                        * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
+                    let rendered_width = *width + extra_after + distributed_width;
+
                     // §17.3.2.32: render run-level shading behind text.
                     // Uses text bounds (ascent+descent), not full line height.
                     if let Some(bg_color) = shading {
@@ -222,7 +357,7 @@ pub(super) fn emit_line_commands(
                             rect: crate::render::geometry::PtRect::from_xywh(
                                 x,
                                 text_top,
-                                *width,
+                                rendered_width,
                                 metrics.height(),
                             ),
                             color: *bg_color,
@@ -235,7 +370,7 @@ pub(super) fn emit_line_commands(
                         let text_top = *cursor_y + line.ascent - metrics.ascent;
                         let bx = x - bdr.space;
                         let by = text_top;
-                        let bw = *width + bdr.space * 2.0;
+                        let bw = rendered_width + bdr.space * 2.0;
                         let bh = metrics.height();
                         let half = bdr.width * 0.5;
                         // Top
@@ -281,7 +416,7 @@ pub(super) fn emit_line_commands(
                         position: PtOffset::new(x + *text_offset, y),
                         text: text.clone(),
                         font_family: font.family.clone(),
-                        char_spacing: font.char_spacing,
+                        char_spacing: font.char_spacing + distribution_extra,
                         font_size: font.size,
                         bold: font.bold,
                         italic: font.italic,
@@ -293,7 +428,7 @@ pub(super) fn emit_line_commands(
                         let rect = crate::render::geometry::PtRect::from_xywh(
                             x,
                             *cursor_y,
-                            *width,
+                            rendered_width,
                             line_height,
                         );
                         if url.starts_with("http://")
@@ -323,14 +458,14 @@ pub(super) fn emit_line_commands(
                         commands.push(DrawCommand::Underline {
                             line: crate::render::geometry::PtLineSegment::new(
                                 PtOffset::new(x, underline_y),
-                                PtOffset::new(x + *width, underline_y),
+                                PtOffset::new(x + rendered_width, underline_y),
                             ),
                             color: *color,
                             width: stroke_width,
                         });
                     }
 
-                    x += *width;
+                    x += rendered_width;
                 }
                 Fragment::Image {
                     size,
@@ -350,7 +485,9 @@ pub(super) fn emit_line_commands(
                             src_rect: *src_rect,
                         });
                     }
-                    x += size.width;
+                    x += size.width
+                        + distribution_extra
+                            * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
                 }
                 Fragment::Emoji {
                     text,
@@ -381,7 +518,9 @@ pub(super) fn emit_line_commands(
                         presentation: *presentation,
                         structure: *structure,
                     });
-                    x += *advance;
+                    x += *advance
+                        + distribution_extra
+                            * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
                 }
                 Fragment::Tab { .. } => {
                     // §17.3.1.37: resolve to the next tab stop.

@@ -20,9 +20,44 @@ pub use grid::compute_column_widths;
 pub use types::*;
 
 use emit::{emit_split_row, emit_table_rows, TableCommandBuffers};
-use grid::build_row_groups;
+use grid::{build_row_groups, row_group_end};
 use measure::measure_table_rows;
 use split::{find_row_cut, split_row_at, RowCutInput};
+
+/// Measure the first atomic paginator row group without emitting table commands.
+///
+/// The following row is included only to resolve the group's shared bottom
+/// border; later rows and groups are neither measured nor paginated.
+pub(crate) fn measure_leading_table_group_height(
+    rows: &[TableRowInput],
+    col_widths: &[Pt],
+    default_line_height: Pt,
+    borders: Option<&TableBorderConfig>,
+    measure_text: super::paragraph::MeasureTextFn<'_>,
+    suppress_first_row_top: bool,
+) -> Option<Pt> {
+    if rows.is_empty() || col_widths.is_empty() {
+        return None;
+    }
+
+    let group_end = row_group_end(rows, 0);
+    let measured_end = (group_end + 1).min(rows.len());
+    let measured = measure_table_rows(
+        &rows[..measured_end],
+        col_widths,
+        default_line_height,
+        borders,
+        measure_text,
+        suppress_first_row_top,
+    );
+
+    Some(
+        measured.rows[..group_end]
+            .iter()
+            .map(|row| row.height + row.border_gap_below)
+            .sum(),
+    )
+}
 
 /// Lay out a table: compute column widths, lay out cells, emit borders.
 ///
@@ -100,6 +135,12 @@ pub struct TablePaginationConfig {
     pub suppress_first_row_top: bool,
 }
 
+pub(crate) struct TablePaginationHeights<F> {
+    pub(crate) available_height: Pt,
+    pub(crate) suppress_first_row_top: bool,
+    pub(crate) page_height_for_slice: F,
+}
+
 /// Lay out a table with page splitting at row boundaries.
 ///
 /// §17.4.49: header rows repeat on each continuation page.
@@ -115,9 +156,36 @@ pub fn layout_table_paginated(
     measure_text: super::paragraph::MeasureTextFn<'_>,
     pagination: &TablePaginationConfig,
 ) -> Vec<TableSlice> {
-    let available_height = pagination.available_height;
     let page_height = pagination.page_height;
-    let suppress_first_row_top = pagination.suppress_first_row_top;
+    layout_table_paginated_with_page_heights(
+        rows,
+        col_widths,
+        _constraints,
+        default_line_height,
+        borders,
+        measure_text,
+        TablePaginationHeights {
+            available_height: pagination.available_height,
+            suppress_first_row_top: pagination.suppress_first_row_top,
+            page_height_for_slice: |_| page_height,
+        },
+    )
+}
+
+pub(crate) fn layout_table_paginated_with_page_heights(
+    rows: &[TableRowInput],
+    col_widths: &[Pt],
+    _constraints: &BoxConstraints,
+    default_line_height: Pt,
+    borders: Option<&TableBorderConfig>,
+    measure_text: super::paragraph::MeasureTextFn<'_>,
+    pagination: TablePaginationHeights<impl FnMut(usize) -> Pt>,
+) -> Vec<TableSlice> {
+    let TablePaginationHeights {
+        available_height,
+        suppress_first_row_top,
+        mut page_height_for_slice,
+    } = pagination;
     if rows.is_empty() || col_widths.is_empty() {
         return vec![TableSlice {
             commands: Vec::new(),
@@ -184,7 +252,7 @@ pub fn layout_table_paginated(
                 });
                 slices.push(std::mem::take(&mut current_slice));
                 // New page: start with header rows (if any).
-                remaining = page_height;
+                remaining = page_height_for_slice(slices.len());
                 if header_count > 0 {
                     current_slice.push(SliceItem::Range(0..header_count));
                     remaining -= header_height;
@@ -215,7 +283,7 @@ pub fn layout_table_paginated(
                                 mr: sub.first,
                             });
                             slices.push(std::mem::take(&mut current_slice));
-                            remaining = page_height;
+                            remaining = page_height_for_slice(slices.len());
                             if header_count > 0 {
                                 current_slice.push(SliceItem::Range(0..header_count));
                                 remaining -= header_height;
@@ -247,7 +315,7 @@ pub fn layout_table_paginated(
 
         // No split possible — move the whole group to the next page.
         slices.push(std::mem::take(&mut current_slice));
-        remaining = page_height;
+        remaining = page_height_for_slice(slices.len());
         // §17.4.49: prepend the repeating header rows only when this group
         // sits past the headers. When advancing because a header row itself
         // doesn't fit, the row is part of the table's first appearance —
@@ -1545,5 +1613,47 @@ mod tests {
             .count();
         assert_eq!(count0, 3, "slice 0: header (1) + body0 (2)");
         assert_eq!(count1, 3, "slice 1: header repeated (1) + body1 (2)");
+    }
+
+    #[test]
+    fn continuation_slices_use_their_own_page_heights() {
+        let rows = (0..4)
+            .map(|_| {
+                let mut row = tall_row(2);
+                row.cant_split = Some(true);
+                row
+            })
+            .collect::<Vec<_>>();
+        let col_widths = vec![Pt::new(40.0)];
+
+        let slices = layout_table_paginated_with_page_heights(
+            &rows,
+            &col_widths,
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            TablePaginationHeights {
+                available_height: Pt::new(30.0),
+                suppress_first_row_top: false,
+                page_height_for_slice: |slice_index| match slice_index {
+                    1 => Pt::new(30.0),
+                    _ => Pt::new(60.0),
+                },
+            },
+        );
+
+        let row_counts = slices
+            .iter()
+            .map(|slice| {
+                slice
+                    .commands
+                    .iter()
+                    .filter(|command| matches!(command, DrawCommand::Text { .. }))
+                    .count()
+                    / 2
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(row_counts, vec![1, 1, 2]);
     }
 }
