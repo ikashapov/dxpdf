@@ -67,6 +67,25 @@ mod tests {
         h: Dimension<HalfPoints>,
     }
 
+    #[derive(Deserialize)]
+    struct NonnegativeTwips {
+        #[serde(
+            rename = "@val",
+            deserialize_with = "deserialize_nonnegative_dimension"
+        )]
+        val: Dimension<Twips>,
+    }
+
+    #[derive(Deserialize)]
+    struct OptionalNonnegativeTwips {
+        #[serde(
+            rename = "@val",
+            default,
+            deserialize_with = "deserialize_optional_nonnegative_dimension"
+        )]
+        val: Option<Dimension<Twips>>,
+    }
+
     #[test]
     fn twips_attribute_deserializes() {
         let v: TwipsVal = quick_xml::de::from_str(r#"<x val="720"/>"#).unwrap();
@@ -94,5 +113,30 @@ mod tests {
             "expected error, got {:?}",
             r.map(|v| v.val.raw())
         );
+    }
+
+    #[test]
+    fn negative_fractions_are_rejected_for_required_nonnegative_dimensions() {
+        for raw in ["-0.1", "-0.49"] {
+            let result: Result<NonnegativeTwips, _> =
+                quick_xml::de::from_str(&format!(r#"<x val="{raw}"/>"#));
+            if let Ok(value) = result {
+                panic!("{raw:?} must be rejected, got {}", value.val.raw());
+            }
+        }
+    }
+
+    #[test]
+    fn negative_fractions_are_rejected_for_optional_nonnegative_dimensions() {
+        for raw in ["-0.1", "-0.49"] {
+            let result: Result<OptionalNonnegativeTwips, _> =
+                quick_xml::de::from_str(&format!(r#"<x val="{raw}"/>"#));
+            if let Ok(value) = result {
+                panic!(
+                    "{raw:?} must be rejected, got {:?}",
+                    value.val.map(|dimension| dimension.raw())
+                );
+            }
+        }
     }
 }

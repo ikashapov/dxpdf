@@ -68,6 +68,16 @@ where
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    struct NonnegativeTableMeasure {
+        #[serde(
+            rename = "tblW",
+            default,
+            deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        )]
+        value: Option<TableMeasureXml>,
+    }
+
     fn parse(xml: &str) -> TableMeasure {
         let x: TableMeasureXml = quick_xml::de::from_str(xml).unwrap();
         x.into()
@@ -115,6 +125,20 @@ mod tests {
         match parse(r#"<tblW w="2500.5" type="dxa"/>"#) {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 2501),
             other => panic!("expected Twips, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_fractions_are_rejected_for_nonnegative_table_measurements() {
+        for raw in ["-0.1", "-0.49"] {
+            let result: Result<NonnegativeTableMeasure, _> =
+                quick_xml::de::from_str(&format!(r#"<x><tblW w="{raw}" type="dxa"/></x>"#));
+            if let Ok(value) = result {
+                panic!(
+                    "{raw:?} must be rejected, got {:?}",
+                    value.value.map(TableMeasure::from)
+                );
+            }
         }
     }
 }
