@@ -17,7 +17,9 @@ use super::floating_table::{
 use super::helpers::{
     render_page_footnotes, split_at_column_breaks, split_at_page_breaks, table_x_offset,
 };
-use super::types::{ContinuationState, FloatingImageY, LayoutBlock};
+use super::types::{
+    ContinuationState, FloatingImage, FloatingImageY, FloatingShape, LayoutBlock, WrapMode,
+};
 use super::FLOAT_DEDUP_EPSILON_PT;
 use super::FOOTNOTE_SEPARATOR_GAP;
 use crate::model::StyleId;
@@ -166,6 +168,125 @@ impl<'doc> PageLayoutState<'doc> {
         self.flush_footnotes(ctx);
         self.pages.push(self.current_page);
         self.pages
+    }
+}
+
+struct ParagraphFloatCheckpoint {
+    command_count: usize,
+    page_floats: Vec<float::ActiveFloat>,
+    cursor_y: Pt,
+}
+
+impl ParagraphFloatCheckpoint {
+    fn capture(state: &PageLayoutState<'_>) -> Self {
+        Self {
+            command_count: state.current_page.commands.len(),
+            page_floats: state.page_floats.clone(),
+            cursor_y: state.cursor_y,
+        }
+    }
+
+    fn restore(&self, state: &mut PageLayoutState<'_>) {
+        state.current_page.commands.truncate(self.command_count);
+        state.page_floats.clone_from(&self.page_floats);
+        state.cursor_y = self.cursor_y;
+    }
+}
+
+fn register_paragraph_floats(
+    state: &mut PageLayoutState<'_>,
+    floating_images: &[FloatingImage],
+    floating_shapes: &[FloatingShape],
+    content_top: Pt,
+) {
+    for fi in floating_images {
+        let (y_start, y_end) = match fi.y {
+            FloatingImageY::RelativeToParagraph(offset) => {
+                (content_top + offset, content_top + offset + fi.size.height)
+            }
+            FloatingImageY::Absolute(img_y) => (img_y, img_y + fi.size.height),
+        };
+        if fi.is_wrap_top_and_bottom() {
+            let img_y = match fi.y {
+                FloatingImageY::Absolute(y) => y,
+                FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
+            };
+            state.current_page.commands.push(DrawCommand::Image {
+                rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
+                image_data: fi.image_data.clone(),
+                src_rect: fi.src_rect,
+            });
+            if y_end > state.cursor_y {
+                state.cursor_y = y_end;
+            }
+        } else {
+            let float_entry = float::ActiveFloat {
+                page_x: fi.x - fi.dist_left,
+                page_y_start: y_start,
+                page_y_end: y_end,
+                width: fi.size.width + fi.dist_left + fi.dist_right,
+                source: float::FloatSource::Image,
+                wrap_text: fi.wrap_mode.wrap_text().into(),
+            };
+            log::debug!(
+                "[layout]   register image float: x={:.1} y={:.1}-{:.1} w={:.1}",
+                float_entry.page_x.raw(),
+                y_start.raw(),
+                y_end.raw(),
+                float_entry.width.raw()
+            );
+            state.page_floats.push(float_entry);
+        }
+    }
+
+    for fs in floating_shapes {
+        if matches!(fs.wrap_mode, WrapMode::None) {
+            continue;
+        }
+        let (y_start, y_end) = match fs.y {
+            FloatingImageY::RelativeToParagraph(offset) => {
+                (content_top + offset, content_top + offset + fs.size.height)
+            }
+            FloatingImageY::Absolute(y) => (y, y + fs.size.height),
+        };
+        if fs.is_wrap_top_and_bottom() {
+            let shape_y = match fs.y {
+                FloatingImageY::Absolute(y) => y,
+                FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
+            };
+            state.current_page.commands.push(DrawCommand::Path {
+                origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+                rotation: fs.rotation,
+                flip_h: fs.flip_h,
+                flip_v: fs.flip_v,
+                extent: fs.size,
+                paths: fs.paths.clone(),
+                fill: fs.fill.clone(),
+                stroke: fs.stroke.clone(),
+                effects: fs.effects.clone(),
+            });
+            if y_end > state.cursor_y {
+                state.cursor_y = y_end;
+            }
+        } else {
+            let float_entry = float::ActiveFloat {
+                page_x: fs.x - fs.dist_left,
+                page_y_start: y_start,
+                page_y_end: y_end,
+                width: fs.size.width + fs.dist_left + fs.dist_right,
+                source: float::FloatSource::Shape,
+                wrap_text: fs.wrap_mode.wrap_text().into(),
+            };
+            log::debug!(
+                "[layout]   register shape float: x={:.1} y={:.1}-{:.1} w={:.1} mode={:?}",
+                float_entry.page_x.raw(),
+                y_start.raw(),
+                y_end.raw(),
+                float_entry.width.raw(),
+                fs.wrap_mode
+            );
+            state.page_floats.push(float_entry);
+        }
     }
 }
 
@@ -525,110 +646,14 @@ pub(crate) fn layout_section_with_clearance(
                 // and cursor_y advances past them — they act as block spacers.
                 // §20.4.2.10: paragraph-relative floats use the content area
                 // top (after space_before), not the total paragraph box top.
+                let float_checkpoint = ParagraphFloatCheckpoint::capture(&state);
                 let content_top = state.cursor_y + effective_style.space_before;
-                for fi in floating_images.iter() {
-                    let (y_start, y_end) = match fi.y {
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            (content_top + offset, content_top + offset + fi.size.height)
-                        }
-                        FloatingImageY::Absolute(img_y) => (img_y, img_y + fi.size.height),
-                    };
-                    if fi.is_wrap_top_and_bottom() {
-                        // §20.4.2.18: emit now and advance cursor past the image.
-                        let img_y = match fi.y {
-                            FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
-                        };
-                        state.current_page.commands.push(DrawCommand::Image {
-                            rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
-                            image_data: fi.image_data.clone(),
-                            src_rect: fi.src_rect,
-                        });
-                        if y_end > state.cursor_y {
-                            state.cursor_y = y_end;
-                        }
-                    } else {
-                        // §20.4.2.3: use distL/distR for text distance from float.
-                        let float_entry = float::ActiveFloat {
-                            page_x: fi.x - fi.dist_left,
-                            page_y_start: y_start,
-                            page_y_end: y_end,
-                            width: fi.size.width + fi.dist_left + fi.dist_right,
-                            source: float::FloatSource::Image,
-                            wrap_text: fi.wrap_mode.wrap_text().into(),
-                        };
-                        log::debug!(
-                            "[layout]   register image float: x={:.1} y={:.1}-{:.1} w={:.1}",
-                            float_entry.page_x.raw(),
-                            y_start.raw(),
-                            y_end.raw(),
-                            float_entry.width.raw()
-                        );
-                        state.page_floats.push(float_entry);
-                    }
-                }
-
-                // §20.4.2: register floating shapes (DrawingML). Parallels
-                // the image loop above but emits `DrawCommand::Path` for
-                // `wrapTopAndBottom` shapes and pushes an `ActiveFloat` with
-                // `FloatSource::Shape` for wrapping modes.
-                for fs in floating_shapes.iter() {
-                    use crate::render::layout::section::WrapMode;
-                    if matches!(fs.wrap_mode, WrapMode::None) {
-                        // wrapNone shapes do not participate in text flow —
-                        // they're emitted after the paragraph (below) with no
-                        // cursor impact.
-                        continue;
-                    }
-                    let (y_start, y_end) = match fs.y {
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            (content_top + offset, content_top + offset + fs.size.height)
-                        }
-                        FloatingImageY::Absolute(y) => (y, y + fs.size.height),
-                    };
-                    if fs.is_wrap_top_and_bottom() {
-                        // §20.4.2.18: emit now and advance cursor past the shape.
-                        let shape_y = match fs.y {
-                            FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
-                        };
-                        state.current_page.commands.push(DrawCommand::Path {
-                            origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
-                            rotation: fs.rotation,
-                            flip_h: fs.flip_h,
-                            flip_v: fs.flip_v,
-                            extent: fs.size,
-                            paths: fs.paths.clone(),
-                            fill: fs.fill.clone(),
-                            stroke: fs.stroke.clone(),
-                            effects: fs.effects.clone(),
-                        });
-                        if y_end > state.cursor_y {
-                            state.cursor_y = y_end;
-                        }
-                    } else {
-                        // Square / Tight / Through — register as active float.
-                        // Tight/Through approximated as Square per the Tier 1
-                        // plan (docs/drawingml-text-wrap.md Phase E).
-                        let float_entry = float::ActiveFloat {
-                            page_x: fs.x - fs.dist_left,
-                            page_y_start: y_start,
-                            page_y_end: y_end,
-                            width: fs.size.width + fs.dist_left + fs.dist_right,
-                            source: float::FloatSource::Shape,
-                            wrap_text: fs.wrap_mode.wrap_text().into(),
-                        };
-                        log::debug!(
-                            "[layout]   register shape float: x={:.1} y={:.1}-{:.1} w={:.1} mode={:?}",
-                            float_entry.page_x.raw(),
-                            y_start.raw(),
-                            y_end.raw(),
-                            float_entry.width.raw(),
-                            fs.wrap_mode
-                        );
-                        state.page_floats.push(float_entry);
-                    }
-                }
+                register_paragraph_floats(
+                    &mut state,
+                    floating_images,
+                    floating_shapes,
+                    content_top,
+                );
 
                 // Prune expired floats.
                 float::prune_floats(&mut state.page_floats, state.cursor_y);
@@ -721,6 +746,7 @@ pub(crate) fn layout_section_with_clearance(
                 let page_chunks = split_at_page_breaks(fragments);
                 let mut para_start_y = state.cursor_y;
                 state.last_para_start_y = state.cursor_y;
+                let mut paragraph_content_placed = false;
 
                 // §17.3.3.1: track whether an unresolved page break remains
                 // after processing all chunks, so it can be deferred to the
@@ -785,15 +811,38 @@ pub(crate) fn layout_section_with_clearance(
                         if state.cursor_y + para.size.height > state.bottom
                             && state.cursor_y > state.column_top
                         {
+                            if !paragraph_content_placed {
+                                float_checkpoint.restore(&mut state);
+                            }
                             if state.current_col + 1 < num_cols {
                                 state.current_col += 1;
                                 state.cursor_y = state.column_top;
                             } else {
                                 state.push_new_page(block_idx, &ctx);
                             }
+                            let destination_para_start_y = state.cursor_y;
+                            if !paragraph_content_placed {
+                                let content_top = state.cursor_y + effective_style.space_before;
+                                register_paragraph_floats(
+                                    &mut state,
+                                    floating_images,
+                                    floating_shapes,
+                                    content_top,
+                                );
+                                let col_width = config.columns[state.current_col].width;
+                                for active_float in &state.page_floats {
+                                    if active_float.overlaps_y(state.cursor_y)
+                                        && active_float.width >= col_width
+                                    {
+                                        state.cursor_y =
+                                            state.cursor_y.max(active_float.page_y_end);
+                                    }
+                                }
+                                float::prune_floats(&mut state.page_floats, state.cursor_y);
+                            }
                             // Update para_start_y after page/column change so
                             // floating images use the correct position.
-                            para_start_y = state.cursor_y;
+                            para_start_y = destination_para_start_y;
                             effective_style.page_y = state.cursor_y;
                             effective_style.page_x = col_x(state.current_col);
                             effective_style.page_content_width =
@@ -824,6 +873,7 @@ pub(crate) fn layout_section_with_clearance(
                             state.current_page.commands.push(cmd);
                         }
                         state.cursor_y += para.size.height;
+                        paragraph_content_placed = true;
                     }
                     // The page break has been consumed by this non-empty chunk.
                     unresolved_page_break = false;

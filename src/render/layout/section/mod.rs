@@ -50,6 +50,7 @@ mod tests {
     };
     use crate::render::resolve::color::RgbColor;
     use crate::render::resolve::header_footer::HeaderFooterSet;
+    use crate::render::resolve::images::MediaEntry;
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::{Mutex, Once};
@@ -135,6 +136,23 @@ mod tests {
             footnotes: vec![],
             floating_images: vec![],
             floating_shapes: vec![],
+        }
+    }
+
+    fn floating_image(wrap_mode: WrapMode, height: f32) -> FloatingImage {
+        FloatingImage {
+            image_data: MediaEntry {
+                data: Rc::from([]),
+                format: crate::model::ImageFormat::Png,
+            },
+            size: PtSize::new(Pt::new(80.0), Pt::new(height)),
+            src_rect: None,
+            x: Pt::new(10.0),
+            y: FloatingImageY::RelativeToParagraph(Pt::ZERO),
+            wrap_mode,
+            dist_left: Pt::ZERO,
+            dist_right: Pt::ZERO,
+            behind_doc: false,
         }
     }
 
@@ -409,6 +427,136 @@ mod tests {
         assert!(
             after_y > moved_last_y,
             "following paragraph at {after_y:?} overlaps moved paragraph ending at {moved_last_y:?}",
+        );
+    }
+
+    #[test]
+    fn moved_paragraph_keeps_its_wrap_float_during_destination_relayout() {
+        let config = small_config();
+        let clearance = HeaderFooterClearance::new(
+            &config,
+            HeaderFooterSet {
+                default: None,
+                first: Some(Pt::new(30.0)),
+                even: None,
+            },
+            HeaderFooterSet {
+                default: None,
+                first: Some(Pt::new(30.0)),
+                even: None,
+            },
+            true,
+            false,
+            1,
+        );
+        let moved = LayoutBlock::Paragraph {
+            fragments: (0..4)
+                .map(|i| text_frag(&format!("moved-{i}"), 80.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section_with_clearance(
+            &[para_block("before", 170.0), moved],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            &clearance,
+        );
+
+        assert_eq!(pages.len(), 2);
+        let first_moved_x = pages[1]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("moved-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("moved paragraph text on page 2");
+        assert!(
+            first_moved_x >= Pt::new(90.0),
+            "moved text at {first_moved_x:?} overlaps its 10-90pt float",
+        );
+    }
+
+    #[test]
+    fn moved_paragraph_relocates_top_and_bottom_float_to_destination_page() {
+        let config = small_config();
+        let clearance = HeaderFooterClearance::new(
+            &config,
+            HeaderFooterSet {
+                default: None,
+                first: Some(Pt::new(30.0)),
+                even: None,
+            },
+            HeaderFooterSet {
+                default: None,
+                first: Some(Pt::new(30.0)),
+                even: None,
+            },
+            true,
+            false,
+            1,
+        );
+        let moved = LayoutBlock::Paragraph {
+            fragments: vec![text_frag("moved", 170.0, 14.0)],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![floating_image(WrapMode::TopAndBottom, 30.0)],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section_with_clearance(
+            &[para_block("before", 170.0), moved],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            &clearance,
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert!(
+            !pages[0]
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. })),
+            "the moved paragraph must not leave its image on page 1",
+        );
+        let image_bottom = pages[1]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Image { rect, .. } => Some(rect.origin.y + rect.size.height),
+                _ => None,
+            })
+            .expect("top-and-bottom image on page 2");
+        let text_y = pages[1]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.as_ref() == "moved" => {
+                    Some(position.y)
+                }
+                _ => None,
+            })
+            .expect("moved paragraph text on page 2");
+        assert!(
+            text_y >= image_bottom,
+            "moved text at {text_y:?} must follow image ending at {image_bottom:?}",
         );
     }
 
