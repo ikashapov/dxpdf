@@ -359,16 +359,15 @@ fn parse_zip_without_document_xml_returns_error() {
 /// Regression: a whitespace-only WordprocessingML text run must survive even
 /// when the document uses a namespace prefix other than the conventional `w`.
 /// quick-xml's serde Deserializer drops this separator before run conversion.
-#[test]
-fn whitespace_only_run_with_an_alternate_wml_prefix_roundtrips() {
+fn assert_whitespace_only_run_roundtrips(wml_namespace: &str) {
     use dxpdf::model::{Block, Inline, RunElement};
     use dxpdf::render::layout::draw_command::DrawCommand;
 
     // OOXML namespace prefixes are arbitrary. This uses a generated `ns0`
     // prefix instead of the conventional `w` prefix.
-    let docx = make_docx(
+    let docx = make_docx(&format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<ns0:document xmlns:ns0="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<ns0:document xmlns:ns0="{wml_namespace}">
   <ns0:body>
     <ns0:p>
       <ns0:r><ns0:t>Normal</ns0:t></ns0:r>
@@ -381,7 +380,7 @@ fn whitespace_only_run_with_an_alternate_wml_prefix_roundtrips() {
     </ns0:p>
   </ns0:body>
 </ns0:document>"#,
-    );
+    ));
 
     let document = dxpdf::docx::parse(&docx).expect("parse");
     let para = match document.body.first().expect("at least one block") {
@@ -439,6 +438,18 @@ fn whitespace_only_run_with_an_alternate_wml_prefix_roundtrips() {
         "Normal Styled Hyperlink",
         "PDF text must retain whitespace-only runs"
     );
+}
+
+#[test]
+fn whitespace_only_run_with_an_alternate_transitional_wml_prefix_roundtrips() {
+    assert_whitespace_only_run_roundtrips(
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    );
+}
+
+#[test]
+fn whitespace_only_run_with_an_alternate_strict_wml_prefix_roundtrips() {
+    assert_whitespace_only_run_roundtrips("http://purl.oclc.org/ooxml/wordprocessingml/main");
 }
 
 #[test]

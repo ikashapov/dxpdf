@@ -55,8 +55,18 @@ pub(crate) const WS_SENTINEL_LF: char = '\u{E00A}';
 /// Sentinel for ASCII carriage return (`0x0D`).
 pub(crate) const WS_SENTINEL_CR: char = '\u{E00D}';
 
-const WORDPROCESSINGML_NAMESPACE: &[u8] =
+const TRANSITIONAL_WORDPROCESSINGML_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const STRICT_WORDPROCESSINGML_NAMESPACE: &[u8] =
+    b"http://purl.oclc.org/ooxml/wordprocessingml/main";
+
+#[inline]
+fn is_wordprocessingml_namespace(uri: &[u8]) -> bool {
+    matches!(
+        uri,
+        TRANSITIONAL_WORDPROCESSINGML_NAMESPACE | STRICT_WORDPROCESSINGML_NAMESPACE
+    )
+}
 
 /// Pre-process an XML byte buffer so whitespace-only WordprocessingML text
 /// content survives quick-xml's trimmer. Returns the original buffer unchanged
@@ -136,7 +146,7 @@ fn whitespace_only_wordprocessingml_text_spans(xml: &[u8]) -> Vec<(usize, usize)
         match event {
             Event::Start(start) => {
                 depth += 1;
-                if matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == WORDPROCESSINGML_NAMESPACE)
+                if matches!(namespace, ResolveResult::Bound(uri) if is_wordprocessingml_namespace(uri.as_ref()))
                     && start.local_name().as_ref() == b"t"
                 {
                     text_depth = Some(depth);
