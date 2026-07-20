@@ -225,6 +225,136 @@ mod tests {
         assert_eq!(text_count, 1);
     }
 
+    // ── §17.3.1.14 keepLines / §17.3.1.44 widow-orphan: across-page splitting ──
+
+    /// A paragraph of `n` words, each ~100pt wide so two never share a line in
+    /// the 180pt content column — i.e. exactly `n` single-line rows.
+    fn multiline_para(n: usize, keep_lines: bool, widow_control: bool) -> LayoutBlock {
+        let fragments = (0..n)
+            .map(|i| text_frag(&format!("word{i} "), 100.0, 14.0))
+            .collect();
+        LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                keep_lines,
+                widow_control,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    fn text_count(commands: &[DrawCommand]) -> usize {
+        commands
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::Text { .. }))
+            .count()
+    }
+
+    #[test]
+    fn tall_paragraph_splits_across_pages() {
+        // 80pt content height / 14pt lines → 5 lines per page. Eight lines must
+        // span two pages, and widow control keeps >= 2 lines on each.
+        let blocks = vec![multiline_para(8, false, true)];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2, "eight lines should not fit on one page");
+        assert_eq!(
+            text_count(&pages[0].commands) + text_count(&pages[1].commands),
+            8
+        );
+        assert!(
+            text_count(&pages[0].commands) >= 2 && text_count(&pages[1].commands) >= 2,
+            "§17.3.1.44: each side of the split keeps >= 2 lines, got {} + {}",
+            text_count(&pages[0].commands),
+            text_count(&pages[1].commands)
+        );
+    }
+
+    #[test]
+    fn keep_lines_prevents_split() {
+        // Same eight lines, but keepLines set: the paragraph is not split — it
+        // stays whole on the first page (overflowing) rather than paginating.
+        let blocks = vec![multiline_para(8, true, true)];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 1, "§17.3.1.14: keepLines forbids the split");
+        assert_eq!(text_count(&pages[0].commands), 8);
+    }
+
+    #[test]
+    fn widow_control_moves_unsplittable_paragraph_whole() {
+        // Page 1 holds three lines of para 1 (42pt), leaving ~38pt (< 3 lines).
+        // A 3-line paragraph cannot split without a widow, so it moves whole.
+        let blocks = vec![
+            multiline_para(3, false, true),
+            multiline_para(3, false, true),
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            text_count(&pages[0].commands),
+            3,
+            "only para 1 fits on page 1"
+        );
+        assert_eq!(
+            text_count(&pages[1].commands),
+            3,
+            "para 2 moved whole to page 2"
+        );
+    }
+
+    #[test]
+    fn without_widow_control_paragraph_splits_leaving_single_line() {
+        // Identical layout, but para 2 disables widow control: it now splits,
+        // leaving two lines on page 1 and a single (widow) line on page 2.
+        let blocks = vec![
+            multiline_para(3, false, true),
+            multiline_para(3, false, false),
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            text_count(&pages[0].commands),
+            5,
+            "para 1 (3) + first 2 lines of para 2"
+        );
+        assert_eq!(text_count(&pages[1].commands), 1, "the widow line");
+    }
+
     #[test]
     fn text_positioned_at_margins() {
         let blocks = vec![para_block("hello", 30.0)];

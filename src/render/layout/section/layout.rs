@@ -4,7 +4,9 @@ use super::super::draw_command::{DrawCommand, LayoutedPage};
 use super::super::float;
 use super::super::header_footer::{HeaderFooterClearance, PageBodyBounds};
 use super::super::page::PageConfig;
-use super::super::paragraph::{layout_paragraph, ParagraphBorderStyle, ParagraphStyle};
+use super::super::paragraph::{
+    layout_paragraph, place_paragraph, ParagraphBorderStyle, ParagraphStyle, PlacedParagraph,
+};
 use super::super::table::{
     layout_table, layout_table_paginated_with_page_heights, measure_leading_table_group_height,
     TablePaginationHeights,
@@ -322,6 +324,164 @@ fn measure_keep_next_group(
         }
     }
     None
+}
+
+/// §17.3.1.14 / §17.3.1.44: how to break a paragraph across a page boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParagraphSplit {
+    /// Emit all lines on the current page (they fit, or must overflow because no
+    /// legal split exists and the paragraph already starts at the page top).
+    All,
+    /// Emit the first `head` lines here and carry the remaining `total - head`
+    /// to the next page. Invariants: `1 <= head < total`; under widow control,
+    /// additionally `head >= 2 && total - head >= 2`.
+    Break { head: usize },
+    /// No legal break at this fill level, and the paragraph does not start at the
+    /// page top — move the whole paragraph to the next page and re-decide there.
+    MoveWhole,
+}
+
+/// Decide how a paragraph whose first `n_fit` of `total` lines fit in the
+/// remaining space should break (§17.3.1.14 keepLines is handled by the caller,
+/// which only calls this for splittable paragraphs).
+///
+/// `widow_control` (§17.3.1.44) forbids leaving a single line stranded: a legal
+/// break keeps `>= 2` lines on each side. `at_page_top` is true when the
+/// paragraph begins at the very top of the page column; there, the remaining
+/// space already equals a full page, so "move whole" cannot help — a paragraph
+/// taller than a page must split ("where possible"), and one that cannot split
+/// legally is emitted whole and allowed to overflow. This guarantees the stacker
+/// always makes progress (never loops).
+fn decide_paragraph_split(
+    n_fit: usize,
+    total: usize,
+    widow_control: bool,
+    at_page_top: bool,
+) -> ParagraphSplit {
+    debug_assert!(total >= 1, "a paragraph has at least one line");
+    if n_fit >= total {
+        return ParagraphSplit::All;
+    }
+
+    // The paragraph does not fully fit; find the largest legal head.
+    let head = if widow_control {
+        // Leave >= 2 lines for the tail (widow) and keep >= 2 here (orphan).
+        let capped = n_fit.min(total.saturating_sub(2));
+        if capped >= 2 {
+            capped
+        } else {
+            0 // no widow/orphan-legal break at this fill level
+        }
+    } else {
+        // Without widow control a single line on either side is allowed; place
+        // as many as fit, leaving at least one for the tail (n_fit < total, so
+        // n_fit <= total - 1 already holds).
+        n_fit
+    };
+
+    if head >= 1 {
+        return ParagraphSplit::Break { head };
+    }
+
+    // No legal break at this fill level.
+    if at_page_top {
+        // Remaining space is a full page and the paragraph still cannot fit or
+        // split legally — emit it whole and let it overflow.
+        ParagraphSplit::All
+    } else {
+        ParagraphSplit::MoveWhole
+    }
+}
+
+/// Place a splittable paragraph, breaking its lines across pages as needed.
+///
+/// The caller guarantees the paragraph is splittable (single column, no
+/// keepLines, no borders/shading/drop cap/floats/footnotes/floating objects,
+/// `>= 2` lines). Each iteration fits as many remaining lines as the current
+/// page holds, applies §17.3.1.44 widow/orphan control via
+/// [`decide_paragraph_split`], emits that segment, and page-breaks to continue.
+/// `line_start` advances by `>= 1` on every emitted segment and a `MoveWhole`
+/// always lands on a fresh page where progress is forced, so the loop
+/// terminates.
+fn emit_split_paragraph(
+    state: &mut PageLayoutState<'_>,
+    placed: &PlacedParagraph<'_>,
+    style: &ParagraphStyle,
+    block_idx: usize,
+    col_x: Pt,
+    ctx: &LayoutCtx<'_>,
+    para_start_y: &mut Pt,
+) {
+    let total = placed.line_count();
+    let widow_control = style.widow_control;
+    let mut line_start = 0;
+    let mut first_segment = true;
+
+    loop {
+        let remaining = total - line_start;
+        let at_page_top = state.cursor_y <= state.column_top;
+        let avail = (state.bottom - state.cursor_y).max(Pt::ZERO);
+
+        // Count how many remaining lines fit in `avail`, charging this segment's
+        // space_before (first segment only, §17.3.1.33) and, at the paragraph's
+        // end, space_after — mirroring the atomic overflow test.
+        let mut used = if first_segment {
+            style.space_before
+        } else {
+            Pt::ZERO
+        };
+        let mut n_fit = 0;
+        for i in line_start..total {
+            let mut needed = used + placed.line_height(i);
+            if i + 1 == total {
+                needed += style.space_after;
+            }
+            if needed > avail {
+                break;
+            }
+            used += placed.line_height(i);
+            n_fit += 1;
+        }
+
+        let head = match decide_paragraph_split(n_fit, remaining, widow_control, at_page_top) {
+            ParagraphSplit::All => remaining,
+            ParagraphSplit::Break { head } => head,
+            ParagraphSplit::MoveWhole => {
+                // Move the remaining lines to a fresh page and re-decide at the
+                // top, where progress is guaranteed.
+                state.push_new_page(block_idx, ctx);
+                *para_start_y = state.cursor_y;
+                continue;
+            }
+        };
+
+        let is_last = line_start + head == total;
+        let segment =
+            placed.emit_split_segment(line_start, line_start + head, first_segment, is_last);
+        if !(first_segment && is_last) {
+            log::debug!(
+                "[layout]   paragraph split: lines {}..{} of {total} at y={:.1}",
+                line_start,
+                line_start + head,
+                state.cursor_y.raw()
+            );
+        }
+        for mut cmd in segment.commands {
+            cmd.shift_y(state.cursor_y);
+            cmd.shift_x(col_x);
+            state.current_page.commands.push(cmd);
+        }
+        state.cursor_y += segment.size.height;
+        line_start += head;
+        first_segment = false;
+
+        if is_last {
+            break;
+        }
+        // Continue the paragraph at the top of the next page.
+        state.push_new_page(block_idx, ctx);
+        *para_start_y = state.cursor_y;
+    }
 }
 
 /// Lay out a sequence of blocks into pages.
@@ -773,7 +933,7 @@ pub(crate) fn layout_section_with_clearance(
                             state.current_col,
                             (state.bottom - state.page_top).max(Pt::ZERO),
                         );
-                        let mut para = layout_paragraph(
+                        let placed = place_paragraph(
                             chunk,
                             &constraints,
                             &effective_style,
@@ -781,49 +941,87 @@ pub(crate) fn layout_section_with_clearance(
                             ctx.measure_text,
                         );
 
-                        // Column/page overflow: advance column, then page.
-                        if state.cursor_y + para.size.height > state.bottom
-                            && state.cursor_y > state.column_top
-                        {
-                            if state.current_col + 1 < num_cols {
-                                state.current_col += 1;
-                                state.cursor_y = state.column_top;
-                            } else {
-                                state.push_new_page(block_idx, &ctx);
-                            }
-                            // Update para_start_y after page/column change so
-                            // floating images use the correct position.
-                            para_start_y = state.cursor_y;
-                            effective_style.page_y = state.cursor_y;
-                            effective_style.page_x = col_x(state.current_col);
-                            effective_style.page_content_width =
-                                config.columns[state.current_col].width;
-                            effective_style.page_floats = state.page_floats.clone();
-                            let destination_constraints = col_constraints(
-                                state.current_col,
-                                (state.bottom - state.page_top).max(Pt::ZERO),
-                            );
-                            para = layout_paragraph(
-                                chunk,
-                                &destination_constraints,
-                                &effective_style,
-                                ctx.default_line_height,
-                                ctx.measure_text,
-                            );
-                        }
+                        // §17.3.1.14 / §17.3.1.44: a paragraph may break across a
+                        // page boundary only when keepLines is unset, its shape
+                        // permits it (no borders/shading/drop cap/active floats),
+                        // it has no attached footnotes or floating objects, and
+                        // the section is single-column. Anything else keeps the
+                        // atomic "move the whole paragraph" behavior — correct,
+                        // just more conservative. (See docs/keep-lines-plan.md;
+                        // the excluded cases are Phase C/D.)
+                        let can_split = num_cols == 1
+                            && !effective_style.keep_lines
+                            && footnotes.is_empty()
+                            && floating_images.is_empty()
+                            && floating_shapes.is_empty()
+                            && placed.line_count() >= 2
+                            && placed.can_split_across_pages();
 
-                        log::debug!(
-                            "[layout]   page_chunk[{page_chunk_idx}] col_chunk[{chunk_idx}] placed at y={:.1} x={:.1} height={:.1}",
-                            state.cursor_y.raw(),
-                            col_x(state.current_col).raw(),
-                            para.size.height.raw()
-                        );
-                        for mut cmd in para.commands {
-                            cmd.shift_y(state.cursor_y);
-                            cmd.shift_x(col_x(state.current_col));
-                            state.current_page.commands.push(cmd);
+                        if can_split {
+                            // Single-column (required for splitting), so the
+                            // column x is constant across the continuation pages.
+                            let seg_col_x = col_x(state.current_col);
+                            emit_split_paragraph(
+                                &mut state,
+                                &placed,
+                                &effective_style,
+                                block_idx,
+                                seg_col_x,
+                                &ctx,
+                                &mut para_start_y,
+                            );
+                        } else {
+                            let mut para = placed.emit_full();
+                            // Column/page overflow: advance column, then page.
+                            if state.cursor_y + para.size.height > state.bottom
+                                && state.cursor_y > state.column_top
+                            {
+                                // `placed` (which borrows `effective_style`) is no
+                                // longer needed; drop it before mutating the style
+                                // and re-placing at the destination page, whose
+                                // max_height differs and re-clamps the height.
+                                drop(placed);
+                                if state.current_col + 1 < num_cols {
+                                    state.current_col += 1;
+                                    state.cursor_y = state.column_top;
+                                } else {
+                                    state.push_new_page(block_idx, &ctx);
+                                }
+                                // Update para_start_y after page/column change so
+                                // floating images use the correct position.
+                                para_start_y = state.cursor_y;
+                                effective_style.page_y = state.cursor_y;
+                                effective_style.page_x = col_x(state.current_col);
+                                effective_style.page_content_width =
+                                    config.columns[state.current_col].width;
+                                effective_style.page_floats = state.page_floats.clone();
+                                let destination_constraints = col_constraints(
+                                    state.current_col,
+                                    (state.bottom - state.page_top).max(Pt::ZERO),
+                                );
+                                para = place_paragraph(
+                                    chunk,
+                                    &destination_constraints,
+                                    &effective_style,
+                                    ctx.default_line_height,
+                                    ctx.measure_text,
+                                )
+                                .emit_full();
+                            }
+
+                            log::debug!(
+                                "[layout]   page_chunk[{page_chunk_idx}] col_chunk[{chunk_idx}] placed at y={:.1} x={:.1} height={:.1}",
+                                state.cursor_y.raw(),
+                                col_x(state.current_col).raw(),
+                                para.size.height.raw()
+                            );
+                            for mut cmd in para.commands {
+                                cmd.shift_y(state.cursor_y);
+                                cmd.shift_x(col_x(state.current_col));
+                                state.current_page.commands.push(cmd);
+                            }
+                            state.cursor_y += para.size.height;
                         }
-                        state.cursor_y += para.size.height;
                     }
                     // The page break has been consumed by this non-empty chunk.
                     unresolved_page_break = false;
@@ -1199,5 +1397,127 @@ mod keep_next_chain_tests {
         let blocks = [paragraph(true, false), paragraph(true, true)];
 
         assert!(starts_keep_next_chain(&blocks, 1));
+    }
+}
+
+#[cfg(test)]
+mod paragraph_split_tests {
+    use super::{decide_paragraph_split, ParagraphSplit};
+
+    // ── Whole paragraph fits ──────────────────────────────────────────────
+
+    #[test]
+    fn all_lines_fit_is_all() {
+        assert_eq!(
+            decide_paragraph_split(5, 5, true, false),
+            ParagraphSplit::All
+        );
+        // More space than needed also counts as fitting.
+        assert_eq!(
+            decide_paragraph_split(9, 5, true, false),
+            ParagraphSplit::All
+        );
+    }
+
+    // ── Widow/orphan control on (§17.3.1.44) ──────────────────────────────
+
+    #[test]
+    fn widow_control_keeps_two_lines_on_each_side() {
+        // 6 lines, 4 fit: place 4, carry 2 — both sides satisfy the >= 2 rule.
+        assert_eq!(
+            decide_paragraph_split(4, 6, true, false),
+            ParagraphSplit::Break { head: 4 }
+        );
+    }
+
+    #[test]
+    fn widow_control_caps_head_to_leave_a_non_widow_tail() {
+        // 4 lines, 3 fit: placing 3 would strand 1 (widow), so cap head to 2.
+        assert_eq!(
+            decide_paragraph_split(3, 4, true, false),
+            ParagraphSplit::Break { head: 2 }
+        );
+    }
+
+    #[test]
+    fn widow_control_rejects_single_orphan_line_and_moves_whole() {
+        // Only 1 line fits: an orphan. Not at page top → move the whole para.
+        assert_eq!(
+            decide_paragraph_split(1, 6, true, false),
+            ParagraphSplit::MoveWhole
+        );
+    }
+
+    #[test]
+    fn widow_control_three_line_paragraph_cannot_split() {
+        // No head in 1..=2 leaves >= 2 on both sides → move whole.
+        assert_eq!(
+            decide_paragraph_split(2, 3, true, false),
+            ParagraphSplit::MoveWhole
+        );
+    }
+
+    #[test]
+    fn widow_control_paragraph_taller_than_page_splits_two_by_two() {
+        // 10 lines, 4 fit per page: 4 / 4 / 2 across three pages.
+        assert_eq!(
+            decide_paragraph_split(4, 10, true, true),
+            ParagraphSplit::Break { head: 4 }
+        );
+        assert_eq!(
+            decide_paragraph_split(4, 6, true, true),
+            ParagraphSplit::Break { head: 4 }
+        );
+        assert_eq!(
+            decide_paragraph_split(4, 2, true, true),
+            ParagraphSplit::All
+        );
+    }
+
+    // ── Widow control off ─────────────────────────────────────────────────
+
+    #[test]
+    fn without_widow_control_a_single_line_may_split() {
+        assert_eq!(
+            decide_paragraph_split(1, 6, false, false),
+            ParagraphSplit::Break { head: 1 }
+        );
+        assert_eq!(
+            decide_paragraph_split(3, 4, false, false),
+            ParagraphSplit::Break { head: 3 }
+        );
+    }
+
+    #[test]
+    fn without_widow_control_nothing_fits_moves_whole() {
+        assert_eq!(
+            decide_paragraph_split(0, 4, false, false),
+            ParagraphSplit::MoveWhole
+        );
+    }
+
+    // ── Degenerate cases at the page top guarantee progress ────────────────
+
+    #[test]
+    fn at_page_top_unsplittable_paragraph_overflows_whole() {
+        // 3-line paragraph, only 2 fit even on a full page, widow control on:
+        // cannot split legally, already at the top → emit whole (overflow).
+        assert_eq!(
+            decide_paragraph_split(2, 3, true, true),
+            ParagraphSplit::All
+        );
+    }
+
+    #[test]
+    fn at_page_top_single_oversized_line_overflows_whole() {
+        // Even one line does not fit a full page → emit it and overflow.
+        assert_eq!(
+            decide_paragraph_split(0, 1, true, true),
+            ParagraphSplit::All
+        );
+        assert_eq!(
+            decide_paragraph_split(0, 3, false, true),
+            ParagraphSplit::All
+        );
     }
 }
