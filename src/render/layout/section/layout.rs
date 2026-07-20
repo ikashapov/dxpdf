@@ -256,13 +256,15 @@ impl<'doc> PageReplayCheckpoint<'doc> {
 
 fn refresh_page_replay_checkpoint<'doc>(
     state: &PageLayoutState<'doc>,
+    block_idx: usize,
     checkpoint: &mut PageReplayCheckpoint<'doc>,
-    marker: &mut (usize, usize),
+    checkpoint_page_index: &mut usize,
+    replay_block_idx: &mut usize,
 ) {
-    let current_marker = (state.page_index, state.page_start_block);
-    if current_marker != *marker {
+    if state.page_index != *checkpoint_page_index {
         *checkpoint = PageReplayCheckpoint::capture(state);
-        *marker = current_marker;
+        *checkpoint_page_index = state.page_index;
+        *replay_block_idx = block_idx;
     }
 }
 
@@ -597,8 +599,9 @@ pub(crate) fn layout_section_with_clearance(
     // A forward-scanned absolute float can later move to another page. Keep
     // those owners out of the source page's next scan while replaying it.
     let mut relocated_absolute_float_blocks = std::collections::HashSet::new();
-    let mut page_start_state = PageReplayCheckpoint::capture(&state);
-    let mut page_start_marker = (state.page_index, state.page_start_block);
+    let mut page_replay_state = PageReplayCheckpoint::capture(&state);
+    let mut checkpoint_page_index = state.page_index;
+    let mut replay_block_idx = 0;
     let mut block_idx = 0;
 
     'blocks: while block_idx < blocks.len() {
@@ -612,7 +615,13 @@ pub(crate) fn layout_section_with_clearance(
                 state.prev_space_after = Pt::ZERO;
             }
         }
-        refresh_page_replay_checkpoint(&state, &mut page_start_state, &mut page_start_marker);
+        refresh_page_replay_checkpoint(
+            &state,
+            block_idx,
+            &mut page_replay_state,
+            &mut checkpoint_page_index,
+            &mut replay_block_idx,
+        );
 
         match block {
             LayoutBlock::Paragraph {
@@ -701,8 +710,10 @@ pub(crate) fn layout_section_with_clearance(
                 }
                 refresh_page_replay_checkpoint(
                     &state,
-                    &mut page_start_state,
-                    &mut page_start_marker,
+                    block_idx,
+                    &mut page_replay_state,
+                    &mut checkpoint_page_index,
+                    &mut replay_block_idx,
                 );
 
                 let mut effective_style = style.clone_for_layout();
@@ -927,7 +938,7 @@ pub(crate) fn layout_section_with_clearance(
                             let moves_to_new_page = state.current_col + 1 >= num_cols;
                             if !paragraph_content_placed
                                 && moves_to_new_page
-                                && block_idx > state.page_start_block
+                                && block_idx > replay_block_idx
                                 && has_absolute_wrap_float(floating_images)
                                 && relocated_absolute_float_blocks.insert(block_idx)
                             {
@@ -935,8 +946,8 @@ pub(crate) fn layout_section_with_clearance(
                                 // wrapped around this future float. Replay the
                                 // page without it before placing the owner on
                                 // its destination page.
-                                page_start_state.restore(&mut state);
-                                block_idx = state.page_start_block;
+                                page_replay_state.restore(&mut state);
+                                block_idx = replay_block_idx;
                                 continue 'blocks;
                             }
                             if !paragraph_content_placed {

@@ -636,6 +636,77 @@ mod tests {
     }
 
     #[test]
+    fn moved_absolute_float_does_not_replay_page_start_paragraph() {
+        let config = small_config();
+        let filler = LayoutBlock::Paragraph {
+            fragments: (0..4)
+                .map(|i| text_frag(&format!("filler-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let page_start = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("page-start-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let source = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[filler, page_start, source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 3);
+        let page_start_commands = pages
+            .iter()
+            .flat_map(|page| &page.commands)
+            .filter(|command| {
+                matches!(
+                    command,
+                    DrawCommand::Text { text, .. } if text.starts_with("page-start-")
+                )
+            })
+            .count();
+        assert_eq!(page_start_commands, 2);
+    }
+
+    #[test]
     fn moved_paragraph_relocates_top_and_bottom_float_to_destination_page() {
         let config = small_config();
         let clearance = HeaderFooterClearance::new(
