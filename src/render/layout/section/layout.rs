@@ -177,6 +177,83 @@ struct ParagraphFloatCheckpoint {
     cursor_y: Pt,
 }
 
+struct PageReplayCheckpoint<'doc> {
+    current_page: LayoutedPage,
+    cursor_y: Pt,
+    page_index: usize,
+    page_top: Pt,
+    current_col: usize,
+    column_top: Pt,
+    bottom: Pt,
+    page_footnotes: Vec<(
+        &'doc [super::super::fragment::Fragment],
+        &'doc ParagraphStyle,
+    )>,
+    first_on_section_page: bool,
+    prev_space_after: Pt,
+    prev_style_id: Option<StyleId>,
+    prev_borders: Option<ParagraphBorderStyle>,
+    page_floats: Vec<float::ActiveFloat>,
+    current_page_abs_floats: Vec<float::ActiveFloat>,
+    abs_floats_dirty: bool,
+    page_start_block: usize,
+    last_para_start_y: Pt,
+    prev_table_style_id: Option<StyleId>,
+    pending_page_break: bool,
+}
+
+impl<'doc> PageReplayCheckpoint<'doc> {
+    fn capture(state: &PageLayoutState<'doc>) -> Self {
+        Self {
+            current_page: state.current_page.clone(),
+            cursor_y: state.cursor_y,
+            page_index: state.page_index,
+            page_top: state.page_top,
+            current_col: state.current_col,
+            column_top: state.column_top,
+            bottom: state.bottom,
+            page_footnotes: state.page_footnotes.clone(),
+            first_on_section_page: state.first_on_section_page,
+            prev_space_after: state.prev_space_after,
+            prev_style_id: state.prev_style_id.clone(),
+            prev_borders: state.prev_borders.clone(),
+            page_floats: state.page_floats.clone(),
+            current_page_abs_floats: state.current_page_abs_floats.clone(),
+            abs_floats_dirty: state.abs_floats_dirty,
+            page_start_block: state.page_start_block,
+            last_para_start_y: state.last_para_start_y,
+            prev_table_style_id: state.prev_table_style_id.clone(),
+            pending_page_break: state.pending_page_break,
+        }
+    }
+
+    fn restore(&self, state: &mut PageLayoutState<'doc>) {
+        state.current_page.clone_from(&self.current_page);
+        state.cursor_y = self.cursor_y;
+        state.page_index = self.page_index;
+        state.page_top = self.page_top;
+        state.current_col = self.current_col;
+        state.column_top = self.column_top;
+        state.bottom = self.bottom;
+        state.page_footnotes.clone_from(&self.page_footnotes);
+        state.first_on_section_page = self.first_on_section_page;
+        state.prev_space_after = self.prev_space_after;
+        state.prev_style_id.clone_from(&self.prev_style_id);
+        state.prev_borders.clone_from(&self.prev_borders);
+        state.page_floats.clone_from(&self.page_floats);
+        state
+            .current_page_abs_floats
+            .clone_from(&self.current_page_abs_floats);
+        state.abs_floats_dirty = self.abs_floats_dirty;
+        state.page_start_block = self.page_start_block;
+        state.last_para_start_y = self.last_para_start_y;
+        state
+            .prev_table_style_id
+            .clone_from(&self.prev_table_style_id);
+        state.pending_page_break = self.pending_page_break;
+    }
+}
+
 impl ParagraphFloatCheckpoint {
     fn capture(state: &PageLayoutState<'_>) -> Self {
         Self {
@@ -288,6 +365,12 @@ fn register_paragraph_floats(
             state.page_floats.push(float_entry);
         }
     }
+}
+
+fn has_absolute_wrap_float(floating_images: &[FloatingImage]) -> bool {
+    floating_images.iter().any(|image| {
+        matches!(image.y, FloatingImageY::Absolute(_)) && image.wrap_mode.registers_as_wrap_float()
+    })
 }
 
 fn paragraph_keep_next(block: &LayoutBlock) -> bool {
@@ -499,7 +582,20 @@ pub(crate) fn layout_section_with_clearance(
     };
     let col_x = |col: usize| -> Pt { config.margins.left + config.columns[col].x_offset };
 
-    for (block_idx, block) in blocks.iter().enumerate() {
+    // A forward-scanned absolute float can later move to another page. Keep
+    // those owners out of the source page's next scan while replaying it.
+    let mut relocated_absolute_float_blocks = std::collections::HashSet::new();
+    let mut page_start_state = PageReplayCheckpoint::capture(&state);
+    let mut page_start_marker = (state.page_index, state.page_start_block);
+    let mut block_idx = 0;
+
+    'blocks: while block_idx < blocks.len() {
+        let page_marker = (state.page_index, state.page_start_block);
+        if page_marker != page_start_marker {
+            page_start_state = PageReplayCheckpoint::capture(&state);
+            page_start_marker = page_marker;
+        }
+        let block = &blocks[block_idx];
         // §17.3.3.1: a deferred inline page break from the previous block
         // forces this block onto a new page.
         if state.pending_page_break {
@@ -665,6 +761,10 @@ pub(crate) fn layout_section_with_clearance(
                     for (fi_idx, future_block) in
                         blocks[state.page_start_block..].iter().enumerate()
                     {
+                        let future_block_idx = state.page_start_block + fi_idx;
+                        if relocated_absolute_float_blocks.contains(&future_block_idx) {
+                            continue;
+                        }
                         if let LayoutBlock::Paragraph {
                             floating_images: fi_list,
                             page_break_before,
@@ -811,6 +911,21 @@ pub(crate) fn layout_section_with_clearance(
                         if state.cursor_y + para.size.height > state.bottom
                             && state.cursor_y > state.column_top
                         {
+                            let moves_to_new_page = state.current_col + 1 >= num_cols;
+                            if !paragraph_content_placed
+                                && moves_to_new_page
+                                && block_idx > state.page_start_block
+                                && has_absolute_wrap_float(floating_images)
+                                && relocated_absolute_float_blocks.insert(block_idx)
+                            {
+                                // Earlier source-page text may already have
+                                // wrapped around this future float. Replay the
+                                // page without it before placing the owner on
+                                // its destination page.
+                                page_start_state.restore(&mut state);
+                                block_idx = state.page_start_block;
+                                continue 'blocks;
+                            }
                             if !paragraph_content_placed {
                                 float_checkpoint.restore(&mut state);
                             }
@@ -1219,6 +1334,7 @@ pub(crate) fn layout_section_with_clearance(
                 state.prev_table_style_id = style_id.clone();
             }
         }
+        block_idx += 1;
     }
 
     // Flush remaining footnotes and push the last page.

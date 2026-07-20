@@ -156,6 +156,13 @@ mod tests {
         }
     }
 
+    fn absolute_floating_image(wrap_mode: WrapMode, y: f32, height: f32) -> FloatingImage {
+        FloatingImage {
+            y: FloatingImageY::Absolute(Pt::new(y)),
+            ..floating_image(wrap_mode, height)
+        }
+    }
+
     fn styled_para_block(text: &str, keep_next: bool, page_break_before: bool) -> LayoutBlock {
         LayoutBlock::Paragraph {
             fragments: vec![text_frag(text, 30.0, 14.0)],
@@ -487,6 +494,86 @@ mod tests {
         assert!(
             first_moved_x >= Pt::new(90.0),
             "moved text at {first_moved_x:?} overlaps its 10-90pt float",
+        );
+    }
+
+    #[test]
+    fn moved_absolute_float_relayouts_earlier_source_page_text() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: (0..4)
+                .map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert!(
+            !pages[0]
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. })),
+            "the relocated float must not remain on the source page"
+        );
+        assert!(
+            pages[1]
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. })),
+            "the relocated float must be emitted on the destination page"
+        );
+        let source_positions: Vec<_> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+
+        let owner_x = pages[1]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("owner-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("owner text on destination page");
+        assert!(
+            owner_x >= Pt::new(90.0),
+            "moved owner text at {owner_x:?} overlaps its 10-90pt float"
         );
     }
 
