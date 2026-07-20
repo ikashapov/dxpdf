@@ -1128,6 +1128,107 @@ mod tests {
     }
 
     #[test]
+    fn vmerge_outer_border_crosses_sibling_horizontal_border_gap() {
+        let border = TableBorderLine {
+            width: Pt::new(1.0),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
+        let borders = TableBorderConfig {
+            top: Some(border),
+            bottom: Some(border),
+            left: Some(border),
+            right: Some(border),
+            inside_h: Some(border),
+            inside_v: Some(border),
+        };
+        let merged_cell = |state| TableCellInput {
+            blocks: vec![],
+            margins: PtEdgeInsets::ZERO,
+            grid_span: 1,
+            shading: None,
+            cell_borders: None,
+            vertical_merge: Some(state),
+            vertical_align: CellVAlign::Top,
+        };
+        let rows = vec![
+            TableRowInput {
+                cells: vec![
+                    simple_cell("recipient"),
+                    merged_cell(VerticalMergeState::Restart),
+                ],
+                height_rule: None,
+                is_header: None,
+                cant_split: None,
+                grid_before: 0,
+                grid_after: 0,
+                border_overrides: None,
+            },
+            TableRowInput {
+                cells: vec![
+                    simple_cell("recipient bank"),
+                    merged_cell(VerticalMergeState::Continue),
+                ],
+                height_rule: None,
+                is_header: None,
+                cant_split: None,
+                grid_before: 0,
+                grid_after: 0,
+                border_overrides: None,
+            },
+            TableRowInput {
+                cells: vec![TableCellInput {
+                    blocks: vec![],
+                    margins: PtEdgeInsets::ZERO,
+                    grid_span: 2,
+                    shading: None,
+                    cell_borders: None,
+                    vertical_merge: None,
+                    vertical_align: CellVAlign::Top,
+                }],
+                height_rule: None,
+                is_header: None,
+                cant_split: None,
+                grid_before: 0,
+                grid_after: 0,
+                border_overrides: None,
+            },
+        ];
+
+        let result = layout_table(
+            &rows,
+            &[Pt::new(100.0), Pt::new(100.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            Some(&borders),
+            None,
+            false,
+        );
+        let mut right_edge_segments: Vec<_> = result
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect { rect, color }
+                    if *color == RgbColor::BLACK
+                        && rect.origin.x.raw() == 199.0
+                        && rect.size.width.raw() == 1.0 =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect();
+        right_edge_segments.sort_by(|a, b| a.origin.y.raw().total_cmp(&b.origin.y.raw()));
+
+        let first_end = right_edge_segments[0].origin.y + right_edge_segments[0].size.height;
+        let continuation_start = right_edge_segments[1].origin.y;
+        assert_eq!(
+            first_end, continuation_start,
+            "a vertically merged outer border must cross the inter-row border band"
+        );
+    }
+
+    #[test]
     fn valign_bottom_on_vmerge_restart_uses_span_height() {
         // §17.4.85 + §17.4.84: vAlign on a vMerge=Restart cell should
         // apply across the whole merged span, not just the first row.

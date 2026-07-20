@@ -146,8 +146,15 @@ fn emit_one_row(
             bufs.content_commands.push(cmd);
         }
 
+        let continues_below = vmerge_ctx.is_some_and(|(_, rows, row_idx)| {
+            row_idx + 1 < rows.len() && is_vmerge_continue(&rows[row_idx + 1], entry.grid_col)
+        });
         let bottom_border_gap = if has_next_in_slice {
-            border_width(b_bottom)
+            if continues_below {
+                mr.border_gap_below
+            } else {
+                border_width(b_bottom)
+            }
         } else {
             Pt::ZERO
         };
