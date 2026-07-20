@@ -254,6 +254,18 @@ impl<'doc> PageReplayCheckpoint<'doc> {
     }
 }
 
+fn refresh_page_replay_checkpoint<'doc>(
+    state: &PageLayoutState<'doc>,
+    checkpoint: &mut PageReplayCheckpoint<'doc>,
+    marker: &mut (usize, usize),
+) {
+    let current_marker = (state.page_index, state.page_start_block);
+    if current_marker != *marker {
+        *checkpoint = PageReplayCheckpoint::capture(state);
+        *marker = current_marker;
+    }
+}
+
 impl ParagraphFloatCheckpoint {
     fn capture(state: &PageLayoutState<'_>) -> Self {
         Self {
@@ -590,11 +602,6 @@ pub(crate) fn layout_section_with_clearance(
     let mut block_idx = 0;
 
     'blocks: while block_idx < blocks.len() {
-        let page_marker = (state.page_index, state.page_start_block);
-        if page_marker != page_start_marker {
-            page_start_state = PageReplayCheckpoint::capture(&state);
-            page_start_marker = page_marker;
-        }
         let block = &blocks[block_idx];
         // §17.3.3.1: a deferred inline page break from the previous block
         // forces this block onto a new page.
@@ -605,6 +612,7 @@ pub(crate) fn layout_section_with_clearance(
                 state.prev_space_after = Pt::ZERO;
             }
         }
+        refresh_page_replay_checkpoint(&state, &mut page_start_state, &mut page_start_marker);
 
         match block {
             LayoutBlock::Paragraph {
@@ -691,6 +699,11 @@ pub(crate) fn layout_section_with_clearance(
                         }
                     }
                 }
+                refresh_page_replay_checkpoint(
+                    &state,
+                    &mut page_start_state,
+                    &mut page_start_marker,
+                );
 
                 let mut effective_style = style.clone_for_layout();
 

@@ -578,6 +578,64 @@ mod tests {
     }
 
     #[test]
+    fn moved_absolute_float_replays_from_first_affected_page_two_paragraph() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: (0..4)
+                .map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: true,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[para_block("before", 170.0), source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 3);
+        let source_positions: Vec<_> = pages[1]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+        assert!(
+            pages[2]
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. })),
+            "the relocated float must be emitted on page 3"
+        );
+    }
+
+    #[test]
     fn moved_paragraph_relocates_top_and_bottom_float_to_destination_page() {
         let config = small_config();
         let clearance = HeaderFooterClearance::new(
