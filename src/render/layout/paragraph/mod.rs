@@ -17,7 +17,7 @@ use super::BoxConstraints;
 use crate::render::dimension::Pt;
 use crate::render::geometry::{PtOffset, PtRect, PtSize};
 
-use borders::emit_paragraph_borders_and_shading;
+use borders::{emit_paragraph_borders_and_shading, emit_segment_borders_and_shading, SegmentEdges};
 use line_emit::{
     compute_line_placements, emit_line_commands, resolve_line_height, split_oversized_fragments,
 };
@@ -389,19 +389,32 @@ impl PlacedParagraph<'_> {
     /// keep the atomic (move-whole) behavior. keepLines (§17.3.1.14) and
     /// footnotes are the caller's concern.
     pub(crate) fn can_split_across_pages(&self) -> bool {
-        self.style.borders.is_none()
-            && self.style.shading.is_none()
-            && self.style.drop_cap.is_none()
-            && self.style.page_floats.is_empty()
+        // Borders (§17.3.1.24) and shading (§17.3.1.31) are handled per segment
+        // by `emit_split_segment`. Drop caps (§17.3.1.11) and active floats
+        // (§17.3.1.44 wrap) still need per-segment handling, so those paragraphs
+        // keep the atomic (move-whole) behavior for now.
+        self.style.drop_cap.is_none() && self.style.page_floats.is_empty()
+    }
+
+    /// §17.3.1.24: bottom border space this paragraph adds after its last line —
+    /// charged, with `space_after`, only on the final segment.
+    pub(crate) fn bottom_border_space(&self) -> Pt {
+        self.style
+            .borders
+            .as_ref()
+            .and_then(|b| b.bottom.as_ref())
+            .map(|b| b.space)
+            .unwrap_or(Pt::ZERO)
     }
 
     /// Emit lines `[first, last)` of a splittable paragraph as one page segment.
     ///
-    /// The caller guarantees [`can_split_across_pages`](Self::can_split_across_pages),
-    /// so only line commands and inter-paragraph spacing apply: `space_before`
-    /// (§17.3.1.33) belongs to the first segment and `space_after` to the last.
-    /// Commands are positioned relative to the segment's own origin `(0, 0)`;
-    /// the stacker shifts them to the page.
+    /// The caller guarantees [`can_split_across_pages`](Self::can_split_across_pages).
+    /// `space_before` (§17.3.1.33) and the top border belong to the first
+    /// segment; `space_after` and the bottom border to the last; shading and side
+    /// borders span every segment (§17.3.1.24/§17.3.1.31). Commands are
+    /// positioned relative to the segment's own origin `(0, 0)`; the stacker
+    /// shifts them to the page.
     pub(crate) fn emit_split_segment(
         &self,
         first: usize,
@@ -433,10 +446,18 @@ impl PlacedParagraph<'_> {
             self.measure_text,
         );
 
-        // §17.3.1.33: only the last segment carries space_after.
-        if is_last_segment {
-            cursor_y += self.style.space_after;
-        }
+        // §17.3.1.24/§17.3.1.31: per-segment border/shading box; the top edge and
+        // space_before are on the first segment, the bottom edge and space_after
+        // on the last, sides and shading on every segment.
+        cursor_y = emit_segment_borders_and_shading(
+            &mut commands,
+            self.style,
+            self.constraints,
+            cursor_y,
+            self.default_line_height,
+            false,
+            SegmentEdges::for_segment(is_first_segment, is_last_segment),
+        );
 
         ParagraphLayout {
             commands,
@@ -1366,6 +1387,109 @@ mod tests {
         for (i, y) in text_ys(&tail.commands).iter().enumerate() {
             assert_eq!(*y + head.size.height.raw(), full_ys[2 + i]);
         }
+    }
+
+    fn border(width: f32) -> BorderLine {
+        BorderLine {
+            width: Pt::new(width),
+            color: RgbColor::BLACK,
+            space: Pt::new(2.0),
+        }
+    }
+
+    /// (horizontal border lines, vertical border lines) in a segment.
+    fn classify_border_lines(commands: &[DrawCommand]) -> (usize, usize) {
+        let mut horizontal = 0;
+        let mut vertical = 0;
+        for c in commands {
+            if let DrawCommand::Line { line, .. } = c {
+                if (line.start.y.raw() - line.end.y.raw()).abs() < 1e-3 {
+                    horizontal += 1;
+                } else if (line.start.x.raw() - line.end.x.raw()).abs() < 1e-3 {
+                    vertical += 1;
+                }
+            }
+        }
+        (horizontal, vertical)
+    }
+
+    fn rect_count(commands: &[DrawCommand]) -> usize {
+        commands
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::Rect { .. }))
+            .count()
+    }
+
+    fn horizontal_line_y(commands: &[DrawCommand]) -> Option<f32> {
+        commands.iter().find_map(|c| match c {
+            DrawCommand::Line { line, .. }
+                if (line.start.y.raw() - line.end.y.raw()).abs() < 1e-3 =>
+            {
+                Some(line.start.y.raw())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn split_segment_draws_border_box_per_page() {
+        // §17.3.1.24/§17.3.1.31: a bordered, shaded paragraph split across three
+        // pages keeps side borders and shading on every segment, the top border
+        // only on the first, and the bottom border only on the last.
+        let frags: Vec<Fragment> = (0..6)
+            .map(|i| text_frag(&format!("word{i} "), 100.0))
+            .collect();
+        let style = ParagraphStyle {
+            borders: Some(ParagraphBorderStyle {
+                top: Some(border(1.0)),
+                bottom: Some(border(1.0)),
+                left: Some(border(1.0)),
+                right: Some(border(1.0)),
+            }),
+            shading: Some(RgbColor::BLACK),
+            ..Default::default()
+        };
+        // Box wider than a word (with room for the 2pt side border spaces) so
+        // each word is its own line without triggering per-character splitting.
+        let constraints = body_constraints(120.0);
+        let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
+        assert!(
+            placed.can_split_across_pages(),
+            "bordered/shaded paragraphs are now splittable"
+        );
+        assert_eq!(placed.line_count(), 6);
+
+        let head = placed.emit_split_segment(0, 2, true, false);
+        let mid = placed.emit_split_segment(2, 4, false, false);
+        let tail = placed.emit_split_segment(4, 6, false, true);
+
+        // Shading fills every segment.
+        assert_eq!(rect_count(&head.commands), 1);
+        assert_eq!(rect_count(&mid.commands), 1);
+        assert_eq!(rect_count(&tail.commands), 1);
+
+        // Sides on every segment; top only first, bottom only last.
+        assert_eq!(
+            classify_border_lines(&head.commands),
+            (1, 2),
+            "first: top + sides"
+        );
+        assert_eq!(
+            classify_border_lines(&mid.commands),
+            (0, 2),
+            "middle: sides only"
+        );
+        assert_eq!(
+            classify_border_lines(&tail.commands),
+            (1, 2),
+            "last: bottom + sides"
+        );
+
+        // The first segment's horizontal edge sits above its text (the top
+        // border, with border space above space_before); the last segment's sits
+        // below its two lines (the bottom border).
+        assert!(horizontal_line_y(&head.commands).unwrap() < 0.0);
+        assert!(horizontal_line_y(&tail.commands).unwrap() > 28.0);
     }
 
     #[test]

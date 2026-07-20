@@ -414,6 +414,9 @@ fn emit_split_paragraph(
 ) {
     let total = placed.line_count();
     let widow_control = style.widow_control;
+    // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are only
+    // spent once, on the segment that carries the paragraph's last line.
+    let trailing_extra = style.space_after + placed.bottom_border_space();
     let mut line_start = 0;
     let mut first_segment = true;
 
@@ -424,7 +427,7 @@ fn emit_split_paragraph(
 
         // Count how many remaining lines fit in `avail`, charging this segment's
         // space_before (first segment only, §17.3.1.33) and, at the paragraph's
-        // end, space_after — mirroring the atomic overflow test.
+        // end, its trailing spacing — mirroring the atomic overflow test.
         let mut used = if first_segment {
             style.space_before
         } else {
@@ -434,7 +437,7 @@ fn emit_split_paragraph(
         for i in line_start..total {
             let mut needed = used + placed.line_height(i);
             if i + 1 == total {
-                needed += style.space_after;
+                needed += trailing_extra;
             }
             if needed > avail {
                 break;

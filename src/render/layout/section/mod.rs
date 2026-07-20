@@ -254,6 +254,14 @@ mod tests {
             .count()
     }
 
+    fn border_line() -> crate::render::layout::paragraph::BorderLine {
+        crate::render::layout::paragraph::BorderLine {
+            width: Pt::new(1.0),
+            color: RgbColor::BLACK,
+            space: Pt::new(2.0),
+        }
+    }
+
     #[test]
     fn tall_paragraph_splits_across_pages() {
         // 80pt content height / 14pt lines → 5 lines per page. Eight lines must
@@ -327,6 +335,44 @@ mod tests {
             3,
             "para 2 moved whole to page 2"
         );
+    }
+
+    #[test]
+    fn bordered_paragraph_splits_across_pages() {
+        // §17.3.1.24: a bordered paragraph now splits (Phase C) instead of moving
+        // whole — the eight lines span two pages, and each page carries border
+        // draw commands (Line) for its segment of the box.
+        let mut block = multiline_para(8, false, true);
+        if let LayoutBlock::Paragraph { style, .. } = &mut block {
+            style.borders = Some(crate::render::layout::paragraph::ParagraphBorderStyle {
+                top: Some(border_line()),
+                bottom: Some(border_line()),
+                left: Some(border_line()),
+                right: Some(border_line()),
+            });
+        }
+        let pages = layout_section(
+            &[block],
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(
+            pages.len(),
+            2,
+            "bordered paragraph should split, not overflow"
+        );
+        for page in &pages {
+            assert!(
+                page.commands
+                    .iter()
+                    .any(|c| matches!(c, DrawCommand::Line { .. })),
+                "each segment draws its part of the border box"
+            );
+        }
     }
 
     #[test]
