@@ -356,25 +356,31 @@ fn parse_zip_without_document_xml_returns_error() {
     );
 }
 
-/// Regression: a whitespace-only `<w:t xml:space="preserve">` between two
-/// other runs must round-trip the literal space into the parsed model.
-/// quick-xml's serde Deserializer trims whitespace-only `$text` content,
-/// which used to drop the separator and render `Label:Value` instead of
-/// `Label: Value`. The whitespace-workaround module substitutes a Private
-/// Use Area sentinel before parsing and reverses it during run conversion.
+/// Regression: a whitespace-only WordprocessingML text run must survive even
+/// when the document uses a namespace prefix other than the conventional `w`.
+/// quick-xml's serde Deserializer drops this separator before run conversion.
 #[test]
-fn whitespace_only_run_with_xml_space_preserve_roundtrips_to_space() {
+fn whitespace_only_run_with_an_alternate_wml_prefix_roundtrips() {
     use dxpdf::model::{Block, Inline, RunElement};
+    use dxpdf::render::layout::draw_command::DrawCommand;
 
-    // Same shape as the failing cell in the Protokoll DIN VDE document:
-    // bold label run, whitespace-only run with xml:space="preserve",
-    // value run with different formatting.
-    let docx = simple_docx(
-        r#"<w:p>
-            <w:r><w:rPr><w:b/></w:rPr><w:t>Label:</w:t></w:r>
-            <w:r><w:t xml:space="preserve"> </w:t></w:r>
-            <w:r><w:t>Value</w:t></w:r>
-        </w:p>"#,
+    // OOXML namespace prefixes are arbitrary. This uses a generated `ns0`
+    // prefix instead of the conventional `w` prefix.
+    let docx = make_docx(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ns0:document xmlns:ns0="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <ns0:body>
+    <ns0:p>
+      <ns0:r><ns0:t>Normal</ns0:t></ns0:r>
+      <ns0:r><ns0:t xml:space="preserve"> </ns0:t></ns0:r>
+      <ns0:r><ns0:rPr><ns0:b/></ns0:rPr><ns0:t>Styled</ns0:t></ns0:r>
+      <ns0:r><ns0:t xml:space="preserve"> </ns0:t></ns0:r>
+      <ns0:hyperlink ns0:anchor="destination">
+        <ns0:r><ns0:rPr><ns0:u ns0:val="single"/></ns0:rPr><ns0:t>Hyperlink</ns0:t></ns0:r>
+      </ns0:hyperlink>
+    </ns0:p>
+  </ns0:body>
+</ns0:document>"#,
     );
 
     let document = dxpdf::docx::parse(&docx).expect("parse");
@@ -383,22 +389,55 @@ fn whitespace_only_run_with_xml_space_preserve_roundtrips_to_space() {
         other => panic!("expected paragraph, got {other:?}"),
     };
 
-    let texts: Vec<&str> = para
-        .content
+    fn collect_text(inlines: &[Inline]) -> String {
+        inlines
+            .iter()
+            .map(|inline| match inline {
+                Inline::TextRun(run) => run
+                    .content
+                    .iter()
+                    .filter_map(|element| match element {
+                        RunElement::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+                Inline::Hyperlink(link) => collect_text(&link.content),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    assert_eq!(
+        collect_text(&para.content),
+        "Normal Styled Hyperlink",
+        "whitespace-only runs must survive normal, styled, and hyperlink boundaries"
+    );
+
+    let (_, pages) = dxpdf::render::resolve_and_layout(&document);
+    let laid_out_text: String = pages
         .iter()
-        .filter_map(|inline| match inline {
-            Inline::TextRun(tr) => tr.content.iter().find_map(|el| match el {
-                RunElement::Text(t) => Some(t.as_str()),
-                _ => None,
-            }),
+        .flat_map(|page| &page.commands)
+        .filter_map(|command| match command {
+            DrawCommand::Text { text, .. } => Some(text.as_ref()),
             _ => None,
         })
         .collect();
 
     assert_eq!(
-        texts,
-        vec!["Label:", " ", "Value"],
-        "whitespace-only run must survive parsing as a literal space"
+        laid_out_text, "Normal Styled Hyperlink",
+        "layout must retain whitespace-only text runs"
+    );
+
+    let pdf = dxpdf::convert(&docx).expect("convert");
+    let parsed_pdf = lopdf::Document::load_mem(&pdf).expect("parse PDF");
+    let page_numbers: Vec<u32> = parsed_pdf.get_pages().into_keys().collect();
+    let pdf_text = parsed_pdf
+        .extract_text(&page_numbers)
+        .expect("extract PDF text");
+    assert_eq!(
+        pdf_text.replace('\n', ""),
+        "Normal Styled Hyperlink",
+        "PDF text must retain whitespace-only runs"
     );
 }
 

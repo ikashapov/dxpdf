@@ -17,11 +17,13 @@
 //!
 //! # The hack
 //!
-//! Before handing each XML part to quick-xml we scan for whitespace-only
-//! `<w:t...>...</w:t>` content and substitute each whitespace byte with a
+//! Before handing each XML part to quick-xml we resolve WordprocessingML text
+//! elements, then substitute each byte in a whitespace-only text node with a
 //! Private Use Area codepoint. quick-xml then sees a non-whitespace text node
-//! and preserves it. The body parser ([`crate::docx::parse::body`]) reverses
-//! the substitution when emitting [`RunElement::Text`].
+//! and preserves it. Resolving namespaces makes the workaround independent of
+//! the arbitrary prefix chosen by the DOCX producer. The body parser
+//! ([`crate::docx::parse::body`]) reverses the substitution when emitting
+//! [`RunElement::Text`].
 //!
 //! Sentinel mapping (BYTE → CHAR):
 //!
@@ -53,53 +55,28 @@ pub(crate) const WS_SENTINEL_LF: char = '\u{E00A}';
 /// Sentinel for ASCII carriage return (`0x0D`).
 pub(crate) const WS_SENTINEL_CR: char = '\u{E00D}';
 
-/// Pre-process an XML byte buffer so whitespace-only `<w:t>` content survives
-/// quick-xml's trimmer. Returns the original buffer unchanged when no
-/// substitution is needed (common case for binary parts).
+const WORDPROCESSINGML_NAMESPACE: &[u8] =
+    b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+/// Pre-process an XML byte buffer so whitespace-only WordprocessingML text
+/// content survives quick-xml's trimmer. Returns the original buffer unchanged
+/// when no substitution is needed.
 ///
 /// See module-level docs for why this is necessary.
 pub(crate) fn substitute_whitespace_only_runs(xml: &[u8]) -> Vec<u8> {
-    // Fast path: if no `<w:t` substring appears in the buffer there is nothing
-    // to scan. This avoids paying the per-byte loop cost on parts (images,
-    // theme XML, etc.) that have no run text.
-    if !contains_subslice(xml, b"<w:t") {
+    let spans = whitespace_only_wordprocessingml_text_spans(xml);
+    if spans.is_empty() {
         return xml.to_vec();
     }
 
     let mut out: Vec<u8> = Vec::with_capacity(xml.len());
-    let mut i = 0;
-    while i < xml.len() {
-        if let Some((content_start, content_end, close_tag_end)) = match_w_t_with_text(xml, i) {
-            let content = &xml[content_start..content_end];
-            if !content.is_empty() && content.iter().all(is_xml_whitespace_byte) {
-                // Copy bytes up to the start of the content (i.e. through `>`),
-                // emit sentinels for each whitespace byte, then resume after
-                // the original content (the closing `</w:t>` will be copied
-                // on the next iteration).
-                out.extend_from_slice(&xml[i..content_start]);
-                for &b in content {
-                    let sentinel = match b {
-                        b' ' => WS_SENTINEL_SPACE,
-                        b'\t' => WS_SENTINEL_TAB,
-                        b'\n' => WS_SENTINEL_LF,
-                        b'\r' => WS_SENTINEL_CR,
-                        _ => unreachable!("guarded by is_xml_whitespace_byte"),
-                    };
-                    let mut buf = [0u8; 4];
-                    out.extend_from_slice(sentinel.encode_utf8(&mut buf).as_bytes());
-                }
-                i = content_end;
-                continue;
-            }
-            // Not whitespace-only — leave the element alone but skip past the
-            // closing tag in one step so we don't rescan attribute bytes.
-            out.extend_from_slice(&xml[i..close_tag_end]);
-            i = close_tag_end;
-            continue;
-        }
-        out.push(xml[i]);
-        i += 1;
+    let mut cursor = 0;
+    for (start, end) in spans {
+        out.extend_from_slice(&xml[cursor..start]);
+        substitute_whitespace(&xml[start..end], &mut out);
+        cursor = end;
     }
+    out.extend_from_slice(&xml[cursor..]);
     out
 }
 
@@ -135,62 +112,70 @@ fn is_ws_sentinel(c: char) -> bool {
     )
 }
 
-/// True if `needle` appears anywhere in `haystack`.
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
+/// Return source spans for whitespace-only text nodes directly inside
+/// WordprocessingML `<*:t>` elements. Namespace prefixes are resolved by
+/// quick-xml, so DrawingML and other XML vocabularies are not mutated.
+/// Malformed XML is left untouched.
+fn whitespace_only_wordprocessingml_text_spans(xml: &[u8]) -> Vec<(usize, usize)> {
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+    use quick_xml::reader::NsReader;
 
-/// Try to match `<w:t...>CONTENT</w:t>` starting at `pos`.
-/// On success, returns `(content_start, content_end, close_tag_end)` where
-/// `close_tag_end` is the byte index just past `</w:t>`.
-///
-/// Self-closing `<w:t/>` is intentionally ignored — there is no content to
-/// preserve. Other `<w:t...` prefixes (`<w:tbl`, `<w:tab`) are rejected by the
-/// element-name boundary check.
-fn match_w_t_with_text(xml: &[u8], pos: usize) -> Option<(usize, usize, usize)> {
-    let prefix = b"<w:t";
-    if !xml[pos..].starts_with(prefix) {
-        return None;
-    }
-    let after_name = pos + prefix.len();
-    let next = *xml.get(after_name)?;
-    // `<w:t` must be followed by `>`, `/`, or whitespace. Anything else means
-    // we matched the prefix of a longer element name like `<w:tbl`.
-    if !matches!(next, b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r') {
-        return None;
-    }
-    // Find the byte index just past the start tag's closing `>`. We walk
-    // forward respecting attribute quoting so a `>` inside an attribute value
-    // doesn't fool us. (XML allows unescaped `>` in attribute values; OOXML
-    // never emits one but cheap to handle.)
-    let mut j = after_name;
-    let mut quote: Option<u8> = None;
-    let start_tag_end = loop {
-        let b = *xml.get(j)?;
-        match (quote, b) {
-            (None, b'>') => break j + 1,
-            (None, b'/') if xml.get(j + 1) == Some(&b'>') => return None, // self-closing
-            (None, b'"') | (None, b'\'') => quote = Some(b),
-            (Some(q), b) if b == q => quote = None,
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut spans = Vec::new();
+    let mut depth: usize = 0;
+    let mut text_depth = None;
+
+    loop {
+        let (namespace, event) = match reader.read_resolved_event() {
+            Ok(event) => event,
+            Err(_) => return Vec::new(),
+        };
+
+        match event {
+            Event::Start(start) => {
+                depth += 1;
+                if matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == WORDPROCESSINGML_NAMESPACE)
+                    && start.local_name().as_ref() == b"t"
+                {
+                    text_depth = Some(depth);
+                }
+            }
+            Event::Text(text) if text_depth.is_some() => {
+                let content = text.as_ref();
+                if !content.is_empty() && content.iter().all(is_xml_whitespace_byte) {
+                    let end = reader.buffer_position() as usize;
+                    let Some(start) = end.checked_sub(content.len()) else {
+                        return Vec::new();
+                    };
+                    spans.push((start, end));
+                }
+            }
+            Event::End(_) => {
+                if text_depth == Some(depth) {
+                    text_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => return if depth == 0 { spans } else { Vec::new() },
             _ => {}
         }
-        j += 1;
-    };
-
-    // Find the next `<` — that's the start of the closing tag (or a child
-    // element, but `<w:t>` per OOXML never has element children).
-    let lt = xml[start_tag_end..].iter().position(|&b| b == b'<')?;
-    let content_end = start_tag_end + lt;
-
-    let close = b"</w:t>";
-    if !xml[content_end..].starts_with(close) {
-        return None;
     }
-    let close_tag_end = content_end + close.len();
-    Some((start_tag_end, content_end, close_tag_end))
+}
+
+fn substitute_whitespace(content: &[u8], out: &mut Vec<u8>) {
+    for &b in content {
+        let sentinel = match b {
+            b' ' => WS_SENTINEL_SPACE,
+            b'\t' => WS_SENTINEL_TAB,
+            b'\n' => WS_SENTINEL_LF,
+            b'\r' => WS_SENTINEL_CR,
+            _ => unreachable!("caller only passes XML whitespace"),
+        };
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(sentinel.encode_utf8(&mut buf).as_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -201,12 +186,23 @@ mod tests {
         String::from_utf8(b).unwrap()
     }
 
+    fn substitute_wml_fragment(fragment: &str) -> String {
+        let open =
+            r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#;
+        let xml = format!("{open}{fragment}</w:root>");
+        let out = s(substitute_whitespace_only_runs(xml.as_bytes()));
+        out.strip_prefix(open)
+            .and_then(|out| out.strip_suffix("</w:root>"))
+            .unwrap()
+            .to_string()
+    }
+
     // ── substitute_whitespace_only_runs ──────────────────────────────────────
 
     #[test]
     fn single_space_preserve_is_substituted() {
         let xml = br#"<w:r><w:t xml:space="preserve"> </w:t></w:r>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(
             out,
             format!(
@@ -219,7 +215,7 @@ mod tests {
     #[test]
     fn three_spaces_preserve_each_substituted() {
         let xml = br#"<w:t xml:space="preserve">   </w:t>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         let expected = format!(
             r#"<w:t xml:space="preserve">{0}{0}{0}</w:t>"#,
             WS_SENTINEL_SPACE
@@ -232,14 +228,14 @@ mod tests {
         // Many third-party DOCX writers emit whitespace-only <w:t> without the
         // xml:space attribute. quick-xml strips them all the same.
         let xml = br#"<w:t> </w:t>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(out, format!("<w:t>{}</w:t>", WS_SENTINEL_SPACE));
     }
 
     #[test]
     fn tab_only_is_substituted() {
         let xml = b"<w:t xml:space=\"preserve\">\t</w:t>";
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(
             out,
             format!("<w:t xml:space=\"preserve\">{}</w:t>", WS_SENTINEL_TAB)
@@ -249,7 +245,7 @@ mod tests {
     #[test]
     fn lf_and_cr_substituted() {
         let xml = b"<w:t xml:space=\"preserve\">\r\n</w:t>";
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(
             out,
             format!(
@@ -264,21 +260,21 @@ mod tests {
         // Content has a non-whitespace char → quick-xml preserves it as-is,
         // we must not modify.
         let xml = br#"<w:t xml:space="preserve">hello world </w:t>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(out, std::str::from_utf8(xml).unwrap());
     }
 
     #[test]
     fn empty_w_t_is_left_untouched() {
         let xml = br#"<w:t></w:t>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(out, std::str::from_utf8(xml).unwrap());
     }
 
     #[test]
     fn self_closing_w_t_is_left_untouched() {
         let xml = br#"<w:t xml:space="preserve"/>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(out, std::str::from_utf8(xml).unwrap());
     }
 
@@ -287,14 +283,14 @@ mod tests {
         // `<w:tbl>`, `<w:tab/>`, `<w:tc>` all start with `<w:t` but should not
         // trigger substitution.
         let xml = br#"<w:tbl><w:tr><w:tc><w:tab/></w:tc></w:tr></w:tbl>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(out, std::str::from_utf8(xml).unwrap());
     }
 
     #[test]
     fn multiple_runs_in_one_buffer() {
         let xml = br#"<w:p><w:r><w:t>A</w:t></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>B</w:t></w:r></w:p>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         let expected = format!(
             r#"<w:p><w:r><w:t>A</w:t></w:r><w:r><w:t xml:space="preserve">{}</w:t></w:r><w:r><w:t>B</w:t></w:r></w:p>"#,
             WS_SENTINEL_SPACE
@@ -303,8 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn buffer_without_w_t_is_unchanged_via_fast_path() {
-        let xml = br#"<a:theme><a:clrScheme/></a:theme>"#;
+    fn non_wordprocessingml_text_is_unchanged() {
+        let xml = br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:t> </a:t></a:theme>"#;
+        let out = substitute_whitespace_only_runs(xml);
+        assert_eq!(&out[..], &xml[..]);
+    }
+
+    #[test]
+    fn malformed_xml_is_left_untouched() {
+        let xml = br#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t> </w:t>"#;
         let out = substitute_whitespace_only_runs(xml);
         assert_eq!(&out[..], &xml[..]);
     }
@@ -322,7 +325,7 @@ mod tests {
         // The scanner must respect quoting so the inner `>` doesn't end the
         // start tag prematurely.
         let xml = br#"<w:t weird="a>b" xml:space="preserve"> </w:t>"#;
-        let out = s(substitute_whitespace_only_runs(xml));
+        let out = substitute_wml_fragment(std::str::from_utf8(xml).unwrap());
         assert_eq!(
             out,
             format!(
@@ -372,11 +375,7 @@ mod tests {
             t: TextXml,
         }
 
-        // The exact problem case from the Protokoll DOCX. We strip the `w:`
-        // namespace prefix here only because this test deserializes outside
-        // the real document context where namespaces are bound — the
-        // substitution function still operates on the canonical `<w:t>` form.
-        let original = br#"<r><w:t xml:space="preserve"> </w:t></r>"#;
+        let original = br#"<r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t xml:space="preserve"> </w:t></r>"#;
         let preprocessed = substitute_whitespace_only_runs(original);
         let parsed: R = quick_xml::de::from_str(std::str::from_utf8(&preprocessed).unwrap())
             .expect("quick-xml parse");
