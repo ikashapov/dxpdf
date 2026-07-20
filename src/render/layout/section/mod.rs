@@ -578,6 +578,467 @@ mod tests {
     }
 
     #[test]
+    fn leading_inline_page_break_relayouts_source_page_after_float_relocation() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: (0..4)
+                .map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: std::iter::once(Fragment::PageBreak {
+                line_height: Pt::new(14.0),
+            })
+            .chain((0..2).map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0)))
+            .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        let source_positions: Vec<_> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+
+        let owner_x = pages[1]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("owner-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("owner text on destination page");
+        assert!(
+            owner_x >= Pt::new(90.0),
+            "owner text at {owner_x:?} overlaps its 10-90pt float"
+        );
+    }
+
+    #[test]
+    fn column_break_page_transition_drops_forward_floats_from_previous_page() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: std::iter::once(Fragment::ColumnBreak)
+                .chain((0..4).map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0)))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 3);
+        let source_positions: Vec<_> = pages[1]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+        assert!(
+            pages[2]
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. })),
+            "the relocated float must be emitted on page 3"
+        );
+    }
+
+    #[test]
+    fn nonempty_column_break_does_not_leak_future_float_to_source_page() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: std::iter::once(text_frag("before", 170.0, 14.0))
+                .chain(std::iter::once(Fragment::ColumnBreak))
+                .chain((0..4).map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0)))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 3);
+        let before_x = pages[0]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.as_ref() == "before" => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("text before the column break on page 1");
+        assert_eq!(before_x, Pt::new(10.0));
+        let source_positions: Vec<_> = pages[1]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+        assert!(pages[..2].iter().all(|page| {
+            !page
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. }))
+        }));
+        assert_eq!(
+            pages[2]
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Image { .. }))
+                .count(),
+            1
+        );
+        let owner_x = pages[2]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("owner-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("owner text on page 3");
+        assert!(owner_x >= Pt::new(90.0));
+    }
+
+    #[test]
+    fn leading_inline_column_break_relayouts_source_page_after_float_relocation() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: (0..4)
+                .map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: std::iter::once(Fragment::ColumnBreak)
+                .chain((0..2).map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0)))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        let source_positions: Vec<_> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+        assert!(!pages[0]
+            .commands
+            .iter()
+            .any(|command| matches!(command, DrawCommand::Image { .. })));
+        assert_eq!(
+            pages[1]
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Image { .. }))
+                .count(),
+            1
+        );
+        let owner_x = pages[1]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("owner-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("owner text on page 2");
+        assert!(owner_x >= Pt::new(90.0));
+    }
+
+    #[test]
+    fn nonempty_page_break_does_not_leak_future_float_to_source_page() {
+        let config = small_config();
+        let source = LayoutBlock::Paragraph {
+            fragments: std::iter::once(text_frag("before", 170.0, 14.0))
+                .chain(std::iter::once(Fragment::PageBreak {
+                    line_height: Pt::new(14.0),
+                }))
+                .chain((0..4).map(|i| text_frag(&format!("source-{i}"), 170.0, 14.0)))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: (0..2)
+                .map(|i| text_frag(&format!("owner-{i}"), 170.0, 14.0))
+                .collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 3);
+        let before_x = pages[0]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.as_ref() == "before" => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("text before the page break on page 1");
+        assert_eq!(before_x, Pt::new(10.0));
+        let source_positions: Vec<_> = pages[1]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("source-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(source_positions, vec![Pt::new(10.0); 4]);
+        assert!(pages[..2].iter().all(|page| {
+            !page
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCommand::Image { .. }))
+        }));
+        assert_eq!(
+            pages[2]
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Image { .. }))
+                .count(),
+            1
+        );
+        let owner_x = pages[2]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.starts_with("owner-") => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("owner text on page 3");
+        assert!(owner_x >= Pt::new(90.0));
+    }
+
+    #[test]
+    fn same_page_column_break_preserves_page_float_state() {
+        use crate::render::layout::page::ColumnGeometry;
+
+        let mut config = small_config();
+        config.columns = vec![
+            ColumnGeometry {
+                x_offset: Pt::ZERO,
+                width: Pt::new(85.0),
+            },
+            ColumnGeometry {
+                x_offset: Pt::new(95.0),
+                width: Pt::new(85.0),
+            },
+        ];
+        let source = LayoutBlock::Paragraph {
+            fragments: vec![
+                text_frag("before", 70.0, 14.0),
+                Fragment::ColumnBreak,
+                text_frag("after", 70.0, 14.0),
+            ],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let owner = LayoutBlock::Paragraph {
+            fragments: vec![text_frag("owner", 70.0, 14.0)],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[source, owner],
+            &config,
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 1);
+        let before_x = pages[0]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { text, position, .. } if text.as_ref() == "before" => {
+                    Some(position.x)
+                }
+                _ => None,
+            })
+            .expect("text in the first column");
+        assert!(before_x >= Pt::new(90.0));
+        for expected in ["before", "after", "owner"] {
+            assert_eq!(
+                pages[0]
+                    .commands
+                    .iter()
+                    .filter(|command| {
+                        matches!(command, DrawCommand::Text { text, .. } if text.as_ref() == expected)
+                    })
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            pages[0]
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Image { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn moved_absolute_float_replays_from_first_affected_page_two_paragraph() {
         let config = small_config();
         let source = LayoutBlock::Paragraph {

@@ -381,10 +381,81 @@ fn register_paragraph_floats(
     }
 }
 
+fn register_destination_paragraph_floats(
+    state: &mut PageLayoutState<'_>,
+    floating_images: &[FloatingImage],
+    floating_shapes: &[FloatingShape],
+    space_before: Pt,
+    col_width: Pt,
+) {
+    let content_top = state.cursor_y + space_before;
+    register_paragraph_floats(state, floating_images, floating_shapes, content_top);
+    for active_float in &state.page_floats {
+        if active_float.overlaps_y(state.cursor_y) && active_float.width >= col_width {
+            state.cursor_y = state.cursor_y.max(active_float.page_y_end);
+        }
+    }
+    float::prune_floats(&mut state.page_floats, state.cursor_y);
+}
+
 fn has_absolute_wrap_float(floating_images: &[FloatingImage]) -> bool {
     floating_images.iter().any(|image| {
         matches!(image.y, FloatingImageY::Absolute(_)) && image.wrap_mode.registers_as_wrap_float()
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForwardScanBoundary {
+    None,
+    BeforeParagraphFloat,
+    AfterParagraphFloat,
+}
+
+fn scan_inline_page_boundary(
+    fragments: &[super::super::fragment::Fragment],
+    current_col: &mut usize,
+    num_cols: usize,
+) -> ForwardScanBoundary {
+    for (index, fragment) in fragments.iter().enumerate() {
+        match fragment {
+            super::super::fragment::Fragment::PageBreak { .. } => {
+                let has_following_content = fragments[index + 1..].iter().any(|fragment| {
+                    !matches!(fragment, super::super::fragment::Fragment::PageBreak { .. })
+                });
+                return if has_following_content {
+                    ForwardScanBoundary::BeforeParagraphFloat
+                } else {
+                    ForwardScanBoundary::AfterParagraphFloat
+                };
+            }
+            super::super::fragment::Fragment::ColumnBreak => {
+                if *current_col + 1 < num_cols {
+                    *current_col += 1;
+                } else {
+                    *current_col = 0;
+                    return ForwardScanBoundary::BeforeParagraphFloat;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ForwardScanBoundary::None
+}
+
+fn mark_absolute_float_relocation(
+    paragraph_content_placed: bool,
+    moves_to_new_page: bool,
+    block_idx: usize,
+    replay_block_idx: usize,
+    floating_images: &[FloatingImage],
+    relocated_blocks: &mut std::collections::HashSet<usize>,
+) -> bool {
+    !paragraph_content_placed
+        && moves_to_new_page
+        && block_idx > replay_block_idx
+        && has_absolute_wrap_float(floating_images)
+        && relocated_blocks.insert(block_idx)
 }
 
 fn paragraph_keep_next(block: &LayoutBlock) -> bool {
@@ -782,16 +853,21 @@ pub(crate) fn layout_section_with_clearance(
                 // current page. Only rescan when the page changes.
                 if state.abs_floats_dirty {
                     state.current_page_abs_floats.clear();
+                    let mut scan_col = state.current_col;
                     for (fi_idx, future_block) in
                         blocks[state.page_start_block..].iter().enumerate()
                     {
                         let future_block_idx = state.page_start_block + fi_idx;
                         if relocated_absolute_float_blocks.contains(&future_block_idx) {
-                            continue;
+                            if fi_idx == 0 {
+                                continue;
+                            }
+                            break;
                         }
                         if let LayoutBlock::Paragraph {
                             floating_images: fi_list,
                             page_break_before,
+                            fragments,
                             ..
                         } = future_block
                         {
@@ -800,20 +876,27 @@ pub(crate) fn layout_section_with_clearance(
                             if *page_break_before && fi_idx > 0 {
                                 break;
                             }
-                            for fi in fi_list {
-                                if fi.is_wrap_top_and_bottom() {
-                                    continue; // handled as block spacers, not floats
+                            let boundary =
+                                scan_inline_page_boundary(fragments, &mut scan_col, num_cols);
+                            if boundary != ForwardScanBoundary::BeforeParagraphFloat {
+                                for fi in fi_list {
+                                    if fi.is_wrap_top_and_bottom() {
+                                        continue; // handled as block spacers, not floats
+                                    }
+                                    if let FloatingImageY::Absolute(img_y) = fi.y {
+                                        state.current_page_abs_floats.push(float::ActiveFloat {
+                                            page_x: fi.x - fi.dist_left,
+                                            page_y_start: img_y,
+                                            page_y_end: img_y + fi.size.height,
+                                            width: fi.size.width + fi.dist_left + fi.dist_right,
+                                            source: float::FloatSource::Image,
+                                            wrap_text: fi.wrap_mode.wrap_text().into(),
+                                        });
+                                    }
                                 }
-                                if let FloatingImageY::Absolute(img_y) = fi.y {
-                                    state.current_page_abs_floats.push(float::ActiveFloat {
-                                        page_x: fi.x - fi.dist_left,
-                                        page_y_start: img_y,
-                                        page_y_end: img_y + fi.size.height,
-                                        width: fi.size.width + fi.dist_left + fi.dist_right,
-                                        source: float::FloatSource::Image,
-                                        wrap_text: fi.wrap_mode.wrap_text().into(),
-                                    });
-                                }
+                            }
+                            if boundary != ForwardScanBoundary::None {
+                                break;
                             }
                         }
                     }
@@ -892,14 +975,39 @@ pub(crate) fn layout_section_with_clearance(
                     // §17.3.3.1: force a new page for non-empty chunks that
                     // follow a page break.
                     if unresolved_page_break {
+                        if mark_absolute_float_relocation(
+                            paragraph_content_placed,
+                            true,
+                            block_idx,
+                            replay_block_idx,
+                            floating_images,
+                            &mut relocated_absolute_float_blocks,
+                        ) {
+                            page_replay_state.restore(&mut state);
+                            block_idx = replay_block_idx;
+                            continue 'blocks;
+                        }
+                        if !paragraph_content_placed {
+                            float_checkpoint.restore(&mut state);
+                        }
                         state.push_new_page(block_idx, &ctx);
                         state.prev_space_after = Pt::ZERO;
                         para_start_y = state.cursor_y;
+                        if !paragraph_content_placed {
+                            let col_width = config.columns[state.current_col].width;
+                            register_destination_paragraph_floats(
+                                &mut state,
+                                floating_images,
+                                floating_shapes,
+                                effective_style.space_before,
+                                col_width,
+                            );
+                        }
                         effective_style.page_y = state.cursor_y;
                         effective_style.page_x = col_x(state.current_col);
                         effective_style.page_content_width =
                             config.columns[state.current_col].width;
-                        effective_style.page_floats = Vec::new();
+                        effective_style.page_floats = state.page_floats.clone();
                     }
 
                     let col_chunks = split_at_column_breaks(page_chunk);
@@ -907,16 +1015,46 @@ pub(crate) fn layout_section_with_clearance(
                     for (chunk_idx, chunk) in col_chunks.iter().enumerate() {
                         // Advance to the next column for chunks after a column break.
                         if chunk_idx > 0 {
-                            if state.current_col + 1 < num_cols {
+                            let starts_new_page = state.current_col + 1 >= num_cols;
+                            if mark_absolute_float_relocation(
+                                paragraph_content_placed,
+                                starts_new_page,
+                                block_idx,
+                                replay_block_idx,
+                                floating_images,
+                                &mut relocated_absolute_float_blocks,
+                            ) {
+                                page_replay_state.restore(&mut state);
+                                block_idx = replay_block_idx;
+                                continue 'blocks;
+                            }
+                            if !paragraph_content_placed && starts_new_page {
+                                float_checkpoint.restore(&mut state);
+                            }
+                            if !starts_new_page {
                                 state.current_col += 1;
                             } else {
                                 // All columns full — new page, reset to column 0.
                                 state.push_new_page(block_idx, &ctx);
                             }
                             state.cursor_y = state.column_top;
+                            if !paragraph_content_placed && starts_new_page {
+                                let col_width = config.columns[state.current_col].width;
+                                register_destination_paragraph_floats(
+                                    &mut state,
+                                    floating_images,
+                                    floating_shapes,
+                                    effective_style.space_before,
+                                    col_width,
+                                );
+                            }
+                            effective_style.page_y = state.cursor_y;
                             effective_style.page_x = col_x(state.current_col);
                             effective_style.page_content_width =
                                 config.columns[state.current_col].width;
+                            if starts_new_page {
+                                effective_style.page_floats = state.page_floats.clone();
+                            }
                         }
 
                         let constraints = col_constraints(
@@ -936,12 +1074,14 @@ pub(crate) fn layout_section_with_clearance(
                             && state.cursor_y > state.column_top
                         {
                             let moves_to_new_page = state.current_col + 1 >= num_cols;
-                            if !paragraph_content_placed
-                                && moves_to_new_page
-                                && block_idx > replay_block_idx
-                                && has_absolute_wrap_float(floating_images)
-                                && relocated_absolute_float_blocks.insert(block_idx)
-                            {
+                            if mark_absolute_float_relocation(
+                                paragraph_content_placed,
+                                moves_to_new_page,
+                                block_idx,
+                                replay_block_idx,
+                                floating_images,
+                                &mut relocated_absolute_float_blocks,
+                            ) {
                                 // Earlier source-page text may already have
                                 // wrapped around this future float. Replay the
                                 // page without it before placing the owner on
@@ -961,23 +1101,14 @@ pub(crate) fn layout_section_with_clearance(
                             }
                             let destination_para_start_y = state.cursor_y;
                             if !paragraph_content_placed {
-                                let content_top = state.cursor_y + effective_style.space_before;
-                                register_paragraph_floats(
+                                let col_width = config.columns[state.current_col].width;
+                                register_destination_paragraph_floats(
                                     &mut state,
                                     floating_images,
                                     floating_shapes,
-                                    content_top,
+                                    effective_style.space_before,
+                                    col_width,
                                 );
-                                let col_width = config.columns[state.current_col].width;
-                                for active_float in &state.page_floats {
-                                    if active_float.overlaps_y(state.cursor_y)
-                                        && active_float.width >= col_width
-                                    {
-                                        state.cursor_y =
-                                            state.cursor_y.max(active_float.page_y_end);
-                                    }
-                                }
-                                float::prune_floats(&mut state.page_floats, state.cursor_y);
                             }
                             // Update para_start_y after page/column change so
                             // floating images use the correct position.
@@ -1012,7 +1143,7 @@ pub(crate) fn layout_section_with_clearance(
                             state.current_page.commands.push(cmd);
                         }
                         state.cursor_y += para.size.height;
-                        paragraph_content_placed = true;
+                        paragraph_content_placed |= !chunk.is_empty();
                     }
                     // The page break has been consumed by this non-empty chunk.
                     unresolved_page_break = false;
