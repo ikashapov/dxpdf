@@ -1274,6 +1274,7 @@ pub(crate) fn layout_section_with_clearance(
                         // longer the discriminant for registration.
                         let _ = is_anchor;
                     }
+                    block_idx += 1;
                     continue;
                 }
 
