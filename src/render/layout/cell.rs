@@ -86,6 +86,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 

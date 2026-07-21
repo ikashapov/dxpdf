@@ -2,6 +2,7 @@
 
 use super::super::draw_command::{DrawCommand, LayoutedPage};
 use super::super::float;
+use super::super::fragment::Fragment;
 use super::super::header_footer::{HeaderFooterClearance, PageBodyBounds};
 use super::super::page::PageConfig;
 use super::super::paragraph::{
@@ -403,14 +404,48 @@ fn decide_paragraph_split(
 /// `line_start` advances by `>= 1` on every emitted segment and a `MoveWhole`
 /// always lands on a fresh page where progress is forced, so the loop
 /// terminates.
-fn emit_split_paragraph(
-    state: &mut PageLayoutState<'_>,
+/// §17.11.23: reserve `footnotes` on the current page — measure each, subtract
+/// its height (and the separator gap for the first footnote on the page) from
+/// the available bottom, and queue it for rendering. Shared by the atomic
+/// placement path and the per-segment split path.
+fn reserve_footnotes<'doc>(
+    state: &mut PageLayoutState<'doc>,
+    ctx: &LayoutCtx<'_>,
+    content_width: Pt,
+    footnotes: &'doc [(Vec<Fragment>, ParagraphStyle)],
+) {
+    if footnotes.is_empty() {
+        return;
+    }
+    let fn_constraints = BoxConstraints::tight_width(content_width, Pt::INFINITY);
+    for (fn_frags, fn_style) in footnotes {
+        let fn_para = layout_paragraph(
+            fn_frags,
+            &fn_constraints,
+            fn_style,
+            ctx.default_line_height,
+            ctx.measure_text,
+        );
+        // Reserve separator space only for the first footnote on this page.
+        if state.page_footnotes.is_empty() {
+            state.bottom -= FOOTNOTE_SEPARATOR_GAP;
+        }
+        state.bottom -= fn_para.size.height;
+        state.page_footnotes.push((fn_frags, fn_style));
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // stacker state + placement inputs are cohesive
+fn emit_split_paragraph<'doc>(
+    state: &mut PageLayoutState<'doc>,
     placed: &PlacedParagraph<'_>,
     style: &ParagraphStyle,
     block_idx: usize,
     col_x: Pt,
     ctx: &LayoutCtx<'_>,
     para_start_y: &mut Pt,
+    footnotes: &'doc [(Vec<Fragment>, ParagraphStyle)],
+    content_width: Pt,
 ) {
     let total = placed.line_count();
     let widow_control = style.widow_control;
@@ -419,6 +454,9 @@ fn emit_split_paragraph(
     let trailing_extra = style.space_after + placed.bottom_border_space();
     let mut line_start = 0;
     let mut first_segment = true;
+    // §17.11.12: footnotes are reserved in document order; this many have been
+    // placed on earlier segments' pages.
+    let mut footnote_cursor = 0;
 
     loop {
         let remaining = total - line_start;
@@ -458,6 +496,22 @@ fn emit_split_paragraph(
             }
         };
 
+        // §17.3.1.11/§17.3.1.44: keep the drop-cap / float-wrapped prefix intact.
+        let head = match prefix_adjusted_head(
+            head,
+            remaining,
+            placed.unbreakable_prefix_lines(),
+            first_segment,
+            at_page_top,
+        ) {
+            Some(head) => head,
+            None => {
+                state.push_new_page(block_idx, ctx);
+                *para_start_y = state.cursor_y;
+                continue;
+            }
+        };
+
         let is_last = line_start + head == total;
         let segment =
             placed.emit_split_segment(line_start, line_start + head, first_segment, is_last);
@@ -475,6 +529,16 @@ fn emit_split_paragraph(
             state.current_page.commands.push(cmd);
         }
         state.cursor_y += segment.size.height;
+
+        // §17.11.12: reserve this segment's footnotes on the current page (the
+        // page its reference marks landed on) before any page break.
+        if !footnotes.is_empty() {
+            let refs = placed.footnote_refs_in(line_start, line_start + head);
+            let end = (footnote_cursor + refs).min(footnotes.len());
+            reserve_footnotes(state, ctx, content_width, &footnotes[footnote_cursor..end]);
+            footnote_cursor = end;
+        }
+
         line_start += head;
         first_segment = false;
 
@@ -484,6 +548,35 @@ fn emit_split_paragraph(
         // Continue the paragraph at the top of the next page.
         state.push_new_page(block_idx, ctx);
         *para_start_y = state.cursor_y;
+    }
+}
+
+/// Constrain a chosen split `head` so it never falls inside the paragraph's
+/// unbreakable prefix (§17.3.1.11 drop cap and/or §17.3.1.44 float-wrapped run,
+/// the first `prefix_lines` lines). Breaking there would tear a drop-cap glyph
+/// or leave float-narrowed lines to be reused full-width on the next page.
+///
+/// Returns `Some(head)` — unchanged when it already clears the prefix — or
+/// `None` meaning "move the whole paragraph to a fresh page" (a break inside the
+/// prefix with room above). At the page top the prefix cannot move any higher,
+/// so it is emitted whole (`Some(prefix_lines)`) and allowed to overflow. The
+/// guard only applies to the first segment (the prefix lives at the start).
+fn prefix_adjusted_head(
+    head: usize,
+    remaining: usize,
+    prefix_lines: usize,
+    first_segment: bool,
+    at_page_top: bool,
+) -> Option<usize> {
+    let breaks_prefix =
+        first_segment && prefix_lines > 1 && head < prefix_lines && head < remaining;
+    if !breaks_prefix {
+        return Some(head);
+    }
+    if at_page_top {
+        Some(prefix_lines.min(remaining))
+    } else {
+        None
     }
 }
 
@@ -884,6 +977,10 @@ pub(crate) fn layout_section_with_clearance(
                 let page_chunks = split_at_page_breaks(fragments);
                 let mut para_start_y = state.cursor_y;
                 state.last_para_start_y = state.cursor_y;
+                // §17.11.12: set once a split segment reserves this paragraph's
+                // footnotes per page, so the atomic after-loop reservation is
+                // skipped (avoids double-reserving).
+                let mut footnotes_reserved = false;
 
                 // §17.3.3.1: track whether an unresolved page break remains
                 // after processing all chunks, so it can be deferred to the
@@ -944,26 +1041,33 @@ pub(crate) fn layout_section_with_clearance(
                             ctx.measure_text,
                         );
 
-                        // §17.3.1.14 / §17.3.1.44: a paragraph may break across a
-                        // page boundary only when keepLines is unset, its shape
-                        // permits it (no borders/shading/drop cap/active floats),
-                        // it has no attached footnotes or floating objects, and
-                        // the section is single-column. Anything else keeps the
-                        // atomic "move the whole paragraph" behavior — correct,
-                        // just more conservative. (See docs/keep-lines-plan.md;
-                        // the excluded cases are Phase C/D.)
+                        // §17.3.1.14: a paragraph may break across a page
+                        // boundary when keepLines is unset and the section is
+                        // single-column. Borders/shading, drop caps, and lines
+                        // wrapped around an active float are handled per segment
+                        // (the float-wrapped run is kept on the first segment by
+                        // the unbreakable-prefix guard, so the full-width tail
+                        // reuses its fitted lines). Paragraphs that own floating
+                        // objects stay atomic (the object anchors to one page).
+                        // Footnotes are reserved per segment, but only for a
+                        // single, unbroken chunk — with explicit page/column
+                        // breaks their reference→segment mapping is ambiguous, so
+                        // those keep the atomic reservation. (See docs/keep-lines-plan.md.)
+                        let single_chunk = page_chunks.len() == 1 && col_chunks.len() == 1;
                         let can_split = num_cols == 1
                             && !effective_style.keep_lines
-                            && footnotes.is_empty()
+                            && (footnotes.is_empty() || single_chunk)
                             && floating_images.is_empty()
                             && floating_shapes.is_empty()
-                            && placed.line_count() >= 2
-                            && placed.can_split_across_pages();
+                            && placed.line_count() >= 2;
 
                         if can_split {
                             // Single-column (required for splitting), so the
                             // column x is constant across the continuation pages.
                             let seg_col_x = col_x(state.current_col);
+                            if !footnotes.is_empty() {
+                                footnotes_reserved = true;
+                            }
                             emit_split_paragraph(
                                 &mut state,
                                 &placed,
@@ -972,6 +1076,8 @@ pub(crate) fn layout_section_with_clearance(
                                 seg_col_x,
                                 &ctx,
                                 &mut para_start_y,
+                                footnotes,
+                                content_width,
                             );
                         } else {
                             let mut para = placed.emit_full();
@@ -1088,25 +1194,11 @@ pub(crate) fn layout_section_with_clearance(
                     });
                 }
 
-                // Collect footnotes for this page and reduce the available bottom.
-                if !footnotes.is_empty() {
-                    let fn_constraints = BoxConstraints::tight_width(content_width, Pt::INFINITY);
-                    let sep_height = FOOTNOTE_SEPARATOR_GAP;
-                    for (fn_frags, fn_style) in footnotes {
-                        let fn_para = layout_paragraph(
-                            fn_frags,
-                            &fn_constraints,
-                            fn_style,
-                            ctx.default_line_height,
-                            ctx.measure_text,
-                        );
-                        // Reserve separator space only for the first footnote on this page.
-                        if state.page_footnotes.is_empty() {
-                            state.bottom -= sep_height;
-                        }
-                        state.bottom -= fn_para.size.height;
-                        state.page_footnotes.push((fn_frags, fn_style));
-                    }
+                // Collect footnotes for this page and reduce the available
+                // bottom. A split paragraph already reserved them per segment
+                // (on the page each reference landed on), so skip here.
+                if !footnotes_reserved {
+                    reserve_footnotes(&mut state, &ctx, content_width, footnotes);
                 }
             }
             LayoutBlock::Table {
@@ -1405,7 +1497,7 @@ mod keep_next_chain_tests {
 
 #[cfg(test)]
 mod paragraph_split_tests {
-    use super::{decide_paragraph_split, ParagraphSplit};
+    use super::{decide_paragraph_split, prefix_adjusted_head, ParagraphSplit};
 
     // ── Whole paragraph fits ──────────────────────────────────────────────
 
@@ -1522,5 +1614,37 @@ mod paragraph_split_tests {
             decide_paragraph_split(0, 3, false, true),
             ParagraphSplit::All
         );
+    }
+
+    // ── §17.3.1.11 drop-cap prefix guard ──────────────────────────────────
+
+    #[test]
+    fn drop_cap_head_clearing_the_prefix_is_unchanged() {
+        // head >= drop_cap_lines: the whole prefix is in the first segment.
+        assert_eq!(prefix_adjusted_head(5, 8, 3, true, true), Some(5));
+        // No drop cap.
+        assert_eq!(prefix_adjusted_head(2, 8, 0, true, false), Some(2));
+        // Single-line drop cap can't be split within.
+        assert_eq!(prefix_adjusted_head(1, 8, 1, true, false), Some(1));
+        // Not the first segment — the prefix is behind us.
+        assert_eq!(prefix_adjusted_head(1, 8, 3, false, false), Some(1));
+        // head == remaining is the whole paragraph (no break inside the prefix).
+        assert_eq!(prefix_adjusted_head(2, 2, 3, true, false), Some(2));
+    }
+
+    #[test]
+    fn drop_cap_break_inside_prefix_moves_whole_when_not_at_top() {
+        // head 2 < drop_cap_lines 3 → tearing the glyph; move the whole para.
+        assert_eq!(prefix_adjusted_head(2, 8, 3, true, false), None);
+        assert_eq!(prefix_adjusted_head(1, 8, 3, true, false), None);
+    }
+
+    #[test]
+    fn drop_cap_break_inside_prefix_overflows_whole_at_top() {
+        // At the page top the prefix can't move up: emit the whole prefix
+        // (drop_cap_lines) and let it overflow, keeping the glyph intact.
+        assert_eq!(prefix_adjusted_head(1, 8, 3, true, true), Some(3));
+        // A paragraph shorter than the prefix clamps to its line count.
+        assert_eq!(prefix_adjusted_head(1, 2, 3, true, true), Some(2));
     }
 }

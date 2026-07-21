@@ -124,6 +124,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 
@@ -399,6 +400,159 @@ mod tests {
             "para 1 (3) + first 2 lines of para 2"
         );
         assert_eq!(text_count(&pages[1].commands), 1, "the widow line");
+    }
+
+    /// A paragraph whose first `drop_cap_lines` lines are spanned by a drop cap.
+    fn dropcap_para(n: usize, drop_cap_lines: u32) -> LayoutBlock {
+        use crate::render::layout::paragraph::DropCapInfo;
+        let fragments = (0..n)
+            .map(|i| text_frag(&format!("b{i} "), 100.0, 14.0))
+            .collect();
+        let style = ParagraphStyle {
+            // Widow control off so the *natural* break would strand a single
+            // line — which, inside the drop-cap prefix, the guard must prevent.
+            widow_control: false,
+            drop_cap: Some(DropCapInfo {
+                fragments: vec![text_frag("§", 20.0, 30.0)],
+                lines: drop_cap_lines,
+                width: Pt::new(20.0),
+                height: Pt::new(30.0),
+                ascent: Pt::new(28.0),
+                h_space: Pt::ZERO,
+                margin_mode: false,
+                indent: Pt::ZERO,
+                frame_height: None,
+                position_offset: Pt::ZERO,
+            }),
+            ..Default::default()
+        };
+        LayoutBlock::Paragraph {
+            fragments,
+            style,
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    fn page_has_dropcap_glyph(page: &crate::render::LayoutedPage) -> bool {
+        page.commands
+            .iter()
+            .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.as_ref() == "§"))
+    }
+
+    fn footnote_ref_frag() -> Fragment {
+        let mut f = text_frag("1", 5.0, 8.0);
+        if let Fragment::Text {
+            is_footnote_ref, ..
+        } = &mut f
+        {
+            *is_footnote_ref = true;
+        }
+        f
+    }
+
+    fn page_has_text(page: &crate::render::LayoutedPage, needle: &str) -> bool {
+        page.commands
+            .iter()
+            .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.as_ref() == needle))
+    }
+
+    #[test]
+    fn footnotes_reserve_on_the_page_of_their_reference() {
+        // §17.11.12: an eight-line paragraph with a footnote reference on line 0
+        // and another on line 7 splits across two pages; each footnote must land
+        // on the page carrying its reference, not both on one page.
+        let mut fragments = vec![text_frag("word0 ", 100.0, 14.0), footnote_ref_frag()];
+        for i in 1..8 {
+            fragments.push(text_frag(&format!("word{i} "), 100.0, 14.0));
+        }
+        fragments.push(footnote_ref_frag()); // reference on the last line
+        let footnotes = vec![
+            (
+                vec![text_frag("FNA", 30.0, 12.0)],
+                ParagraphStyle::default(),
+            ),
+            (
+                vec![text_frag("FNB", 30.0, 12.0)],
+                ParagraphStyle::default(),
+            ),
+        ];
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                widow_control: false,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes,
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let pages = layout_section(
+            &[block],
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2, "the paragraph should split");
+        let last = pages.len() - 1;
+        assert!(
+            page_has_text(&pages[0], "FNA"),
+            "footnote A on its reference's page"
+        );
+        assert!(
+            !page_has_text(&pages[0], "FNB"),
+            "footnote B is not on page 1"
+        );
+        assert!(
+            page_has_text(&pages[last], "FNB"),
+            "footnote B on the last page with its reference"
+        );
+    }
+
+    #[test]
+    fn drop_cap_prefix_is_not_split_across_pages() {
+        // §17.3.1.11: page 1 leaves room for ~1 line after four lines of para 1.
+        // A naive break would put a single line of the drop-cap paragraph on
+        // page 1 and tear the 3-line drop cap. The guard moves the paragraph
+        // whole, so page 1 holds only para 1 and the drop cap lands intact later.
+        let blocks = vec![multiline_para(4, false, false), dropcap_para(6, 3)];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2);
+        assert_eq!(
+            text_count(&pages[0].commands),
+            4,
+            "only para 1 on page 1 — the drop-cap paragraph moved whole"
+        );
+        assert!(
+            !page_has_dropcap_glyph(&pages[0]),
+            "the drop cap must not appear on page 1"
+        );
+        // The drop cap lands on some later page, together with >= 3 body lines
+        // (its prefix), never stranded.
+        let cap_page = pages
+            .iter()
+            .find(|p| page_has_dropcap_glyph(p))
+            .expect("drop cap is emitted on some page");
+        // Body lines on the drop-cap page = text commands minus the glyph;
+        // the 3-line drop-cap prefix stays with the glyph (so > 3 text commands).
+        assert!(
+            text_count(&cap_page.commands) > 3,
+            "the drop-cap prefix (>= 3 lines) stays with the glyph"
+        );
     }
 
     #[test]

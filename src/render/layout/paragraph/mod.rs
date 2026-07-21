@@ -309,6 +309,46 @@ impl PlacedParagraph<'_> {
         self.line_heights[i]
     }
 
+    /// Number of leading lines that must stay together on the first segment
+    /// when this paragraph splits — the larger of:
+    ///
+    /// - §17.3.1.11 the drop-cap span (a split inside it tears the glyph), and
+    /// - §17.3.1.44 the float-wrapped run: every line up to and including the
+    ///   last one narrowed by an active float. Keeping these on the first
+    ///   segment guarantees the continuation is full-width, so the already-fitted
+    ///   tail lines are reused correctly on the next page without re-wrapping.
+    pub(crate) fn unbreakable_prefix_lines(&self) -> usize {
+        let float_prefix = self
+            .line_placements
+            .iter()
+            .rposition(|lp| lp.float_left > Pt::ZERO || lp.float_right > Pt::ZERO)
+            .map_or(0, |i| i + 1);
+        self.params.drop_cap_lines.max(float_prefix)
+    }
+
+    /// §17.11.12: number of footnote reference marks in lines `[first, last)`.
+    /// The stacker reserves this many footnotes (in document order) on the page
+    /// that segment lands on, so a footnote sits with its reference.
+    pub(crate) fn footnote_refs_in(&self, first: usize, last: usize) -> usize {
+        self.line_placements[first..last]
+            .iter()
+            .map(|lp| {
+                self.fragments[lp.line.start..lp.line.end]
+                    .iter()
+                    .filter(|f| {
+                        matches!(
+                            f,
+                            Fragment::Text {
+                                is_footnote_ref: true,
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
     /// Render the drop cap glyphs at their precomputed baseline (§17.3.1.11).
     /// Only the first segment of a split paragraph carries the drop cap.
     fn emit_drop_cap(&self, commands: &mut Vec<DrawCommand>) {
@@ -380,22 +420,6 @@ impl PlacedParagraph<'_> {
         }
     }
 
-    /// Whether this paragraph's *shape* can be split across a page boundary with
-    /// [`emit_split_segment`](Self::emit_split_segment).
-    ///
-    /// Paragraph borders/shading (§17.3.1.24/§17.3.1.31), drop caps
-    /// (§17.3.1.11), and active floats (§17.3.1.44 wrap) each need per-segment
-    /// handling that the split emit does not yet perform, so such paragraphs
-    /// keep the atomic (move-whole) behavior. keepLines (§17.3.1.14) and
-    /// footnotes are the caller's concern.
-    pub(crate) fn can_split_across_pages(&self) -> bool {
-        // Borders (§17.3.1.24) and shading (§17.3.1.31) are handled per segment
-        // by `emit_split_segment`. Drop caps (§17.3.1.11) and active floats
-        // (§17.3.1.44 wrap) still need per-segment handling, so those paragraphs
-        // keep the atomic (move-whole) behavior for now.
-        self.style.drop_cap.is_none() && self.style.page_floats.is_empty()
-    }
-
     /// §17.3.1.24: bottom border space this paragraph adds after its last line —
     /// charged, with `space_after`, only on the final segment.
     pub(crate) fn bottom_border_space(&self) -> Pt {
@@ -409,7 +433,9 @@ impl PlacedParagraph<'_> {
 
     /// Emit lines `[first, last)` of a splittable paragraph as one page segment.
     ///
-    /// The caller guarantees [`can_split_across_pages`](Self::can_split_across_pages).
+    /// The caller keeps the unbreakable prefix (see
+    /// [`unbreakable_prefix_lines`](Self::unbreakable_prefix_lines)) on the first
+    /// segment, so the drop cap and any float-wrapped lines stay intact.
     /// `space_before` (§17.3.1.33) and the top border belong to the first
     /// segment; `space_after` and the bottom border to the last; shading and side
     /// borders span every segment (§17.3.1.24/§17.3.1.31). Commands are
@@ -434,6 +460,12 @@ impl PlacedParagraph<'_> {
         } else {
             Pt::ZERO
         };
+
+        // §17.3.1.11: the drop cap belongs to the first segment (the stacker's
+        // guard keeps the whole drop-cap prefix there, so the glyph is intact).
+        if is_first_segment {
+            self.emit_drop_cap(&mut commands);
+        }
 
         emit_line_commands(
             &mut commands,
@@ -522,6 +554,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 
@@ -1362,7 +1395,7 @@ mod tests {
         let constraints = body_constraints(80.0);
         let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
         assert_eq!(placed.line_count(), 4);
-        assert!(placed.can_split_across_pages());
+        assert_eq!(placed.unbreakable_prefix_lines(), 0, "no drop cap / floats");
 
         let full = placed.emit_full();
         let head = placed.emit_split_segment(0, 2, true, false);
@@ -1432,6 +1465,40 @@ mod tests {
     }
 
     #[test]
+    fn float_wrapped_lines_form_an_unbreakable_prefix() {
+        // §17.3.1.44: an active float covering y[0,30) narrows the first three
+        // 14pt lines (y 0, 14, 28). Those float-wrapped lines must stay on the
+        // first segment so the full-width continuation reuses its fitted lines.
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        let float = ActiveFloat {
+            page_x: Pt::ZERO,
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        };
+        let style = ParagraphStyle {
+            page_floats: vec![float],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(120.0),
+            ..Default::default()
+        };
+        let frags: Vec<Fragment> = (0..20)
+            .map(|i| text_frag(&format!("w{i} "), 20.0))
+            .collect();
+        let constraints = body_constraints(120.0);
+        let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
+
+        assert!(placed.line_count() >= 4, "enough lines to clear the float");
+        assert_eq!(
+            placed.unbreakable_prefix_lines(),
+            3,
+            "the three float-narrowed lines are the unbreakable prefix"
+        );
+    }
+
+    #[test]
     fn split_segment_draws_border_box_per_page() {
         // §17.3.1.24/§17.3.1.31: a bordered, shaded paragraph split across three
         // pages keeps side borders and shading on every segment, the top border
@@ -1453,9 +1520,10 @@ mod tests {
         // each word is its own line without triggering per-character splitting.
         let constraints = body_constraints(120.0);
         let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
-        assert!(
-            placed.can_split_across_pages(),
-            "bordered/shaded paragraphs are now splittable"
+        assert_eq!(
+            placed.unbreakable_prefix_lines(),
+            0,
+            "bordered/shaded paragraphs split freely (no drop cap / floats)"
         );
         assert_eq!(placed.line_count(), 6);
 

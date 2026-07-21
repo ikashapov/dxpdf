@@ -357,6 +357,9 @@ pub(super) fn split_oversized_fragments(
                             hyperlink_url: hyperlink_url.clone(),
                             baseline_offset: *baseline_offset,
                             text_offset: Pt::ZERO,
+                            // A per-character split of an over-wide word is never
+                            // a footnote mark (those are tiny superscripts).
+                            is_footnote_ref: false,
                         });
                     }
                 }

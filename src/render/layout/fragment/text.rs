@@ -224,6 +224,7 @@ pub(super) fn emit_text_words<F>(
             hyperlink_url: hyperlink_url.map(String::from),
             baseline_offset: style.baseline_offset,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         });
     }
 }

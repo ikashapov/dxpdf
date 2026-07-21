@@ -336,6 +336,7 @@ where
         hyperlink_url: None,
         baseline_offset: Pt::ZERO,
         text_offset: Pt::ZERO,
+        is_footnote_ref: false,
     }
 }
 
@@ -775,6 +776,7 @@ where
                         hyperlink_url: hyperlink_url.map(String::from),
                         baseline_offset: Pt::ZERO,
                         text_offset: Pt::ZERO,
+                        is_footnote_ref: false,
                     });
                 }
                 // Bookmark target — emit as zero-width named destination.
@@ -819,6 +821,9 @@ where
                         hyperlink_url: None,
                         baseline_offset,
                         text_offset: Pt::ZERO,
+                        // §17.11.12: tag so across-page splitting reserves this
+                        // footnote on the page its reference mark lands on.
+                        is_footnote_ref: true,
                     });
                 }
                 // §17.11.2: endnote reference — render as superscript Roman numeral.
@@ -851,6 +856,7 @@ where
                         hyperlink_url: None,
                         baseline_offset,
                         text_offset: Pt::ZERO,
+                        is_footnote_ref: false,
                     });
                 }
                 Inline::Pict(pict) => {

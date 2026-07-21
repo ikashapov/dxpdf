@@ -706,6 +706,8 @@ pub(super) fn split_oversized_fragments<'a>(
                         hyperlink_url: hyperlink_url.clone(),
                         baseline_offset: *baseline_offset,
                         text_offset: Pt::ZERO,
+                        // Per-character split of an over-wide word — not a mark.
+                        is_footnote_ref: false,
                     });
                 }
             }
