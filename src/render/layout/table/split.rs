@@ -9,6 +9,7 @@
 
 use crate::render::dimension::Pt;
 use crate::render::layout::draw_command::DrawCommand;
+use crate::render::layout::section::CellLine;
 
 use super::borders::CellBorders;
 use super::types::{CellLayoutEntry, MeasuredRow, TableRowInput};
@@ -27,19 +28,24 @@ pub(super) struct RowCutInput<'a> {
 /// natural top margin.
 struct CellCut {
     /// Partition threshold: commands with primary-Y strictly less than
-    /// this value stay on the first half.
+    /// this value stay on the first half (cell-box coordinates).
     content_cut_y: Pt,
-    /// Amount by which second-half commands are shifted up so that the
-    /// first surviving line lands at `margin_top + ascent` in the
-    /// continuation cell.
+    /// Partition threshold for the [`CellLine`] cut model, in cell-content
+    /// coordinates (i.e. `content_cut_y - margin_top`): lines whose box top is
+    /// strictly less stay on the first half.
+    line_cut_y: Pt,
+    /// Amount by which second-half commands (and continuation line tops) are
+    /// shifted up so that the first surviving line lands at the continuation
+    /// cell's natural top margin.
     shift: Pt,
 }
 
 impl CellCut {
-    /// "Don't split" sentinel — all commands stay on the first half.
+    /// "Don't split" sentinel — all commands and lines stay on the first half.
     fn keep_all() -> Self {
         Self {
             content_cut_y: Pt::new(f32::INFINITY),
+            line_cut_y: Pt::new(f32::INFINITY),
             shift: Pt::ZERO,
         }
     }
@@ -120,71 +126,100 @@ pub(super) fn find_row_cut(input: &RowCutInput<'_>) -> Option<SplitCut> {
     })
 }
 
-/// For a single cell, choose the largest prefix of lines that fits in
-/// `available`. Returns the `CellCut` and the first-half height this cell
-/// needs — symmetric with a non-split cell of the same line count: the
-/// last line's line-box bottom plus `tcMar/bottom` (variant 2 of the
-/// OOXML split-edge options; §17.4.40 re-applied at the cut edge).
+/// For a single cell, choose the largest legal prefix of lines that fits in
+/// `available`, honoring the cell paragraphs' §17.3.1.14 keepLines,
+/// §17.3.1.44 widow/orphan control, and §17.3.1.15 keepNext — the same policy
+/// body across-page splitting applies. Returns the `CellCut` and the first-half
+/// height this cell needs: the retained content plus the cell's top and bottom
+/// margins, so the cut edge gets the natural padding Word preserves (variant 2
+/// of the OOXML split-edge options; §17.4.40 re-applied at the cut edge).
+///
+/// Returns `None` when the cell exposes no legal cut point within `available`
+/// (empty/one-line, image/shape-only, keepLines, or every fitting cut would
+/// strand a widow) — the caller then keeps the cell whole on the first half.
 fn cut_for_cell(
     entry: &CellLayoutEntry,
     margin_top: Pt,
     margin_bottom: Pt,
     available: Pt,
 ) -> Option<(CellCut, Pt)> {
-    let mut baselines: Vec<Pt> = entry
-        .layout
-        .commands
-        .iter()
-        .filter_map(|c| match c {
-            DrawCommand::Text { position, .. } => Some(position.y),
-            _ => None,
-        })
-        .collect();
-    baselines.sort_by(|a, b| {
-        a.raw()
-            .partial_cmp(&b.raw())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    baselines.dedup_by(|a, b| (a.raw() - b.raw()).abs() < 0.01);
-
-    // Need at least two baselines to have somewhere to cut between.
-    if baselines.len() < 2 {
-        return None;
-    }
-
-    // Space available for the content plus both margins, since the first
-    // half reproduces the cell's natural layout (top margin, lines, bottom
-    // margin) — same as a non-split cell rendering the retained lines.
+    // Space available for the content between both margins, since the first
+    // half reproduces the cell's natural layout (top margin, retained lines,
+    // bottom margin) — same as a non-split cell rendering those lines.
     let budget = available - margin_top - margin_bottom;
     if budget <= Pt::ZERO {
         return None;
     }
 
-    let first = baselines[0];
-    // Largest k such that the line-box bottom of line k fits in `budget`.
-    // Line-box bottom of line k ≈ baselines[k+1] - ascent; since
-    // baselines[0] = margin_top + ascent, shifting by baselines[0] - margin_top
-    // gives us content_span = baselines[k+1] - baselines[0] ≈ (k+1) * line_height.
-    let mut best_k: Option<usize> = None;
-    for k in 0..baselines.len() - 1 {
-        let span = baselines[k + 1] - first;
-        if span <= budget {
-            best_k = Some(k);
-        } else {
-            break;
-        }
+    let cont_top = largest_legal_cut(&entry.layout.lines, budget)?;
+    if cont_top <= Pt::ZERO {
+        return None;
     }
-    let k = best_k?;
 
-    let shift = baselines[k + 1] - first;
-    let half_h = shift + margin_top + margin_bottom;
+    // `cont_top` is the box top of the first continuation line, in cell-content
+    // coordinates — equivalently the content height the first half retains.
+    // Shifting the continuation up by it lands its first line at the cell's top
+    // margin; the partition threshold sits at `margin_top + cont_top` (draw
+    // commands are margin-shifted, the cut model is not).
+    let shift = cont_top;
+    let half_h = cont_top + margin_top + margin_bottom;
     Some((
         CellCut {
-            content_cut_y: baselines[k + 1],
+            content_cut_y: margin_top + cont_top,
+            line_cut_y: cont_top,
             shift,
         },
         half_h,
     ))
+}
+
+/// The largest legal cut offset (`cont_top`, cell-content coords) not exceeding
+/// `budget`: the most content the first half may retain while leaving a
+/// spec-legal split point. A cut "after line L" keeps `lines[0..=L]` and flows
+/// the rest to the continuation.
+///
+/// Legality (§17.3.1.14 / §17.3.1.44 / §17.3.1.15):
+/// - **interior** (L and L+1 share a paragraph): illegal if the paragraph is
+///   internally atomic (keepLines / bordered / shaded / drop cap); otherwise,
+///   under widow control, both sides must keep `>= 2` of the paragraph's lines.
+/// - **boundary** (L and L+1 are different paragraphs): legal unless the earlier
+///   paragraph is keepNext (bound to the block that follows).
+///
+/// Line box tops increase monotonically, so the scan stops once a candidate
+/// exceeds `budget`.
+fn largest_legal_cut(lines: &[CellLine], budget: Pt) -> Option<Pt> {
+    let n = lines.len();
+    if n < 2 {
+        return None;
+    }
+    let mut best: Option<Pt> = None;
+    for l in 0..n - 1 {
+        let a = &lines[l];
+        let b = &lines[l + 1];
+        let cont_top = b.top_y;
+        if cont_top > budget {
+            break;
+        }
+        let legal = if a.para == b.para {
+            if a.interior_atomic {
+                false
+            } else if a.widow_control {
+                let first = lines.iter().position(|x| x.para == a.para).unwrap_or(l);
+                let last = lines.iter().rposition(|x| x.para == a.para).unwrap_or(l);
+                let head = l + 1 - first; // this paragraph's lines kept
+                let tail = last - l; // this paragraph's lines continued
+                head >= 2 && tail >= 2
+            } else {
+                true
+            }
+        } else {
+            !a.keep_next
+        };
+        if legal {
+            best = Some(best.map_or(cont_top, |x: Pt| x.max(cont_top)));
+        }
+    }
+    best
 }
 
 /// A row cut into two halves. Each half is a full `MeasuredRow` ready to
@@ -219,10 +254,17 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
     for (entry, cc) in mr.entries.iter().zip(cut.cells.iter()) {
         let (first_cmds, second_cmds) =
             partition_commands(&entry.layout.commands, cc.content_cut_y, cc.shift);
+        // Partition the cut model too, rebasing the continuation's line tops by
+        // the same shift, so a further split of the continuation (mod.rs's
+        // iterative loop) re-evaluates §17.3.1.44 widow control against the
+        // lines that actually remain.
+        let (first_lines, second_lines) =
+            partition_lines(&entry.layout.lines, cc.line_cut_y, cc.shift);
         first_entries.push(CellLayoutEntry {
             layout: crate::render::layout::cell::CellLayout {
                 commands: first_cmds,
                 content_height: entry.layout.content_height.min(first_h),
+                lines: first_lines,
             },
             cell_x: entry.cell_x,
             cell_w: entry.cell_w,
@@ -232,6 +274,7 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
             layout: crate::render::layout::cell::CellLayout {
                 commands: second_cmds,
                 content_height: (entry.layout.content_height - cc.shift).max(Pt::ZERO),
+                lines: second_lines,
             },
             cell_x: entry.cell_x,
             cell_w: entry.cell_w,
@@ -284,6 +327,25 @@ fn partition_commands(
             let mut c = cmd.clone();
             c.shift_y(-shift);
             second.push(c);
+        }
+    }
+    (first, second)
+}
+
+/// Partition the [`CellLine`] cut model at `cut_y` (cell-content coords).
+/// Lines whose box top is `< cut_y` stay on the first half; the rest form the
+/// continuation, with their tops rebased up by `shift` so the model tracks the
+/// continuation's own coordinates for any further split.
+fn partition_lines(lines: &[CellLine], cut_y: Pt, shift: Pt) -> (Vec<CellLine>, Vec<CellLine>) {
+    let mut first = Vec::new();
+    let mut second = Vec::new();
+    for line in lines {
+        if line.top_y < cut_y {
+            first.push(line.clone());
+        } else {
+            let mut l = line.clone();
+            l.top_y -= shift;
+            second.push(l);
         }
     }
     (first, second)

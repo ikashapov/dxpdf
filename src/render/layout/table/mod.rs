@@ -1264,6 +1264,51 @@ mod tests {
         }
     }
 
+    /// A paragraph of `n_lines` narrow fragments (each wraps to its own 14pt
+    /// line) carrying `style`, for in-cell split tests.
+    fn styled_para(n_lines: usize, style: ParagraphStyle) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: (0..n_lines)
+                .map(|i| text_frag(&format!("L{i} "), 30.0))
+                .collect(),
+            style,
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    /// A single-cell, single-column row whose cell holds `blocks`.
+    fn one_cell_row(blocks: Vec<LayoutBlock>) -> TableRowInput {
+        TableRowInput {
+            cells: vec![TableCellInput {
+                blocks,
+                margins: PtEdgeInsets::ZERO,
+                grid_span: 1,
+                shading: None,
+                cell_borders: None,
+                vertical_merge: None,
+                vertical_align: CellVAlign::Top,
+            }],
+            height_rule: None,
+            is_header: None,
+            cant_split: None,
+            grid_before: 0,
+            grid_after: 0,
+            border_overrides: None,
+        }
+    }
+
+    /// Number of `Text` draw commands in a slice (one per fitted line here).
+    fn slice_line_count(slice: &TableSlice) -> usize {
+        slice
+            .commands
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::Text { .. }))
+            .count()
+    }
+
     #[test]
     fn splittable_row_breaks_across_pages() {
         // Row with 6 lines (84pt). Available = 50pt on page 1 ⇒ only ~3
@@ -1656,5 +1701,192 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(row_counts, vec![1, 1, 2]);
+    }
+
+    // ── In-cell paragraph splitting semantics (§17.3.1.14/.15/.44) ───────
+
+    #[test]
+    fn widow_control_keeps_two_cell_lines_on_each_side_of_a_split() {
+        // §17.3.1.44: a 6-line cell paragraph where 5 lines would fit must not
+        // strand a single-line widow — the split leaves 4 on page 1 and 2 on
+        // page 2 (not 5 + 1).
+        let rows = vec![one_cell_row(vec![styled_para(
+            6,
+            ParagraphStyle::default(),
+        )])];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(75.0), // 5 lines fit geometrically
+                page_height: Pt::new(200.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slice_line_count(&slices[0]), 4, "orphan side keeps >= 2");
+        assert_eq!(slice_line_count(&slices[1]), 2, "widow side keeps >= 2");
+    }
+
+    #[test]
+    fn without_widow_control_a_cell_paragraph_may_strand_one_line() {
+        // Same geometry, widow control off (§17.3.1.44 disabled) ⇒ the cell
+        // splits as far as it fits: 5 lines on page 1, 1 on page 2. This is the
+        // behaviour the widow-control test above suppresses.
+        let style = ParagraphStyle {
+            widow_control: false,
+            ..Default::default()
+        };
+        let rows = vec![one_cell_row(vec![styled_para(6, style)])];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(75.0),
+                page_height: Pt::new(200.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slice_line_count(&slices[0]), 5);
+        assert_eq!(slice_line_count(&slices[1]), 1);
+    }
+
+    #[test]
+    fn keep_lines_cell_paragraph_moves_whole_instead_of_splitting() {
+        // §17.3.1.14: a keepLines paragraph is never divided. Only 3 of its 6
+        // lines fit on page 1, but rather than split it moves whole to page 2
+        // (which can hold all 6).
+        let style = ParagraphStyle {
+            keep_lines: true,
+            ..Default::default()
+        };
+        let rows = vec![one_cell_row(vec![styled_para(6, style)])];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(50.0), // 3 lines would fit
+                page_height: Pt::new(200.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(
+            slice_line_count(&slices[0]),
+            0,
+            "keepLines: nothing splits off"
+        );
+        assert_eq!(slice_line_count(&slices[1]), 6, "whole paragraph moved");
+    }
+
+    #[test]
+    fn cell_splits_at_paragraph_boundary_when_neither_paragraph_can_split() {
+        // Two 3-line paragraphs: neither can split under widow control (a
+        // 3-line paragraph has no ≥2/≥2 cut). With 4 lines of room the cell
+        // must break at the *paragraph boundary* — 3 lines (para A) on page 1,
+        // 3 (para B) on page 2 — not mid-paragraph.
+        let rows = vec![one_cell_row(vec![
+            styled_para(3, ParagraphStyle::default()),
+            styled_para(3, ParagraphStyle::default()),
+        ])];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(60.0), // room for ~4 lines
+                page_height: Pt::new(200.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slice_line_count(&slices[0]), 3, "para A stays intact");
+        assert_eq!(slice_line_count(&slices[1]), 3, "para B stays intact");
+    }
+
+    #[test]
+    fn keep_next_forbids_splitting_a_cell_at_that_paragraph_boundary() {
+        // §17.3.1.15: para A is keepNext, so the cell may not break between A
+        // and B. Neither 3-line paragraph can split internally (widow control),
+        // so — unlike the boundary test above — the whole cell moves to page 2.
+        let keep_next = ParagraphStyle {
+            keep_next: true,
+            ..Default::default()
+        };
+        let rows = vec![one_cell_row(vec![
+            styled_para(3, keep_next),
+            styled_para(3, ParagraphStyle::default()),
+        ])];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(60.0),
+                page_height: Pt::new(200.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(
+            slice_line_count(&slices[0]),
+            0,
+            "keepNext binds A to B: the boundary cut is illegal, cell moves whole"
+        );
+        assert_eq!(slice_line_count(&slices[1]), 6);
+    }
+
+    #[test]
+    fn cell_paragraph_split_across_three_pages_never_widows() {
+        // §17.3.1.44 must hold at *every* break, not just the first. An 11-line
+        // cell paragraph over pages that each hold 5 lines splits 5/4/2 — never
+        // the 5/5/1 a naive re-split would produce.
+        let rows = vec![one_cell_row(vec![styled_para(
+            11,
+            ParagraphStyle::default(),
+        )])];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(75.0),
+                page_height: Pt::new(75.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert!(
+            slices.len() >= 3,
+            "expected >= 3 slices, got {}",
+            slices.len()
+        );
+        let counts: Vec<usize> = slices.iter().map(slice_line_count).collect();
+        assert_eq!(counts.iter().sum::<usize>(), 11, "every line emitted once");
+        assert!(
+            counts.iter().all(|&c| c >= 2),
+            "no single-line widow/orphan segment: {counts:?}"
+        );
     }
 }

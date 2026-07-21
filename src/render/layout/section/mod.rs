@@ -11,7 +11,7 @@ mod types;
 
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
-pub use stacker::{stack_blocks, StackResult};
+pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
 
 // ── Footnote rendering constants ─────────────────────────────────────────────

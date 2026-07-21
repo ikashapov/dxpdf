@@ -2,12 +2,46 @@
 
 use super::super::draw_command::DrawCommand;
 use super::super::float;
-use super::super::paragraph::layout_paragraph;
+use super::super::paragraph::place_paragraph;
 use super::super::table::layout_table;
 use super::helpers::table_x_offset;
 use super::types::{FloatingImageY, LayoutBlock};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtRect;
+
+/// One fitted line of stacked cell content, recorded so a §17.4.1 row split can
+/// choose legal cut points from the paragraph structure rather than from raw
+/// draw commands.
+///
+/// Cutting a cell "after this line" flows it and everything below to the
+/// continuation page. Legality mirrors body across-page paragraph splitting:
+/// §17.3.1.14 keepLines and borders/shading/drop-cap paragraphs are never cut
+/// internally, §17.3.1.44 widow/orphan control forbids single-line segments of
+/// a paragraph, and §17.3.1.15 keepNext forbids a cut at a paragraph's trailing
+/// boundary. The [`stack_blocks`] producer leaves the line list empty for any
+/// cell it cannot safely bisect (nested table, floating object).
+#[derive(Debug, Clone)]
+pub struct CellLine {
+    /// Box top of this line, in cell-content coordinates (0 = content top,
+    /// before the cell margin shift applied by `layout_cell`).
+    pub top_y: Pt,
+    /// Index of the paragraph (block) this line belongs to. Lines of one
+    /// paragraph are contiguous and share widow/orphan and keepLines rules; a
+    /// cut may fall between two paragraphs freely (unless the earlier one is
+    /// keepNext).
+    pub para: usize,
+    /// §17.3.1.14 / §17.3.1.24 / §17.3.1.31 / §17.3.1.11: this line's paragraph
+    /// forbids interior splits — keepLines, or a bordered / shaded / drop-cap
+    /// paragraph whose box would be torn. Its lines may still be moved whole to
+    /// the continuation, but never divided among themselves.
+    pub interior_atomic: bool,
+    /// §17.3.1.44: widow/orphan control is active for this paragraph, so an
+    /// interior cut must leave `>= 2` of the paragraph's lines on each side.
+    pub widow_control: bool,
+    /// §17.3.1.15: this line's paragraph is kept with the following block, so a
+    /// cut at the paragraph's trailing boundary is illegal.
+    pub keep_next: bool,
+}
 
 /// Result of stacking blocks vertically.
 pub struct StackResult {
@@ -15,6 +49,10 @@ pub struct StackResult {
     pub commands: Vec<DrawCommand>,
     /// Total height consumed by all blocks.
     pub height: Pt,
+    /// Per-line cut model for §17.4.1 row splitting (cell-content coords).
+    /// Empty when the content cannot be safely bisected (nested table or
+    /// floating object present) — such cells move whole rather than split.
+    pub lines: Vec<CellLine>,
 }
 
 /// Stack blocks vertically within a fixed-width area.
@@ -39,8 +77,13 @@ pub fn stack_blocks(
     let mut prev_space_after = Pt::ZERO;
     let mut prev_style_id: Option<crate::model::StyleId> = None;
     let mut page_floats: Vec<float::ActiveFloat> = Vec::new();
+    // §17.4.1 row-split model: one entry per fitted line, plus a flag that a
+    // block was encountered which makes the whole cell unsafe to bisect
+    // (nested table or floating object).
+    let mut cell_lines: Vec<CellLine> = Vec::new();
+    let mut splittable = true;
 
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
         match block {
             LayoutBlock::Paragraph {
                 fragments,
@@ -150,13 +193,40 @@ pub fn stack_blocks(
                 effective_style.page_x = Pt::ZERO;
                 effective_style.page_content_width = content_width;
 
-                let para = layout_paragraph(
+                let placed = place_paragraph(
                     fragments,
                     &constraints,
                     &effective_style,
                     default_line_height,
                     measure_text,
                 );
+
+                // §17.4.1: record this paragraph's lines for the row-split cut
+                // model. A floating object anchored here makes the whole cell
+                // unsafe to bisect (per-line float offsets depend on absolute
+                // y); a paragraph whose box would tear (keepLines, borders,
+                // shading, drop cap) is kept internally atomic.
+                if !floating_images.is_empty() || !floating_shapes.is_empty() {
+                    splittable = false;
+                } else if splittable {
+                    let interior_atomic = effective_style.keep_lines
+                        || effective_style.borders.is_some()
+                        || effective_style.shading.is_some()
+                        || effective_style.drop_cap.is_some();
+                    let mut line_top = cursor_y + effective_style.space_before;
+                    for i in 0..placed.line_count() {
+                        cell_lines.push(CellLine {
+                            top_y: line_top,
+                            para: block_index,
+                            interior_atomic,
+                            widow_control: effective_style.widow_control,
+                            keep_next: effective_style.keep_next,
+                        });
+                        line_top += placed.line_height(i);
+                    }
+                }
+
+                let para = placed.emit_full();
 
                 for mut cmd in para.commands {
                     cmd.shift_y(cursor_y);
@@ -233,6 +303,10 @@ pub fn stack_blocks(
                 alignment,
                 ..
             } => {
+                // §17.4.1: a nested table can't be cleanly bisected, so the
+                // enclosing cell must move whole (matches `build_row_groups`,
+                // which marks rows with nested tables non-splittable).
+                splittable = false;
                 // stack_blocks is used for table cells and header/footer —
                 // no adjacent table collapse in these contexts.
                 let table = layout_table(
@@ -269,5 +343,6 @@ pub fn stack_blocks(
     StackResult {
         commands,
         height: cursor_y,
+        lines: if splittable { cell_lines } else { Vec::new() },
     }
 }
