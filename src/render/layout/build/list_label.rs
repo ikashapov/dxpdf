@@ -232,6 +232,7 @@ fn inject_text_label(
         hyperlink_url: None,
         baseline_offset: Pt::ZERO,
         text_offset,
+        is_footnote_ref: false,
     };
     let tab_fitting = (hanging - label_width).max(Pt::ZERO);
     let tab_frag = Fragment::Tab {

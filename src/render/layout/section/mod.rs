@@ -11,7 +11,7 @@ mod types;
 
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
-pub use stacker::{stack_blocks, StackResult};
+pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
 
 // ── Footnote rendering constants ─────────────────────────────────────────────
@@ -124,6 +124,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 
@@ -223,6 +224,430 @@ mod tests {
             .filter(|c| matches!(c, DrawCommand::Text { .. }))
             .count();
         assert_eq!(text_count, 1);
+    }
+
+    // ── §17.3.1.14 keepLines / §17.3.1.44 widow-orphan: across-page splitting ──
+
+    /// A paragraph of `n` words, each ~100pt wide so two never share a line in
+    /// the 180pt content column — i.e. exactly `n` single-line rows.
+    fn multiline_para(n: usize, keep_lines: bool, widow_control: bool) -> LayoutBlock {
+        let fragments = (0..n)
+            .map(|i| text_frag(&format!("word{i} "), 100.0, 14.0))
+            .collect();
+        LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                keep_lines,
+                widow_control,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    fn text_count(commands: &[DrawCommand]) -> usize {
+        commands
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::Text { .. }))
+            .count()
+    }
+
+    fn two_column_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![
+                ColumnGeometry {
+                    x_offset: Pt::ZERO,
+                    width: Pt::new(85.0),
+                },
+                ColumnGeometry {
+                    x_offset: Pt::new(95.0),
+                    width: Pt::new(85.0),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn paragraph_splits_across_columns() {
+        // §17.6.4: two 85pt columns, 80pt tall → 5 lines each. A 12-line
+        // paragraph fills column 0, then column 1, then spills to page 2.
+        let fragments: Vec<Fragment> = (0..12)
+            .map(|i| text_frag(&format!("word{i} "), 60.0, 14.0))
+            .collect();
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                widow_control: false,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let pages = layout_section(
+            &[block],
+            &two_column_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2, "12 lines exceed two 5-line columns");
+        let xs: std::collections::BTreeSet<i32> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.x.raw() as i32),
+                _ => None,
+            })
+            .collect();
+        assert!(xs.contains(&10), "column 0 text at x=10, got {xs:?}");
+        assert!(xs.contains(&105), "column 1 text at x=105, got {xs:?}");
+    }
+
+    fn border_line() -> crate::render::layout::paragraph::BorderLine {
+        crate::render::layout::paragraph::BorderLine {
+            width: Pt::new(1.0),
+            color: RgbColor::BLACK,
+            space: Pt::new(2.0),
+        }
+    }
+
+    #[test]
+    fn tall_paragraph_splits_across_pages() {
+        // 80pt content height / 14pt lines → 5 lines per page. Eight lines must
+        // span two pages, and widow control keeps >= 2 lines on each.
+        let blocks = vec![multiline_para(8, false, true)];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2, "eight lines should not fit on one page");
+        assert_eq!(
+            text_count(&pages[0].commands) + text_count(&pages[1].commands),
+            8
+        );
+        assert!(
+            text_count(&pages[0].commands) >= 2 && text_count(&pages[1].commands) >= 2,
+            "§17.3.1.44: each side of the split keeps >= 2 lines, got {} + {}",
+            text_count(&pages[0].commands),
+            text_count(&pages[1].commands)
+        );
+    }
+
+    #[test]
+    fn keep_lines_prevents_split() {
+        // Same eight lines, but keepLines set: the paragraph is not split — it
+        // stays whole on the first page (overflowing) rather than paginating.
+        let blocks = vec![multiline_para(8, true, true)];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 1, "§17.3.1.14: keepLines forbids the split");
+        assert_eq!(text_count(&pages[0].commands), 8);
+    }
+
+    #[test]
+    fn widow_control_moves_unsplittable_paragraph_whole() {
+        // Page 1 holds three lines of para 1 (42pt), leaving ~38pt (< 3 lines).
+        // A 3-line paragraph cannot split without a widow, so it moves whole.
+        let blocks = vec![
+            multiline_para(3, false, true),
+            multiline_para(3, false, true),
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            text_count(&pages[0].commands),
+            3,
+            "only para 1 fits on page 1"
+        );
+        assert_eq!(
+            text_count(&pages[1].commands),
+            3,
+            "para 2 moved whole to page 2"
+        );
+    }
+
+    #[test]
+    fn keep_next_paragraph_taller_than_page_still_splits() {
+        // §17.3.1.15: keepNext must not stop a paragraph taller than a page from
+        // splitting (it cannot be "kept with next" on one page regardless). All
+        // content is preserved and the following block trails it — no hang.
+        let fragments: Vec<Fragment> = (0..8)
+            .map(|i| text_frag(&format!("word{i} "), 100.0, 14.0))
+            .collect();
+        let keep = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                keep_next: true,
+                widow_control: false,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let next = para_block("next", 40.0);
+        let pages = layout_section(
+            &[keep, next],
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2, "the tall keepNext paragraph splits");
+        let total: usize = pages.iter().map(|p| text_count(&p.commands)).sum();
+        assert_eq!(total, 9, "all eight keepNext lines plus the next paragraph");
+    }
+
+    #[test]
+    fn bordered_paragraph_splits_across_pages() {
+        // §17.3.1.24: a bordered paragraph now splits (Phase C) instead of moving
+        // whole — the eight lines span two pages, and each page carries border
+        // draw commands (Line) for its segment of the box.
+        let mut block = multiline_para(8, false, true);
+        if let LayoutBlock::Paragraph { style, .. } = &mut block {
+            style.borders = Some(crate::render::layout::paragraph::ParagraphBorderStyle {
+                top: Some(border_line()),
+                bottom: Some(border_line()),
+                left: Some(border_line()),
+                right: Some(border_line()),
+            });
+        }
+        let pages = layout_section(
+            &[block],
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(
+            pages.len(),
+            2,
+            "bordered paragraph should split, not overflow"
+        );
+        for page in &pages {
+            assert!(
+                page.commands
+                    .iter()
+                    .any(|c| matches!(c, DrawCommand::Line { .. })),
+                "each segment draws its part of the border box"
+            );
+        }
+    }
+
+    #[test]
+    fn without_widow_control_paragraph_splits_leaving_single_line() {
+        // Identical layout, but para 2 disables widow control: it now splits,
+        // leaving two lines on page 1 and a single (widow) line on page 2.
+        let blocks = vec![
+            multiline_para(3, false, true),
+            multiline_para(3, false, false),
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2);
+        assert_eq!(
+            text_count(&pages[0].commands),
+            5,
+            "para 1 (3) + first 2 lines of para 2"
+        );
+        assert_eq!(text_count(&pages[1].commands), 1, "the widow line");
+    }
+
+    /// A paragraph whose first `drop_cap_lines` lines are spanned by a drop cap.
+    fn dropcap_para(n: usize, drop_cap_lines: u32) -> LayoutBlock {
+        use crate::render::layout::paragraph::DropCapInfo;
+        let fragments = (0..n)
+            .map(|i| text_frag(&format!("b{i} "), 100.0, 14.0))
+            .collect();
+        let style = ParagraphStyle {
+            // Widow control off so the *natural* break would strand a single
+            // line — which, inside the drop-cap prefix, the guard must prevent.
+            widow_control: false,
+            drop_cap: Some(DropCapInfo {
+                fragments: vec![text_frag("§", 20.0, 30.0)],
+                lines: drop_cap_lines,
+                width: Pt::new(20.0),
+                height: Pt::new(30.0),
+                ascent: Pt::new(28.0),
+                h_space: Pt::ZERO,
+                margin_mode: false,
+                indent: Pt::ZERO,
+                frame_height: None,
+                position_offset: Pt::ZERO,
+            }),
+            ..Default::default()
+        };
+        LayoutBlock::Paragraph {
+            fragments,
+            style,
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    fn page_has_dropcap_glyph(page: &crate::render::LayoutedPage) -> bool {
+        page.commands
+            .iter()
+            .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.as_ref() == "§"))
+    }
+
+    fn footnote_ref_frag() -> Fragment {
+        let mut f = text_frag("1", 5.0, 8.0);
+        if let Fragment::Text {
+            is_footnote_ref, ..
+        } = &mut f
+        {
+            *is_footnote_ref = true;
+        }
+        f
+    }
+
+    fn page_has_text(page: &crate::render::LayoutedPage, needle: &str) -> bool {
+        page.commands
+            .iter()
+            .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.as_ref() == needle))
+    }
+
+    #[test]
+    fn footnotes_reserve_on_the_page_of_their_reference() {
+        // §17.11.12: an eight-line paragraph with a footnote reference on line 0
+        // and another on line 7 splits across two pages; each footnote must land
+        // on the page carrying its reference, not both on one page.
+        let mut fragments = vec![text_frag("word0 ", 100.0, 14.0), footnote_ref_frag()];
+        for i in 1..8 {
+            fragments.push(text_frag(&format!("word{i} "), 100.0, 14.0));
+        }
+        fragments.push(footnote_ref_frag()); // reference on the last line
+        let footnotes = vec![
+            (
+                vec![text_frag("FNA", 30.0, 12.0)],
+                ParagraphStyle::default(),
+            ),
+            (
+                vec![text_frag("FNB", 30.0, 12.0)],
+                ParagraphStyle::default(),
+            ),
+        ];
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                widow_control: false,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes,
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let pages = layout_section(
+            &[block],
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2, "the paragraph should split");
+        let last = pages.len() - 1;
+        assert!(
+            page_has_text(&pages[0], "FNA"),
+            "footnote A on its reference's page"
+        );
+        assert!(
+            !page_has_text(&pages[0], "FNB"),
+            "footnote B is not on page 1"
+        );
+        assert!(
+            page_has_text(&pages[last], "FNB"),
+            "footnote B on the last page with its reference"
+        );
+    }
+
+    #[test]
+    fn drop_cap_prefix_is_not_split_across_pages() {
+        // §17.3.1.11: page 1 leaves room for ~1 line after four lines of para 1.
+        // A naive break would put a single line of the drop-cap paragraph on
+        // page 1 and tear the 3-line drop cap. The guard moves the paragraph
+        // whole, so page 1 holds only para 1 and the drop cap lands intact later.
+        let blocks = vec![multiline_para(4, false, false), dropcap_para(6, 3)];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2);
+        assert_eq!(
+            text_count(&pages[0].commands),
+            4,
+            "only para 1 on page 1 — the drop-cap paragraph moved whole"
+        );
+        assert!(
+            !page_has_dropcap_glyph(&pages[0]),
+            "the drop cap must not appear on page 1"
+        );
+        // The drop cap lands on some later page, together with >= 3 body lines
+        // (its prefix), never stranded.
+        let cap_page = pages
+            .iter()
+            .find(|p| page_has_dropcap_glyph(p))
+            .expect("drop cap is emitted on some page");
+        // Body lines on the drop-cap page = text commands minus the glyph;
+        // the 3-line drop-cap prefix stays with the glyph (so > 3 text commands).
+        assert!(
+            text_count(&cap_page.commands) > 3,
+            "the drop-cap prefix (>= 3 lines) stays with the glyph"
+        );
     }
 
     #[test]
@@ -1322,6 +1747,153 @@ mod tests {
         }
     }
 
+    // ── §17.3.1.15 keepNext tightening (plan §11.2) ──────────────────────
+
+    /// A `keep_next` paragraph of `n` single-line rows (`{prefix}0..{prefix}{n}`),
+    /// each word wide enough that only one fits per 180pt column line.
+    fn multiline_keep_next(prefix: &str, n: usize) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: (0..n)
+                .map(|i| text_frag(&format!("{prefix}{i}"), 100.0, 14.0))
+                .collect(),
+            style: ParagraphStyle {
+                keep_next: true,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    /// A 180×140pt content area (10 lines at 14pt), for multi-paragraph chains
+    /// that must still fit on a fresh page.
+    fn tall_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            page_size: PtSize::new(Pt::new(200.0), Pt::new(160.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![ColumnGeometry {
+                x_offset: Pt::ZERO,
+                width: Pt::new(180.0),
+            }],
+        }
+    }
+
+    #[test]
+    fn splittable_leading_keep_next_paragraph_fills_current_page() {
+        // Two fill lines, then a 4-line keepNext paragraph + 1-line terminal
+        // (a 5-line group that fits a fresh page but not the 3 lines left here).
+        // The old whole-group move left this page with only the fill; the
+        // tightening splits the keepNext paragraph so its head fills the page,
+        // and its tail travels to the fresh page WITH the terminal (§17.3.1.15).
+        let mut blocks = vec![para_block("fill0", 100.0), para_block("fill1", 100.0)];
+        blocks.push(multiline_keep_next("kn", 4));
+        blocks.push(para_block("body", 100.0));
+
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        let per_page = texts_per_page(&pages);
+        assert!(pages.len() >= 2);
+
+        // Page 1 is filled with the keepNext paragraph's head, not left blank.
+        assert!(
+            per_page[0].iter().any(|t| t == "kn0"),
+            "leading keepNext paragraph should fill the current page: {per_page:?}"
+        );
+        // The keepNext boundary holds: the paragraph's last line shares a page
+        // with the terminal block.
+        let kn_last = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "kn3"))
+            .expect("kn3 present");
+        let body = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "body"))
+            .expect("body present");
+        assert_eq!(
+            kn_last, body,
+            "keepNext binds the last line to the next block"
+        );
+    }
+
+    #[test]
+    fn keep_next_chain_leading_split_keeps_all_boundaries() {
+        // A multi-paragraph chain (leading kn 6 lines → middle kn 2 lines →
+        // terminal) that fits a fresh 10-line page but not the 5 lines left
+        // after the fill. The splittable leading paragraph fills the current
+        // page; the remainder is strictly smaller than the fresh-page-fitting
+        // group, so it lands intact on the next page with every keepNext
+        // boundary preserved.
+        let mut blocks: Vec<LayoutBlock> = (0..5)
+            .map(|i| para_block(&format!("fill{i}"), 100.0))
+            .collect();
+        blocks.push(multiline_keep_next("lead", 6));
+        blocks.push(multiline_keep_next("mid", 2));
+        blocks.push(para_block("term", 100.0));
+
+        let pages = layout_section(&blocks, &tall_config(), None, Pt::ZERO, Pt::new(14.0), None);
+        let per_page = texts_per_page(&pages);
+        assert!(pages.len() >= 2);
+
+        assert!(
+            per_page[0].iter().any(|t| t == "lead0"),
+            "leading paragraph head fills the current page: {per_page:?}"
+        );
+        // lead.last ↔ mid.first and mid.last ↔ term must each share a page.
+        let find = |needle: &str| {
+            per_page
+                .iter()
+                .position(|p| p.iter().any(|t| t == needle))
+                .unwrap_or_else(|| panic!("{needle} present: {per_page:?}"))
+        };
+        assert_eq!(find("lead5"), find("mid0"), "lead→mid boundary intact");
+        assert_eq!(find("mid1"), find("term"), "mid→term boundary intact");
+    }
+
+    #[test]
+    fn three_line_keep_next_paragraph_moves_whole_under_widow_control() {
+        // A 3-line keepNext paragraph cannot split (widow control needs >= 2
+        // lines on each side), so the tightening must NOT peel it — the whole
+        // group still moves to the fresh page.
+        let mut blocks = vec![para_block("fill0", 100.0), para_block("fill1", 100.0)];
+        blocks.push(multiline_keep_next("kn", 3));
+        blocks.push(para_block("body", 100.0));
+
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        let per_page = texts_per_page(&pages);
+        assert!(pages.len() >= 2);
+        assert!(
+            !per_page[0].iter().any(|t| t == "kn0"),
+            "an unsplittable 3-line keepNext paragraph must move whole: {per_page:?}"
+        );
+        let kn_last = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "kn2"))
+            .unwrap();
+        let body = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "body"))
+            .unwrap();
+        assert_eq!(kn_last, body);
+    }
+
     /// A floating table whose laid-out height exceeds the available
     /// space on its anchor page must split at row boundaries. With the
     /// 100pt-tall small_config and an anchor at y=15, 8 rows of ~14pt
@@ -1612,6 +2184,177 @@ mod tests {
             1,
             "only one top border line (grouped): got {}",
             line_cmds.len()
+        );
+    }
+
+    // ── §4 continuation re-fit around a next-page float (plan §11.3) ─────
+
+    /// A paragraph carrying one absolute-positioned floating image (left side),
+    /// registered as a `Square` wrap float by the forward scan.
+    fn para_with_abs_left_float(text: &str, fx: f32, fy: f32, fw: f32, fh: f32) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: vec![text_frag(text, 20.0, 14.0)],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![FloatingImage {
+                image_data: crate::render::resolve::images::MediaEntry {
+                    data: std::rc::Rc::from(&[][..]),
+                    format: crate::model::ImageFormat::Png,
+                },
+                size: PtSize::new(Pt::new(fw), Pt::new(fh)),
+                src_rect: None,
+                x: Pt::new(fx),
+                y: FloatingImageY::Absolute(Pt::new(fy)),
+                wrap_mode: WrapMode::Square(crate::model::WrapText::BothSides),
+                dist_left: Pt::ZERO,
+                dist_right: Pt::ZERO,
+                behind_doc: false,
+            }],
+            floating_shapes: vec![],
+        }
+    }
+
+    #[test]
+    fn continuation_re_fits_around_a_float_on_its_own_page() {
+        // §4/§11.3: a paragraph splits across a page boundary; a LATER block on
+        // the continuation page owns an absolute float in the top-left. The
+        // continuation's re-fit (not a reuse of the starting-page placement)
+        // must wrap its first lines around that float — they start at the
+        // float's right edge (x≈60), not the page margin (x=10).
+        //
+        // Layout (small_config: content x∈[10,190]? width 180, y∈[10,90]):
+        //  - 3 one-line fills push the cursor to y=52 (below the float band).
+        //  - P: 6 single-line words (100pt each → one per line at any width
+        //    ≥100). Only ~2 fit below the fills on page 1; the rest continue.
+        //  - Q: an absolute float x=10,y=10,w=50,h=40 → band y∈[10,50].
+        let float_block = para_with_abs_left_float("Q", 10.0, 10.0, 50.0, 40.0);
+        let mut blocks: Vec<LayoutBlock> = (0..3)
+            .map(|i| para_block(&format!("fill{i}"), 100.0))
+            .collect();
+        blocks.push(multiline_para(6, false, true));
+        blocks.push(float_block);
+
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        assert!(pages.len() >= 2, "paragraph must split across pages");
+
+        // First continuation line on page 2 is "word2" (2 words stayed on
+        // page 1). It sits in the float band, so it must be indented past the
+        // float's right edge.
+        let word2_x = pages[1]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if text.trim() == "word2" => {
+                    Some(position.x.raw())
+                }
+                _ => None,
+            })
+            .expect("word2 on page 2");
+        assert!(
+            (word2_x - 60.0).abs() < 0.5,
+            "continuation must wrap around the next-page float (x≈60), got {word2_x}"
+        );
+    }
+
+    // ── §17.6.4 splitting across unequal-width columns (plan §11.4) ──────
+
+    /// Two columns of *unequal* width sharing one 200×100 page: col 0 is 100pt
+    /// wide at the left margin (x=10), col 1 is 70pt wide at x=120.
+    fn unequal_two_column_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![
+                ColumnGeometry {
+                    x_offset: Pt::ZERO,
+                    width: Pt::new(100.0),
+                },
+                ColumnGeometry {
+                    x_offset: Pt::new(110.0),
+                    width: Pt::new(70.0),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn paragraph_splits_across_unequal_width_columns() {
+        // §11.4: the per-column re-fit (§11.3) removed the equal-width gate, so
+        // a paragraph now flows across columns of different widths. 8 single-
+        // line words (65pt → one per line in both the 100pt and 70pt columns);
+        // ~5 fit in col 0's 80pt height, the rest re-fit into col 1.
+        //
+        // Before the gate was lifted this paragraph was laid out atomically: at
+        // the column top it overflowed col 0 and never reached col 1.
+        let fragments: Vec<Fragment> = (0..8)
+            .map(|i| text_frag(&format!("w{i} "), 65.0, 14.0))
+            .collect();
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[block],
+            &unequal_two_column_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        // Collect (x, text) across every page.
+        let placed: Vec<(f32, String)> = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, text, .. } => {
+                    Some((position.x.raw(), text.trim().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            placed.len(),
+            8,
+            "every word emitted exactly once: {placed:?}"
+        );
+        let in_col0 = placed
+            .iter()
+            .filter(|(x, _)| (*x - 10.0).abs() < 0.5)
+            .count();
+        let in_col1 = placed
+            .iter()
+            .filter(|(x, _)| (*x - 120.0).abs() < 0.5)
+            .count();
+        assert!(
+            in_col0 >= 2,
+            "col 0 (x≈10, 100pt wide) holds the head: {placed:?}"
+        );
+        assert!(
+            in_col1 >= 1,
+            "col 1 (x≈120, 70pt wide) holds the re-fit continuation: {placed:?}"
+        );
+        assert_eq!(
+            in_col0 + in_col1,
+            8,
+            "all words land in one column or the other"
         );
     }
 }

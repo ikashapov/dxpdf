@@ -242,6 +242,7 @@ pub(super) fn measure_table_rows(
                 CellLayout {
                     commands: Vec::new(),
                     content_height: Pt::ZERO,
+                    lines: Vec::new(),
                 }
             } else {
                 layout_cell(

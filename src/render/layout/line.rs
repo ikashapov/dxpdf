@@ -241,6 +241,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 
@@ -385,6 +386,7 @@ mod tests {
                 border: None,
                 baseline_offset: Pt::ZERO,
                 text_offset: Pt::ZERO,
+                is_footnote_ref: false,
             },
             Fragment::Text {
                 text: "big".into(),
@@ -412,6 +414,7 @@ mod tests {
                 border: None,
                 baseline_offset: Pt::ZERO,
                 text_offset: Pt::ZERO,
+                is_footnote_ref: false,
             },
         ];
         let lines = fit_lines(&frags, Pt::new(100.0));

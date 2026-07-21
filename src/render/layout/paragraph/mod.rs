@@ -9,13 +9,15 @@ mod types;
 
 pub use types::*;
 
+use std::borrow::Cow;
+
 use super::draw_command::DrawCommand;
 use super::fragment::Fragment;
 use super::BoxConstraints;
 use crate::render::dimension::Pt;
 use crate::render::geometry::{PtOffset, PtRect, PtSize};
 
-use borders::emit_paragraph_borders_and_shading;
+use borders::{emit_paragraph_borders_and_shading, emit_segment_borders_and_shading, SegmentEdges};
 use line_emit::{
     compute_line_placements, emit_line_commands, resolve_line_height, split_oversized_fragments,
 };
@@ -119,17 +121,43 @@ fn clip_oversized_images(fragments: &[Fragment], max_width: Pt) -> Option<Vec<Fr
     )
 }
 
-/// Lay out a paragraph: fit fragments into lines, apply alignment and spacing.
+/// A paragraph whose lines have been fitted and measured, ready to emit.
 ///
-/// Returns draw commands positioned relative to (0, 0). The caller positions
-/// the paragraph by adding its offset during the paint phase.
-pub fn layout_paragraph(
-    fragments: &[Fragment],
-    constraints: &BoxConstraints,
-    style: &ParagraphStyle,
+/// The layout of a paragraph splits into two halves: *place* (fit fragments into
+/// lines and measure them — [`place_paragraph`]) and *emit* (produce
+/// `DrawCommand`s). The common case emits the whole paragraph at once
+/// ([`PlacedParagraph::emit_full`], wrapped by [`layout_paragraph`]). When a
+/// paragraph must break across a page boundary (§17.3.1.14 `keepLines`,
+/// §17.3.1.44 `widowControl`), the stacker emits sub-ranges of its lines at
+/// different page origins via [`PlacedParagraph::emit_split_segment`].
+///
+/// `line_placements` index into `fragments`, which is the *effective* fragment
+/// list after inline-image clipping (§20.4.2.7) and oversized-fragment
+/// splitting — hence the `Cow`, which borrows on the common no-transform path.
+pub(crate) struct PlacedParagraph<'a> {
+    fragments: Cow<'a, [Fragment]>,
+    line_placements: Vec<LinePlacement>,
+    params: LineLayoutParams,
+    style: &'a ParagraphStyle,
+    constraints: &'a BoxConstraints,
     default_line_height: Pt,
-    measure_text: MeasureTextFn<'_>,
-) -> ParagraphLayout {
+    measure_text: MeasureTextFn<'a>,
+    /// §17.3.1.11: precomputed baseline for the drop cap, if any.
+    drop_cap_baseline_y: Option<Pt>,
+    /// §17.3.1.33: resolved height of each fitted line, in line order. Lets the
+    /// stacker choose split points without re-measuring.
+    line_heights: Vec<Pt>,
+}
+
+/// Fit and measure a paragraph's lines without emitting draw commands — the
+/// "place" half of paragraph layout (see [`PlacedParagraph`]).
+pub(crate) fn place_paragraph<'a>(
+    fragments: &'a [Fragment],
+    constraints: &'a BoxConstraints,
+    style: &'a ParagraphStyle,
+    default_line_height: Pt,
+    measure_text: MeasureTextFn<'a>,
+) -> PlacedParagraph<'a> {
     // §17.3.1.11: drop cap text frame.
     // Drop mode: body text indented by drop cap position + width + hSpace.
     // Margin mode: drop cap is in the margin, body text is NOT indented.
@@ -169,32 +197,30 @@ pub fn layout_paragraph(
     // Drop cap indent also reduces width for the first N lines.
     let first_line_adjustment = style.indent_first_line + drop_cap_indent;
 
-    // Clip inline images wider than the content box to the cell/page width,
-    // cropping the overflow the way Word does (§20.4.2.7: the extent is the
-    // object's final size, so it is not scaled to fit — the cell clips it).
-    let clipped_frags;
-    let fragments: &[Fragment] = match clip_oversized_images(fragments, content_width) {
-        Some(v) => {
-            clipped_frags = v;
-            &clipped_frags
-        }
-        None => fragments,
-    };
-
-    // Split oversized text fragments into per-character fragments so narrow
-    // cells get character-level line breaking.
+    // Effective fragments: clip inline images wider than the content box
+    // (§20.4.2.7 — Word clips rather than scales), then split oversized text
+    // fragments into per-character fragments for narrow-cell character-level
+    // breaking. `Cow` so the common path (nothing over-wide) borrows the input
+    // without cloning; only an actual transform materializes an owned `Vec`.
     let min_avail = (content_width - first_line_adjustment).max(Pt::ZERO);
-    let split_frags;
-    let fragments: &[Fragment] = if min_avail > Pt::ZERO {
-        split_frags = split_oversized_fragments(fragments, min_avail, measure_text);
-        &split_frags
-    } else {
-        fragments
+    let effective: Cow<'a, [Fragment]> = {
+        let clipped: Cow<'a, [Fragment]> = match clip_oversized_images(fragments, content_width) {
+            Some(v) => Cow::Owned(v),
+            None => Cow::Borrowed(fragments),
+        };
+        // Mirror `split_oversized_fragments`'s fast-path predicate so we only
+        // own the vector when a split will actually happen (no extra clone).
+        let needs_split = min_avail > Pt::ZERO
+            && clipped.iter().any(|f| {
+                matches!(f, Fragment::Text { width, text, .. } if *width > min_avail && text.len() > 1)
+            });
+        if needs_split {
+            Cow::Owned(split_oversized_fragments(&clipped, min_avail, measure_text).into_owned())
+        } else {
+            clipped
+        }
     };
 
-    // Per-line float adjustment: fit one line at a time, computing the available
-    // width for each line based on its absolute y position on the page.
-    // Each line stores its (float_left, float_right) adjustments for rendering.
     let params = LineLayoutParams {
         content_width,
         max_width: constraints.max_width,
@@ -203,23 +229,20 @@ pub fn layout_paragraph(
         drop_cap_lines,
         default_line_height,
     };
-    let line_placements = compute_line_placements(fragments, style, &params);
-
-    let mut commands = Vec::new();
-    let mut cursor_y = style.space_before;
+    // Per-line float adjustment: fit one line at a time, computing the available
+    // width for each line based on its absolute y position on the page.
+    let line_placements = compute_line_placements(&effective, style, &params);
 
     // §17.3.1.11: compute the drop cap baseline.
-    // When frame_height is set (lineRule="exact"), use:
+    // When frame_height is set (lineRule="exact"):
     //   baseline = frame_top + frame_height - descent + position_offset
     // Otherwise fall back to aligning with the Nth body line's baseline.
     let drop_cap_baseline_y = if let Some(ref dc) = style.drop_cap {
         if let Some(fh) = dc.frame_height {
-            let baseline = cursor_y + fh + dc.position_offset;
-            Some(baseline)
+            Some(style.space_before + fh + dc.position_offset)
         } else {
-            // Fallback: align with Nth body line baseline.
             let n = dc.lines.max(1) as usize;
-            let mut y = cursor_y;
+            let mut y = style.space_before;
             for (i, lp) in line_placements.iter().enumerate().take(n) {
                 let natural = if lp.line.height > Pt::ZERO {
                     lp.line.height
@@ -244,63 +267,265 @@ pub fn layout_paragraph(
         None
     };
 
-    // Render drop cap at the computed baseline.
-    if let (Some(ref dc), Some(baseline_y)) = (&style.drop_cap, drop_cap_baseline_y) {
-        // §17.3.1.11: position the drop cap using its own paragraph's indent.
-        // Drop mode: at the drop cap paragraph's indent (inside text area).
-        // Margin mode: in the page margin, to the left of text.
-        let dc_x = if dc.margin_mode {
-            dc.indent - dc.width - dc.h_space
-        } else {
-            dc.indent
-        };
-        for frag in &dc.fragments {
-            if let Fragment::Text {
-                text, font, color, ..
-            } = frag
-            {
-                commands.push(DrawCommand::Text {
-                    position: PtOffset::new(dc_x, baseline_y),
-                    text: text.clone(),
-                    font_family: font.family.clone(),
-                    char_spacing: font.char_spacing,
-                    font_size: font.size,
-                    bold: font.bold,
-                    italic: font.italic,
-                    color: *color,
-                    text_scale: font.text_scale,
-                });
+    // §17.3.1.33: resolve each line's height once, matching `emit_line_commands`.
+    let line_heights = line_placements
+        .iter()
+        .map(|lp| {
+            let natural = if lp.line.height > Pt::ZERO {
+                lp.line.height
+            } else {
+                default_line_height
+            };
+            let text_h = if lp.line.text_height > Pt::ZERO {
+                lp.line.text_height
+            } else {
+                default_line_height
+            };
+            resolve_line_height(natural, text_h, &style.line_spacing)
+        })
+        .collect();
+
+    PlacedParagraph {
+        fragments: effective,
+        line_placements,
+        params,
+        style,
+        constraints,
+        default_line_height,
+        measure_text,
+        drop_cap_baseline_y,
+        line_heights,
+    }
+}
+
+impl PlacedParagraph<'_> {
+    /// Number of fitted lines.
+    pub(crate) fn line_count(&self) -> usize {
+        self.line_placements.len()
+    }
+
+    /// §17.3.1.33: resolved height of line `i`.
+    pub(crate) fn line_height(&self, i: usize) -> Pt {
+        self.line_heights[i]
+    }
+
+    /// Number of leading lines that must stay together on the first segment
+    /// when this paragraph splits — the larger of:
+    ///
+    /// - §17.3.1.11 the drop-cap span (a split inside it tears the glyph), and
+    /// - §17.3.1.44 the float-wrapped run: every line up to and including the
+    ///   last one narrowed by an active float. Keeping these on the first
+    ///   segment guarantees the continuation is full-width, so the already-fitted
+    ///   tail lines are reused correctly on the next page without re-wrapping.
+    pub(crate) fn unbreakable_prefix_lines(&self) -> usize {
+        let float_prefix = self
+            .line_placements
+            .iter()
+            .rposition(|lp| lp.float_left > Pt::ZERO || lp.float_right > Pt::ZERO)
+            .map_or(0, |i| i + 1);
+        self.params.drop_cap_lines.max(float_prefix)
+    }
+
+    /// §4 continuation re-fit: the effective fragments from line `from` onward,
+    /// cloned so the stacker can re-place the remainder against the next page's
+    /// floats and width (instead of reusing this page's placement). `from` must
+    /// be a valid line index (`< line_count()`).
+    pub(crate) fn fragments_from_line(&self, from: usize) -> Vec<Fragment> {
+        let start = self.line_placements[from].line.start;
+        self.fragments[start..].to_vec()
+    }
+
+    /// §17.11.12: number of footnote reference marks in lines `[first, last)`.
+    /// The stacker reserves this many footnotes (in document order) on the page
+    /// that segment lands on, so a footnote sits with its reference.
+    pub(crate) fn footnote_refs_in(&self, first: usize, last: usize) -> usize {
+        self.line_placements[first..last]
+            .iter()
+            .map(|lp| {
+                self.fragments[lp.line.start..lp.line.end]
+                    .iter()
+                    .filter(|f| {
+                        matches!(
+                            f,
+                            Fragment::Text {
+                                is_footnote_ref: true,
+                                ..
+                            }
+                        )
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Render the drop cap glyphs at their precomputed baseline (§17.3.1.11).
+    /// Only the first segment of a split paragraph carries the drop cap.
+    fn emit_drop_cap(&self, commands: &mut Vec<DrawCommand>) {
+        if let (Some(ref dc), Some(baseline_y)) = (&self.style.drop_cap, self.drop_cap_baseline_y) {
+            // §17.3.1.11: position the drop cap using its own paragraph's indent.
+            // Drop mode: at the drop cap paragraph's indent (inside text area).
+            // Margin mode: in the page margin, to the left of text.
+            let dc_x = if dc.margin_mode {
+                dc.indent - dc.width - dc.h_space
+            } else {
+                dc.indent
+            };
+            for frag in &dc.fragments {
+                if let Fragment::Text {
+                    text, font, color, ..
+                } = frag
+                {
+                    commands.push(DrawCommand::Text {
+                        position: PtOffset::new(dc_x, baseline_y),
+                        text: text.clone(),
+                        font_family: font.family.clone(),
+                        char_spacing: font.char_spacing,
+                        font_size: font.size,
+                        bold: font.bold,
+                        italic: font.italic,
+                        color: *color,
+                        text_scale: font.text_scale,
+                    });
+                }
             }
         }
     }
 
-    emit_line_commands(
-        &mut commands,
-        &mut cursor_y,
-        &line_placements,
-        fragments,
-        style,
-        &params,
-        measure_text,
-    );
+    /// Emit the whole paragraph — drop cap, every line, and border/shading with
+    /// `space_before`/`space_after`. The common, non-split path.
+    pub(crate) fn emit_full(&self) -> ParagraphLayout {
+        let mut commands = Vec::new();
+        let mut cursor_y = self.style.space_before;
 
-    // §17.3.1.24: paragraph border and shading coordinate system.
-    // Borders sit at the paragraph indent edges. The border `space` is the
-    // distance between the border line and the text content. Top/bottom
-    // border space expands the bordered area vertically.
-    cursor_y = emit_paragraph_borders_and_shading(
-        &mut commands,
-        style,
-        constraints,
-        cursor_y,
-        default_line_height,
-        line_placements.is_empty(),
-    );
+        self.emit_drop_cap(&mut commands);
 
-    ParagraphLayout {
-        commands,
-        size: PtSize::new(constraints.max_width, cursor_y),
+        emit_line_commands(
+            &mut commands,
+            &mut cursor_y,
+            &self.line_placements,
+            0..self.line_placements.len(),
+            &self.fragments,
+            self.style,
+            &self.params,
+            self.measure_text,
+        );
+
+        // §17.3.1.24: paragraph border and shading coordinate system.
+        // Borders sit at the paragraph indent edges. The border `space` is the
+        // distance between the border line and the text content. Top/bottom
+        // border space expands the bordered area vertically.
+        cursor_y = emit_paragraph_borders_and_shading(
+            &mut commands,
+            self.style,
+            self.constraints,
+            cursor_y,
+            self.default_line_height,
+            self.line_placements.is_empty(),
+        );
+
+        ParagraphLayout {
+            commands,
+            size: PtSize::new(self.constraints.max_width, cursor_y),
+        }
     }
+
+    /// §17.3.1.24: bottom border space this paragraph adds after its last line —
+    /// charged, with `space_after`, only on the final segment.
+    pub(crate) fn bottom_border_space(&self) -> Pt {
+        self.style
+            .borders
+            .as_ref()
+            .and_then(|b| b.bottom.as_ref())
+            .map(|b| b.space)
+            .unwrap_or(Pt::ZERO)
+    }
+
+    /// Emit lines `[first, last)` of a splittable paragraph as one page segment.
+    ///
+    /// The caller keeps the unbreakable prefix (see
+    /// [`unbreakable_prefix_lines`](Self::unbreakable_prefix_lines)) on the first
+    /// segment, so the drop cap and any float-wrapped lines stay intact.
+    /// `space_before` (§17.3.1.33) and the top border belong to the first
+    /// segment; `space_after` and the bottom border to the last; shading and side
+    /// borders span every segment (§17.3.1.24/§17.3.1.31). Commands are
+    /// positioned relative to the segment's own origin `(0, 0)`; the stacker
+    /// shifts them to the page.
+    pub(crate) fn emit_split_segment(
+        &self,
+        first: usize,
+        last: usize,
+        is_first_segment: bool,
+        is_last_segment: bool,
+    ) -> ParagraphLayout {
+        debug_assert!(
+            first < last && last <= self.line_placements.len(),
+            "split range {first}..{last} out of bounds for {} lines",
+            self.line_placements.len()
+        );
+        let mut commands = Vec::new();
+        // §17.3.1.33: only the first segment carries the paragraph's space_before.
+        let mut cursor_y = if is_first_segment {
+            self.style.space_before
+        } else {
+            Pt::ZERO
+        };
+
+        // §17.3.1.11: the drop cap belongs to the first segment (the stacker's
+        // guard keeps the whole drop-cap prefix there, so the glyph is intact).
+        if is_first_segment {
+            self.emit_drop_cap(&mut commands);
+        }
+
+        emit_line_commands(
+            &mut commands,
+            &mut cursor_y,
+            &self.line_placements,
+            first..last,
+            &self.fragments,
+            self.style,
+            &self.params,
+            self.measure_text,
+        );
+
+        // §17.3.1.24/§17.3.1.31: per-segment border/shading box; the top edge and
+        // space_before are on the first segment, the bottom edge and space_after
+        // on the last, sides and shading on every segment.
+        cursor_y = emit_segment_borders_and_shading(
+            &mut commands,
+            self.style,
+            self.constraints,
+            cursor_y,
+            self.default_line_height,
+            false,
+            SegmentEdges::for_segment(is_first_segment, is_last_segment),
+        );
+
+        ParagraphLayout {
+            commands,
+            size: PtSize::new(self.constraints.max_width, cursor_y),
+        }
+    }
+}
+
+/// Lay out a paragraph: fit fragments into lines, apply alignment and spacing.
+///
+/// Returns draw commands positioned relative to (0, 0). The caller positions
+/// the paragraph by adding its offset during the paint phase.
+pub fn layout_paragraph(
+    fragments: &[Fragment],
+    constraints: &BoxConstraints,
+    style: &ParagraphStyle,
+    default_line_height: Pt,
+    measure_text: MeasureTextFn<'_>,
+) -> ParagraphLayout {
+    place_paragraph(
+        fragments,
+        constraints,
+        style,
+        default_line_height,
+        measure_text,
+    )
+    .emit_full()
 }
 
 #[cfg(test)]
@@ -338,6 +563,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 
@@ -1148,6 +1374,199 @@ mod tests {
         assert_eq!(text_count, 3);
         // Height: 3 lines * 14pt = 42pt
         assert_eq!(result.size.height.raw(), 42.0);
+    }
+
+    fn text_ys(commands: &[DrawCommand]) -> Vec<f32> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.y.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn emit_split_segment_partitions_full_emit() {
+        // Four words, each wrapping to its own 14pt line, with space_before and
+        // space_after so we can check they land on the right segments.
+        let frags = vec![
+            text_frag("word1 ", 45.0),
+            text_frag("word2 ", 45.0),
+            text_frag("word3 ", 45.0),
+            text_frag("word4", 45.0),
+        ];
+        let style = ParagraphStyle {
+            space_before: Pt::new(10.0),
+            space_after: Pt::new(6.0),
+            ..Default::default()
+        };
+        let constraints = body_constraints(80.0);
+        let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
+        assert_eq!(placed.line_count(), 4);
+        assert_eq!(placed.unbreakable_prefix_lines(), 0, "no drop cap / floats");
+
+        let full = placed.emit_full();
+        let head = placed.emit_split_segment(0, 2, true, false);
+        let tail = placed.emit_split_segment(2, 4, false, true);
+
+        // Content preserved: 4 text commands total, 2 per segment.
+        assert_eq!(text_ys(&full.commands).len(), 4);
+        assert_eq!(text_ys(&head.commands).len(), 2);
+        assert_eq!(text_ys(&tail.commands).len(), 2);
+
+        // §17.3.1.33: the two segment heights reconstruct the whole height
+        // (space_before on the head, space_after on the tail, no double count).
+        assert_eq!(
+            (head.size.height + tail.size.height).raw(),
+            full.size.height.raw()
+        );
+
+        // The head reproduces the first lines verbatim; the tail reproduces the
+        // rest, shifted up by the head's height.
+        let full_ys = text_ys(&full.commands);
+        assert_eq!(text_ys(&head.commands).as_slice(), &full_ys[..2]);
+        for (i, y) in text_ys(&tail.commands).iter().enumerate() {
+            assert_eq!(*y + head.size.height.raw(), full_ys[2 + i]);
+        }
+    }
+
+    fn border(width: f32) -> BorderLine {
+        BorderLine {
+            width: Pt::new(width),
+            color: RgbColor::BLACK,
+            space: Pt::new(2.0),
+        }
+    }
+
+    /// (horizontal border lines, vertical border lines) in a segment.
+    fn classify_border_lines(commands: &[DrawCommand]) -> (usize, usize) {
+        let mut horizontal = 0;
+        let mut vertical = 0;
+        for c in commands {
+            if let DrawCommand::Line { line, .. } = c {
+                if (line.start.y.raw() - line.end.y.raw()).abs() < 1e-3 {
+                    horizontal += 1;
+                } else if (line.start.x.raw() - line.end.x.raw()).abs() < 1e-3 {
+                    vertical += 1;
+                }
+            }
+        }
+        (horizontal, vertical)
+    }
+
+    fn rect_count(commands: &[DrawCommand]) -> usize {
+        commands
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::Rect { .. }))
+            .count()
+    }
+
+    fn horizontal_line_y(commands: &[DrawCommand]) -> Option<f32> {
+        commands.iter().find_map(|c| match c {
+            DrawCommand::Line { line, .. }
+                if (line.start.y.raw() - line.end.y.raw()).abs() < 1e-3 =>
+            {
+                Some(line.start.y.raw())
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn float_wrapped_lines_form_an_unbreakable_prefix() {
+        // §17.3.1.44: an active float covering y[0,30) narrows the first three
+        // 14pt lines (y 0, 14, 28). Those float-wrapped lines must stay on the
+        // first segment so the full-width continuation reuses its fitted lines.
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        let float = ActiveFloat {
+            page_x: Pt::ZERO,
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        };
+        let style = ParagraphStyle {
+            page_floats: vec![float],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(120.0),
+            ..Default::default()
+        };
+        let frags: Vec<Fragment> = (0..20)
+            .map(|i| text_frag(&format!("w{i} "), 20.0))
+            .collect();
+        let constraints = body_constraints(120.0);
+        let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
+
+        assert!(placed.line_count() >= 4, "enough lines to clear the float");
+        assert_eq!(
+            placed.unbreakable_prefix_lines(),
+            3,
+            "the three float-narrowed lines are the unbreakable prefix"
+        );
+    }
+
+    #[test]
+    fn split_segment_draws_border_box_per_page() {
+        // §17.3.1.24/§17.3.1.31: a bordered, shaded paragraph split across three
+        // pages keeps side borders and shading on every segment, the top border
+        // only on the first, and the bottom border only on the last.
+        let frags: Vec<Fragment> = (0..6)
+            .map(|i| text_frag(&format!("word{i} "), 100.0))
+            .collect();
+        let style = ParagraphStyle {
+            borders: Some(ParagraphBorderStyle {
+                top: Some(border(1.0)),
+                bottom: Some(border(1.0)),
+                left: Some(border(1.0)),
+                right: Some(border(1.0)),
+            }),
+            shading: Some(RgbColor::BLACK),
+            ..Default::default()
+        };
+        // Box wider than a word (with room for the 2pt side border spaces) so
+        // each word is its own line without triggering per-character splitting.
+        let constraints = body_constraints(120.0);
+        let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
+        assert_eq!(
+            placed.unbreakable_prefix_lines(),
+            0,
+            "bordered/shaded paragraphs split freely (no drop cap / floats)"
+        );
+        assert_eq!(placed.line_count(), 6);
+
+        let head = placed.emit_split_segment(0, 2, true, false);
+        let mid = placed.emit_split_segment(2, 4, false, false);
+        let tail = placed.emit_split_segment(4, 6, false, true);
+
+        // Shading fills every segment.
+        assert_eq!(rect_count(&head.commands), 1);
+        assert_eq!(rect_count(&mid.commands), 1);
+        assert_eq!(rect_count(&tail.commands), 1);
+
+        // Sides on every segment; top only first, bottom only last.
+        assert_eq!(
+            classify_border_lines(&head.commands),
+            (1, 2),
+            "first: top + sides"
+        );
+        assert_eq!(
+            classify_border_lines(&mid.commands),
+            (0, 2),
+            "middle: sides only"
+        );
+        assert_eq!(
+            classify_border_lines(&tail.commands),
+            (1, 2),
+            "last: bottom + sides"
+        );
+
+        // The first segment's horizontal edge sits above its text (the top
+        // border, with border space above space_before); the last segment's sits
+        // below its two lines (the bottom border).
+        assert!(horizontal_line_y(&head.commands).unwrap() < 0.0);
+        assert!(horizontal_line_y(&tail.commands).unwrap() > 28.0);
     }
 
     #[test]

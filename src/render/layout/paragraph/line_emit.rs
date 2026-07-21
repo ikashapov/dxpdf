@@ -232,10 +232,12 @@ fn distribution_extra_per_gap(
 ///
 /// Handles per-fragment shading, run borders, text, hyperlinks, underlines,
 /// images, tab stops (with leaders), bookmarks, and drop-cap indent offsets.
+#[allow(clippy::too_many_arguments)] // low-level emit primitive; inputs are cohesive
 pub(super) fn emit_line_commands(
     commands: &mut Vec<DrawCommand>,
     cursor_y: &mut Pt,
     line_placements: &[LinePlacement],
+    line_range: std::ops::Range<usize>,
     fragments: &[Fragment],
     style: &ParagraphStyle,
     params: &LineLayoutParams,
@@ -246,7 +248,12 @@ pub(super) fn emit_line_commands(
     let drop_cap_indent = params.drop_cap_indent;
     let drop_cap_lines = params.drop_cap_lines;
     let default_line_height = params.default_line_height;
-    for (line_idx, lp) in line_placements.iter().enumerate() {
+    // `line_idx` stays absolute within the paragraph (not the emitted range) so
+    // first-line indent (§17.3.1.12), drop caps (§17.3.1.11), and last-line
+    // justification (§17.3.1.13) resolve correctly when a paragraph is split
+    // across pages and only a sub-range of its lines is emitted here.
+    for line_idx in line_range {
+        let lp = &line_placements[line_idx];
         let line = &lp.line;
 
         // Drop cap lines get extra indent; after that, refit remaining lines at full width.
@@ -699,6 +706,8 @@ pub(super) fn split_oversized_fragments<'a>(
                         hyperlink_url: hyperlink_url.clone(),
                         baseline_offset: *baseline_offset,
                         text_offset: Pt::ZERO,
+                        // Per-character split of an over-wide word — not a mark.
+                        is_footnote_ref: false,
                     });
                 }
             }
