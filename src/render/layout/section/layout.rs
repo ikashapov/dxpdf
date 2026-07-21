@@ -1211,15 +1211,11 @@ pub(crate) fn layout_section_with_clearance(
                         // single, unbroken chunk — with explicit page/column
                         // breaks their reference→segment mapping is ambiguous, so
                         // those keep the atomic reservation. (See docs/keep-lines-plan.md.)
-                        // §17.6.4: splitting reuses the placement across columns,
-                        // which is only valid when the columns are equal width.
-                        let equal_columns = config
-                            .columns
-                            .windows(2)
-                            .all(|w| (w[0].width - w[1].width).raw().abs() < 0.5);
+                        // §17.6.4: splitting re-fits the remainder against each
+                        // column's own width (`emit_split_paragraph`), so columns
+                        // of unequal width split correctly — no equal-width gate.
                         let single_chunk = page_chunks.len() == 1 && col_chunks.len() == 1;
-                        let can_split = equal_columns
-                            && !effective_style.keep_lines
+                        let can_split = !effective_style.keep_lines
                             && (footnotes.is_empty() || single_chunk)
                             && floating_images.is_empty()
                             && floating_shapes.is_empty()

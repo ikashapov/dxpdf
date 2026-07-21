@@ -2263,4 +2263,98 @@ mod tests {
             "continuation must wrap around the next-page float (x≈60), got {word2_x}"
         );
     }
+
+    // ── §17.6.4 splitting across unequal-width columns (plan §11.4) ──────
+
+    /// Two columns of *unequal* width sharing one 200×100 page: col 0 is 100pt
+    /// wide at the left margin (x=10), col 1 is 70pt wide at x=120.
+    fn unequal_two_column_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![
+                ColumnGeometry {
+                    x_offset: Pt::ZERO,
+                    width: Pt::new(100.0),
+                },
+                ColumnGeometry {
+                    x_offset: Pt::new(110.0),
+                    width: Pt::new(70.0),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn paragraph_splits_across_unequal_width_columns() {
+        // §11.4: the per-column re-fit (§11.3) removed the equal-width gate, so
+        // a paragraph now flows across columns of different widths. 8 single-
+        // line words (65pt → one per line in both the 100pt and 70pt columns);
+        // ~5 fit in col 0's 80pt height, the rest re-fit into col 1.
+        //
+        // Before the gate was lifted this paragraph was laid out atomically: at
+        // the column top it overflowed col 0 and never reached col 1.
+        let fragments: Vec<Fragment> = (0..8)
+            .map(|i| text_frag(&format!("w{i} "), 65.0, 14.0))
+            .collect();
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[block],
+            &unequal_two_column_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        // Collect (x, text) across every page.
+        let placed: Vec<(f32, String)> = pages
+            .iter()
+            .flat_map(|p| p.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, text, .. } => {
+                    Some((position.x.raw(), text.trim().to_string()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            placed.len(),
+            8,
+            "every word emitted exactly once: {placed:?}"
+        );
+        let in_col0 = placed
+            .iter()
+            .filter(|(x, _)| (*x - 10.0).abs() < 0.5)
+            .count();
+        let in_col1 = placed
+            .iter()
+            .filter(|(x, _)| (*x - 120.0).abs() < 0.5)
+            .count();
+        assert!(
+            in_col0 >= 2,
+            "col 0 (x≈10, 100pt wide) holds the head: {placed:?}"
+        );
+        assert!(
+            in_col1 >= 1,
+            "col 1 (x≈120, 70pt wide) holds the re-fit continuation: {placed:?}"
+        );
+        assert_eq!(
+            in_col0 + in_col1,
+            8,
+            "all words land in one column or the other"
+        );
+    }
 }
