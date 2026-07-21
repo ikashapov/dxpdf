@@ -255,6 +255,66 @@ mod tests {
             .count()
     }
 
+    fn two_column_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![
+                ColumnGeometry {
+                    x_offset: Pt::ZERO,
+                    width: Pt::new(85.0),
+                },
+                ColumnGeometry {
+                    x_offset: Pt::new(95.0),
+                    width: Pt::new(85.0),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn paragraph_splits_across_columns() {
+        // §17.6.4: two 85pt columns, 80pt tall → 5 lines each. A 12-line
+        // paragraph fills column 0, then column 1, then spills to page 2.
+        let fragments: Vec<Fragment> = (0..12)
+            .map(|i| text_frag(&format!("word{i} "), 60.0, 14.0))
+            .collect();
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                widow_control: false,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let pages = layout_section(
+            &[block],
+            &two_column_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2, "12 lines exceed two 5-line columns");
+        let xs: std::collections::BTreeSet<i32> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.x.raw() as i32),
+                _ => None,
+            })
+            .collect();
+        assert!(xs.contains(&10), "column 0 text at x=10, got {xs:?}");
+        assert!(xs.contains(&105), "column 1 text at x=105, got {xs:?}");
+    }
+
     fn border_line() -> crate::render::layout::paragraph::BorderLine {
         crate::render::layout::paragraph::BorderLine {
             width: Pt::new(1.0),
@@ -336,6 +396,41 @@ mod tests {
             3,
             "para 2 moved whole to page 2"
         );
+    }
+
+    #[test]
+    fn keep_next_paragraph_taller_than_page_still_splits() {
+        // §17.3.1.15: keepNext must not stop a paragraph taller than a page from
+        // splitting (it cannot be "kept with next" on one page regardless). All
+        // content is preserved and the following block trails it — no hang.
+        let fragments: Vec<Fragment> = (0..8)
+            .map(|i| text_frag(&format!("word{i} "), 100.0, 14.0))
+            .collect();
+        let keep = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                keep_next: true,
+                widow_control: false,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+        let next = para_block("next", 40.0);
+        let pages = layout_section(
+            &[keep, next],
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert!(pages.len() >= 2, "the tall keepNext paragraph splits");
+        let total: usize = pages.iter().map(|p| text_count(&p.commands)).sum();
+        assert_eq!(total, 9, "all eight keepNext lines plus the next paragraph");
     }
 
     #[test]

@@ -435,18 +435,40 @@ fn reserve_footnotes<'doc>(
     }
 }
 
+/// §17.6.4: advance the split cursor to the next column, or — when the last
+/// column is full — to the top of a fresh page. A fresh column, like a fresh
+/// page, offers the full column height, so the split fit treats both as "at the
+/// column top".
+fn advance_column_or_page(
+    state: &mut PageLayoutState<'_>,
+    block_idx: usize,
+    ctx: &LayoutCtx<'_>,
+    num_cols: usize,
+    para_start_y: &mut Pt,
+) {
+    if state.current_col + 1 < num_cols {
+        state.current_col += 1;
+        state.cursor_y = state.column_top;
+    } else {
+        state.push_new_page(block_idx, ctx);
+    }
+    *para_start_y = state.cursor_y;
+}
+
 #[allow(clippy::too_many_arguments)] // stacker state + placement inputs are cohesive
 fn emit_split_paragraph<'doc>(
     state: &mut PageLayoutState<'doc>,
     placed: &PlacedParagraph<'_>,
     style: &ParagraphStyle,
     block_idx: usize,
-    col_x: Pt,
+    config: &PageConfig,
     ctx: &LayoutCtx<'_>,
     para_start_y: &mut Pt,
     footnotes: &'doc [(Vec<Fragment>, ParagraphStyle)],
     content_width: Pt,
 ) {
+    let num_cols = config.num_columns();
+    let col_x = |col: usize| config.margins.left + config.columns[col].x_offset;
     let total = placed.line_count();
     let widow_control = style.widow_control;
     // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are only
@@ -460,6 +482,7 @@ fn emit_split_paragraph<'doc>(
 
     loop {
         let remaining = total - line_start;
+        // §17.6.4: a fresh column offers full height, like a fresh page.
         let at_page_top = state.cursor_y <= state.column_top;
         let avail = (state.bottom - state.cursor_y).max(Pt::ZERO);
 
@@ -488,10 +511,9 @@ fn emit_split_paragraph<'doc>(
             ParagraphSplit::All => remaining,
             ParagraphSplit::Break { head } => head,
             ParagraphSplit::MoveWhole => {
-                // Move the remaining lines to a fresh page and re-decide at the
-                // top, where progress is guaranteed.
-                state.push_new_page(block_idx, ctx);
-                *para_start_y = state.cursor_y;
+                // Move the remaining lines to the next column/page and re-decide
+                // at the top, where progress is guaranteed.
+                advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
                 continue;
             }
         };
@@ -506,8 +528,7 @@ fn emit_split_paragraph<'doc>(
         ) {
             Some(head) => head,
             None => {
-                state.push_new_page(block_idx, ctx);
-                *para_start_y = state.cursor_y;
+                advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
                 continue;
             }
         };
@@ -523,9 +544,10 @@ fn emit_split_paragraph<'doc>(
                 state.cursor_y.raw()
             );
         }
+        let segment_x = col_x(state.current_col);
         for mut cmd in segment.commands {
             cmd.shift_y(state.cursor_y);
-            cmd.shift_x(col_x);
+            cmd.shift_x(segment_x);
             state.current_page.commands.push(cmd);
         }
         state.cursor_y += segment.size.height;
@@ -545,9 +567,8 @@ fn emit_split_paragraph<'doc>(
         if is_last {
             break;
         }
-        // Continue the paragraph at the top of the next page.
-        state.push_new_page(block_idx, ctx);
-        *para_start_y = state.cursor_y;
+        // Continue the paragraph in the next column, or the next page.
+        advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
     }
 }
 
@@ -1053,8 +1074,14 @@ pub(crate) fn layout_section_with_clearance(
                         // single, unbroken chunk — with explicit page/column
                         // breaks their reference→segment mapping is ambiguous, so
                         // those keep the atomic reservation. (See docs/keep-lines-plan.md.)
+                        // §17.6.4: splitting reuses the placement across columns,
+                        // which is only valid when the columns are equal width.
+                        let equal_columns = config
+                            .columns
+                            .windows(2)
+                            .all(|w| (w[0].width - w[1].width).raw().abs() < 0.5);
                         let single_chunk = page_chunks.len() == 1 && col_chunks.len() == 1;
-                        let can_split = num_cols == 1
+                        let can_split = equal_columns
                             && !effective_style.keep_lines
                             && (footnotes.is_empty() || single_chunk)
                             && floating_images.is_empty()
@@ -1062,9 +1089,6 @@ pub(crate) fn layout_section_with_clearance(
                             && placed.line_count() >= 2;
 
                         if can_split {
-                            // Single-column (required for splitting), so the
-                            // column x is constant across the continuation pages.
-                            let seg_col_x = col_x(state.current_col);
                             if !footnotes.is_empty() {
                                 footnotes_reserved = true;
                             }
@@ -1073,7 +1097,7 @@ pub(crate) fn layout_section_with_clearance(
                                 &placed,
                                 &effective_style,
                                 block_idx,
-                                seg_col_x,
+                                config,
                                 &ctx,
                                 &mut para_start_y,
                                 footnotes,
