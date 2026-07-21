@@ -1,30 +1,34 @@
 use serde::{Deserialize, Deserializer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IntegerMeasure(i64);
+pub(crate) struct IntegerMeasure {
+    value: i64,
+    negative: bool,
+}
 
 impl IntegerMeasure {
     pub(crate) fn value(self) -> i64 {
-        self.0
+        self.value
     }
 
     pub(crate) fn is_negative(&self) -> bool {
-        self.0 < 0
+        self.negative
     }
 }
 
 impl<'de> Deserialize<'de> for IntegerMeasure {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        parse_integer_measure(&raw)
-            .map(Self)
-            .map_err(serde::de::Error::custom)
+        parse_integer_measure(&raw).map_err(serde::de::Error::custom)
     }
 }
 
-fn parse_integer_measure(raw: &str) -> Result<i64, &'static str> {
+fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
     if let Ok(value) = raw.parse::<i64>() {
-        return Ok(value);
+        return Ok(IntegerMeasure {
+            value,
+            negative: raw.starts_with('-'),
+        });
     }
 
     let (negative, unsigned) = match raw.strip_prefix('-') {
@@ -53,7 +57,8 @@ fn parse_integer_measure(raw: &str) -> Result<i64, &'static str> {
     } else {
         rounded_magnitude
     };
-    i64::try_from(signed).map_err(|_| "measurement is outside the supported range")
+    let value = i64::try_from(signed).map_err(|_| "measurement is outside the supported range")?;
+    Ok(IntegerMeasure { value, negative })
 }
 
 #[cfg(test)]

@@ -14,9 +14,10 @@
 //! becomes a real correctness bug. With per-render ownership, no such
 //! leakage is possible.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 
+use skia_safe::font_style::{Slant, Weight, Width};
 use skia_safe::{Data, Font, FontMgr, FontStyle, Typeface};
 
 use crate::model::{EmbeddedFont, EmbeddedFontVariant};
@@ -122,12 +123,142 @@ struct EmbeddedRecord {
     bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FaceAlias {
+    family: String,
+    weight: i32,
+}
+
+#[derive(Clone, Debug)]
+enum AliasEntry {
+    Unique(FaceAlias),
+    Ambiguous,
+}
+
+#[derive(Default)]
+struct FaceAliasIndex {
+    aliases: HashMap<String, AliasEntry>,
+}
+
+impl FaceAliasIndex {
+    fn build(font_mgr: &FontMgr) -> Self {
+        let mut index = Self::default();
+
+        for family in font_mgr.family_names() {
+            let mut style_set = font_mgr.match_family(&family);
+            let count = style_set.count();
+            for face_index in 0..count {
+                let (style, style_name) = style_set.style(face_index);
+                let post_script_name = style_set
+                    .new_typeface(face_index)
+                    .and_then(|typeface| typeface.post_script_name());
+                index.insert_face(
+                    &family,
+                    style,
+                    style_name.as_deref(),
+                    post_script_name.as_deref(),
+                );
+            }
+        }
+
+        index
+    }
+
+    fn insert_face(
+        &mut self,
+        family: &str,
+        style: FontStyle,
+        style_name: Option<&str>,
+        post_script_name: Option<&str>,
+    ) {
+        // This compatibility layer resolves weight-bearing face names. Width
+        // and slant aliases require a fuller OpenType identity model.
+        if style.width() != Width::NORMAL || style.slant() != Slant::Upright {
+            return;
+        }
+
+        let alias = FaceAlias {
+            family: family.to_owned(),
+            weight: *style.weight(),
+        };
+
+        if let Some(style_name) = style_name.filter(|name| !name.trim().is_empty()) {
+            self.insert_alias(&format!("{family} {style_name}"), alias.clone());
+        }
+        if let Some(post_script_name) = post_script_name.filter(|name| !name.trim().is_empty()) {
+            self.insert_alias(post_script_name, alias.clone());
+        }
+        for weight_name in canonical_weight_names(alias.weight) {
+            self.insert_alias(&format!("{family} {weight_name}"), alias.clone());
+        }
+    }
+
+    fn insert_alias(&mut self, name: &str, alias: FaceAlias) {
+        use std::collections::hash_map::Entry;
+
+        match self.aliases.entry(face_name_key(name)) {
+            Entry::Vacant(entry) => {
+                entry.insert(AliasEntry::Unique(alias));
+            }
+            Entry::Occupied(mut entry) => match entry.get() {
+                AliasEntry::Unique(existing) if existing == &alias => {}
+                AliasEntry::Unique(_) => {
+                    entry.insert(AliasEntry::Ambiguous);
+                }
+                AliasEntry::Ambiguous => {}
+            },
+        }
+    }
+
+    fn resolve(&self, name: &str) -> Option<&FaceAlias> {
+        match self.aliases.get(&face_name_key(name))? {
+            AliasEntry::Unique(alias) => Some(alias),
+            AliasEntry::Ambiguous => None,
+        }
+    }
+}
+
+fn face_name_key(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn canonical_weight_names(weight: i32) -> &'static [&'static str] {
+    match weight {
+        100 => &["Thin", "Hairline"],
+        200 => &["ExtraLight", "Extra Light", "UltraLight", "Ultra Light"],
+        300 => &["Light"],
+        400 => &["Regular", "Normal"],
+        500 => &["Medium"],
+        600 => &["Semibold", "SemiBold", "Semi Bold", "DemiBold", "Demi Bold"],
+        700 => &["Bold"],
+        800 => &["ExtraBold", "Extra Bold", "UltraBold", "Ultra Bold"],
+        900 => &["Black", "Heavy"],
+        _ => &[],
+    }
+}
+
+fn merged_alias_weight(alias_weight: i32, requested_weight: i32) -> i32 {
+    alias_weight.max(requested_weight)
+}
+
+fn style_for_face_alias(alias: &FaceAlias, requested: FontStyle) -> FontStyle {
+    FontStyle::new(
+        Weight::from(merged_alias_weight(alias.weight, *requested.weight())),
+        Width::NORMAL,
+        requested.slant(),
+    )
+}
+
 // ─── FontRegistry ────────────────────────────────────────────────────────────
 
 pub struct FontRegistry {
     font_mgr: FontMgr,
     embedded: Vec<EmbeddedRecord>,
     embedded_index: HashMap<(String, EmbeddedFontVariant), EmbeddedFontId>,
+    system_face_aliases: OnceCell<FaceAliasIndex>,
     typefaces: RefCell<HashMap<TypefaceKey, TypefaceEntry>>,
 }
 
@@ -138,6 +269,7 @@ impl FontRegistry {
             font_mgr,
             embedded: Vec::new(),
             embedded_index: HashMap::new(),
+            system_face_aliases: OnceCell::new(),
             typefaces: RefCell::new(HashMap::new()),
         }
     }
@@ -250,6 +382,24 @@ impl FontRegistry {
         if let Some(tf) = match_exact(&self.font_mgr, family, style) {
             log::debug!("[font] '{}' {:?} → exact match", family, style);
             return system_entry(tf);
+        }
+
+        if let Some(alias) = self
+            .system_face_aliases
+            .get_or_init(|| FaceAliasIndex::build(&self.font_mgr))
+            .resolve(family)
+        {
+            let alias_style = style_for_face_alias(alias, style);
+            if let Some(tf) = match_exact(&self.font_mgr, &alias.family, alias_style) {
+                log::debug!(
+                    "[font] '{}' {:?} → face alias '{}' {:?}",
+                    family,
+                    style,
+                    alias.family,
+                    alias_style
+                );
+                return system_entry(tf);
+            }
         }
 
         if let Some((_, subs)) = FONT_SUBSTITUTIONS
@@ -541,9 +691,103 @@ impl FontCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skia_safe::font_style::{Slant, Weight, Width};
 
     fn fmgr() -> FontMgr {
         FontMgr::new()
+    }
+
+    fn test_alias(family: &str, weight: i32) -> FaceAlias {
+        FaceAlias {
+            family: family.to_owned(),
+            weight,
+        }
+    }
+
+    #[test]
+    fn face_aliases_support_semibold_spellings() {
+        let mut index = FaceAliasIndex::default();
+        index.insert_face(
+            "Proxima Nova",
+            FontStyle::new(Weight::SEMI_BOLD, Width::NORMAL, Slant::Upright),
+            Some("Semibold"),
+            Some("ProximaNova-Semibold"),
+        );
+
+        for name in [
+            "Proxima Nova Semibold",
+            "Proxima Nova SemiBold",
+            "Proxima Nova Semi Bold",
+            "ProximaNova-Semibold",
+        ] {
+            let alias = index.resolve(name).expect("alias should resolve");
+            assert_eq!(alias.family, "Proxima Nova");
+            assert_eq!(alias.weight, *Weight::SEMI_BOLD);
+        }
+    }
+
+    #[test]
+    fn face_aliases_support_extra_bold_spellings() {
+        let mut index = FaceAliasIndex::default();
+        index.insert_face(
+            "Inter",
+            FontStyle::new(Weight::EXTRA_BOLD, Width::NORMAL, Slant::Upright),
+            Some("ExtraBold"),
+            Some("Inter-ExtraBold"),
+        );
+
+        for name in ["Inter ExtraBold", "Inter Extra Bold", "Inter-ExtraBold"] {
+            assert_eq!(
+                index.resolve(name).expect("alias should resolve").weight,
+                *Weight::EXTRA_BOLD
+            );
+        }
+    }
+
+    #[test]
+    fn face_alias_keys_ignore_case_and_repeated_whitespace() {
+        assert_eq!(
+            face_name_key("  Proxima   Nova SEMIBOLD "),
+            face_name_key("proxima nova semibold")
+        );
+    }
+
+    #[test]
+    fn face_alias_keys_preserve_punctuation() {
+        assert_ne!(face_name_key("A-B"), face_name_key("AB"));
+    }
+
+    #[test]
+    fn conflicting_face_aliases_are_ambiguous() {
+        let mut index = FaceAliasIndex::default();
+        index.insert_alias("Shared Alias", test_alias("Family A", 600));
+        index.insert_alias("Shared Alias", test_alias("Family B", 600));
+
+        assert!(index.resolve("Shared Alias").is_none());
+    }
+
+    #[test]
+    fn requested_weight_never_downgrades_face_alias_weight() {
+        assert_eq!(
+            merged_alias_weight(*Weight::SEMI_BOLD, *Weight::BOLD),
+            *Weight::BOLD
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::EXTRA_BOLD, *Weight::BOLD),
+            *Weight::EXTRA_BOLD
+        );
+    }
+
+    #[test]
+    fn face_alias_style_preserves_requested_slant() {
+        let alias = test_alias("Proxima Nova", *Weight::SEMI_BOLD);
+        let requested = FontStyle::new(Weight::NORMAL, Width::NORMAL, Slant::Italic);
+
+        let resolved = style_for_face_alias(&alias, requested);
+
+        assert_eq!(*resolved.weight(), *Weight::SEMI_BOLD);
+        assert_eq!(resolved.width(), Width::NORMAL);
+        assert_eq!(resolved.slant(), Slant::Italic);
     }
 
     /// Pull bytes from a guaranteed-available system typeface so tests don't

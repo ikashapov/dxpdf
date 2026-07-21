@@ -20,7 +20,9 @@ use super::floating_table::{
 use super::helpers::{
     render_page_footnotes, split_at_column_breaks, split_at_page_breaks, table_x_offset,
 };
-use super::types::{ContinuationState, FloatingImageY, LayoutBlock};
+use super::types::{
+    ContinuationState, FloatingImage, FloatingImageY, FloatingShape, LayoutBlock, WrapMode,
+};
 use super::FLOAT_DEDUP_EPSILON_PT;
 use super::FOOTNOTE_SEPARATOR_GAP;
 use crate::model::StyleId;
@@ -181,17 +183,32 @@ impl<'doc> PageLayoutState<'doc> {
     fn effective_floats_at_cursor(
         &mut self,
         blocks: &[LayoutBlock],
+        relocated_absolute_float_blocks: &std::collections::HashSet<usize>,
+        num_cols: usize,
         space_before: Pt,
         col_width: Pt,
     ) -> Vec<float::ActiveFloat> {
         // Forward-scan absolute floats from upcoming paragraphs on the current
-        // page. Only rescan when the page changes.
+        // page. Only rescan when the page changes. The scan tracks inline
+        // column/page boundaries (`scan_inline_page_boundary`) so a float past
+        // an in-paragraph break isn't attributed to this page, and skips blocks
+        // whose absolute float has been relocated to a later page (#86's
+        // relocation replay), so wrapped text on the replayed page ignores it.
         if self.abs_floats_dirty {
             self.current_page_abs_floats.clear();
+            let mut scan_col = self.current_col;
             for (fi_idx, future_block) in blocks[self.page_start_block..].iter().enumerate() {
+                let future_block_idx = self.page_start_block + fi_idx;
+                if relocated_absolute_float_blocks.contains(&future_block_idx) {
+                    if fi_idx == 0 {
+                        continue;
+                    }
+                    break;
+                }
                 if let LayoutBlock::Paragraph {
                     floating_images: fi_list,
                     page_break_before,
+                    fragments,
                     ..
                 } = future_block
                 {
@@ -200,20 +217,26 @@ impl<'doc> PageLayoutState<'doc> {
                     if *page_break_before && fi_idx > 0 {
                         break;
                     }
-                    for fi in fi_list {
-                        if fi.is_wrap_top_and_bottom() {
-                            continue; // handled as block spacers, not floats
+                    let boundary = scan_inline_page_boundary(fragments, &mut scan_col, num_cols);
+                    if boundary != ForwardScanBoundary::BeforeParagraphFloat {
+                        for fi in fi_list {
+                            if fi.is_wrap_top_and_bottom() {
+                                continue; // handled as block spacers, not floats
+                            }
+                            if let FloatingImageY::Absolute(img_y) = fi.y {
+                                self.current_page_abs_floats.push(float::ActiveFloat {
+                                    page_x: fi.x - fi.dist_left,
+                                    page_y_start: img_y,
+                                    page_y_end: img_y + fi.size.height,
+                                    width: fi.size.width + fi.dist_left + fi.dist_right,
+                                    source: float::FloatSource::Image,
+                                    wrap_text: fi.wrap_mode.wrap_text().into(),
+                                });
+                            }
                         }
-                        if let FloatingImageY::Absolute(img_y) = fi.y {
-                            self.current_page_abs_floats.push(float::ActiveFloat {
-                                page_x: fi.x - fi.dist_left,
-                                page_y_start: img_y,
-                                page_y_end: img_y + fi.size.height,
-                                width: fi.size.width + fi.dist_left + fi.dist_right,
-                                source: float::FloatSource::Image,
-                                wrap_text: fi.wrap_mode.wrap_text().into(),
-                            });
-                        }
+                    }
+                    if boundary != ForwardScanBoundary::None {
+                        break;
                     }
                 }
             }
@@ -249,6 +272,293 @@ impl<'doc> PageLayoutState<'doc> {
         float::prune_floats(&mut effective_floats, self.cursor_y);
         effective_floats
     }
+}
+
+struct ParagraphFloatCheckpoint {
+    command_count: usize,
+    page_floats: Vec<float::ActiveFloat>,
+    cursor_y: Pt,
+}
+
+struct PageReplayCheckpoint<'doc> {
+    current_page: LayoutedPage,
+    cursor_y: Pt,
+    page_index: usize,
+    page_top: Pt,
+    current_col: usize,
+    column_top: Pt,
+    bottom: Pt,
+    page_footnotes: Vec<(
+        &'doc [super::super::fragment::Fragment],
+        &'doc ParagraphStyle,
+    )>,
+    first_on_section_page: bool,
+    prev_space_after: Pt,
+    prev_style_id: Option<StyleId>,
+    prev_borders: Option<ParagraphBorderStyle>,
+    page_floats: Vec<float::ActiveFloat>,
+    current_page_abs_floats: Vec<float::ActiveFloat>,
+    abs_floats_dirty: bool,
+    page_start_block: usize,
+    last_para_start_y: Pt,
+    prev_table_style_id: Option<StyleId>,
+    pending_page_break: bool,
+}
+
+impl<'doc> PageReplayCheckpoint<'doc> {
+    fn capture(state: &PageLayoutState<'doc>) -> Self {
+        Self {
+            current_page: state.current_page.clone(),
+            cursor_y: state.cursor_y,
+            page_index: state.page_index,
+            page_top: state.page_top,
+            current_col: state.current_col,
+            column_top: state.column_top,
+            bottom: state.bottom,
+            page_footnotes: state.page_footnotes.clone(),
+            first_on_section_page: state.first_on_section_page,
+            prev_space_after: state.prev_space_after,
+            prev_style_id: state.prev_style_id.clone(),
+            prev_borders: state.prev_borders.clone(),
+            page_floats: state.page_floats.clone(),
+            current_page_abs_floats: state.current_page_abs_floats.clone(),
+            abs_floats_dirty: state.abs_floats_dirty,
+            page_start_block: state.page_start_block,
+            last_para_start_y: state.last_para_start_y,
+            prev_table_style_id: state.prev_table_style_id.clone(),
+            pending_page_break: state.pending_page_break,
+        }
+    }
+
+    fn restore(&self, state: &mut PageLayoutState<'doc>) {
+        state.current_page.clone_from(&self.current_page);
+        state.cursor_y = self.cursor_y;
+        state.page_index = self.page_index;
+        state.page_top = self.page_top;
+        state.current_col = self.current_col;
+        state.column_top = self.column_top;
+        state.bottom = self.bottom;
+        state.page_footnotes.clone_from(&self.page_footnotes);
+        state.first_on_section_page = self.first_on_section_page;
+        state.prev_space_after = self.prev_space_after;
+        state.prev_style_id.clone_from(&self.prev_style_id);
+        state.prev_borders.clone_from(&self.prev_borders);
+        state.page_floats.clone_from(&self.page_floats);
+        state
+            .current_page_abs_floats
+            .clone_from(&self.current_page_abs_floats);
+        state.abs_floats_dirty = self.abs_floats_dirty;
+        state.page_start_block = self.page_start_block;
+        state.last_para_start_y = self.last_para_start_y;
+        state
+            .prev_table_style_id
+            .clone_from(&self.prev_table_style_id);
+        state.pending_page_break = self.pending_page_break;
+    }
+}
+
+fn refresh_page_replay_checkpoint<'doc>(
+    state: &PageLayoutState<'doc>,
+    block_idx: usize,
+    checkpoint: &mut PageReplayCheckpoint<'doc>,
+    checkpoint_page_index: &mut usize,
+    replay_block_idx: &mut usize,
+) {
+    if state.page_index != *checkpoint_page_index {
+        *checkpoint = PageReplayCheckpoint::capture(state);
+        *checkpoint_page_index = state.page_index;
+        *replay_block_idx = block_idx;
+    }
+}
+
+impl ParagraphFloatCheckpoint {
+    fn capture(state: &PageLayoutState<'_>) -> Self {
+        Self {
+            command_count: state.current_page.commands.len(),
+            page_floats: state.page_floats.clone(),
+            cursor_y: state.cursor_y,
+        }
+    }
+
+    fn restore(&self, state: &mut PageLayoutState<'_>) {
+        state.current_page.commands.truncate(self.command_count);
+        state.page_floats.clone_from(&self.page_floats);
+        state.cursor_y = self.cursor_y;
+    }
+}
+
+fn register_paragraph_floats(
+    state: &mut PageLayoutState<'_>,
+    floating_images: &[FloatingImage],
+    floating_shapes: &[FloatingShape],
+    content_top: Pt,
+) {
+    for fi in floating_images {
+        let (y_start, y_end) = match fi.y {
+            FloatingImageY::RelativeToParagraph(offset) => {
+                (content_top + offset, content_top + offset + fi.size.height)
+            }
+            FloatingImageY::Absolute(img_y) => (img_y, img_y + fi.size.height),
+        };
+        if fi.is_wrap_top_and_bottom() {
+            let img_y = match fi.y {
+                FloatingImageY::Absolute(y) => y,
+                FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
+            };
+            state.current_page.commands.push(DrawCommand::Image {
+                rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
+                image_data: fi.image_data.clone(),
+                src_rect: fi.src_rect,
+            });
+            if y_end > state.cursor_y {
+                state.cursor_y = y_end;
+            }
+        } else {
+            let float_entry = float::ActiveFloat {
+                page_x: fi.x - fi.dist_left,
+                page_y_start: y_start,
+                page_y_end: y_end,
+                width: fi.size.width + fi.dist_left + fi.dist_right,
+                source: float::FloatSource::Image,
+                wrap_text: fi.wrap_mode.wrap_text().into(),
+            };
+            log::debug!(
+                "[layout]   register image float: x={:.1} y={:.1}-{:.1} w={:.1}",
+                float_entry.page_x.raw(),
+                y_start.raw(),
+                y_end.raw(),
+                float_entry.width.raw()
+            );
+            state.page_floats.push(float_entry);
+        }
+    }
+
+    for fs in floating_shapes {
+        if matches!(fs.wrap_mode, WrapMode::None) {
+            continue;
+        }
+        let (y_start, y_end) = match fs.y {
+            FloatingImageY::RelativeToParagraph(offset) => {
+                (content_top + offset, content_top + offset + fs.size.height)
+            }
+            FloatingImageY::Absolute(y) => (y, y + fs.size.height),
+        };
+        if fs.is_wrap_top_and_bottom() {
+            let shape_y = match fs.y {
+                FloatingImageY::Absolute(y) => y,
+                FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
+            };
+            state.current_page.commands.push(DrawCommand::Path {
+                origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+                rotation: fs.rotation,
+                flip_h: fs.flip_h,
+                flip_v: fs.flip_v,
+                extent: fs.size,
+                paths: fs.paths.clone(),
+                fill: fs.fill.clone(),
+                stroke: fs.stroke.clone(),
+                effects: fs.effects.clone(),
+            });
+            if y_end > state.cursor_y {
+                state.cursor_y = y_end;
+            }
+        } else {
+            let float_entry = float::ActiveFloat {
+                page_x: fs.x - fs.dist_left,
+                page_y_start: y_start,
+                page_y_end: y_end,
+                width: fs.size.width + fs.dist_left + fs.dist_right,
+                source: float::FloatSource::Shape,
+                wrap_text: fs.wrap_mode.wrap_text().into(),
+            };
+            log::debug!(
+                "[layout]   register shape float: x={:.1} y={:.1}-{:.1} w={:.1} mode={:?}",
+                float_entry.page_x.raw(),
+                y_start.raw(),
+                y_end.raw(),
+                float_entry.width.raw(),
+                fs.wrap_mode
+            );
+            state.page_floats.push(float_entry);
+        }
+    }
+}
+
+fn register_destination_paragraph_floats(
+    state: &mut PageLayoutState<'_>,
+    floating_images: &[FloatingImage],
+    floating_shapes: &[FloatingShape],
+    space_before: Pt,
+    col_width: Pt,
+) {
+    let content_top = state.cursor_y + space_before;
+    register_paragraph_floats(state, floating_images, floating_shapes, content_top);
+    for active_float in &state.page_floats {
+        if active_float.overlaps_y(state.cursor_y) && active_float.width >= col_width {
+            state.cursor_y = state.cursor_y.max(active_float.page_y_end);
+        }
+    }
+    float::prune_floats(&mut state.page_floats, state.cursor_y);
+}
+
+fn has_absolute_wrap_float(floating_images: &[FloatingImage]) -> bool {
+    floating_images.iter().any(|image| {
+        matches!(image.y, FloatingImageY::Absolute(_)) && image.wrap_mode.registers_as_wrap_float()
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForwardScanBoundary {
+    None,
+    BeforeParagraphFloat,
+    AfterParagraphFloat,
+}
+
+fn scan_inline_page_boundary(
+    fragments: &[super::super::fragment::Fragment],
+    current_col: &mut usize,
+    num_cols: usize,
+) -> ForwardScanBoundary {
+    for (index, fragment) in fragments.iter().enumerate() {
+        match fragment {
+            super::super::fragment::Fragment::PageBreak { .. } => {
+                let has_following_content = fragments[index + 1..].iter().any(|fragment| {
+                    !matches!(fragment, super::super::fragment::Fragment::PageBreak { .. })
+                });
+                return if has_following_content {
+                    ForwardScanBoundary::BeforeParagraphFloat
+                } else {
+                    ForwardScanBoundary::AfterParagraphFloat
+                };
+            }
+            super::super::fragment::Fragment::ColumnBreak => {
+                if *current_col + 1 < num_cols {
+                    *current_col += 1;
+                } else {
+                    *current_col = 0;
+                    return ForwardScanBoundary::BeforeParagraphFloat;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ForwardScanBoundary::None
+}
+
+fn mark_absolute_float_relocation(
+    paragraph_content_placed: bool,
+    moves_to_new_page: bool,
+    block_idx: usize,
+    replay_block_idx: usize,
+    floating_images: &[FloatingImage],
+    relocated_blocks: &mut std::collections::HashSet<usize>,
+) -> bool {
+    !paragraph_content_placed
+        && moves_to_new_page
+        && block_idx > replay_block_idx
+        && has_absolute_wrap_float(floating_images)
+        && relocated_blocks.insert(block_idx)
 }
 
 fn paragraph_keep_next(block: &LayoutBlock) -> bool {
@@ -595,6 +905,7 @@ fn emit_split_paragraph<'doc>(
     footnotes: &'doc [(Vec<Fragment>, ParagraphStyle)],
     content_width: Pt,
     blocks: &[LayoutBlock],
+    relocated_absolute_float_blocks: &std::collections::HashSet<usize>,
 ) {
     let num_cols = config.num_columns();
     let col_x = |col: usize| config.margins.left + config.columns[col].x_offset;
@@ -678,7 +989,14 @@ fn emit_split_paragraph<'doc>(
         let Some(head) = head else {
             drop(placed);
             advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
-            cont_style = continuation_style(state, blocks, style, config, first_segment);
+            cont_style = continuation_style(
+                state,
+                blocks,
+                style,
+                config,
+                relocated_absolute_float_blocks,
+                first_segment,
+            );
             continue;
         };
 
@@ -717,7 +1035,14 @@ fn emit_split_paragraph<'doc>(
         drop(placed);
         first_segment = false;
         advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
-        cont_style = continuation_style(state, blocks, style, config, first_segment);
+        cont_style = continuation_style(
+            state,
+            blocks,
+            style,
+            config,
+            relocated_absolute_float_blocks,
+            first_segment,
+        );
         remaining = next_remaining;
     }
 }
@@ -735,6 +1060,7 @@ fn continuation_style(
     blocks: &[LayoutBlock],
     style: &ParagraphStyle,
     config: &PageConfig,
+    relocated_absolute_float_blocks: &std::collections::HashSet<usize>,
     first_segment: bool,
 ) -> ParagraphStyle {
     let col = state.current_col;
@@ -745,7 +1071,13 @@ fn continuation_style(
     } else {
         Pt::ZERO
     };
-    let floats = state.effective_floats_at_cursor(blocks, space_before, col_width);
+    let floats = state.effective_floats_at_cursor(
+        blocks,
+        relocated_absolute_float_blocks,
+        config.num_columns(),
+        space_before,
+        col_width,
+    );
     let mut cs = style.clone();
     if !first_segment {
         cs.drop_cap = None;
@@ -842,7 +1174,16 @@ pub(crate) fn layout_section_with_clearance(
     };
     let col_x = |col: usize| -> Pt { config.margins.left + config.columns[col].x_offset };
 
-    for (block_idx, block) in blocks.iter().enumerate() {
+    // A forward-scanned absolute float can later move to another page. Keep
+    // those owners out of the source page's next scan while replaying it.
+    let mut relocated_absolute_float_blocks = std::collections::HashSet::new();
+    let mut page_replay_state = PageReplayCheckpoint::capture(&state);
+    let mut checkpoint_page_index = state.page_index;
+    let mut replay_block_idx = 0;
+    let mut block_idx = 0;
+
+    'blocks: while block_idx < blocks.len() {
+        let block = &blocks[block_idx];
         // §17.3.3.1: a deferred inline page break from the previous block
         // forces this block onto a new page.
         if state.pending_page_break {
@@ -852,6 +1193,13 @@ pub(crate) fn layout_section_with_clearance(
                 state.prev_space_after = Pt::ZERO;
             }
         }
+        refresh_page_replay_checkpoint(
+            &state,
+            block_idx,
+            &mut page_replay_state,
+            &mut checkpoint_page_index,
+            &mut replay_block_idx,
+        );
 
         match block {
             LayoutBlock::Paragraph {
@@ -955,6 +1303,13 @@ pub(crate) fn layout_section_with_clearance(
                         }
                     }
                 }
+                refresh_page_replay_checkpoint(
+                    &state,
+                    block_idx,
+                    &mut page_replay_state,
+                    &mut checkpoint_page_index,
+                    &mut replay_block_idx,
+                );
 
                 let mut effective_style = style.clone_for_layout();
 
@@ -1006,121 +1361,28 @@ pub(crate) fn layout_section_with_clearance(
                 // and cursor_y advances past them — they act as block spacers.
                 // §20.4.2.10: paragraph-relative floats use the content area
                 // top (after space_before), not the total paragraph box top.
+                let float_checkpoint = ParagraphFloatCheckpoint::capture(&state);
                 let content_top = state.cursor_y + effective_style.space_before;
-                for fi in floating_images.iter() {
-                    let (y_start, y_end) = match fi.y {
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            (content_top + offset, content_top + offset + fi.size.height)
-                        }
-                        FloatingImageY::Absolute(img_y) => (img_y, img_y + fi.size.height),
-                    };
-                    if fi.is_wrap_top_and_bottom() {
-                        // §20.4.2.18: emit now and advance cursor past the image.
-                        let img_y = match fi.y {
-                            FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
-                        };
-                        state.current_page.commands.push(DrawCommand::Image {
-                            rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
-                            image_data: fi.image_data.clone(),
-                            src_rect: fi.src_rect,
-                        });
-                        if y_end > state.cursor_y {
-                            state.cursor_y = y_end;
-                        }
-                    } else {
-                        // §20.4.2.3: use distL/distR for text distance from float.
-                        let float_entry = float::ActiveFloat {
-                            page_x: fi.x - fi.dist_left,
-                            page_y_start: y_start,
-                            page_y_end: y_end,
-                            width: fi.size.width + fi.dist_left + fi.dist_right,
-                            source: float::FloatSource::Image,
-                            wrap_text: fi.wrap_mode.wrap_text().into(),
-                        };
-                        log::debug!(
-                            "[layout]   register image float: x={:.1} y={:.1}-{:.1} w={:.1}",
-                            float_entry.page_x.raw(),
-                            y_start.raw(),
-                            y_end.raw(),
-                            float_entry.width.raw()
-                        );
-                        state.page_floats.push(float_entry);
-                    }
-                }
-
-                // §20.4.2: register floating shapes (DrawingML). Parallels
-                // the image loop above but emits `DrawCommand::Path` for
-                // `wrapTopAndBottom` shapes and pushes an `ActiveFloat` with
-                // `FloatSource::Shape` for wrapping modes.
-                for fs in floating_shapes.iter() {
-                    use crate::render::layout::section::WrapMode;
-                    if matches!(fs.wrap_mode, WrapMode::None) {
-                        // wrapNone shapes do not participate in text flow —
-                        // they're emitted after the paragraph (below) with no
-                        // cursor impact.
-                        continue;
-                    }
-                    let (y_start, y_end) = match fs.y {
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            (content_top + offset, content_top + offset + fs.size.height)
-                        }
-                        FloatingImageY::Absolute(y) => (y, y + fs.size.height),
-                    };
-                    if fs.is_wrap_top_and_bottom() {
-                        // §20.4.2.18: emit now and advance cursor past the shape.
-                        let shape_y = match fs.y {
-                            FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
-                        };
-                        state.current_page.commands.push(DrawCommand::Path {
-                            origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
-                            rotation: fs.rotation,
-                            flip_h: fs.flip_h,
-                            flip_v: fs.flip_v,
-                            extent: fs.size,
-                            paths: fs.paths.clone(),
-                            fill: fs.fill.clone(),
-                            stroke: fs.stroke.clone(),
-                            effects: fs.effects.clone(),
-                        });
-                        if y_end > state.cursor_y {
-                            state.cursor_y = y_end;
-                        }
-                    } else {
-                        // Square / Tight / Through — register as active float.
-                        // Tight/Through approximated as Square per the Tier 1
-                        // plan (docs/drawingml-text-wrap.md Phase E).
-                        let float_entry = float::ActiveFloat {
-                            page_x: fs.x - fs.dist_left,
-                            page_y_start: y_start,
-                            page_y_end: y_end,
-                            width: fs.size.width + fs.dist_left + fs.dist_right,
-                            source: float::FloatSource::Shape,
-                            wrap_text: fs.wrap_mode.wrap_text().into(),
-                        };
-                        log::debug!(
-                            "[layout]   register shape float: x={:.1} y={:.1}-{:.1} w={:.1} mode={:?}",
-                            float_entry.page_x.raw(),
-                            y_start.raw(),
-                            y_end.raw(),
-                            float_entry.width.raw(),
-                            fs.wrap_mode
-                        );
-                        state.page_floats.push(float_entry);
-                    }
-                }
+                register_paragraph_floats(
+                    &mut state,
+                    floating_images,
+                    floating_shapes,
+                    content_top,
+                );
 
                 // Prune expired floats.
                 float::prune_floats(&mut state.page_floats, state.cursor_y);
 
                 // §20.4.2 / §17.4.56: floats affecting text at the cursor —
-                // registered page floats plus forward-scanned absolute floats
-                // from upcoming blocks — advancing past any full-width blocker.
+                // registered page floats plus the boundary-/relocation-aware
+                // forward scan of upcoming blocks — advancing past any
+                // full-width blocker.
                 let col_width = config.columns[state.current_col].width;
                 let page_x = col_x(state.current_col);
                 let effective_floats = state.effective_floats_at_cursor(
                     blocks,
+                    &relocated_absolute_float_blocks,
+                    num_cols,
                     effective_style.space_before,
                     col_width,
                 );
@@ -1135,6 +1397,10 @@ pub(crate) fn layout_section_with_clearance(
                 let page_chunks = split_at_page_breaks(fragments);
                 let mut para_start_y = state.cursor_y;
                 state.last_para_start_y = state.cursor_y;
+                // §17.4.56 (#86 relocation): true once any of this paragraph's
+                // content has been placed, so a later overflow relocates its
+                // absolute float instead of double-wrapping earlier text.
+                let mut paragraph_content_placed = false;
                 // §17.11.12: set once a split segment reserves this paragraph's
                 // footnotes per page, so the atomic after-loop reservation is
                 // skipped (avoids double-reserving).
@@ -1160,14 +1426,39 @@ pub(crate) fn layout_section_with_clearance(
                     // §17.3.3.1: force a new page for non-empty chunks that
                     // follow a page break.
                     if unresolved_page_break {
+                        if mark_absolute_float_relocation(
+                            paragraph_content_placed,
+                            true,
+                            block_idx,
+                            replay_block_idx,
+                            floating_images,
+                            &mut relocated_absolute_float_blocks,
+                        ) {
+                            page_replay_state.restore(&mut state);
+                            block_idx = replay_block_idx;
+                            continue 'blocks;
+                        }
+                        if !paragraph_content_placed {
+                            float_checkpoint.restore(&mut state);
+                        }
                         state.push_new_page(block_idx, &ctx);
                         state.prev_space_after = Pt::ZERO;
                         para_start_y = state.cursor_y;
+                        if !paragraph_content_placed {
+                            let col_width = config.columns[state.current_col].width;
+                            register_destination_paragraph_floats(
+                                &mut state,
+                                floating_images,
+                                floating_shapes,
+                                effective_style.space_before,
+                                col_width,
+                            );
+                        }
                         effective_style.page_y = state.cursor_y;
                         effective_style.page_x = col_x(state.current_col);
                         effective_style.page_content_width =
                             config.columns[state.current_col].width;
-                        effective_style.page_floats = Vec::new();
+                        effective_style.page_floats = state.page_floats.clone();
                     }
 
                     let col_chunks = split_at_column_breaks(page_chunk);
@@ -1175,16 +1466,46 @@ pub(crate) fn layout_section_with_clearance(
                     for (chunk_idx, chunk) in col_chunks.iter().enumerate() {
                         // Advance to the next column for chunks after a column break.
                         if chunk_idx > 0 {
-                            if state.current_col + 1 < num_cols {
+                            let starts_new_page = state.current_col + 1 >= num_cols;
+                            if mark_absolute_float_relocation(
+                                paragraph_content_placed,
+                                starts_new_page,
+                                block_idx,
+                                replay_block_idx,
+                                floating_images,
+                                &mut relocated_absolute_float_blocks,
+                            ) {
+                                page_replay_state.restore(&mut state);
+                                block_idx = replay_block_idx;
+                                continue 'blocks;
+                            }
+                            if !paragraph_content_placed && starts_new_page {
+                                float_checkpoint.restore(&mut state);
+                            }
+                            if !starts_new_page {
                                 state.current_col += 1;
                             } else {
                                 // All columns full — new page, reset to column 0.
                                 state.push_new_page(block_idx, &ctx);
                             }
                             state.cursor_y = state.column_top;
+                            if !paragraph_content_placed && starts_new_page {
+                                let col_width = config.columns[state.current_col].width;
+                                register_destination_paragraph_floats(
+                                    &mut state,
+                                    floating_images,
+                                    floating_shapes,
+                                    effective_style.space_before,
+                                    col_width,
+                                );
+                            }
+                            effective_style.page_y = state.cursor_y;
                             effective_style.page_x = col_x(state.current_col);
                             effective_style.page_content_width =
                                 config.columns[state.current_col].width;
+                            if starts_new_page {
+                                effective_style.page_floats = state.page_floats.clone();
+                            }
                         }
 
                         let constraints = col_constraints(
@@ -1200,20 +1521,21 @@ pub(crate) fn layout_section_with_clearance(
                         );
 
                         // §17.3.1.14: a paragraph may break across a page
-                        // boundary when keepLines is unset and the section is
-                        // single-column. Borders/shading, drop caps, and lines
-                        // wrapped around an active float are handled per segment
-                        // (the float-wrapped run is kept on the first segment by
-                        // the unbreakable-prefix guard, so the full-width tail
-                        // reuses its fitted lines). Paragraphs that own floating
-                        // objects stay atomic (the object anchors to one page).
-                        // Footnotes are reserved per segment, but only for a
-                        // single, unbroken chunk — with explicit page/column
-                        // breaks their reference→segment mapping is ambiguous, so
-                        // those keep the atomic reservation. (See docs/keep-lines-plan.md.)
-                        // §17.6.4: splitting re-fits the remainder against each
-                        // column's own width (`emit_split_paragraph`), so columns
-                        // of unequal width split correctly — no equal-width gate.
+                        // boundary when keepLines is unset. Borders/shading, drop
+                        // caps, and lines wrapped around an active float are
+                        // handled per segment (the float-wrapped run is kept on
+                        // the first segment by the unbreakable-prefix guard, so
+                        // the tail reuses its fitted lines). Paragraphs that own
+                        // floating objects stay atomic (the object anchors to one
+                        // page) and take the #86 relocation path in the `else`
+                        // branch below. Footnotes are reserved per segment, but
+                        // only for a single, unbroken chunk — with explicit
+                        // page/column breaks their reference→segment mapping is
+                        // ambiguous, so those keep the atomic reservation. (See
+                        // docs/keep-lines-plan.md.) §17.6.4: splitting re-fits the
+                        // remainder against each column's own width
+                        // (`emit_split_paragraph`), so unequal-width columns split
+                        // correctly — no equal-width gate.
                         let single_chunk = page_chunks.len() == 1 && col_chunks.len() == 1;
                         let can_split = !effective_style.keep_lines
                             && (footnotes.is_empty() || single_chunk)
@@ -1237,6 +1559,7 @@ pub(crate) fn layout_section_with_clearance(
                                 footnotes,
                                 content_width,
                                 blocks,
+                                &relocated_absolute_float_blocks,
                             );
                         } else {
                             let mut para = placed.emit_full();
@@ -1249,15 +1572,51 @@ pub(crate) fn layout_section_with_clearance(
                                 // and re-placing at the destination page, whose
                                 // max_height differs and re-clamps the height.
                                 drop(placed);
+                                // #86: if this atomic paragraph owns an absolute
+                                // wrap float and moves to a new page before any of
+                                // its own content is placed, earlier source-page
+                                // text may already have wrapped around that future
+                                // float. Replay the page without it before placing
+                                // the owner on its destination page.
+                                let moves_to_new_page = state.current_col + 1 >= num_cols;
+                                if mark_absolute_float_relocation(
+                                    paragraph_content_placed,
+                                    moves_to_new_page,
+                                    block_idx,
+                                    replay_block_idx,
+                                    floating_images,
+                                    &mut relocated_absolute_float_blocks,
+                                ) {
+                                    page_replay_state.restore(&mut state);
+                                    block_idx = replay_block_idx;
+                                    continue 'blocks;
+                                }
+                                if !paragraph_content_placed {
+                                    float_checkpoint.restore(&mut state);
+                                }
                                 if state.current_col + 1 < num_cols {
                                     state.current_col += 1;
                                     state.cursor_y = state.column_top;
                                 } else {
                                     state.push_new_page(block_idx, &ctx);
                                 }
+                                let destination_para_start_y = state.cursor_y;
+                                // Re-register this paragraph's own floats at the
+                                // destination when none of its content has landed
+                                // yet (§20.4.2).
+                                if !paragraph_content_placed {
+                                    let col_width = config.columns[state.current_col].width;
+                                    register_destination_paragraph_floats(
+                                        &mut state,
+                                        floating_images,
+                                        floating_shapes,
+                                        effective_style.space_before,
+                                        col_width,
+                                    );
+                                }
                                 // Update para_start_y after page/column change so
                                 // floating images use the correct position.
-                                para_start_y = state.cursor_y;
+                                para_start_y = destination_para_start_y;
                                 effective_style.page_y = state.cursor_y;
                                 effective_style.page_x = col_x(state.current_col);
                                 effective_style.page_content_width =
@@ -1290,6 +1649,11 @@ pub(crate) fn layout_section_with_clearance(
                             }
                             state.cursor_y += para.size.height;
                         }
+                        // #86: mark that content of this paragraph has landed
+                        // (either split segments or the atomic block), so a
+                        // later block's absolute-float overflow relocates rather
+                        // than double-wrapping this already-placed text.
+                        paragraph_content_placed |= !chunk.is_empty();
                     }
                     // The page break has been consumed by this non-empty chunk.
                     unresolved_page_break = false;
@@ -1561,6 +1925,7 @@ pub(crate) fn layout_section_with_clearance(
                         // longer the discriminant for registration.
                         let _ = is_anchor;
                     }
+                    block_idx += 1;
                     continue;
                 }
 
@@ -1621,6 +1986,7 @@ pub(crate) fn layout_section_with_clearance(
                 state.prev_table_style_id = style_id.clone();
             }
         }
+        block_idx += 1;
     }
 
     // Flush remaining footnotes and push the last page.

@@ -198,7 +198,7 @@ Each layout element (paragraphs, table cells, headers/footers) goes through thre
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **42 features fully implemented, 9 partial, 12 planned.**
+Validated against ISO 29500 (Office Open XML). **42 features fully implemented, 10 partial, 12 planned.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -225,7 +225,8 @@ Validated against ISO 29500 (Office Open XML). **42 features fully implemented, 
 | Feature | Status |
 |---|---|
 | Alignment (left, center, right) | ✅ |
-| Alignment (justify, distribute) | ✅ |
+| Alignment (justify) | ✅ |
+| Alignment (distribute) | ⚠️ scalar-based: combining marks and contextual scripts such as Arabic and Indic are not shaping-safe |
 | Spacing before/after, line spacing | ✅ auto/exact/atLeast |
 | Indentation (left, right, first-line, hanging) | ✅ |
 | Tab stops (left) | ✅ |
