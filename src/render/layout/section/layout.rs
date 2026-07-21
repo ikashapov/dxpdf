@@ -327,6 +327,55 @@ fn measure_keep_next_group(
     None
 }
 
+/// §17.3.1.15 (keepNext tightening): can the paragraph that *starts* a keepNext
+/// chain be split so a widow-legal head stays on the current page while its tail
+/// travels to the fresh page with the rest of the group?
+///
+/// keepNext forbids a page break only *between* a paragraph and the next block —
+/// it does not pin the paragraph's earlier lines. So when the whole group would
+/// otherwise be moved to a fresh page (leaving the current page under-filled),
+/// a splittable leading paragraph can instead fill the current page and carry
+/// its `>= 2`-line tail onward: the caller has already checked the whole group
+/// fits on a fresh page, and the remainder after peeling a `>= 2`-line head is
+/// strictly smaller, so it still fits there and no keepNext boundary is broken.
+///
+/// True only for a body paragraph that can actually split — no keepLines
+/// (§17.3.1.14), no floating objects (they anchor to one page), and enough
+/// lines to leave `>= 2` on each side under §17.3.1.44 widow control. A `false`
+/// result keeps the conservative whole-group move.
+fn leading_keep_next_paragraph_splittable(
+    block: &LayoutBlock,
+    constraints: &BoxConstraints,
+    default_line_height: Pt,
+    measure_text: super::super::paragraph::MeasureTextFn<'_>,
+) -> bool {
+    let LayoutBlock::Paragraph {
+        fragments,
+        style,
+        floating_images,
+        floating_shapes,
+        ..
+    } = block
+    else {
+        return false;
+    };
+    let effective = style.clone_for_layout();
+    if effective.keep_lines || !floating_images.is_empty() || !floating_shapes.is_empty() {
+        return false;
+    }
+    let placed = place_paragraph(
+        fragments,
+        constraints,
+        &effective,
+        default_line_height,
+        measure_text,
+    );
+    // Widow control (§17.3.1.44) needs `>= 2` lines on each side of the break;
+    // without it a single-line head is legal.
+    let min_lines = if effective.widow_control { 4 } else { 2 };
+    placed.line_count() >= min_lines
+}
+
 /// §17.3.1.14 / §17.3.1.44: how to break a paragraph across a page boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParagraphSplit {
@@ -741,8 +790,25 @@ pub(crate) fn layout_section_with_clearance(
                                 })
                             }
                             _ => {
+                                // §17.3.1.15 (11.2): the group doesn't fit here
+                                // but fits on a fresh page. Rather than move the
+                                // whole group, let a splittable leading
+                                // paragraph fill this page and carry its
+                                // widow-legal tail onward — the remainder is
+                                // strictly smaller than the (fresh-page-fitting)
+                                // group, so the keepNext boundary stays intact.
+                                // Only for paragraph terminals: a table terminal
+                                // is excluded from the group measurement, so its
+                                // leading row is not covered by that guarantee
+                                // and keeps the whole-move (handled above).
                                 fresh_page_group_height <= full_page_height
                                     && current_group_top + current_group_height > state.bottom
+                                    && !leading_keep_next_paragraph_splittable(
+                                        &blocks[block_idx],
+                                        &constraints,
+                                        ctx.default_line_height,
+                                        ctx.measure_text,
+                                    )
                             }
                         };
                         if should_move && state.cursor_y > state.column_top {

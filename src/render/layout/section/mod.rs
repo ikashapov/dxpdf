@@ -1747,6 +1747,153 @@ mod tests {
         }
     }
 
+    // ── §17.3.1.15 keepNext tightening (plan §11.2) ──────────────────────
+
+    /// A `keep_next` paragraph of `n` single-line rows (`{prefix}0..{prefix}{n}`),
+    /// each word wide enough that only one fits per 180pt column line.
+    fn multiline_keep_next(prefix: &str, n: usize) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: (0..n)
+                .map(|i| text_frag(&format!("{prefix}{i}"), 100.0, 14.0))
+                .collect(),
+            style: ParagraphStyle {
+                keep_next: true,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    /// A 180×140pt content area (10 lines at 14pt), for multi-paragraph chains
+    /// that must still fit on a fresh page.
+    fn tall_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            page_size: PtSize::new(Pt::new(200.0), Pt::new(160.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![ColumnGeometry {
+                x_offset: Pt::ZERO,
+                width: Pt::new(180.0),
+            }],
+        }
+    }
+
+    #[test]
+    fn splittable_leading_keep_next_paragraph_fills_current_page() {
+        // Two fill lines, then a 4-line keepNext paragraph + 1-line terminal
+        // (a 5-line group that fits a fresh page but not the 3 lines left here).
+        // The old whole-group move left this page with only the fill; the
+        // tightening splits the keepNext paragraph so its head fills the page,
+        // and its tail travels to the fresh page WITH the terminal (§17.3.1.15).
+        let mut blocks = vec![para_block("fill0", 100.0), para_block("fill1", 100.0)];
+        blocks.push(multiline_keep_next("kn", 4));
+        blocks.push(para_block("body", 100.0));
+
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        let per_page = texts_per_page(&pages);
+        assert!(pages.len() >= 2);
+
+        // Page 1 is filled with the keepNext paragraph's head, not left blank.
+        assert!(
+            per_page[0].iter().any(|t| t == "kn0"),
+            "leading keepNext paragraph should fill the current page: {per_page:?}"
+        );
+        // The keepNext boundary holds: the paragraph's last line shares a page
+        // with the terminal block.
+        let kn_last = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "kn3"))
+            .expect("kn3 present");
+        let body = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "body"))
+            .expect("body present");
+        assert_eq!(
+            kn_last, body,
+            "keepNext binds the last line to the next block"
+        );
+    }
+
+    #[test]
+    fn keep_next_chain_leading_split_keeps_all_boundaries() {
+        // A multi-paragraph chain (leading kn 6 lines → middle kn 2 lines →
+        // terminal) that fits a fresh 10-line page but not the 5 lines left
+        // after the fill. The splittable leading paragraph fills the current
+        // page; the remainder is strictly smaller than the fresh-page-fitting
+        // group, so it lands intact on the next page with every keepNext
+        // boundary preserved.
+        let mut blocks: Vec<LayoutBlock> = (0..5)
+            .map(|i| para_block(&format!("fill{i}"), 100.0))
+            .collect();
+        blocks.push(multiline_keep_next("lead", 6));
+        blocks.push(multiline_keep_next("mid", 2));
+        blocks.push(para_block("term", 100.0));
+
+        let pages = layout_section(&blocks, &tall_config(), None, Pt::ZERO, Pt::new(14.0), None);
+        let per_page = texts_per_page(&pages);
+        assert!(pages.len() >= 2);
+
+        assert!(
+            per_page[0].iter().any(|t| t == "lead0"),
+            "leading paragraph head fills the current page: {per_page:?}"
+        );
+        // lead.last ↔ mid.first and mid.last ↔ term must each share a page.
+        let find = |needle: &str| {
+            per_page
+                .iter()
+                .position(|p| p.iter().any(|t| t == needle))
+                .unwrap_or_else(|| panic!("{needle} present: {per_page:?}"))
+        };
+        assert_eq!(find("lead5"), find("mid0"), "lead→mid boundary intact");
+        assert_eq!(find("mid1"), find("term"), "mid→term boundary intact");
+    }
+
+    #[test]
+    fn three_line_keep_next_paragraph_moves_whole_under_widow_control() {
+        // A 3-line keepNext paragraph cannot split (widow control needs >= 2
+        // lines on each side), so the tightening must NOT peel it — the whole
+        // group still moves to the fresh page.
+        let mut blocks = vec![para_block("fill0", 100.0), para_block("fill1", 100.0)];
+        blocks.push(multiline_keep_next("kn", 3));
+        blocks.push(para_block("body", 100.0));
+
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        let per_page = texts_per_page(&pages);
+        assert!(pages.len() >= 2);
+        assert!(
+            !per_page[0].iter().any(|t| t == "kn0"),
+            "an unsplittable 3-line keepNext paragraph must move whole: {per_page:?}"
+        );
+        let kn_last = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "kn2"))
+            .unwrap();
+        let body = per_page
+            .iter()
+            .position(|p| p.iter().any(|t| t == "body"))
+            .unwrap();
+        assert_eq!(kn_last, body);
+    }
+
     /// A floating table whose laid-out height exceeds the available
     /// space on its anchor page must split at row boundaries. With the
     /// 100pt-tall small_config and an anchor at y=15, 8 rows of ~14pt
