@@ -6,7 +6,7 @@ use super::super::fragment::Fragment;
 use super::super::header_footer::{HeaderFooterClearance, PageBodyBounds};
 use super::super::page::PageConfig;
 use super::super::paragraph::{
-    layout_paragraph, place_paragraph, ParagraphBorderStyle, ParagraphStyle, PlacedParagraph,
+    layout_paragraph, place_paragraph, ParagraphBorderStyle, ParagraphStyle,
 };
 use super::super::table::{
     layout_table, layout_table_paginated_with_page_heights, measure_leading_table_group_height,
@@ -169,6 +169,85 @@ impl<'doc> PageLayoutState<'doc> {
         self.flush_footnotes(ctx);
         self.pages.push(self.current_page);
         self.pages
+    }
+
+    /// The floats affecting text at the current cursor on the current
+    /// page/column: registered page floats (§20.4.2) plus forward-scanned
+    /// absolute floats from upcoming blocks on this page (rebuilt once per page
+    /// while `abs_floats_dirty`), advancing the cursor past any full-width float
+    /// that blocks all text (§17.4.56). Shared by the main block loop and the
+    /// across-page split re-fit (§4) so a continuation wraps around whatever
+    /// floats live on *its* page, not the paragraph's starting page.
+    fn effective_floats_at_cursor(
+        &mut self,
+        blocks: &[LayoutBlock],
+        space_before: Pt,
+        col_width: Pt,
+    ) -> Vec<float::ActiveFloat> {
+        // Forward-scan absolute floats from upcoming paragraphs on the current
+        // page. Only rescan when the page changes.
+        if self.abs_floats_dirty {
+            self.current_page_abs_floats.clear();
+            for (fi_idx, future_block) in blocks[self.page_start_block..].iter().enumerate() {
+                if let LayoutBlock::Paragraph {
+                    floating_images: fi_list,
+                    page_break_before,
+                    ..
+                } = future_block
+                {
+                    // Stop scanning at the next explicit page break (skip the
+                    // first block — it may have triggered this page).
+                    if *page_break_before && fi_idx > 0 {
+                        break;
+                    }
+                    for fi in fi_list {
+                        if fi.is_wrap_top_and_bottom() {
+                            continue; // handled as block spacers, not floats
+                        }
+                        if let FloatingImageY::Absolute(img_y) = fi.y {
+                            self.current_page_abs_floats.push(float::ActiveFloat {
+                                page_x: fi.x - fi.dist_left,
+                                page_y_start: img_y,
+                                page_y_end: img_y + fi.size.height,
+                                width: fi.size.width + fi.dist_left + fi.dist_right,
+                                source: float::FloatSource::Image,
+                                wrap_text: fi.wrap_mode.wrap_text().into(),
+                            });
+                        }
+                    }
+                }
+            }
+            self.abs_floats_dirty = false;
+        }
+
+        // Merge page_floats with forward-scanned absolute floats (dedup). Only
+        // include absolute floats whose y range starts at or above the current
+        // cursor — floats below shouldn't affect text above.
+        let mut effective_floats = self.page_floats.clone();
+        let y_threshold = self.cursor_y + space_before;
+        let deduped: Vec<float::ActiveFloat> = self
+            .current_page_abs_floats
+            .iter()
+            .filter(|af| af.page_y_start <= y_threshold)
+            .filter(|af| {
+                !effective_floats.iter().any(|pf| {
+                    (pf.page_x - af.page_x).raw().abs() < FLOAT_DEDUP_EPSILON_PT
+                        && (pf.page_y_start - af.page_y_start).raw().abs() < FLOAT_DEDUP_EPSILON_PT
+                        && (pf.page_y_end - af.page_y_end).raw().abs() < FLOAT_DEDUP_EPSILON_PT
+                })
+            })
+            .cloned()
+            .collect();
+        effective_floats.extend(deduped);
+
+        // §17.4.56: advance past any full-width float that blocks all text.
+        for ef in &effective_floats {
+            if ef.overlaps_y(self.cursor_y) && ef.width >= col_width {
+                self.cursor_y = self.cursor_y.max(ef.page_y_end);
+            }
+        }
+        float::prune_floats(&mut effective_floats, self.cursor_y);
+        effective_floats
     }
 }
 
@@ -507,7 +586,7 @@ fn advance_column_or_page(
 #[allow(clippy::too_many_arguments)] // stacker state + placement inputs are cohesive
 fn emit_split_paragraph<'doc>(
     state: &mut PageLayoutState<'doc>,
-    placed: &PlacedParagraph<'_>,
+    fragments: &[Fragment],
     style: &ParagraphStyle,
     block_idx: usize,
     config: &PageConfig,
@@ -515,36 +594,56 @@ fn emit_split_paragraph<'doc>(
     para_start_y: &mut Pt,
     footnotes: &'doc [(Vec<Fragment>, ParagraphStyle)],
     content_width: Pt,
+    blocks: &[LayoutBlock],
 ) {
     let num_cols = config.num_columns();
     let col_x = |col: usize| config.margins.left + config.columns[col].x_offset;
-    let total = placed.line_count();
     let widow_control = style.widow_control;
-    // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are only
-    // spent once, on the segment that carries the paragraph's last line.
-    let trailing_extra = style.space_after + placed.bottom_border_space();
-    let mut line_start = 0;
+
+    // §4: the remainder to place on the current page, plus the style to place
+    // it with. Both are re-derived per page/column so a continuation wraps
+    // around whatever floats live on *its* page (not the paragraph's starting
+    // page) and uses that page's width. Owned so they can be re-sliced/re-styled
+    // across page breaks. The first page reuses the caller's `style` (which
+    // already carries the starting page's floats/width).
+    let mut remaining: Vec<Fragment> = fragments.to_vec();
+    let mut cont_style: ParagraphStyle = style.clone();
     let mut first_segment = true;
-    // §17.11.12: footnotes are reserved in document order; this many have been
-    // placed on earlier segments' pages.
+    // §17.11.12: footnotes reserved in document order; this many are placed.
     let mut footnote_cursor = 0;
 
     loop {
-        let remaining = total - line_start;
+        let col_width = config.columns[state.current_col].width;
+        let page_height = (state.bottom - state.page_top).max(Pt::ZERO);
+        let constraints = BoxConstraints::new(Pt::ZERO, col_width, Pt::ZERO, page_height);
+        let placed = place_paragraph(
+            &remaining,
+            &constraints,
+            &cont_style,
+            ctx.default_line_height,
+            ctx.measure_text,
+        );
+        let total = placed.line_count();
+        if total == 0 {
+            break;
+        }
+
         // §17.6.4: a fresh column offers full height, like a fresh page.
         let at_page_top = state.cursor_y <= state.column_top;
         let avail = (state.bottom - state.cursor_y).max(Pt::ZERO);
+        // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are
+        // only spent once, on the segment carrying the paragraph's last line.
+        let trailing_extra = cont_style.space_after + placed.bottom_border_space();
 
-        // Count how many remaining lines fit in `avail`, charging this segment's
-        // space_before (first segment only, §17.3.1.33) and, at the paragraph's
-        // end, its trailing spacing — mirroring the atomic overflow test.
+        // Count how many of this placement's lines fit, charging space_before
+        // (first segment only, §17.3.1.33) and the trailing spacing on the last.
         let mut used = if first_segment {
-            style.space_before
+            cont_style.space_before
         } else {
             Pt::ZERO
         };
         let mut n_fit = 0;
-        for i in line_start..total {
+        for i in 0..total {
             let mut needed = used + placed.line_height(i);
             if i + 1 == total {
                 needed += trailing_extra;
@@ -556,40 +655,38 @@ fn emit_split_paragraph<'doc>(
             n_fit += 1;
         }
 
-        let head = match decide_paragraph_split(n_fit, remaining, widow_control, at_page_top) {
-            ParagraphSplit::All => remaining,
-            ParagraphSplit::Break { head } => head,
-            ParagraphSplit::MoveWhole => {
-                // Move the remaining lines to the next column/page and re-decide
-                // at the top, where progress is guaranteed.
-                advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
-                continue;
-            }
+        // §17.3.1.44 widow/orphan, then §17.3.1.11/§17.3.1.44 unbreakable-prefix
+        // clamp (drop cap / float-wrapped run kept intact on the first segment).
+        let head = match decide_paragraph_split(n_fit, total, widow_control, at_page_top) {
+            ParagraphSplit::All => Some(total),
+            ParagraphSplit::Break { head } => Some(head),
+            ParagraphSplit::MoveWhole => None,
+        }
+        .and_then(|head| {
+            prefix_adjusted_head(
+                head,
+                total,
+                placed.unbreakable_prefix_lines(),
+                first_segment,
+                at_page_top,
+            )
+        });
+
+        // No legal placement here: move the whole remainder to the next
+        // column/page and re-fit at the top (nothing emitted, so the drop cap
+        // and space_before are preserved for the real first segment).
+        let Some(head) = head else {
+            drop(placed);
+            advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
+            cont_style = continuation_style(state, blocks, style, config, first_segment);
+            continue;
         };
 
-        // §17.3.1.11/§17.3.1.44: keep the drop-cap / float-wrapped prefix intact.
-        let head = match prefix_adjusted_head(
-            head,
-            remaining,
-            placed.unbreakable_prefix_lines(),
-            first_segment,
-            at_page_top,
-        ) {
-            Some(head) => head,
-            None => {
-                advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
-                continue;
-            }
-        };
-
-        let is_last = line_start + head == total;
-        let segment =
-            placed.emit_split_segment(line_start, line_start + head, first_segment, is_last);
+        let is_last = head == total;
+        let segment = placed.emit_split_segment(0, head, first_segment, is_last);
         if !(first_segment && is_last) {
             log::debug!(
-                "[layout]   paragraph split: lines {}..{} of {total} at y={:.1}",
-                line_start,
-                line_start + head,
+                "[layout]   paragraph split: {head}/{total} lines at y={:.1}",
                 state.cursor_y.raw()
             );
         }
@@ -601,24 +698,65 @@ fn emit_split_paragraph<'doc>(
         }
         state.cursor_y += segment.size.height;
 
-        // §17.11.12: reserve this segment's footnotes on the current page (the
-        // page its reference marks landed on) before any page break.
+        // §17.11.12: reserve this segment's footnotes on the page its reference
+        // marks landed on, before any page break.
         if !footnotes.is_empty() {
-            let refs = placed.footnote_refs_in(line_start, line_start + head);
+            let refs = placed.footnote_refs_in(0, head);
             let end = (footnote_cursor + refs).min(footnotes.len());
             reserve_footnotes(state, ctx, content_width, &footnotes[footnote_cursor..end]);
             footnote_cursor = end;
         }
 
-        line_start += head;
-        first_segment = false;
-
         if is_last {
             break;
         }
-        // Continue the paragraph in the next column, or the next page.
+
+        // §4: carry the unplaced fragments to the next column/page and re-fit
+        // them there against that page's floats and width.
+        let next_remaining = placed.fragments_from_line(head);
+        drop(placed);
+        first_segment = false;
         advance_column_or_page(state, block_idx, ctx, num_cols, para_start_y);
+        cont_style = continuation_style(state, blocks, style, config, first_segment);
+        remaining = next_remaining;
     }
+}
+
+/// Build the paragraph style for a split segment after advancing to a new
+/// column/page (§4 continuation re-fit). Refreshes the float set for the new
+/// page (`effective_floats_at_cursor`, which may also advance the cursor past a
+/// full-width float) and repositions the paragraph. When something has already
+/// been emitted (`first_segment == false`), the continuation drops
+/// `space_before` (§17.3.1.33), the drop cap (§17.3.1.11), and the first-line
+/// indent (§17.3.1.12); a whole-paragraph move that emitted nothing keeps them
+/// for the eventual real first segment.
+fn continuation_style(
+    state: &mut PageLayoutState<'_>,
+    blocks: &[LayoutBlock],
+    style: &ParagraphStyle,
+    config: &PageConfig,
+    first_segment: bool,
+) -> ParagraphStyle {
+    let col = state.current_col;
+    let col_width = config.columns[col].width;
+    let page_x = config.margins.left + config.columns[col].x_offset;
+    let space_before = if first_segment {
+        style.space_before
+    } else {
+        Pt::ZERO
+    };
+    let floats = state.effective_floats_at_cursor(blocks, space_before, col_width);
+    let mut cs = style.clone();
+    if !first_segment {
+        cs.drop_cap = None;
+        cs.indent_first_line = Pt::ZERO;
+        cs.space_before = Pt::ZERO;
+    }
+    cs.page_floats = floats;
+    cs.page_y = state.cursor_y;
+    cs.page_x = page_x;
+    cs.page_content_width = col_width;
+    cs
 }
 
 /// Constrain a chosen split `head` so it never falls inside the paragraph's
@@ -976,83 +1114,16 @@ pub(crate) fn layout_section_with_clearance(
                 // Prune expired floats.
                 float::prune_floats(&mut state.page_floats, state.cursor_y);
 
-                // Forward-scan absolute floats from upcoming paragraphs on the
-                // current page. Only rescan when the page changes.
-                if state.abs_floats_dirty {
-                    state.current_page_abs_floats.clear();
-                    for (fi_idx, future_block) in
-                        blocks[state.page_start_block..].iter().enumerate()
-                    {
-                        if let LayoutBlock::Paragraph {
-                            floating_images: fi_list,
-                            page_break_before,
-                            ..
-                        } = future_block
-                        {
-                            // Stop scanning at the next explicit page break
-                            // (skip the first block — it may have triggered this page).
-                            if *page_break_before && fi_idx > 0 {
-                                break;
-                            }
-                            for fi in fi_list {
-                                if fi.is_wrap_top_and_bottom() {
-                                    continue; // handled as block spacers, not floats
-                                }
-                                if let FloatingImageY::Absolute(img_y) = fi.y {
-                                    state.current_page_abs_floats.push(float::ActiveFloat {
-                                        page_x: fi.x - fi.dist_left,
-                                        page_y_start: img_y,
-                                        page_y_end: img_y + fi.size.height,
-                                        width: fi.size.width + fi.dist_left + fi.dist_right,
-                                        source: float::FloatSource::Image,
-                                        wrap_text: fi.wrap_mode.wrap_text().into(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    state.abs_floats_dirty = false;
-                }
-
-                // Merge page_floats with forward-scanned absolute floats (dedup).
-                // Only include absolute floats whose y range starts at or above
-                // the current cursor — floats below shouldn't affect text above.
-                let mut effective_floats = state.page_floats.clone();
-                let y_threshold = state.cursor_y + effective_style.space_before;
-                let deduped: Vec<float::ActiveFloat> = state
-                    .current_page_abs_floats
-                    .iter()
-                    .filter(|af| af.page_y_start <= y_threshold)
-                    .filter(|af| {
-                        !effective_floats.iter().any(|pf| {
-                            (pf.page_x - af.page_x).raw().abs() < FLOAT_DEDUP_EPSILON_PT
-                                && (pf.page_y_start - af.page_y_start).raw().abs()
-                                    < FLOAT_DEDUP_EPSILON_PT
-                                && (pf.page_y_end - af.page_y_end).raw().abs()
-                                    < FLOAT_DEDUP_EPSILON_PT
-                        })
-                    })
-                    .cloned()
-                    .collect();
-                effective_floats.extend(deduped);
-                if !effective_floats.is_empty() {
-                    for (i, f) in effective_floats.iter().enumerate() {
-                        log::debug!(
-                            "[layout]   effective_float[{i}]: x={:.1} y={:.1}-{:.1} w={:.1} src={:?}",
-                            f.page_x.raw(), f.page_y_start.raw(),
-                            f.page_y_end.raw(), f.width.raw(), f.source
-                        );
-                    }
-                }
-                // §17.4.56: advance past any full-width float that blocks all text.
+                // §20.4.2 / §17.4.56: floats affecting text at the cursor —
+                // registered page floats plus forward-scanned absolute floats
+                // from upcoming blocks — advancing past any full-width blocker.
                 let col_width = config.columns[state.current_col].width;
                 let page_x = col_x(state.current_col);
-                for ef in &effective_floats {
-                    if ef.overlaps_y(state.cursor_y) && ef.width >= col_width {
-                        state.cursor_y = state.cursor_y.max(ef.page_y_end);
-                    }
-                }
-                float::prune_floats(&mut effective_floats, state.cursor_y);
+                let effective_floats = state.effective_floats_at_cursor(
+                    blocks,
+                    effective_style.space_before,
+                    col_width,
+                );
 
                 effective_style.page_floats = effective_floats;
                 effective_style.page_y = state.cursor_y;
@@ -1158,9 +1229,10 @@ pub(crate) fn layout_section_with_clearance(
                             if !footnotes.is_empty() {
                                 footnotes_reserved = true;
                             }
+                            drop(placed);
                             emit_split_paragraph(
                                 &mut state,
-                                &placed,
+                                chunk,
                                 &effective_style,
                                 block_idx,
                                 config,
@@ -1168,6 +1240,7 @@ pub(crate) fn layout_section_with_clearance(
                                 &mut para_start_y,
                                 footnotes,
                                 content_width,
+                                blocks,
                             );
                         } else {
                             let mut para = placed.emit_full();

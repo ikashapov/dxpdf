@@ -326,6 +326,15 @@ impl PlacedParagraph<'_> {
         self.params.drop_cap_lines.max(float_prefix)
     }
 
+    /// §4 continuation re-fit: the effective fragments from line `from` onward,
+    /// cloned so the stacker can re-place the remainder against the next page's
+    /// floats and width (instead of reusing this page's placement). `from` must
+    /// be a valid line index (`< line_count()`).
+    pub(crate) fn fragments_from_line(&self, from: usize) -> Vec<Fragment> {
+        let start = self.line_placements[from].line.start;
+        self.fragments[start..].to_vec()
+    }
+
     /// §17.11.12: number of footnote reference marks in lines `[first, last)`.
     /// The stacker reserves this many footnotes (in document order) on the page
     /// that segment lands on, so a footnote sits with its reference.

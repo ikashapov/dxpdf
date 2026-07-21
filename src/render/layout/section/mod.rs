@@ -2186,4 +2186,81 @@ mod tests {
             line_cmds.len()
         );
     }
+
+    // ── §4 continuation re-fit around a next-page float (plan §11.3) ─────
+
+    /// A paragraph carrying one absolute-positioned floating image (left side),
+    /// registered as a `Square` wrap float by the forward scan.
+    fn para_with_abs_left_float(text: &str, fx: f32, fy: f32, fw: f32, fh: f32) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: vec![text_frag(text, 20.0, 14.0)],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![FloatingImage {
+                image_data: crate::render::resolve::images::MediaEntry {
+                    data: std::rc::Rc::from(&[][..]),
+                    format: crate::model::ImageFormat::Png,
+                },
+                size: PtSize::new(Pt::new(fw), Pt::new(fh)),
+                src_rect: None,
+                x: Pt::new(fx),
+                y: FloatingImageY::Absolute(Pt::new(fy)),
+                wrap_mode: WrapMode::Square(crate::model::WrapText::BothSides),
+                dist_left: Pt::ZERO,
+                dist_right: Pt::ZERO,
+                behind_doc: false,
+            }],
+            floating_shapes: vec![],
+        }
+    }
+
+    #[test]
+    fn continuation_re_fits_around_a_float_on_its_own_page() {
+        // §4/§11.3: a paragraph splits across a page boundary; a LATER block on
+        // the continuation page owns an absolute float in the top-left. The
+        // continuation's re-fit (not a reuse of the starting-page placement)
+        // must wrap its first lines around that float — they start at the
+        // float's right edge (x≈60), not the page margin (x=10).
+        //
+        // Layout (small_config: content x∈[10,190]? width 180, y∈[10,90]):
+        //  - 3 one-line fills push the cursor to y=52 (below the float band).
+        //  - P: 6 single-line words (100pt each → one per line at any width
+        //    ≥100). Only ~2 fit below the fills on page 1; the rest continue.
+        //  - Q: an absolute float x=10,y=10,w=50,h=40 → band y∈[10,50].
+        let float_block = para_with_abs_left_float("Q", 10.0, 10.0, 50.0, 40.0);
+        let mut blocks: Vec<LayoutBlock> = (0..3)
+            .map(|i| para_block(&format!("fill{i}"), 100.0))
+            .collect();
+        blocks.push(multiline_para(6, false, true));
+        blocks.push(float_block);
+
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        assert!(pages.len() >= 2, "paragraph must split across pages");
+
+        // First continuation line on page 2 is "word2" (2 words stayed on
+        // page 1). It sits in the float band, so it must be indented past the
+        // float's right edge.
+        let word2_x = pages[1]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if text.trim() == "word2" => {
+                    Some(position.x.raw())
+                }
+                _ => None,
+            })
+            .expect("word2 on page 2");
+        assert!(
+            (word2_x - 60.0).abs() < 0.5,
+            "continuation must wrap around the next-page float (x≈60), got {word2_x}"
+        );
+    }
 }
