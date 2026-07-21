@@ -37,8 +37,14 @@ pub struct ParagraphStyle {
     pub borders: Option<ParagraphBorderStyle>,
     /// §17.3.1.31: paragraph shading (background fill).
     pub shading: Option<RgbColor>,
-    /// §17.3.1.14: keep this paragraph on the same page as the next.
+    /// §17.3.1.15: keep this paragraph on the same page as the next.
     pub keep_next: bool,
+    /// §17.3.1.14: keep all lines of this paragraph on one page where possible
+    /// (suppresses across-page splitting of the paragraph).
+    pub keep_lines: bool,
+    /// §17.3.1.44: when the paragraph *does* split, forbid a single line stranded
+    /// at the bottom (orphan) or top (widow) of a page. Word's default is on.
+    pub widow_control: bool,
     /// §17.3.1.9: suppress spacing between paragraphs of the same style.
     pub contextual_spacing: bool,
     /// Style ID for contextual spacing comparison.
@@ -115,6 +121,8 @@ impl ParagraphStyle {
             borders: self.borders.clone(),
             shading: self.shading,
             keep_next: self.keep_next,
+            keep_lines: self.keep_lines,
+            widow_control: self.widow_control,
             contextual_spacing: self.contextual_spacing,
             style_id: self.style_id.clone(),
             // Caller will replace these — skip cloning the vec.
@@ -141,6 +149,9 @@ impl Default for ParagraphStyle {
             borders: None,
             shading: None,
             keep_next: false,
+            keep_lines: false,
+            // §17.3.1.44: Word enables widow/orphan control by default.
+            widow_control: true,
             contextual_spacing: false,
             style_id: None,
             page_floats: Vec::new(),

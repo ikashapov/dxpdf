@@ -196,6 +196,9 @@ pub(super) fn paragraph_style_from_props(props: &model::ParagraphProperties) -> 
             .as_ref()
             .map(|s| resolve_color(s.fill, ColorContext::Background)),
         keep_next: props.keep_next.unwrap_or(false),
+        keep_lines: props.keep_lines.unwrap_or(false),
+        // §17.3.1.44: Word enables widow/orphan control by default.
+        widow_control: props.widow_control.unwrap_or(true),
         contextual_spacing: props.contextual_spacing.unwrap_or(false),
         style_id: None, // set by caller when available
         page_floats: Vec::new(),
@@ -354,6 +357,9 @@ pub(super) fn split_oversized_fragments(
                             hyperlink_url: hyperlink_url.clone(),
                             baseline_offset: *baseline_offset,
                             text_offset: Pt::ZERO,
+                            // A per-character split of an over-wide word is never
+                            // a footnote mark (those are tiny superscripts).
+                            is_footnote_ref: false,
                         });
                     }
                 }

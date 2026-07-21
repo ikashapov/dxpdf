@@ -7,7 +7,7 @@
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtEdgeInsets;
 
-use super::section::{stack_blocks, LayoutBlock};
+use super::section::{stack_blocks, CellLine, LayoutBlock};
 
 /// Result of laying out a cell.
 #[derive(Debug)]
@@ -16,6 +16,10 @@ pub struct CellLayout {
     pub commands: Vec<super::draw_command::DrawCommand>,
     /// Content height (without margins).
     pub content_height: Pt,
+    /// §17.4.1 row-split cut model, in cell-content coordinates (i.e. *not*
+    /// shifted by the cell margins — the splitter adds `margin_top`). Empty for
+    /// a cell that can't be safely bisected; see [`CellLine`].
+    pub lines: Vec<CellLine>,
 }
 
 /// Lay out blocks inside a table cell.
@@ -47,6 +51,10 @@ pub fn layout_cell(
     CellLayout {
         commands,
         content_height: result.height,
+        // Cut points stay in content coordinates; the shift above applies to
+        // draw commands only. `split.rs` accounts for `margin_top` when
+        // partitioning against them.
+        lines: result.lines,
     }
 }
 
@@ -86,6 +94,7 @@ mod tests {
             border: None,
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
+            is_footnote_ref: false,
         }
     }
 

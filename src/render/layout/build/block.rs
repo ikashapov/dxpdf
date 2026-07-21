@@ -297,6 +297,7 @@ pub(super) fn build_note_content(
                         hyperlink_url: None,
                         baseline_offset: -(font.size * 0.4),
                         text_offset: Pt::ZERO,
+                        is_footnote_ref: false,
                     },
                 );
             }

@@ -115,6 +115,10 @@ pub enum Fragment {
         /// Used for right/center-justified list labels where the text is
         /// positioned within a wider fragment. Default: Pt::ZERO.
         text_offset: Pt,
+        /// §17.11.12: true if this is a footnote reference mark (the superscript
+        /// number). Rendered as ordinary text, but tagged so across-page
+        /// splitting can reserve each footnote on the page its mark lands on.
+        is_footnote_ref: bool,
     },
     Image {
         size: PtSize,
