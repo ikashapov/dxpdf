@@ -1,16 +1,19 @@
-//! Font subsetting — collect glyph usage, subset typefaces, replace.
+//! Font subsetting — collect codepoint usage, subset typefaces, replace.
 //!
 //! The pass runs between layout and paint. Driven by the `subset-fonts` Cargo
 //! feature (default-on). See `docs/font-subsetting.md` for the full design.
 //!
 //! Design invariants:
 //! - **Single source of truth** for typeface bytes ([`crate::render::fonts::FontRegistry`])
-//!   and for usage tracking ([`collect::GlyphUsage`]). Each piece of state lives
-//!   in exactly one place.
-//! - **Glyph-id preservation.** `subsetter` retains the original glyph ids in
-//!   the subsetted font, so downstream paint's `text_to_glyphs` and `cmap`
-//!   lookups remain valid against the subsetted typeface — no re-shaping
-//!   needed.
+//!   and for usage tracking ([`collect::CodepointUsage`]). Each piece of state
+//!   lives in exactly one place.
+//! - **Codepoint-driven subsetting.** `fontcull` walks the font's own `cmap` to
+//!   derive the glyph closure and keeps `GSUB` substitutions reachable from it,
+//!   so ligatures and contextual alternates survive and paint's
+//!   `text_to_glyphs`/`cmap` lookups stay valid — no re-shaping needed.
+//! - **Shapeability is validated, not assumed.** A structurally valid subset
+//!   can still ship a broken `cmap`; [`apply()`] rejects any subset whose kept
+//!   codepoints shape to `.notdef` and keeps the original bytes instead.
 //! - **Spec touchpoints.** ECMA-376 §17.8 (DOCX font embedding,
 //!   deobfuscation) is enforced upstream by the parser. ISO 32000-1 §9.6.4
 //!   subset prefixes (`AAAAAA+`-style) are emitted by Skia's PDF backend at

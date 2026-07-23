@@ -20,8 +20,9 @@ use crate::render::resolve::shape_geometry::SubPath;
 ///
 /// Tier 1 treats `Tight` and `Through` as spec-compliant placeholders: the
 /// layout pipeline approximates them using the float's bounding rect plus
-/// a side constraint; full polygon-aware line fitting is Tier 2 per
-/// `docs/drawingml-text-wrap.md`.
+/// a side constraint. Full polygon-aware line fitting is deferred to Tier 2
+/// and not yet designed. See `docs/floating-images.md` for the current
+/// wrap behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WrapMode {
     /// §20.4.2.15 wrapNone — no reflow; drawing paints over or under text.

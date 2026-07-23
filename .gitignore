@@ -1,2 +1,18 @@
 /target
-/crates/*/target
+
+# Local-only document corpus. May contain private/customer documents, so it is
+# never committed. Tests that use it are gated on file existence and skip when
+# it is absent (see tests/header_footer_selection.rs).
+/test-cases/
+
+# Generated PDFs — scratch output from the render-and-verify loop.
+/output/
+/test-files/*.pdf
+/*.pdf
+
+# Python tooling
+__pycache__/
+*.py[cod]
+/dist/
+/.venv/
+/venv/
