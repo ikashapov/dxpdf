@@ -36,7 +36,7 @@ impl EmbeddedFontId {
 }
 
 /// Identity for a Skia [`Typeface`], wrapping `Typeface::unique_id`.
-/// Used as the join key with [`crate::render::subset::GlyphUsage`].
+/// Used as the join key with [`crate::render::subset::CodepointUsage`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypefaceId(pub u32);
 

@@ -1,7 +1,9 @@
-//! Mixed-content spike per `docs/serde-migration-plan.md` pre-work.
+//! Mixed-content spike from the serde migration pre-work. The migration is
+//! complete — these tests remain as regression coverage for the quick-xml
+//! serde behaviors the parser depends on.
 //!
-//! Validates that quick-xml 0.37's serde layer handles three patterns that
-//! the plan's Phase 4 depends on:
+//! Validates that quick-xml's serde layer handles three patterns that the
+//! body-schema parsing relies on:
 //!
 //! 1. `#[serde(rename = "$value")]` + untagged enum of child element types
 //!    preserves **document order** of heterogeneous children.
