@@ -44,7 +44,9 @@
 //!     * a public knob to disable `StartTrimmer`, or
 //!     * `xml:space="preserve"` honored for whitespace-only `Text` events.
 //!
-//! See <https://github.com/tafia/quick-xml/issues/> — file/link before merge.
+//! Tracked upstream at the quick-xml repository
+//! (<https://github.com/tafia/quick-xml>); this module is the local
+//! stopgap until one of the above is available.
 
 /// Sentinel for ASCII space (`0x20`).
 pub(crate) const WS_SENTINEL_SPACE: char = '\u{E020}';
@@ -391,5 +393,37 @@ mod tests {
             .expect("quick-xml parse");
         let restored = restore_whitespace_sentinels(&parsed.t.content);
         assert_eq!(restored, " ", "expected single literal space to survive");
+    }
+
+    /// The "Label: Value" class this module exists to fix isn't only
+    /// whitespace-*only* nodes — a mixed run with a significant *trailing*
+    /// space (`<w:t xml:space="preserve">Label: </w:t>`) must also survive the
+    /// full substitute → quick-xml → restore round-trip. This node is not
+    /// all-whitespace, so `substitute_whitespace_only_runs` leaves it untouched;
+    /// the test asserts quick-xml itself preserves the trailing space.
+    #[test]
+    fn round_trip_preserves_trailing_space_in_mixed_content() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct TextXml {
+            #[serde(rename = "$text", default)]
+            content: String,
+        }
+        #[derive(Deserialize)]
+        struct R {
+            #[serde(rename = "t")]
+            t: TextXml,
+        }
+
+        let original = br#"<r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t xml:space="preserve">Label: </w:t></r>"#;
+        let preprocessed = substitute_whitespace_only_runs(original);
+        let parsed: R = quick_xml::de::from_str(std::str::from_utf8(&preprocessed).unwrap())
+            .expect("quick-xml parse");
+        let restored = restore_whitespace_sentinels(&parsed.t.content);
+        assert_eq!(
+            restored, "Label: ",
+            "trailing space in mixed content must survive quick-xml"
+        );
     }
 }

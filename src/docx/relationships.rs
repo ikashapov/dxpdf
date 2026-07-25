@@ -207,3 +207,98 @@ impl From<RelationshipXml> for Relationship {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    fn classify(suffix: &str) -> RelationshipType {
+        RelationshipType::from_uri(&format!("{NS}/{suffix}"))
+    }
+
+    #[test]
+    fn classifies_common_types() {
+        assert_eq!(classify("officeDocument"), RelationshipType::OfficeDocument);
+        assert_eq!(classify("styles"), RelationshipType::Styles);
+        assert_eq!(classify("numbering"), RelationshipType::Numbering);
+        assert_eq!(classify("settings"), RelationshipType::Settings);
+        assert_eq!(classify("theme"), RelationshipType::Theme);
+        assert_eq!(classify("header"), RelationshipType::Header);
+        assert_eq!(classify("footer"), RelationshipType::Footer);
+        assert_eq!(classify("footnotes"), RelationshipType::Footnotes);
+        assert_eq!(classify("endnotes"), RelationshipType::Endnotes);
+        assert_eq!(classify("image"), RelationshipType::Image);
+        assert_eq!(classify("hyperlink"), RelationshipType::Hyperlink);
+    }
+
+    // These pairs share a suffix prefix, so the order of the `ends_with`
+    // chain in `from_uri` matters. A reorder that let the shorter suffix win
+    // would silently misclassify — these lock the distinction in.
+    #[test]
+    fn font_table_is_not_font() {
+        assert_eq!(classify("fontTable"), RelationshipType::FontTable);
+        assert_eq!(classify("font"), RelationshipType::Font);
+    }
+
+    #[test]
+    fn styles_with_effects_is_not_styles() {
+        assert_eq!(
+            classify("stylesWithEffects"),
+            RelationshipType::StylesWithEffects
+        );
+        assert_eq!(classify("styles"), RelationshipType::Styles);
+    }
+
+    #[test]
+    fn property_relationship_types_are_distinct() {
+        // core-properties uses a different namespace in practice, but the
+        // suffix match is what disambiguates it from the -properties siblings.
+        assert_eq!(
+            RelationshipType::from_uri(
+                "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+            ),
+            RelationshipType::CoreProperties
+        );
+        assert_eq!(
+            classify("extended-properties"),
+            RelationshipType::ExtendedProperties
+        );
+        assert_eq!(
+            classify("custom-properties"),
+            RelationshipType::CustomProperties
+        );
+    }
+
+    #[test]
+    fn unknown_type_is_preserved_not_dropped() {
+        let uri = "http://example.com/relationships/somethingNovel";
+        assert_eq!(
+            RelationshipType::from_uri(uri),
+            RelationshipType::Unknown(uri.to_string())
+        );
+    }
+
+    #[test]
+    fn target_mode_defaults_to_internal_and_is_case_insensitive() {
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rId1" Type="http://x/image" Target="media/i.png"/>
+            <Relationship Id="rId2" Type="http://x/hyperlink" Target="http://e.com" TargetMode="External"/>
+            <Relationship Id="rId3" Type="http://x/hyperlink" Target="http://e.com" TargetMode="eXtErNaL"/>
+        </Relationships>"#;
+        let rels = Relationships::parse(xml).expect("parse rels");
+        assert_eq!(
+            rels.find_by_id("rId1").unwrap().target_mode,
+            TargetMode::Internal
+        );
+        assert_eq!(
+            rels.find_by_id("rId2").unwrap().target_mode,
+            TargetMode::External
+        );
+        assert_eq!(
+            rels.find_by_id("rId3").unwrap().target_mode,
+            TargetMode::External
+        );
+    }
+}
