@@ -16,7 +16,7 @@ use crate::docx::parse::primitives::st_enums::{
     StXAlign, StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::OnOff;
+use crate::docx::parse::primitives::{last_toggle, OnOff};
 
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
@@ -290,10 +290,12 @@ impl From<TblpPrXml> for TablePositioning {
 pub(crate) struct TrPrXml {
     #[serde(rename = "trHeight", default)]
     tr_height: Option<TrHeightXml>,
+    // `Vec<OnOff>` (not `Option`) tolerates duplicated toggles per §17.7.2
+    // last-wins — see `RPrXml` / `PPrXml` for the rationale.
     #[serde(rename = "tblHeader", default)]
-    tbl_header: Option<OnOff>,
+    tbl_header: Vec<OnOff>,
     #[serde(rename = "cantSplit", default)]
-    cant_split: Option<OnOff>,
+    cant_split: Vec<OnOff>,
     #[serde(rename = "jc", default)]
     jc: Option<ValAttr<StJc>>,
     #[serde(rename = "cnfStyle", default)]
@@ -344,8 +346,8 @@ impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
         Self {
             height: x.tr_height.map(Into::into),
-            is_header: x.tbl_header.map(|OnOff(b)| b),
-            cant_split: x.cant_split.map(|OnOff(b)| b),
+            is_header: last_toggle(x.tbl_header),
+            cant_split: last_toggle(x.cant_split),
             justification: x.jc.map(|v| Alignment::from(v.val)),
             cnf_style: x.cnf_style.map(CnfStyle::from),
             grid_before: x.grid_before.map(|v| v.val).unwrap_or(0),
@@ -381,7 +383,7 @@ pub(crate) struct TcPrXml {
     #[serde(rename = "textDirection", default)]
     text_direction: Option<ValAttr<StTextDirection>>,
     #[serde(rename = "noWrap", default)]
-    no_wrap: Option<OnOff>,
+    no_wrap: Vec<OnOff>,
     #[serde(rename = "cnfStyle", default)]
     cnf_style: Option<CnfStyleXml>,
 }
@@ -425,7 +427,7 @@ impl From<TcPrXml> for TableCellProperties {
             text_direction: x
                 .text_direction
                 .map(|v| crate::docx::model::TextDirection::from(v.val)),
-            no_wrap: x.no_wrap.map(|OnOff(b)| b),
+            no_wrap: last_toggle(x.no_wrap),
             cnf_style: x.cnf_style.map(CnfStyle::from),
         }
     }
@@ -616,6 +618,21 @@ mod tests {
         let tr = parse_tr_pr(r#"<trPr><tblHeader/><cantSplit/></trPr>"#);
         assert_eq!(tr.is_header, Some(true));
         assert_eq!(tr.cant_split, Some(true));
+    }
+
+    #[test]
+    fn tr_pr_duplicate_toggles_tolerated_last_wins() {
+        // Duplicated row toggles (as some writers emit) must not fail the parse.
+        let tr = parse_tr_pr(r#"<trPr><cantSplit/><cantSplit/></trPr>"#);
+        assert_eq!(tr.cant_split, Some(true));
+        let tr = parse_tr_pr(r#"<trPr><tblHeader val="1"/><tblHeader val="0"/></trPr>"#);
+        assert_eq!(tr.is_header, Some(false));
+    }
+
+    #[test]
+    fn tc_pr_duplicate_no_wrap_tolerated() {
+        let tc = parse_tc_pr(r#"<tcPr><noWrap/><noWrap/></tcPr>"#);
+        assert_eq!(tc.no_wrap, Some(true));
     }
 
     #[test]
