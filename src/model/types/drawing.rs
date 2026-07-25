@@ -143,6 +143,10 @@ pub struct WordProcessingShape {
     /// on spPr as inheritance from this reference, so resolve consults it
     /// when the direct effect list is absent or empty.
     pub style_effect_ref: Option<StyleMatrixRef>,
+    /// §20.1.2.2.45 wps:style / §20.1.4.1.13 a:fillRef — reference to a theme
+    /// fill style. When the shape has no direct `spPr` fill, the referenced
+    /// theme fill (recolored by the ref's `phClr`) supplies the fill.
+    pub style_fill_ref: Option<StyleMatrixRef>,
     /// §20.1.2.1.1: body properties (text layout within the shape).
     pub body_pr: Option<BodyProperties>,
     /// §17.17.1: text content inside the shape.

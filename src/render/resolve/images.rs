@@ -226,6 +226,7 @@ mod tests {
                 shape_properties: None,
                 style_line_ref: None,
                 style_effect_ref: None,
+                style_fill_ref: None,
                 body_pr: None,
                 txbx_content: vec![],
             })),

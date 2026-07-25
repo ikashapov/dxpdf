@@ -476,6 +476,8 @@ pub(crate) struct WspXml {
 pub(crate) struct ShapeStyleXml {
     #[serde(rename = "lnRef", default)]
     pub(crate) ln_ref: Option<StyleMatrixRefXml>,
+    #[serde(rename = "fillRef", default)]
+    pub(crate) fill_ref: Option<StyleMatrixRefXml>,
     #[serde(rename = "effectRef", default)]
     pub(crate) effect_ref: Option<StyleMatrixRefXml>,
 }
@@ -526,15 +528,20 @@ impl WspXml {
                 blocks
             })
             .unwrap_or_default();
-        let (style_line_ref, style_effect_ref) = match self.style {
-            Some(s) => (s.ln_ref.map(Into::into), s.effect_ref.map(Into::into)),
-            None => (None, None),
+        let (style_line_ref, style_fill_ref, style_effect_ref) = match self.style {
+            Some(s) => (
+                s.ln_ref.map(Into::into),
+                s.fill_ref.map(Into::into),
+                s.effect_ref.map(Into::into),
+            ),
+            None => (None, None, None),
         };
         WordProcessingShape {
             cnv_pr: self.cnv_pr.map(Into::into),
             shape_properties: self.sp_pr.map(Into::into),
             style_line_ref,
             style_effect_ref,
+            style_fill_ref,
             body_pr: self.body_pr.map(Into::into),
             txbx_content,
         }
@@ -875,6 +882,34 @@ mod tests {
             Block::Paragraph(_) => (),
             other => panic!("expected Paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wsp_style_fill_ref_parsed() {
+        // §20.1.4.1.13: a `<wps:style><a:fillRef>` is captured with its idx and
+        // phClr-substitute color for theme-fill resolution.
+        let xml = r#"<wrap xmlns:wps="urn:wps" xmlns:w="urn:w" xmlns:a="urn:a" xmlns:r="urn:r">
+            <wsp>
+                <cNvPr id="1" name="S"/>
+                <style>
+                    <lnRef idx="2"><schemeClr val="accent1"/></lnRef>
+                    <fillRef idx="1"><schemeClr val="accent1"/></fillRef>
+                    <effectRef idx="0"/>
+                </style>
+                <spPr><prstGeom prst="rect"/></spPr>
+                <bodyPr/>
+            </wsp>
+        </wrap>"#;
+        #[derive(Deserialize)]
+        struct Wrap {
+            wsp: WspXml,
+        }
+        let w: Wrap = quick_xml::de::from_str(xml).unwrap();
+        let mut ctx = crate::docx::parse::body::ConvertCtx::new();
+        let wsp = w.wsp.into_model(&mut ctx);
+        let fr = wsp.style_fill_ref.expect("fillRef parsed");
+        assert_eq!(fr.idx, 1);
+        assert!(fr.color.is_some(), "phClr-substitute color captured");
     }
 
     // ── Picture spPr wiring (now that shape schema exists) ──

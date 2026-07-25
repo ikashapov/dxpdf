@@ -152,7 +152,8 @@ pub fn build_header_footer_content(
         match block {
             Block::Paragraph(p) => {
                 let (mut frags, props) = build_fragments(p, ctx, state, None, None);
-                let style = paragraph_style_from_props(&props);
+                let style =
+                    paragraph_style_from_props(&props, Pt::from(ctx.resolved.default_tab_stop));
 
                 // Check for VML absolute positioning in Pict inlines.
                 if absolute_position.is_none() {

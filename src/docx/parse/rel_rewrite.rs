@@ -249,9 +249,12 @@ fn rewrite_vml_image_data(data: &mut VmlImageData, remap: &HashMap<RelId, RelId>
 /// reason) the URL won't match any rId in `remap` and this is a
 /// no-op.
 fn rewrite_in_hyperlink_target(target: &mut HyperlinkTarget, remap: &HashMap<RelId, RelId>) {
-    if let HyperlinkTarget::External(ref id) = target {
+    if let HyperlinkTarget::ExternalRel(ref id) = target {
         if let Some(new) = remap.get(id) {
-            *target = HyperlinkTarget::External(new.clone());
+            // For a subordinate part the remap resolves a hyperlink rId directly
+            // to its external URL (see `load_part_rel_remap`), so the target
+            // becomes a resolved URL rather than another rId.
+            *target = HyperlinkTarget::ExternalUrl(new.as_str().to_string());
         }
     }
 }
@@ -458,6 +461,7 @@ mod tests {
                 shape_properties,
                 style_line_ref: None,
                 style_effect_ref: None,
+                style_fill_ref: None,
                 body_pr: None,
                 txbx_content,
             })),
@@ -682,7 +686,7 @@ mod tests {
             properties: ParagraphProperties::default(),
             mark_run_properties: None,
             content: vec![Inline::Hyperlink(Hyperlink {
-                target: HyperlinkTarget::External(RelId::new("rId7")),
+                target: HyperlinkTarget::ExternalRel(RelId::new("rId7")),
                 content: vec![],
             })],
             rsids: ParagraphRevisionIds::default(),
@@ -696,10 +700,10 @@ mod tests {
         let Inline::Hyperlink(h) = &p.content[0] else {
             panic!()
         };
-        let HyperlinkTarget::External(id) = &h.target else {
+        let HyperlinkTarget::ExternalUrl(url) = &h.target else {
             panic!()
         };
-        assert_eq!(id.as_str(), "https://example.com");
+        assert_eq!(url, "https://example.com");
     }
 
     // ── §M.2.2 AlternateContent choice (the preferred branch) ───────────
@@ -711,7 +715,7 @@ mod tests {
         // too — previously only the fallback was walked.
         let ac = AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![Inline::Image(Box::new(picture_with_blip("rId1")))],
             }],
             fallback: None,

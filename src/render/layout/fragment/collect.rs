@@ -624,8 +624,10 @@ where
                 }
                 Inline::Hyperlink(link) => {
                     let url: Option<&str> = match &link.target {
-                        crate::model::HyperlinkTarget::External(rel_id) => Some(rel_id.as_str()),
+                        crate::model::HyperlinkTarget::ExternalUrl(url) => Some(url.as_str()),
                         crate::model::HyperlinkTarget::Internal { anchor } => Some(anchor.as_str()),
+                        // An unresolved rId (no matching relationship) has no URL.
+                        crate::model::HyperlinkTarget::ExternalRel(_) => None,
                     };
                     let mut sub = collect_fragments(
                         &link.content,
@@ -1132,7 +1134,7 @@ mod tests {
     #[test]
     fn hyperlink_recurses_into_content() {
         let inlines = vec![Inline::Hyperlink(Hyperlink {
-            target: HyperlinkTarget::External(RelId::new("rId1")),
+            target: HyperlinkTarget::ExternalUrl("https://example.com".into()),
             content: vec![text_run("click me")],
         })];
         let ctx = default_ctx(12.0);
@@ -1154,7 +1156,7 @@ mod tests {
         } = &frags[0]
         {
             assert_eq!(&**text, "click ");
-            assert_eq!(hyperlink_url.as_deref(), Some("rId1"));
+            assert_eq!(hyperlink_url.as_deref(), Some("https://example.com"));
         } else {
             panic!("expected Text fragment");
         }
@@ -1240,7 +1242,7 @@ mod tests {
     fn alternate_content_uses_fallback() {
         let inlines = vec![Inline::AlternateContent(AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![text_run("choice")],
             }],
             fallback: Some(vec![text_run("fallback")]),

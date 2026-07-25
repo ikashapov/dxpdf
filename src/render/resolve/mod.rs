@@ -16,6 +16,7 @@ pub mod styles;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::model::dimension::{Dimension, Twips};
 use crate::model::{
     Block, Document, NoteId, NumId, NumPicBullet, NumPicBulletId, ParagraphProperties, RelId,
     RunProperties, StyleId, Theme,
@@ -61,6 +62,9 @@ pub struct ResolvedDocument {
     /// to odd pages). Without this flag, the `even` slots are dead
     /// data even if the document supplies them.
     pub even_and_odd_headers: bool,
+    /// §17.15.1.25: the document's default tab-stop interval (`w:defaultTabStop`,
+    /// spec default 720 twips). Consumed by paragraph tab layout.
+    pub default_tab_stop: Dimension<Twips>,
 }
 
 /// Transform a raw parsed Document into a layout-ready ResolvedDocument.
@@ -106,6 +110,7 @@ pub fn resolve(doc: &Document) -> ResolvedDocument {
         footnotes: doc.footnotes.clone(),
         endnotes: doc.endnotes.clone(),
         even_and_odd_headers: doc.settings.even_and_odd_headers,
+        default_tab_stop: doc.settings.default_tab_stop,
     }
 }
 
@@ -250,6 +255,8 @@ mod tests {
                     indentation: None,
                     run_properties: None,
                     lvl_pic_bullet_id: None,
+                    suffix: crate::model::LevelSuffix::default(),
+                    is_legal: false,
                 }],
             },
         );

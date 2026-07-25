@@ -226,6 +226,7 @@ pub(super) fn extract_floating_shapes(
             shape_props,
             wsp.style_line_ref.as_ref(),
             wsp.style_effect_ref.as_ref(),
+            wsp.style_fill_ref.as_ref(),
             ctx.resolved.theme.as_ref(),
         );
 
@@ -971,6 +972,7 @@ mod tests {
                 shape_properties: None,
                 style_line_ref: None,
                 style_effect_ref: None,
+                style_fill_ref: None,
                 body_pr: None,
                 txbx_content: vec![],
             })),
@@ -1005,7 +1007,7 @@ mod tests {
     fn ac_with_wps_choice() -> AlternateContent {
         AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![Inline::Image(Box::new(anchored_wps_image()))],
             }],
             // A non-empty fallback that would otherwise be searched.
@@ -1021,7 +1023,7 @@ mod tests {
     #[test]
     fn choices_render_wps_shape_false_without_shape() {
         let choices = vec![McChoice {
-            requires: McRequires::Wps,
+            requires: vec![McRequires::Wps],
             content: vec![Inline::InstrText(String::new())],
         }];
         assert!(!choices_render_wps_shape(&choices));
@@ -1035,13 +1037,13 @@ mod tests {
     fn choices_render_wps_shape_recurses_into_nested_alternate_content() {
         let nested = AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![Inline::Image(Box::new(anchored_wps_image()))],
             }],
             fallback: None,
         };
         let outer = vec![McChoice {
-            requires: McRequires::Wps,
+            requires: vec![McRequires::Wps],
             content: vec![Inline::AlternateContent(nested)],
         }];
         assert!(choices_render_wps_shape(&outer));

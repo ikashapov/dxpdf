@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::model::{
-    Alignment, Indentation, NumId, NumPicBulletId, NumberFormat, NumberingDefinitions,
+    Alignment, Indentation, LevelSuffix, NumId, NumPicBulletId, NumberFormat, NumberingDefinitions,
     NumberingLevelDefinition, RunProperties,
 };
 
@@ -22,6 +22,10 @@ pub struct ResolvedNumberingLevel {
     pub justification: Option<Alignment>,
     /// §17.9.10: reference to a picture bullet definition.
     pub lvl_pic_bullet_id: Option<NumPicBulletId>,
+    /// §17.9.29: separator between the label and the paragraph text.
+    pub suffix: LevelSuffix,
+    /// §17.9.8: render all level numbers as decimal (legal numbering).
+    pub is_legal: bool,
 }
 
 /// Resolve numbering definitions into a flat lookup: NumId → Vec<ResolvedNumberingLevel>.
@@ -41,14 +45,20 @@ pub fn resolve_numbering(
         let mut levels: Vec<ResolvedNumberingLevel> =
             abstract_levels.iter().map(resolve_level).collect();
 
-        // Apply level overrides
+        // Apply level overrides (§17.9.9). A `<w:lvlOverride>` may supply a full
+        // replacement `<w:lvl>` and/or a `<w:startOverride>` that restarts the
+        // level's counter.
         for ovr in &instance.level_overrides {
             let idx = ovr.level as usize;
-            let resolved = resolve_level(ovr);
-            if idx < levels.len() {
-                levels[idx] = resolved;
+            if idx >= levels.len() {
+                continue; // override references a level beyond the abstract def
             }
-            // If override references a level beyond abstract, we skip it
+            if let Some(def) = &ovr.definition {
+                levels[idx] = resolve_level(def);
+            }
+            if let Some(start) = ovr.start_override {
+                levels[idx].start = start;
+            }
         }
 
         result.insert(*num_id, levels);
@@ -66,6 +76,8 @@ fn resolve_level(def: &NumberingLevelDefinition) -> ResolvedNumberingLevel {
         indentation: def.indentation,
         justification: def.justification,
         lvl_pic_bullet_id: def.lvl_pic_bullet_id,
+        suffix: def.suffix,
+        is_legal: def.is_legal,
     }
 }
 
@@ -87,15 +99,21 @@ pub fn format_list_label(
     }
 
     // Expand template: %1 → level 0 counter, %2 → level 1 counter, etc.
+    // §17.9.8: when this level is "legal", every referenced counter is rendered
+    // as decimal regardless of the individual levels' own formats.
     let mut result = lvl.level_text.clone();
     for i in (0..=level).rev() {
         let placeholder = format!("%{}", i + 1);
         if result.contains(&placeholder) {
             let count = counters.get(&(num_id, i)).copied().unwrap_or(1);
-            let fmt = levels
-                .get(i as usize)
-                .map(|l| l.format)
-                .unwrap_or(NumberFormat::Decimal);
+            let fmt = if lvl.is_legal {
+                NumberFormat::Decimal
+            } else {
+                levels
+                    .get(i as usize)
+                    .map(|l| l.format)
+                    .unwrap_or(NumberFormat::Decimal)
+            };
             let formatted = format_number(count, fmt);
             result = result.replace(&placeholder, &formatted);
         }
@@ -192,7 +210,14 @@ mod tests {
                         num_id,
                         NumberingInstance {
                             abstract_num_id: abstract_id,
-                            level_overrides: overrides,
+                            level_overrides: overrides
+                                .into_iter()
+                                .map(|def| crate::model::LevelOverride {
+                                    level: def.level,
+                                    start_override: None,
+                                    definition: Some(def),
+                                })
+                                .collect(),
                         },
                     )
                 })
@@ -211,6 +236,8 @@ mod tests {
             indentation: None,
             run_properties: None,
             lvl_pic_bullet_id: None,
+            suffix: LevelSuffix::default(),
+            is_legal: false,
         }
     }
 
@@ -301,6 +328,73 @@ mod tests {
     }
 
     #[test]
+    fn start_override_restarts_level_counter() {
+        // A startOverride-only lvlOverride resets the level's start value.
+        let mut abstract_nums = HashMap::new();
+        abstract_nums.insert(
+            AbstractNumId::new(0),
+            AbstractNumbering {
+                levels: vec![level(0, NumberFormat::Decimal, "%1.", 1)],
+            },
+        );
+        let mut numbering_instances = HashMap::new();
+        numbering_instances.insert(
+            NumId::new(1),
+            NumberingInstance {
+                abstract_num_id: AbstractNumId::new(0),
+                level_overrides: vec![crate::model::LevelOverride {
+                    level: 0,
+                    start_override: Some(5),
+                    definition: None,
+                }],
+            },
+        );
+        let defs = NumberingDefinitions {
+            abstract_nums,
+            numbering_instances,
+            pic_bullets: HashMap::new(),
+        };
+        let resolved = resolve_numbering(&defs);
+        assert_eq!(resolved[&NumId::new(1)][0].start, 5);
+    }
+
+    #[test]
+    fn legal_numbering_renders_all_levels_decimal() {
+        let levels = vec![
+            ResolvedNumberingLevel {
+                format: NumberFormat::UpperRoman,
+                level_text: "%1".to_string(),
+                start: 1,
+                run_properties: None,
+                indentation: None,
+                justification: None,
+                lvl_pic_bullet_id: None,
+                suffix: LevelSuffix::default(),
+                is_legal: false,
+            },
+            ResolvedNumberingLevel {
+                format: NumberFormat::LowerLetter,
+                level_text: "%1.%2".to_string(),
+                start: 1,
+                run_properties: None,
+                indentation: None,
+                justification: None,
+                lvl_pic_bullet_id: None,
+                suffix: LevelSuffix::default(),
+                is_legal: true,
+            },
+        ];
+        let mut counters = HashMap::new();
+        counters.insert((NumId::new(1), 0u8), 3u32); // would be "III" un-legal
+        counters.insert((NumId::new(1), 1u8), 2u32); // would be "b" un-legal
+        let label = format_list_label(&levels, 1, &counters, NumId::new(1)).unwrap();
+        assert_eq!(
+            label, "3.2",
+            "isLgl forces decimal for every referenced level"
+        );
+    }
+
+    #[test]
     fn level_with_no_format_defaults_to_none() {
         let defs = make_defs(
             vec![(
@@ -314,6 +408,8 @@ mod tests {
                     indentation: None,
                     run_properties: None,
                     lvl_pic_bullet_id: None,
+                    suffix: LevelSuffix::default(),
+                    is_legal: false,
                 }],
             )],
             vec![(NumId::new(1), AbstractNumId::new(0), vec![])],

@@ -5,10 +5,12 @@ use serde::Deserialize;
 
 use crate::docx::error::Result;
 use crate::docx::model::{
-    AbstractNumId, AbstractNumbering, Alignment, Indentation, NumId, NumPicBullet, NumPicBulletId,
-    NumberFormat, NumberingDefinitions, NumberingInstance, NumberingLevelDefinition, RunProperties,
+    AbstractNumId, AbstractNumbering, Alignment, Indentation, LevelOverride, LevelSuffix, NumId,
+    NumPicBullet, NumPicBulletId, NumberFormat, NumberingDefinitions, NumberingInstance,
+    NumberingLevelDefinition, RunProperties,
 };
 use crate::docx::parse::primitives::st_enums::{StJc, StNumberFormat};
+use crate::docx::parse::primitives::OnOff;
 use crate::docx::parse::properties::schema::paragraph::PPrXml;
 use crate::docx::parse::properties::schema::run::RPrXml;
 use crate::docx::parse::serde_xml::from_xml;
@@ -61,12 +63,35 @@ struct LvlXml {
     start: Option<ValAttr<u32>>,
     #[serde(rename = "lvlJc", default)]
     lvl_jc: Option<ValAttr<StJc>>,
+    #[serde(rename = "suff", default)]
+    suff: Option<ValAttr<StLevelSuffix>>,
+    #[serde(rename = "isLgl", default)]
+    is_lgl: Option<OnOff>,
     #[serde(rename = "pPr", default)]
     p_pr: Option<PPrXml>,
     #[serde(rename = "rPr", default)]
     r_pr: Option<RPrXml>,
     #[serde(rename = "lvlPicBulletId", default)]
     lvl_pic_bullet_id: Option<ValAttr<i64>>,
+}
+
+/// §17.18.53 ST_LevelSuffix.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StLevelSuffix {
+    Tab,
+    Space,
+    Nothing,
+}
+
+impl From<StLevelSuffix> for LevelSuffix {
+    fn from(s: StLevelSuffix) -> Self {
+        match s {
+            StLevelSuffix::Tab => Self::Tab,
+            StLevelSuffix::Space => Self::Space,
+            StLevelSuffix::Nothing => Self::Nothing,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -83,6 +108,8 @@ struct NumXml {
 struct LvlOverrideXml {
     #[serde(rename = "@ilvl")]
     ilvl: u8,
+    #[serde(rename = "startOverride", default)]
+    start_override: Option<ValAttr<u32>>,
     #[serde(rename = "lvl", default)]
     lvl: Option<LvlXml>,
 }
@@ -156,6 +183,8 @@ impl From<LvlXml> for NumberingLevelDefinition {
             indentation,
             run_properties,
             lvl_pic_bullet_id: x.lvl_pic_bullet_id.map(|v| NumPicBulletId::new(v.val)),
+            suffix: x.suff.map(|v| LevelSuffix::from(v.val)).unwrap_or_default(),
+            is_legal: x.is_lgl.map(|OnOff(b)| b).unwrap_or(false),
         }
     }
 }
@@ -183,11 +212,16 @@ fn convert_num(n: NumXml) -> NumberingInstance {
     let level_overrides = n
         .overrides
         .into_iter()
-        .filter_map(|o| {
-            o.lvl.map(|mut lvl| {
-                lvl.ilvl = o.ilvl; // legacy parser used override's @ilvl, not inner lvl's
+        .map(|o| {
+            let definition = o.lvl.map(|mut lvl| {
+                lvl.ilvl = o.ilvl; // the override's @ilvl wins over the inner lvl's
                 NumberingLevelDefinition::from(lvl)
-            })
+            });
+            LevelOverride {
+                level: o.ilvl,
+                start_override: o.start_override.map(|v| v.val),
+                definition,
+            }
         })
         .collect();
     NumberingInstance {
@@ -255,6 +289,52 @@ mod tests {
         let inst = &defs.numbering_instances[&NumId::new(9)];
         assert_eq!(inst.level_overrides.len(), 1);
         assert_eq!(inst.level_overrides[0].level, 2);
+        assert!(inst.level_overrides[0].definition.is_some());
+    }
+
+    #[test]
+    fn lvl_suff_and_islgl_parse() {
+        let xml = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="1">
+              <w:lvl w:ilvl="0">
+                <w:numFmt w:val="decimal"/>
+                <w:lvlText w:val="%1."/>
+                <w:suff w:val="space"/>
+                <w:isLgl/>
+              </w:lvl>
+            </w:abstractNum>
+          </w:numbering>"#;
+        let lvl = &parse_numbering(xml).unwrap().abstract_nums[&AbstractNumId::new(1)].levels[0];
+        assert_eq!(lvl.suffix, LevelSuffix::Space);
+        assert!(lvl.is_legal);
+    }
+
+    #[test]
+    fn lvl_suff_defaults_to_tab_and_islgl_false() {
+        let xml = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+          </w:numbering>"#;
+        let lvl = &parse_numbering(xml).unwrap().abstract_nums[&AbstractNumId::new(1)].levels[0];
+        assert_eq!(lvl.suffix, LevelSuffix::Tab);
+        assert!(!lvl.is_legal);
+    }
+
+    #[test]
+    fn start_override_without_lvl_is_captured() {
+        // A `<w:lvlOverride>` may carry only `<w:startOverride>` (no `<w:lvl>`);
+        // the old filter_map dropped such overrides entirely.
+        let xml = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:num w:numId="3">
+              <w:abstractNumId w:val="1"/>
+              <w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride>
+            </w:num>
+          </w:numbering>"#;
+        let defs = parse_numbering(xml).unwrap();
+        let inst = &defs.numbering_instances[&NumId::new(3)];
+        assert_eq!(inst.level_overrides.len(), 1);
+        assert_eq!(inst.level_overrides[0].level, 0);
+        assert_eq!(inst.level_overrides[0].start_override, Some(5));
+        assert!(inst.level_overrides[0].definition.is_none());
     }
 
     #[test]

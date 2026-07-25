@@ -416,11 +416,11 @@ mod tests {
     /// own scope handled via recursion at the emit site).
     #[test]
     fn a8_hyperlink_breaks_join() {
-        use crate::model::{Hyperlink, HyperlinkTarget, RelId};
+        use crate::model::{Hyperlink, HyperlinkTarget};
         let inlines = vec![
             text_run("before "),
             Inline::Hyperlink(Hyperlink {
-                target: HyperlinkTarget::External(RelId::new("rId1")),
+                target: HyperlinkTarget::ExternalUrl("https://example.com".into()),
                 content: vec![text_run("link")],
             }),
             text_run(" after"),

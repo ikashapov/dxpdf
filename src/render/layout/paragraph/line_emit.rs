@@ -533,7 +533,8 @@ pub(super) fn emit_line_commands(
                     // §17.3.1.37: resolve to the next tab stop.
                     // Tab stop positions are absolute from the paragraph's
                     // left edge, not relative to the text indent.
-                    let (tab_pos, tab_stop) = find_next_tab_stop(x, &style.tabs, line_available);
+                    let (tab_pos, tab_stop) =
+                        find_next_tab_stop(x, &style.tabs, line_available, style.default_tab_stop);
 
                     let new_x = if let Some(ts) = tab_stop {
                         use crate::model::TabAlignment;
@@ -726,15 +727,14 @@ fn is_tab_like(f: &Fragment) -> bool {
 
 /// §17.3.1.37: find the next tab stop position greater than `current_x`.
 /// Returns (position, optional tab stop definition).
-/// If no custom tab stop matches, uses default tab stops every 36pt (0.5 inch).
+/// If no custom tab stop matches, falls back to the document's default tab-stop
+/// interval (§17.15.1.25 `w:defaultTabStop`, spec default 36pt / 0.5 inch).
 pub(super) fn find_next_tab_stop(
     current_x: Pt,
     tabs: &[TabStopDef],
     line_width: Pt,
+    default_interval: Pt,
 ) -> (Pt, Option<&TabStopDef>) {
-    // §17.15.1.25: default tab stop interval is 36pt (0.5 inch).
-    const DEFAULT_TAB_INTERVAL: f32 = 36.0;
-
     // Find the first custom tab stop past current position.
     for ts in tabs {
         if ts.position > current_x {
@@ -742,8 +742,14 @@ pub(super) fn find_next_tab_stop(
         }
     }
 
-    // No custom tab stop — use default interval.
-    let next = ((current_x.raw() / DEFAULT_TAB_INTERVAL).floor() + 1.0) * DEFAULT_TAB_INTERVAL;
+    // No custom tab stop — use the document default interval. Guard against a
+    // zero/negative interval (a degenerate w:defaultTabStop) to avoid a stall.
+    let interval = if default_interval.raw() > 0.0 {
+        default_interval.raw()
+    } else {
+        36.0
+    };
+    let next = ((current_x.raw() / interval).floor() + 1.0) * interval;
     (Pt::new(next.min(line_width.raw())), None)
 }
 
@@ -837,5 +843,37 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
         }
         LineSpacingRule::Exact(h) => *h,
         LineSpacingRule::AtLeast(min) => natural.max(*min),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_next_tab_stop;
+    use crate::render::dimension::Pt;
+
+    #[test]
+    fn default_interval_36pt_advances_half_inch() {
+        // No custom stops: land on the next multiple of the default interval.
+        let (pos, ts) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 36.0);
+        assert!(ts.is_none());
+        let (pos, _) = find_next_tab_stop(Pt::new(40.0), &[], Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 72.0);
+    }
+
+    #[test]
+    fn custom_default_interval_is_honored() {
+        // A custom w:defaultTabStop (e.g. 1440tw = 72pt / 1 inch) changes the grid.
+        let (pos, _) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::new(72.0));
+        assert_eq!(pos.raw(), 72.0);
+        let (pos, _) = find_next_tab_stop(Pt::new(80.0), &[], Pt::new(1000.0), Pt::new(72.0));
+        assert_eq!(pos.raw(), 144.0);
+    }
+
+    #[test]
+    fn zero_interval_falls_back_to_36pt() {
+        // A degenerate w:defaultTabStop of 0 must not stall the tab grid.
+        let (pos, _) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::ZERO);
+        assert_eq!(pos.raw(), 36.0);
     }
 }

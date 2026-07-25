@@ -331,7 +331,7 @@ fn append_para_children(
 
 fn convert_hyperlink(h: HyperlinkXml, ctx: &mut ConvertCtx) -> Hyperlink {
     let target = if let Some(id) = h.r_id {
-        HyperlinkTarget::External(RelId::new(id))
+        HyperlinkTarget::ExternalRel(RelId::new(id))
     } else {
         HyperlinkTarget::Internal {
             anchor: h.anchor.unwrap_or_default(),
@@ -364,7 +364,15 @@ fn convert_alt_content(a: AltContentXml, ctx: &mut ConvertCtx) -> AlternateConte
         .choices
         .into_iter()
         .filter_map(|c| {
-            let requires = mc_requires(&c.requires)?;
+            // §M.2.2: @Requires is a space-separated list of namespace prefixes;
+            // the choice is usable only if we understand *all* of them. A single
+            // unknown token drops the whole choice (falling through to the next
+            // choice or the fallback).
+            let requires: Vec<McRequires> = c
+                .requires
+                .split_whitespace()
+                .map(mc_requires)
+                .collect::<Option<_>>()?;
             let content = convert_mc_content(c.content, ctx);
             Some(McChoice { requires, content })
         })
@@ -720,9 +728,55 @@ mod tests {
         assert_eq!(mc_requires("w14"), Some(McRequires::W14));
         // Unknown / unsupported token → None (choice is dropped, fallback used).
         assert_eq!(mc_requires("nope"), None);
-        // Known limitation: a space-separated Requires list is not split, so a
-        // multi-prefix choice matches nothing (see deferred finding A3#5).
+        // `mc_requires` maps a *single* token; a space-separated list is split by
+        // `convert_alt_content` (see `alt_content_requires_*` below), so a raw
+        // multi-token string is not a valid single token.
         assert_eq!(mc_requires("wps w14"), None);
+    }
+
+    #[test]
+    fn alt_content_multi_token_requires_is_kept_when_all_known() {
+        // §M.2.2: a space-separated Requires with every token understood keeps
+        // the choice (previously the whole choice was dropped).
+        let xml = r#"<w:r xmlns:w="x" xmlns:mc="m">
+              <mc:AlternateContent>
+                <mc:Choice Requires="wps w14"><w:drawing/></mc:Choice>
+                <mc:Fallback/>
+              </mc:AlternateContent>
+            </w:r>"#;
+        let r: RunXml = quick_xml::de::from_str(xml).unwrap();
+        let mut out = Vec::new();
+        let mut ctx = ConvertCtx::new();
+        extend_from_run(r, &mut out, &mut ctx);
+        let Some(Inline::AlternateContent(ac)) = out.into_iter().next() else {
+            panic!("expected AlternateContent");
+        };
+        assert_eq!(ac.choices.len(), 1, "multi-token choice kept");
+        assert_eq!(
+            ac.choices[0].requires,
+            vec![McRequires::Wps, McRequires::W14]
+        );
+    }
+
+    #[test]
+    fn alt_content_choice_with_unknown_token_is_dropped() {
+        let xml = r#"<w:r xmlns:w="x" xmlns:mc="m">
+              <mc:AlternateContent>
+                <mc:Choice Requires="wps nope"><w:drawing/></mc:Choice>
+                <mc:Fallback/>
+              </mc:AlternateContent>
+            </w:r>"#;
+        let r: RunXml = quick_xml::de::from_str(xml).unwrap();
+        let mut out = Vec::new();
+        let mut ctx = ConvertCtx::new();
+        extend_from_run(r, &mut out, &mut ctx);
+        let Some(Inline::AlternateContent(ac)) = out.into_iter().next() else {
+            panic!("expected AlternateContent");
+        };
+        assert!(
+            ac.choices.is_empty(),
+            "choice with an unknown token dropped"
+        );
     }
 
     /// Regression: a `<w:tr>` whose `<w:tc>` cells are interleaved with

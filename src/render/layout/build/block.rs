@@ -182,7 +182,8 @@ pub(super) fn build_paragraph_block(
         return None;
     }
 
-    let mut style = paragraph_style_from_props(&merged_props);
+    let mut style =
+        paragraph_style_from_props(&merged_props, Pt::from(ctx.resolved.default_tab_stop));
     style.style_id = p.style_id.clone();
 
     // Attach pending drop cap to this paragraph.
@@ -301,7 +302,8 @@ pub(super) fn build_note_content(
                     },
                 );
             }
-            let style = paragraph_style_from_props(&merged_props);
+            let style =
+                paragraph_style_from_props(&merged_props, Pt::from(ctx.resolved.default_tab_stop));
             results.push((display_num.to_string(), frags, style));
         }
     }

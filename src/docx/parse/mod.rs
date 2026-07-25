@@ -321,15 +321,15 @@ fn resolve_hyperlinks_in_inlines(
     inlines: &mut [crate::model::Inline],
     rels: &crate::docx::relationships::Relationships,
 ) {
-    use crate::model::{HyperlinkTarget, Inline, RelId};
+    use crate::model::{HyperlinkTarget, Inline};
 
     for inline in inlines {
         match inline {
             Inline::Hyperlink(link) => {
-                // Resolve External(RelId) to the actual URL.
-                if let HyperlinkTarget::External(ref rel_id) = link.target {
+                // Resolve an unresolved relationship id to its actual URL.
+                if let HyperlinkTarget::ExternalRel(ref rel_id) = link.target {
                     if let Some(rel) = rels.find_by_id(rel_id.as_str()) {
-                        link.target = HyperlinkTarget::External(RelId::new(&rel.target));
+                        link.target = HyperlinkTarget::ExternalUrl(rel.target.clone());
                     }
                 }
                 // Recurse into hyperlink content.

@@ -31,6 +31,9 @@ pub struct ParagraphStyle {
     pub line_spacing: LineSpacingRule,
     /// §17.3.1.38: custom tab stops.
     pub tabs: Vec<TabStopDef>,
+    /// §17.15.1.25: the default tab-stop interval, used when no custom tab stop
+    /// applies (from `w:settings/w:defaultTabStop`; spec default 720tw = 36pt).
+    pub default_tab_stop: Pt,
     /// Drop cap to render at the start of this paragraph.
     pub drop_cap: Option<DropCapInfo>,
     /// §17.3.1.24: paragraph borders.
@@ -117,6 +120,7 @@ impl ParagraphStyle {
             indent_first_line: self.indent_first_line,
             line_spacing: self.line_spacing,
             tabs: self.tabs.clone(),
+            default_tab_stop: self.default_tab_stop,
             drop_cap: self.drop_cap.clone(),
             borders: self.borders.clone(),
             shading: self.shading,
@@ -145,6 +149,8 @@ impl Default for ParagraphStyle {
             indent_first_line: Pt::ZERO,
             line_spacing: LineSpacingRule::Auto(1.0),
             tabs: Vec::new(),
+            // §17.15.1.25: 720 twips = 36pt is the OOXML default interval.
+            default_tab_stop: Pt::new(36.0),
             drop_cap: None,
             borders: None,
             shading: None,

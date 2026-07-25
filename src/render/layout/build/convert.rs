@@ -115,7 +115,10 @@ pub(super) fn doc_font_size(ctx: &BuildContext) -> Pt {
 }
 
 /// Convert a model paragraph properties into a layout ParagraphStyle.
-pub(super) fn paragraph_style_from_props(props: &model::ParagraphProperties) -> ParagraphStyle {
+pub(super) fn paragraph_style_from_props(
+    props: &model::ParagraphProperties,
+    default_tab_stop: Pt,
+) -> ParagraphStyle {
     let indent_left = props
         .indentation
         .and_then(|i| i.start)
@@ -189,6 +192,7 @@ pub(super) fn paragraph_style_from_props(props: &model::ParagraphProperties) -> 
         indent_first_line,
         line_spacing,
         tabs,
+        default_tab_stop,
         drop_cap: None,
         borders: resolve_paragraph_borders(props),
         shading: props
