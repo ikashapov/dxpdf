@@ -301,3 +301,153 @@ impl From<LsdExceptionXml> for LatentStyleException {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+
+    fn sid(s: &str) -> StyleId {
+        StyleId::new(s)
+    }
+
+    fn parse(inner: &str) -> StyleSheet {
+        let xml = format!("<w:styles {NS}>{inner}</w:styles>");
+        parse_styles(xml.as_bytes()).expect("styles must parse")
+    }
+
+    #[test]
+    fn empty_input_returns_default_stylesheet() {
+        let sheet = parse_styles(b"").unwrap();
+        assert!(sheet.styles.is_empty());
+        assert!(sheet.latent_styles.is_none());
+    }
+
+    #[test]
+    fn style_type_defaults_to_paragraph_and_maps_all_kinds() {
+        let sheet = parse(
+            r#"<w:style w:styleId="NoType"><w:name w:val="No Type"/></w:style>
+               <w:style w:type="character" w:styleId="Char"/>
+               <w:style w:type="table" w:styleId="Tbl"/>
+               <w:style w:type="numbering" w:styleId="Num"/>"#,
+        );
+        assert_eq!(
+            sheet.styles[&sid("NoType")].style_type,
+            StyleType::Paragraph
+        );
+        assert_eq!(sheet.styles[&sid("Char")].style_type, StyleType::Character);
+        assert_eq!(sheet.styles[&sid("Tbl")].style_type, StyleType::Table);
+        assert_eq!(sheet.styles[&sid("Num")].style_type, StyleType::Numbering);
+    }
+
+    #[test]
+    fn name_based_on_and_default_flag_preserved() {
+        let sheet = parse(
+            r#"<w:style w:type="paragraph" w:styleId="Heading1" w:default="1">
+                 <w:name w:val="heading 1"/>
+                 <w:basedOn w:val="Normal"/>
+               </w:style>"#,
+        );
+        let s = &sheet.styles[&sid("Heading1")];
+        assert_eq!(s.name.as_deref(), Some("heading 1"));
+        assert_eq!(s.based_on, Some(sid("Normal")));
+        assert!(s.is_default);
+    }
+
+    #[test]
+    fn style_without_style_id_is_dropped() {
+        // styleId is required; a style missing it can't be referenced, so it's
+        // dropped rather than aborting the whole styles.xml parse.
+        let sheet = parse(
+            r#"<w:style w:type="paragraph"><w:name w:val="Anon"/></w:style>
+               <w:style w:type="paragraph" w:styleId="Kept"/>"#,
+        );
+        assert_eq!(sheet.styles.len(), 1);
+        assert!(sheet.styles.contains_key(&sid("Kept")));
+    }
+
+    #[test]
+    fn doc_defaults_run_and_paragraph_extracted() {
+        let sheet = parse(
+            r#"<w:docDefaults>
+                 <w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault>
+                 <w:pPrDefault><w:pPr><w:jc w:val="center"/></w:pPr></w:pPrDefault>
+               </w:docDefaults>"#,
+        );
+        assert_eq!(sheet.doc_defaults_run.bold, Some(true));
+        assert_eq!(
+            sheet.doc_defaults_paragraph.alignment,
+            Some(Alignment::Center)
+        );
+    }
+
+    #[test]
+    fn all_table_style_override_types_map() {
+        let names = [
+            "firstRow",
+            "lastRow",
+            "firstCol",
+            "lastCol",
+            "band1Vert",
+            "band2Vert",
+            "band1Horz",
+            "band2Horz",
+            "neCell",
+            "nwCell",
+            "seCell",
+            "swCell",
+            "wholeTable",
+        ];
+        let inner: String = names
+            .iter()
+            .map(|t| format!(r#"<w:tblStylePr w:type="{t}"><w:rPr><w:b/></w:rPr></w:tblStylePr>"#))
+            .collect();
+        let sheet = parse(&format!(
+            r#"<w:style w:type="table" w:styleId="TblStyle">{inner}</w:style>"#
+        ));
+        let got: Vec<TableStyleOverrideType> = sheet.styles[&sid("TblStyle")]
+            .table_style_overrides
+            .iter()
+            .map(|o| o.override_type)
+            .collect();
+        assert_eq!(got.len(), 13);
+        for expected in [
+            TableStyleOverrideType::FirstRow,
+            TableStyleOverrideType::LastRow,
+            TableStyleOverrideType::FirstCol,
+            TableStyleOverrideType::LastCol,
+            TableStyleOverrideType::Band1Vert,
+            TableStyleOverrideType::Band2Vert,
+            TableStyleOverrideType::Band1Horz,
+            TableStyleOverrideType::Band2Horz,
+            TableStyleOverrideType::NeCell,
+            TableStyleOverrideType::NwCell,
+            TableStyleOverrideType::SeCell,
+            TableStyleOverrideType::SwCell,
+            TableStyleOverrideType::WholeTable,
+        ] {
+            assert!(
+                got.contains(&expected),
+                "missing override type {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn latent_styles_and_exceptions_parsed() {
+        let sheet = parse(
+            r#"<w:latentStyles w:count="371" w:defUIPriority="99">
+                 <w:lsdException w:name="Normal" w:uiPriority="0" w:qFormat="1"/>
+                 <w:lsdException w:name="heading 1" w:semiHidden="1"/>
+               </w:latentStyles>"#,
+        );
+        let ls = sheet.latent_styles.expect("latentStyles present");
+        assert_eq!(ls.count, Some(371));
+        assert_eq!(ls.default_ui_priority, Some(99));
+        assert_eq!(ls.exceptions.len(), 2);
+        assert_eq!(ls.exceptions[0].name.as_deref(), Some("Normal"));
+        assert_eq!(ls.exceptions[0].q_format, Some(true));
+        assert_eq!(ls.exceptions[1].semi_hidden, Some(true));
+    }
+}

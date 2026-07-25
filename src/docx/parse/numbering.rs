@@ -173,7 +173,13 @@ fn convert_num(n: NumXml) -> NumberingInstance {
     let abstract_num_id = n
         .abstract_num_id
         .map(|v| AbstractNumId::new(v.val))
-        .unwrap_or_else(|| AbstractNumId::new(0));
+        .unwrap_or_else(|| {
+            log::warn!(
+                "numbering instance numId={} has no abstractNumId; defaulting to 0",
+                n.num_id
+            );
+            AbstractNumId::new(0)
+        });
     let level_overrides = n
         .overrides
         .into_iter()
@@ -220,6 +226,35 @@ mod tests {
             defs.numbering_instances[&NumId::new(12)].abstract_num_id,
             AbstractNumId::new(2)
         );
+    }
+
+    #[test]
+    fn num_without_abstract_ref_defaults_to_zero() {
+        // `<w:num>` with no `<w:abstractNumId>` binds to abstract 0 (with a warn).
+        let xml = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:num w:numId="7"/></w:numbering>"#;
+        let defs = parse_numbering(xml).unwrap();
+        assert_eq!(
+            defs.numbering_instances[&NumId::new(7)].abstract_num_id,
+            AbstractNumId::new(0)
+        );
+    }
+
+    #[test]
+    fn lvl_override_uses_override_ilvl_not_inner_lvl() {
+        // The override's own @ilvl wins over the nested `<w:lvl w:ilvl>`.
+        let xml = br#"
+          <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:num w:numId="9">
+              <w:abstractNumId w:val="1"/>
+              <w:lvlOverride w:ilvl="2">
+                <w:lvl w:ilvl="0"><w:lvlText w:val="X%1"/></w:lvl>
+              </w:lvlOverride>
+            </w:num>
+          </w:numbering>"#;
+        let defs = parse_numbering(xml).unwrap();
+        let inst = &defs.numbering_instances[&NumId::new(9)];
+        assert_eq!(inst.level_overrides.len(), 1);
+        assert_eq!(inst.level_overrides[0].level, 2);
     }
 
     #[test]
