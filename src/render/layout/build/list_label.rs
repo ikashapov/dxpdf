@@ -167,7 +167,7 @@ fn inject_text_label(
         };
 
     let (default_family, default_size, default_color, _, paragraph_style_run) =
-        resolve_paragraph_defaults(para, ctx.resolved, false);
+        resolve_paragraph_defaults(para, ctx.resolved, false, None, None);
 
     // §17.9.23 / §17.3.1.29: assemble the label's character-property
     // cascade. Order matters — level rPr beats paragraph-mark rPr beats

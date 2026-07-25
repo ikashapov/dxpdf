@@ -16,9 +16,10 @@ use serde::{Deserialize, Deserializer};
 use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg};
 use crate::docx::geometry::Offset;
 use crate::docx::model::{
-    BlackWhiteMode, Block, BodyProperties, DrawingFill, GeomGuide, PresetGeometryDef,
-    PresetShapeType, ShapeGeometry, ShapeProperties, StyleMatrixRef, TextAnchoringType,
-    TextAutoFit, TextVerticalType, TextWrappingType, Transform2D, WordProcessingShape,
+    BlackWhiteMode, Block, BodyProperties, DrawingFill, FontCollectionIndex, FontReference,
+    GeomGuide, PresetGeometryDef, PresetShapeType, ShapeGeometry, ShapeProperties, StyleMatrixRef,
+    TextAnchoringType, TextAutoFit, TextVerticalType, TextWrappingType, Transform2D,
+    WordProcessingShape,
 };
 use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
 
@@ -480,6 +481,48 @@ pub(crate) struct ShapeStyleXml {
     pub(crate) fill_ref: Option<StyleMatrixRefXml>,
     #[serde(rename = "effectRef", default)]
     pub(crate) effect_ref: Option<StyleMatrixRefXml>,
+    /// §20.1.4.1.17 a:fontRef — `@idx` is `ST_FontCollectionIndex` (a string
+    /// enum, unlike the numeric matrix refs above), plus an optional color.
+    #[serde(rename = "fontRef", default)]
+    pub(crate) font_ref: Option<FontRefXml>,
+}
+
+/// §20.1.4.1.17 CT_FontReference.
+#[derive(Deserialize)]
+pub(crate) struct FontRefXml {
+    #[serde(rename = "@idx", default)]
+    pub(crate) idx: StFontCollectionIndex,
+    #[serde(rename = "$value", default)]
+    pub(crate) color: Option<DrawingColorXml>,
+}
+
+/// §20.1.8.30 ST_FontCollectionIndex.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum StFontCollectionIndex {
+    Major,
+    Minor,
+    #[default]
+    None,
+}
+
+impl From<StFontCollectionIndex> for FontCollectionIndex {
+    fn from(x: StFontCollectionIndex) -> Self {
+        match x {
+            StFontCollectionIndex::Major => Self::Major,
+            StFontCollectionIndex::Minor => Self::Minor,
+            StFontCollectionIndex::None => Self::None,
+        }
+    }
+}
+
+impl From<FontRefXml> for FontReference {
+    fn from(x: FontRefXml) -> Self {
+        Self {
+            collection: x.idx.into(),
+            color: x.color.map(Into::into),
+        }
+    }
 }
 
 /// §20.1.4.2.19 CT_StyleMatrixReference — `idx` + optional color for
@@ -528,13 +571,14 @@ impl WspXml {
                 blocks
             })
             .unwrap_or_default();
-        let (style_line_ref, style_fill_ref, style_effect_ref) = match self.style {
+        let (style_line_ref, style_fill_ref, style_effect_ref, style_font_ref) = match self.style {
             Some(s) => (
                 s.ln_ref.map(Into::into),
                 s.fill_ref.map(Into::into),
                 s.effect_ref.map(Into::into),
+                s.font_ref.map(Into::into),
             ),
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
         WordProcessingShape {
             cnv_pr: self.cnv_pr.map(Into::into),
@@ -542,6 +586,7 @@ impl WspXml {
             style_line_ref,
             style_effect_ref,
             style_fill_ref,
+            style_font_ref,
             body_pr: self.body_pr.map(Into::into),
             txbx_content,
         }
@@ -910,6 +955,33 @@ mod tests {
         let fr = wsp.style_fill_ref.expect("fillRef parsed");
         assert_eq!(fr.idx, 1);
         assert!(fr.color.is_some(), "phClr-substitute color captured");
+    }
+
+    #[test]
+    fn wsp_style_font_ref_parsed() {
+        // §20.1.4.1.17: fontRef carries the shape's default text color (here a
+        // light scheme color for text on a dark fill) and the theme font
+        // collection (`@idx` is a string enum: major/minor/none).
+        let xml = r#"<wrap xmlns:wps="urn:wps" xmlns:w="urn:w" xmlns:a="urn:a" xmlns:r="urn:r">
+            <wsp>
+                <cNvPr id="1" name="S"/>
+                <style>
+                    <fillRef idx="1"><schemeClr val="accent1"/></fillRef>
+                    <fontRef idx="minor"><schemeClr val="lt1"/></fontRef>
+                </style>
+                <bodyPr/>
+            </wsp>
+        </wrap>"#;
+        #[derive(Deserialize)]
+        struct Wrap {
+            wsp: WspXml,
+        }
+        let w: Wrap = quick_xml::de::from_str(xml).unwrap();
+        let mut ctx = crate::docx::parse::body::ConvertCtx::new();
+        let wsp = w.wsp.into_model(&mut ctx);
+        let fr = wsp.style_font_ref.expect("fontRef parsed");
+        assert_eq!(fr.collection, FontCollectionIndex::Minor);
+        assert!(fr.color.is_some(), "fontRef text color captured");
     }
 
     // ── Picture spPr wiring (now that shape schema exists) ──

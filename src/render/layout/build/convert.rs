@@ -33,6 +33,11 @@ pub(super) fn resolve_paragraph_defaults(
     para: &model::Paragraph,
     resolved: &ResolvedDocument,
     defer_doc_defaults: bool,
+    // §20.1.4.1.17: base color / font family for a shape text box (from
+    // `wps:style/fontRef`). They sit *below* the style/run cascade — an
+    // explicit run or style value still wins. `None` uses the normal defaults.
+    base_color: Option<RgbColor>,
+    base_family: Option<&str>,
 ) -> (
     String,
     Pt,
@@ -43,20 +48,23 @@ pub(super) fn resolve_paragraph_defaults(
     let mut para_props = para.properties.clone();
     let mut run_defaults = resolved.doc_defaults_run.clone();
 
-    // Derive default font from: doc defaults → theme minor font → spec fallback.
-    let mut default_family = resolved
-        .theme
-        .as_ref()
-        .map(|t| t.minor_font.latin.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(SPEC_FALLBACK_FONT)
-        .to_string();
+    // Derive default font from: fontRef base → doc defaults → theme minor → spec.
+    let mut default_family = match base_family.filter(|s| !s.is_empty()) {
+        Some(f) => f.to_string(),
+        None => resolved
+            .theme
+            .as_ref()
+            .map(|t| t.minor_font.latin.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(SPEC_FALLBACK_FONT)
+            .to_string(),
+    };
     let mut default_size = resolved
         .doc_defaults_run
         .font_size
         .map(Pt::from)
         .unwrap_or(SPEC_DEFAULT_FONT_SIZE);
-    let mut default_color = RgbColor::BLACK;
+    let mut default_color = base_color.unwrap_or(RgbColor::BLACK);
 
     // §17.7.4.17: if no style is specified, use the default paragraph style.
     let effective_style_id = para
@@ -612,6 +620,59 @@ mod tests {
     use super::*;
     use crate::model::dimension::Dimension;
     use crate::model::{Border, BorderStyle, Color, ParagraphBorders, ParagraphProperties};
+    use crate::render::resolve::color::rgb_from_u32;
+
+    /// An all-empty ResolvedDocument for exercising `resolve_paragraph_defaults`.
+    fn empty_resolved() -> ResolvedDocument {
+        use std::collections::HashMap;
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: ParagraphProperties::default(),
+            doc_defaults_run: model::RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn bare_para() -> model::Paragraph {
+        model::Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: Vec::new(),
+            rsids: model::ParagraphRevisionIds::default(),
+        }
+    }
+
+    #[test]
+    fn shape_font_ref_base_color_and_family_apply_as_defaults() {
+        // §20.1.4.1.17: a shape's fontRef supplies the base text color / family
+        // used when the run/style specify none.
+        let resolved = empty_resolved();
+        let para = bare_para();
+
+        let (_, _, color, _, _) =
+            resolve_paragraph_defaults(&para, &resolved, false, Some(rgb_from_u32(0xFF0000)), None);
+        assert_eq!(color, rgb_from_u32(0xFF0000), "fontRef base color applies");
+
+        // Without a base, the default stays black (unchanged behavior).
+        let (_, _, black, _, _) = resolve_paragraph_defaults(&para, &resolved, false, None, None);
+        assert_eq!(black, rgb_from_u32(0x000000));
+
+        // Base family applies when set.
+        let (family, _, _, _, _) =
+            resolve_paragraph_defaults(&para, &resolved, false, None, Some("Foo Sans"));
+        assert_eq!(family, "Foo Sans");
+    }
 
     fn border_with_style(style: BorderStyle) -> Border {
         Border {

@@ -62,6 +62,14 @@ pub struct BuildState {
     pub list_counters: HashMap<(model::NumId, u8), u32>,
     /// Field evaluation context (page number, total pages).
     pub field_ctx: crate::render::layout::fragment::FieldContext,
+    /// §20.1.4.1.17: default text color for the current shape text box (from
+    /// `wps:style/fontRef`), applied as the base below the run/style cascade.
+    /// `None` outside a shape text box.
+    pub shape_default_text_color: Option<crate::render::resolve::color::RgbColor>,
+    /// §20.1.4.1.17: default font family for the current shape text box (the
+    /// theme major/minor collection selected by `fontRef@idx`). `None` outside
+    /// a shape text box.
+    pub shape_default_font_family: Option<String>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -218,7 +226,8 @@ pub fn build_header_footer_content(
                 // (otherwise the shape displaces text it should flank).
                 let has_floating_anchor = has_float_images || !paragraph_shapes.is_empty();
                 if frags.is_empty() && block_i + 1 < block_count && !has_floating_anchor {
-                    let (family, mut size, ..) = resolve_paragraph_defaults(p, ctx.resolved, false);
+                    let (family, mut size, ..) =
+                        resolve_paragraph_defaults(p, ctx.resolved, false, None, None);
                     if let Some(ref mrp) = p.mark_run_properties {
                         if let Some(fs) = mrp.font_size {
                             size = Pt::from(fs);

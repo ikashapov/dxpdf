@@ -903,6 +903,31 @@ pub(super) fn build_shape_text_commands(
         return Vec::new();
     }
 
+    // §20.1.4.1.17: a wps:style/fontRef sets the shape's default text color and
+    // theme font collection for the text-box content. Resolved here and threaded
+    // through BuildState so the paragraph cascade uses them as the base (an
+    // explicit run/style color still wins).
+    let theme = ctx.resolved.theme.as_ref();
+    let (shape_default_text_color, shape_default_font_family) = match &wsp.style_font_ref {
+        Some(fr) => {
+            let color = fr.color.as_ref().map(|c| {
+                let dc = crate::render::resolve::drawing_color::DrawingColorContext::new(theme);
+                let rgba = crate::render::resolve::drawing_color::resolve_drawing_color(c, &dc);
+                crate::render::resolve::color::rgb_from_u32(rgba.to_rgb24())
+            });
+            let family = theme.and_then(|t| {
+                let fam = match fr.collection {
+                    crate::model::FontCollectionIndex::Major => t.major_font.latin.clone(),
+                    crate::model::FontCollectionIndex::Minor => t.minor_font.latin.clone(),
+                    crate::model::FontCollectionIndex::None => String::new(),
+                };
+                (!fam.is_empty()).then_some(fam)
+            });
+            (color, family)
+        }
+        None => (None, None),
+    };
+
     // Sub-state with the host's page dimensions and field context. Counters
     // are reset so a footnote/list inside a shape body doesn't bump the
     // outer counters.
@@ -912,6 +937,8 @@ pub(super) fn build_shape_text_commands(
         endnote_counter: 0,
         list_counters: std::collections::HashMap::new(),
         field_ctx: state.field_ctx,
+        shape_default_text_color,
+        shape_default_font_family,
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
@@ -973,6 +1000,7 @@ mod tests {
                 style_line_ref: None,
                 style_effect_ref: None,
                 style_fill_ref: None,
+                style_font_ref: None,
                 body_pr: None,
                 txbx_content: vec![],
             })),

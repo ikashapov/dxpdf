@@ -462,6 +462,7 @@ mod tests {
                 style_line_ref: None,
                 style_effect_ref: None,
                 style_fill_ref: None,
+                style_font_ref: None,
                 body_pr: None,
                 txbx_content,
             })),

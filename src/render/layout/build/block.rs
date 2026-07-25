@@ -78,8 +78,13 @@ pub(super) fn build_paragraph_block(
     // Headers/footers have their own injection in
     // `build_header_footer_content` (§17.10.1) and do not call this.
     if fragments.is_empty() {
-        let (family, mut size, ..) =
-            resolve_paragraph_defaults(p, ctx.resolved, table_style.is_some());
+        let (family, mut size, ..) = resolve_paragraph_defaults(
+            p,
+            ctx.resolved,
+            table_style.is_some(),
+            state.shape_default_text_color,
+            state.shape_default_font_family.as_deref(),
+        );
         if let Some(ref mrp) = p.mark_run_properties {
             if let Some(fs) = mrp.font_size {
                 size = Pt::from(fs);
@@ -357,7 +362,13 @@ pub(super) fn build_fragments(
     // Doc defaults are deferred so table style/conditional can be inserted
     // between paragraph style and doc defaults in the cascade.
     let (default_family, mut default_size, mut default_color, mut merged_props, mut run_defaults) =
-        resolve_paragraph_defaults(para, ctx.resolved, table_style.is_some());
+        resolve_paragraph_defaults(
+            para,
+            ctx.resolved,
+            table_style.is_some(),
+            state.shape_default_text_color,
+            state.shape_default_font_family.as_deref(),
+        );
 
     // §17.7.2: table conditional formatting — lower priority than paragraph style.
     if let Some(c) = cond {

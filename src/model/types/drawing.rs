@@ -147,10 +147,32 @@ pub struct WordProcessingShape {
     /// fill style. When the shape has no direct `spPr` fill, the referenced
     /// theme fill (recolored by the ref's `phClr`) supplies the fill.
     pub style_fill_ref: Option<StyleMatrixRef>,
+    /// §20.1.2.2.45 wps:style / §20.1.4.1.17 a:fontRef — the shape's default
+    /// text color and theme font collection for text inside `<wps:txbx>`.
+    pub style_font_ref: Option<FontReference>,
     /// §20.1.2.1.1: body properties (text layout within the shape).
     pub body_pr: Option<BodyProperties>,
     /// §17.17.1: text content inside the shape.
     pub txbx_content: Vec<Block>,
+}
+
+/// §20.1.4.1.17 CT_FontReference — `wps:style/fontRef`: selects the theme font
+/// collection (major/minor) and the shape's default text color.
+#[derive(Clone, Debug)]
+pub struct FontReference {
+    pub collection: FontCollectionIndex,
+    /// Default text color for the shape's text (often a scheme color such as
+    /// `lt1` for light text on a dark fill). `None` leaves the normal cascade.
+    pub color: Option<DrawingColor>,
+}
+
+/// §20.1.8.30 ST_FontCollectionIndex — which theme font collection a
+/// `fontRef` selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontCollectionIndex {
+    Major,
+    Minor,
+    None,
 }
 
 /// §20.1.4.2.19 CT_StyleMatrixReference — a 1-based index into one of the
