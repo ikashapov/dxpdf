@@ -252,14 +252,19 @@ pub(crate) struct AnchorXml {
     pub dist_r: Option<Dimension<Emu>>,
     #[serde(rename = "@simplePos", default)]
     pub simple_pos_attr: Option<AttrBool>,
-    #[serde(rename = "@relativeHeight")]
-    pub relative_height: u32,
-    #[serde(rename = "@behindDoc")]
-    pub behind_doc: AttrBool,
-    #[serde(rename = "@locked")]
-    pub locked: AttrBool,
-    #[serde(rename = "@allowOverlap")]
-    pub allow_overlap: AttrBool,
+    // §20.4.2.3 marks these four `use="required"`, but a single nonconformant
+    // `<wp:anchor>` (some third-party / hand-edited producers omit them) would
+    // otherwise fail deserialization and abort the whole-document parse. Accept
+    // them as optional and apply Word's effective defaults at the `into_image`
+    // seam — matching `layout_in_cell` / `hidden`, which are already lenient.
+    #[serde(rename = "@relativeHeight", default)]
+    pub relative_height: Option<u32>,
+    #[serde(rename = "@behindDoc", default)]
+    pub behind_doc: Option<AttrBool>,
+    #[serde(rename = "@locked", default)]
+    pub locked: Option<AttrBool>,
+    #[serde(rename = "@allowOverlap", default)]
+    pub allow_overlap: Option<AttrBool>,
     #[serde(rename = "@layoutInCell", default)]
     pub layout_in_cell: Option<AttrBool>,
     #[serde(rename = "@hidden", default)]
@@ -528,10 +533,12 @@ impl AnchorXml {
                 horizontal_position,
                 vertical_position,
                 wrap,
-                behind_text: self.behind_doc.0,
-                lock_anchor: self.locked.0,
-                allow_overlap: self.allow_overlap.0,
-                relative_height: self.relative_height,
+                // Word's effective defaults when the (spec-required) attrs are
+                // absent: in front of text, unlocked, overlap allowed, z-order 0.
+                behind_text: self.behind_doc.map(|b| b.0).unwrap_or(false),
+                lock_anchor: self.locked.map(|b| b.0).unwrap_or(false),
+                allow_overlap: self.allow_overlap.map(|b| b.0).unwrap_or(true),
+                relative_height: self.relative_height.unwrap_or(0),
                 layout_in_cell: self.layout_in_cell.map(|b| b.0),
                 hidden: self.hidden.map(|b| b.0),
             }),
@@ -555,7 +562,10 @@ fn position(p: Option<PositionXml>) -> AnchorPosition {
         };
     }
     if let Some(o) = p.pos_offset {
-        let offset = o.value.trim().parse::<i64>().unwrap_or(0);
+        let offset = o.value.trim().parse::<i64>().unwrap_or_else(|_| {
+            log::warn!("posOffset: invalid EMU offset {:?}; using 0", o.value);
+            0
+        });
         return AnchorPosition::Offset {
             relative_from: rel,
             offset: Dimension::new(offset),
@@ -892,6 +902,31 @@ mod tests {
         };
         assert!(a.behind_text);
         assert!(!a.allow_overlap);
+    }
+
+    #[test]
+    fn anchor_missing_required_flags_uses_word_defaults() {
+        // §20.4.2.3 marks relativeHeight/behindDoc/locked/allowOverlap required,
+        // but a nonconformant anchor that omits them must still parse — a single
+        // bad anchor must not abort the whole-document parse — falling back to
+        // Word's effective defaults.
+        let img = parse_anchor(
+            r#"<anchor distT="0" distB="0" distL="0" distR="0">
+                <positionH relativeFrom="column"><posOffset>0</posOffset></positionH>
+                <positionV relativeFrom="paragraph"><posOffset>0</posOffset></positionV>
+                <wrapNone/>
+                <extent cx="100" cy="100"/>
+                <docPr id="9" name="lenient"/>
+                <graphic><graphicData/></graphic>
+            </anchor>"#,
+        );
+        let ImagePlacement::Anchor(a) = &img.placement else {
+            panic!("expected Anchor");
+        };
+        assert!(!a.behind_text, "behindDoc defaults to false");
+        assert!(!a.lock_anchor, "locked defaults to false");
+        assert!(a.allow_overlap, "allowOverlap defaults to true");
+        assert_eq!(a.relative_height, 0, "relativeHeight defaults to 0");
     }
 
     #[test]

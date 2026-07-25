@@ -358,16 +358,25 @@ fn to_command(c: PathCommandXml) -> Option<PathCommand> {
         PathCommandXml::LnTo(s) => PathCommand::LineTo(s.pt.into()),
         PathCommandXml::CubicBezTo(m) => {
             let mut it = m.pts.into_iter();
-            let a = it.next()?.into();
-            let b = it.next()?.into();
-            let c = it.next()?.into();
-            PathCommand::CubicBezTo(a, b, c)
+            match (it.next(), it.next(), it.next()) {
+                (Some(a), Some(b), Some(c)) => {
+                    PathCommand::CubicBezTo(a.into(), b.into(), c.into())
+                }
+                _ => {
+                    log::warn!("cubicBezTo: expected 3 points; dropping malformed command");
+                    return None;
+                }
+            }
         }
         PathCommandXml::QuadBezTo(m) => {
             let mut it = m.pts.into_iter();
-            let a = it.next()?.into();
-            let b = it.next()?.into();
-            PathCommand::QuadBezTo(a, b)
+            match (it.next(), it.next()) {
+                (Some(a), Some(b)) => PathCommand::QuadBezTo(a.into(), b.into()),
+                _ => {
+                    log::warn!("quadBezTo: expected 2 points; dropping malformed command");
+                    return None;
+                }
+            }
         }
         PathCommandXml::ArcTo(a) => PathCommand::ArcTo {
             wr: a.wr.0,
@@ -615,6 +624,27 @@ mod tests {
         assert_eq!(p.fill, PathFillMode::Norm);
         assert!(p.stroke);
         assert!(!p.extrusion_ok);
+    }
+
+    #[test]
+    fn malformed_cubic_bezier_is_dropped() {
+        // A cubicBezTo needs 3 points; a short one is dropped (with a warn)
+        // rather than corrupting the path or aborting the parse.
+        let g = parse(
+            r#"<custGeom>
+                <pathLst>
+                    <path w="100" h="100">
+                        <moveTo><pt x="0" y="0"/></moveTo>
+                        <cubicBezTo><pt x="10" y="0"/><pt x="20" y="0"/></cubicBezTo>
+                        <lnTo><pt x="50" y="50"/></lnTo>
+                    </path>
+                </pathLst>
+            </custGeom>"#,
+        );
+        let cmds = &g.paths[0].commands;
+        assert_eq!(cmds.len(), 2, "malformed cubicBezTo dropped, others kept");
+        assert!(matches!(cmds[0], PathCommand::MoveTo(_)));
+        assert!(matches!(cmds[1], PathCommand::LineTo(_)));
     }
 
     #[test]
