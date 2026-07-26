@@ -5,7 +5,7 @@
 //! operand is either a decimal literal, a guide-name reference, or one of a
 //! small set of spec-defined named constants.
 //!
-//! The spec enumerates 18 operators (§20.1.9.11 ST_GeomGuideFormula). All
+//! The spec enumerates 17 operators (§20.1.9.11 ST_GeomGuideFormula). All
 //! are implemented here. Resolution is pure: given a `GuideContext` and a
 //! slice of `GeomGuide`s in document order, `evaluate_guides` returns a
 //! `GuideValues` map keyed by guide name.

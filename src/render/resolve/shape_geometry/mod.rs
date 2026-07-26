@@ -86,3 +86,45 @@ pub fn build_geometry(geometry: &ShapeGeometry, extent: PtSize) -> Option<ShapeP
         ShapeGeometry::Custom(def) => custom::build_custom(def, extent),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{PresetGeometryDef, PresetShapeType, ShapeGeometry};
+
+    fn preset(preset: PresetShapeType) -> ShapeGeometry {
+        ShapeGeometry::Preset(PresetGeometryDef {
+            preset,
+            adjust_values: vec![],
+        })
+    }
+
+    #[test]
+    fn zero_extent_returns_none() {
+        // Both dimensions zero → nothing to draw.
+        let g = preset(PresetShapeType::Rect);
+        assert!(build_geometry(&g, PtSize::new(Pt::ZERO, Pt::ZERO)).is_none());
+    }
+
+    #[test]
+    fn single_zero_dimension_still_builds() {
+        // A vertical line is authored as cx=0, cy=N — must not be rejected.
+        let g = preset(PresetShapeType::Line);
+        assert!(build_geometry(&g, PtSize::new(Pt::ZERO, Pt::new(40.0))).is_some());
+        // …and a horizontal line as cx=N, cy=0.
+        assert!(build_geometry(&g, PtSize::new(Pt::new(40.0), Pt::ZERO)).is_some());
+    }
+
+    #[test]
+    fn preset_dispatch_builds_supported_shapes() {
+        let extent = PtSize::new(Pt::new(30.0), Pt::new(20.0));
+        assert!(build_geometry(&preset(PresetShapeType::Rect), extent).is_some());
+        assert!(build_geometry(&preset(PresetShapeType::Line), extent).is_some());
+    }
+
+    #[test]
+    fn unimplemented_preset_returns_none() {
+        let extent = PtSize::new(Pt::new(30.0), Pt::new(20.0));
+        assert!(build_geometry(&preset(PresetShapeType::Star12), extent).is_none());
+    }
+}
