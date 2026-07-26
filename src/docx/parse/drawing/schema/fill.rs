@@ -111,8 +111,11 @@ pub struct LinShadeXml {
 
 #[derive(Debug, Deserialize)]
 pub struct PathShadeXml {
-    #[serde(rename = "@path")]
-    pub path_type: StPathShadeType,
+    // §20.1.8.46 CT_PathShadeProperties: `@path` is use="optional". Keep it
+    // optional so a conformant `<a:path>` that omits it does not fail the
+    // whole document (theme `fmtScheme` fills feed this parser).
+    #[serde(rename = "@path", default)]
+    pub path_type: Option<StPathShadeType>,
     #[serde(rename = "fillToRect", default)]
     pub fill_to_rect: Option<RelativeRectXml>,
 }
@@ -191,7 +194,13 @@ impl From<GradFillXml> for GradientFill {
             }
         } else if let Some(path) = x.path {
             GradientShadeProperties::Path {
-                path_type: path.path_type.into(),
+                // An omitted `@path` still denotes a path (radial-family)
+                // gradient; default to `circle`, which is what the shade
+                // currently resolves to downstream (Radial).
+                path_type: path
+                    .path_type
+                    .map(Into::into)
+                    .unwrap_or(PathShadeType::Circle),
                 fill_to_rect: path.fill_to_rect.map(Into::into),
             }
         } else {
@@ -365,8 +374,9 @@ impl From<BlipFillXml> for BlipFill {
 
 #[derive(Debug, Deserialize)]
 pub struct PattFillXml {
-    #[serde(rename = "@prst")]
-    pub prst: StPresetPatternVal,
+    // §20.1.8.47 CT_PatternFillProperties: `@prst` is use="optional".
+    #[serde(rename = "@prst", default)]
+    pub prst: Option<StPresetPatternVal>,
     #[serde(rename = "fgClr", default)]
     pub fg_clr: Option<ColorParent>,
     #[serde(rename = "bgClr", default)]
@@ -383,7 +393,7 @@ pub struct ColorParent {
 impl From<PattFillXml> for PatternFill {
     fn from(x: PattFillXml) -> Self {
         Self {
-            preset: x.prst.into(),
+            preset: x.prst.map(Into::into),
             fg_color: x.fg_clr.map(|c| c.color.into()),
             bg_color: x.bg_clr.map(|c| c.color.into()),
         }
@@ -657,7 +667,7 @@ mod tests {
             </pattFill>"#,
         ) {
             DrawingFill::Pattern(p) => {
-                assert_eq!(p.preset, PresetPatternVal::Cross);
+                assert_eq!(p.preset, Some(PresetPatternVal::Cross));
                 assert!(p.fg_color.is_some());
                 assert!(p.bg_color.is_some());
             }
@@ -668,7 +678,41 @@ mod tests {
     #[test]
     fn pattern_fill_dk_horz() {
         match parse(r#"<pattFill prst="dkHorz"/>"#) {
-            DrawingFill::Pattern(p) => assert_eq!(p.preset, PresetPatternVal::DkHorz),
+            DrawingFill::Pattern(p) => assert_eq!(p.preset, Some(PresetPatternVal::DkHorz)),
+            other => panic!("expected Pattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_gradient_without_path_attr_defaults_to_circle() {
+        // §20.1.8.46 CT_PathShadeProperties: `@path` is optional. A `<a:path>`
+        // omitting it must parse (not crash the theme parse) and default to a
+        // circle path so the gradient still resolves as radial downstream.
+        match parse(
+            r#"<gradFill>
+                <gsLst><gs pos="0"><srgbClr val="FF0000"/></gs></gsLst>
+                <path><fillToRect l="0" t="0" r="0" b="0"/></path>
+            </gradFill>"#,
+        ) {
+            DrawingFill::Gradient(g) => match g.shade_properties {
+                GradientShadeProperties::Path { path_type, .. } => {
+                    assert_eq!(path_type, PathShadeType::Circle);
+                }
+                other => panic!("expected Path, got {other:?}"),
+            },
+            other => panic!("expected Gradient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pattern_fill_without_prst_is_none() {
+        // §20.1.8.47 CT_PatternFillProperties: `@prst` is optional. An omitted
+        // preset must parse to `None`, not fail the whole document.
+        match parse(r#"<pattFill><fgClr><srgbClr val="FF0000"/></fgClr></pattFill>"#) {
+            DrawingFill::Pattern(p) => {
+                assert_eq!(p.preset, None);
+                assert!(p.fg_color.is_some());
+            }
             other => panic!("expected Pattern, got {other:?}"),
         }
     }

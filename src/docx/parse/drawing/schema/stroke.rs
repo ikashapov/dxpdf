@@ -75,6 +75,12 @@ pub enum LnChildXml {
     HeadEnd(LineEndXml),
     #[serde(rename = "tailEnd")]
     TailEnd(LineEndXml),
+
+    // §20.1.2.2.24 CT_LineProperties ends with an optional `<a:extLst>`, and
+    // producers may emit other extension children. Absorb anything unknown
+    // rather than failing the whole document (theme `lnStyleLst` feeds this).
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +325,7 @@ impl From<OutlineXml> for Outline {
                 LnChildXml::TailEnd(le) => {
                     tail_end = Some(line_end(le));
                 }
+                LnChildXml::Other => {}
             }
         }
 
@@ -444,6 +451,26 @@ mod tests {
         assert_eq!(t.kind, LineEndType::None);
         assert_eq!(t.width, LineEndSize::Med);
         assert_eq!(t.length, LineEndSize::Med);
+    }
+
+    #[test]
+    fn outline_with_ext_lst_is_tolerated() {
+        // §20.1.2.2.24 CT_LineProperties permits a trailing <a:extLst>; an
+        // unknown child must be absorbed, not crash the theme parse. The
+        // recognised siblings still resolve.
+        let o = parse(
+            r#"<ln w="9525">
+                <solidFill><srgbClr val="FF0000"/></solidFill>
+                <prstDash val="solid"/>
+                <extLst><ext uri="{X}"><foo/></ext></extLst>
+            </ln>"#,
+        );
+        assert_eq!(o.width.unwrap().raw(), 9525);
+        assert!(matches!(o.fill, Some(DrawingFill::Solid(_))));
+        assert!(matches!(
+            o.dash,
+            Some(LineDash::Preset(PresetLineDashVal::Solid))
+        ));
     }
 
     #[test]

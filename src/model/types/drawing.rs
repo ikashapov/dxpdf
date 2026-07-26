@@ -865,8 +865,9 @@ pub enum TileFlipMode {
 /// §20.1.8.47 CT_PatternFillProperties.
 #[derive(Clone, Debug)]
 pub struct PatternFill {
-    /// §20.1.10.50 @prst — preset pattern.
-    pub preset: PresetPatternVal,
+    /// §20.1.10.50 @prst — preset pattern. Optional per spec; `None` when the
+    /// `<a:pattFill>` omits `@prst` (an unspecified pattern).
+    pub preset: Option<PresetPatternVal>,
     /// §20.1.8.30 fgClr — foreground color.
     pub fg_color: Option<DrawingColor>,
     /// §20.1.8.10 bgClr — background color.

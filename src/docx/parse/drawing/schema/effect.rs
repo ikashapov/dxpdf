@@ -297,18 +297,26 @@ impl From<StPresetShadowVal> for PresetShadowVal {
 
 impl From<EffectListXml> for EffectList {
     fn from(x: EffectListXml) -> Self {
-        Self {
-            effects: x
-                .effects
-                .into_iter()
-                .filter_map(|e| e.try_into().ok())
-                .collect(),
+        let mut effects = Vec::new();
+        for e in x.effects {
+            match Effect::try_from(e) {
+                Ok(eff) => effects.push(eff),
+                // §20.1.8.* — the color/fill child is mandatory for these
+                // effects; a malformed one is dropped rather than silently
+                // vanishing without a trace (cf. the geometry short-command warn).
+                Err(name) => {
+                    log::warn!("drawing effect <{name}> dropped: missing required color/fill child")
+                }
+            }
         }
+        Self { effects }
     }
 }
 
 impl TryFrom<EffectXml> for Effect {
-    type Error = ();
+    /// The name of the effect element that could not be built (missing its
+    /// required color/fill child), for diagnostics.
+    type Error = &'static str;
     fn try_from(e: EffectXml) -> Result<Self, Self::Error> {
         Ok(match e {
             EffectXml::Blur(b) => Effect::Blur(BlurEffect {
@@ -321,7 +329,7 @@ impl TryFrom<EffectXml> for Effect {
             EffectXml::Reflection(r) => Effect::Reflection(reflection(r)),
             EffectXml::FillOverlay(f) => {
                 // Spec requires a fill child; if missing, skip this effect.
-                let fill: DrawingFill = f.fill.ok_or(())?.into();
+                let fill: DrawingFill = f.fill.ok_or("fillOverlay")?.into();
                 Effect::FillOverlay(FillOverlayEffect {
                     fill,
                     blend: f.blend.into(),
@@ -329,10 +337,10 @@ impl TryFrom<EffectXml> for Effect {
             }
             EffectXml::Glow(g) => Effect::Glow(GlowEffect {
                 radius: g.rad.unwrap_or_default(),
-                color: g.color.ok_or(())?.into(),
+                color: g.color.ok_or("glow")?.into(),
             }),
             EffectXml::InnerShdw(i) => {
-                let color: DrawingColor = i.color.ok_or(())?.into();
+                let color: DrawingColor = i.color.ok_or("innerShdw")?.into();
                 Effect::InnerShdw(InnerShadowEffect {
                     blur_radius: i.blur_rad.unwrap_or_default(),
                     distance: i.distance.unwrap_or_default(),
@@ -341,7 +349,7 @@ impl TryFrom<EffectXml> for Effect {
                 })
             }
             EffectXml::OuterShdw(o) => {
-                let color: DrawingColor = o.color.ok_or(())?.into();
+                let color: DrawingColor = o.color.ok_or("outerShdw")?.into();
                 Effect::OuterShdw(OuterShadowEffect {
                     blur_radius: o.blur_rad.unwrap_or_default(),
                     distance: o.distance.unwrap_or_default(),
@@ -356,7 +364,7 @@ impl TryFrom<EffectXml> for Effect {
                 })
             }
             EffectXml::PrstShdw(p) => {
-                let color: DrawingColor = p.color.ok_or(())?.into();
+                let color: DrawingColor = p.color.ok_or("prstShdw")?.into();
                 Effect::PrstShdw(PresetShadowEffect {
                     preset: p.prst.into(),
                     distance: p.distance.unwrap_or_default(),
@@ -528,6 +536,19 @@ mod tests {
             }
             other => panic!("expected Reflection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn effect_missing_required_color_is_dropped() {
+        // glow/shadow require a color child; a malformed one is skipped (with a
+        // warn) while well-formed siblings survive — the list never crashes.
+        let el = parse(
+            r#"<glow rad="40000"/>
+               <outerShdw blurRad="0" dist="0" dir="0"/>
+               <blur rad="5000"/>"#,
+        );
+        assert_eq!(el.effects.len(), 1);
+        assert!(matches!(&el.effects[0], Effect::Blur(_)));
     }
 
     #[test]
