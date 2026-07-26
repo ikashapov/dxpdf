@@ -29,13 +29,17 @@ pub struct CellGridPosition {
 
 /// §17.7.6: resolve conditional formatting for a cell at (row, col).
 ///
-/// Overlays applicable `tblStylePr` overrides in priority order per §17.7.6:
-/// 1. Whole table (lowest)
-/// 2. Band1/Band2 Horizontal
-/// 3. Band1/Band2 Vertical
-/// 4. First/Last Column
-/// 5. First/Last Row
-/// 6. Corner cells (highest)
+/// Overlays applicable positional `tblStylePr` overrides in ascending priority
+/// (later overlays win), per §17.7.6:
+/// 1. Band1/Band2 Vertical (banded columns)
+/// 2. Band1/Band2 Horizontal (banded rows — override column banding)
+/// 3. First/Last Column
+/// 4. First/Last Row
+/// 5. Corner cells (highest)
+///
+/// The spec's lowest layer, `wholeTable`, is not positional and is *not* applied
+/// here (it would layer below the bands as a per-table base) — see the table-build
+/// note: `wholeTable` overrides are currently unresolved.
 pub fn resolve_cell_conditional(
     pos: &CellGridPosition,
     look: Option<&TableLook>,
@@ -93,7 +97,31 @@ fn applicable_regions(
     let h_band_active = !look.and_then(|l| l.no_h_band).unwrap_or(false);
     let v_band_active = !look.and_then(|l| l.no_v_band).unwrap_or(false);
 
-    // §17.7.6 priority 2: horizontal banding.
+    // §17.7.6 priority 1: vertical banding (banded columns). Pushed *before*
+    // horizontal banding so that — per the spec's ascending order (band1Vert,
+    // band2Vert, band1Horz, band2Horz) — row banding overrides column banding.
+    if v_band_active {
+        let band_col = if first_col_active && col_idx > 0 {
+            col_idx - 1
+        } else {
+            col_idx
+        };
+        let band_size = col_band_size.max(1) as usize;
+        let in_first_band = (band_col / band_size).is_multiple_of(2);
+
+        let is_first = first_col_active && col_idx == 0;
+        let is_last = last_col_active && col_idx == num_cols - 1;
+        if !is_first && !is_last {
+            if in_first_band {
+                regions.push(TableStyleOverrideType::Band1Vert);
+            } else {
+                regions.push(TableStyleOverrideType::Band2Vert);
+            }
+        }
+    }
+
+    // §17.7.6 priority 2: horizontal banding (banded rows) — higher priority
+    // than vertical banding.
     if h_band_active {
         // When firstRow is active, banding starts from row 1.
         let band_row = if first_row_active && row_idx > 0 {
@@ -112,27 +140,6 @@ fn applicable_regions(
                 regions.push(TableStyleOverrideType::Band1Horz);
             } else {
                 regions.push(TableStyleOverrideType::Band2Horz);
-            }
-        }
-    }
-
-    // §17.7.6 priority 3: vertical banding.
-    if v_band_active {
-        let band_col = if first_col_active && col_idx > 0 {
-            col_idx - 1
-        } else {
-            col_idx
-        };
-        let band_size = col_band_size.max(1) as usize;
-        let in_first_band = (band_col / band_size).is_multiple_of(2);
-
-        let is_first = first_col_active && col_idx == 0;
-        let is_last = last_col_active && col_idx == num_cols - 1;
-        if !is_first && !is_last {
-            if in_first_band {
-                regions.push(TableStyleOverrideType::Band1Vert);
-            } else {
-                regions.push(TableStyleOverrideType::Band2Vert);
             }
         }
     }
@@ -458,5 +465,42 @@ mod tests {
         );
         assert!(result.cell_properties.is_none());
         assert!(result.run_properties.is_none());
+    }
+
+    #[test]
+    fn horizontal_banding_overrides_vertical() {
+        // §17.7.6: band1Horz is applied after band1Vert, so on a cell that is in
+        // both an odd row-band and an odd column-band the *row* banding wins.
+        let overrides = vec![
+            make_override(
+                TableStyleOverrideType::Band1Vert,
+                Some(blue_shading()),
+                None,
+            ),
+            make_override(
+                TableStyleOverrideType::Band1Horz,
+                Some(green_shading()),
+                None,
+            ),
+        ];
+        // Interior cell (1,1): band_row=0 → Band1Horz, band_col=0 → Band1Vert.
+        let result = resolve_cell_conditional(
+            &CellGridPosition {
+                row_idx: 1,
+                col_idx: 1,
+                num_rows: 6,
+                num_cols: 6,
+                row_band_size: 1,
+                col_band_size: 1,
+            },
+            None,
+            &overrides,
+        );
+        let shading = result.cell_properties.unwrap().shading.unwrap();
+        assert_eq!(
+            shading.fill,
+            Color::Rgb(0x9BBB59),
+            "row banding (green) must override column banding (blue)"
+        );
     }
 }
