@@ -76,3 +76,79 @@ fn parse_formula_arg(s: &str) -> Option<VmlFormulaArg> {
     }
     s.parse::<i64>().ok().map(VmlFormulaArg::Literal)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sum_with_adj_ref_and_literals() {
+        let f = parse_formula("sum #0 0 10800").unwrap();
+        assert_eq!(f.operation, VmlFormulaOp::Sum);
+        assert_eq!(
+            f.args,
+            [
+                VmlFormulaArg::AdjRef(0),
+                VmlFormulaArg::Literal(0),
+                VmlFormulaArg::Literal(10800),
+            ]
+        );
+    }
+
+    #[test]
+    fn prod_maps_from_short_name() {
+        let f = parse_formula("prod @2 1 2").unwrap();
+        assert_eq!(f.operation, VmlFormulaOp::Product);
+        assert_eq!(f.args[0], VmlFormulaArg::FormulaRef(2));
+    }
+
+    #[test]
+    fn guide_arguments() {
+        let f = parse_formula("mid width height").unwrap();
+        assert_eq!(f.operation, VmlFormulaOp::Mid);
+        assert_eq!(f.args[0], VmlFormulaArg::Guide(VmlGuide::Width));
+        assert_eq!(f.args[1], VmlFormulaArg::Guide(VmlGuide::Height));
+        // No third token → defaults to literal 0.
+        assert_eq!(f.args[2], VmlFormulaArg::Literal(0));
+    }
+
+    #[test]
+    fn missing_arguments_default_to_literal_zero() {
+        let f = parse_formula("val 100").unwrap();
+        assert_eq!(f.operation, VmlFormulaOp::Val);
+        assert_eq!(
+            f.args,
+            [
+                VmlFormulaArg::Literal(100),
+                VmlFormulaArg::Literal(0),
+                VmlFormulaArg::Literal(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn negative_literal() {
+        let f = parse_formula("sum 0 0 -10800").unwrap();
+        assert_eq!(f.args[2], VmlFormulaArg::Literal(-10800));
+    }
+
+    #[test]
+    fn unknown_operation_is_dropped() {
+        assert!(parse_formula("bogus 1 2 3").is_none());
+    }
+
+    #[test]
+    fn empty_string_is_none() {
+        assert!(parse_formula("").is_none());
+        assert!(parse_formula("   ").is_none());
+    }
+
+    #[test]
+    fn unparseable_guide_falls_back_to_literal_zero() {
+        // An unrecognized non-numeric arg is not a guide and not an integer;
+        // `arg()` substitutes literal 0 rather than failing the whole formula.
+        let f = parse_formula("sum notaguide 5 6").unwrap();
+        assert_eq!(f.args[0], VmlFormulaArg::Literal(0));
+        assert_eq!(f.args[1], VmlFormulaArg::Literal(5));
+    }
+}

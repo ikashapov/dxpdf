@@ -177,8 +177,8 @@ impl From<FillXml> for crate::docx::model::VmlFill {
         };
         VmlFill {
             fill_type,
-            color: x.color.as_deref().and_then(|s| parse_color(s).ok()),
-            color2: x.color2.as_deref().and_then(|s| parse_color(s).ok()),
+            color: x.color.as_deref().and_then(parse_color),
+            color2: x.color2.as_deref().and_then(parse_color),
             opacity: x.opacity.as_deref().and_then(|s| {
                 // VML opacity admits "0.5" or "32768f" (fixed-point fraction
                 // of 65536). For phase C we accept the float form.
@@ -195,7 +195,7 @@ impl CommonAttrsXml {
         VmlCommonAttrs {
             id: self.id.map(VmlShapeId::new),
             style: parse_style(self.style),
-            fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+            fill_color: self.fillcolor.as_deref().and_then(parse_color),
             stroked: self.stroked.map(|b| b.0),
             stroke: self.stroke.map(Into::into),
             text_box: self.textbox.map(|t| t.into_model(ctx)),
@@ -297,7 +297,7 @@ impl ShapeXml {
             common: crate::model::VmlCommonAttrs {
                 id: self.id.map(VmlShapeId::new),
                 style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+                fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
                 stroke: self.stroke.map(Into::into),
                 text_box: self.textbox.map(|t| t.into_model(ctx)),
@@ -355,7 +355,7 @@ impl RectXml {
             common: VmlCommonAttrs {
                 id: self.id.map(VmlShapeId::new),
                 style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+                fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
                 stroke: self.stroke.map(Into::into),
                 text_box: self.textbox.map(|t| t.into_model(ctx)),
@@ -549,7 +549,7 @@ impl GroupXml {
             common: VmlCommonAttrs {
                 id: self.id.map(VmlShapeId::new),
                 style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+                fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
                 ..VmlCommonAttrs::default()
             },

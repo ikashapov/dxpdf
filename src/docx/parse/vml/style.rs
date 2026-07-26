@@ -206,3 +206,136 @@ pub(super) fn parse_length(s: &str) -> Option<VmlLength> {
     let value = num_str.trim().parse::<f64>().ok()?;
     Some(VmlLength { value, unit })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_yields_default() {
+        let s = parse_style(None);
+        assert!(s.position.is_none());
+        assert!(s.left.is_none());
+    }
+
+    #[test]
+    fn position_and_dimensions() {
+        let s = parse_style(Some(
+            "position:absolute;left:10pt;top:20pt;width:100pt;height:50pt".into(),
+        ));
+        assert_eq!(s.position, Some(CssPosition::Absolute));
+        assert_eq!(
+            s.left,
+            Some(VmlLength {
+                value: 10.0,
+                unit: VmlLengthUnit::Pt
+            })
+        );
+        assert_eq!(
+            s.width,
+            Some(VmlLength {
+                value: 100.0,
+                unit: VmlLengthUnit::Pt
+            })
+        );
+        assert_eq!(
+            s.height,
+            Some(VmlLength {
+                value: 50.0,
+                unit: VmlLengthUnit::Pt
+            })
+        );
+    }
+
+    #[test]
+    fn flip_and_visibility() {
+        let s = parse_style(Some("flip:xy;visibility:hidden".into()));
+        assert_eq!(s.flip, Some(VmlFlip::XY));
+        assert_eq!(s.visibility, Some(CssVisibility::Hidden));
+    }
+
+    #[test]
+    fn mso_positioning() {
+        let s = parse_style(Some(
+            "mso-position-horizontal:center;mso-position-vertical-relative:line".into(),
+        ));
+        assert_eq!(s.mso_position_horizontal, Some(MsoPositionH::Center));
+        assert_eq!(
+            s.mso_position_vertical_relative,
+            Some(MsoPositionVRelative::Line)
+        );
+    }
+
+    #[test]
+    fn z_index_and_rotation() {
+        let s = parse_style(Some("z-index:5;rotation:45".into()));
+        assert_eq!(s.z_index, Some(5));
+        assert_eq!(s.rotation, Some(45.0));
+    }
+
+    #[test]
+    fn whitespace_and_unknown_props_are_ignored() {
+        // Extra whitespace, a trailing empty declaration, and an unrecognized
+        // property must not derail the recognized ones.
+        let s = parse_style(Some("  left : 3pt ; mso-bogus:1 ;".into()));
+        assert_eq!(
+            s.left,
+            Some(VmlLength {
+                value: 3.0,
+                unit: VmlLengthUnit::Pt
+            })
+        );
+    }
+
+    #[test]
+    fn length_units() {
+        assert_eq!(
+            parse_length("468pt"),
+            Some(VmlLength {
+                value: 468.0,
+                unit: VmlLengthUnit::Pt
+            })
+        );
+        assert_eq!(
+            parse_length("3.5in"),
+            Some(VmlLength {
+                value: 3.5,
+                unit: VmlLengthUnit::In
+            })
+        );
+        assert_eq!(
+            parse_length("50%"),
+            Some(VmlLength {
+                value: 50.0,
+                unit: VmlLengthUnit::Percent
+            })
+        );
+        assert_eq!(
+            parse_length("-10pt"),
+            Some(VmlLength {
+                value: -10.0,
+                unit: VmlLengthUnit::Pt
+            })
+        );
+    }
+
+    #[test]
+    fn unitless_length() {
+        assert_eq!(
+            parse_length("0"),
+            Some(VmlLength {
+                value: 0.0,
+                unit: VmlLengthUnit::None
+            })
+        );
+    }
+
+    #[test]
+    fn empty_and_unsupported_unit_are_none() {
+        assert!(parse_length("").is_none());
+        assert!(parse_length("   ").is_none());
+        // Unknown unit suffix → warn + None (rather than a wrong value).
+        assert!(parse_length("10xyz").is_none());
+        assert!(parse_length("auto").is_none());
+    }
+}
