@@ -230,6 +230,68 @@ impl From<PTabLeader> for TabLeader {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cnf_first_row_bit_is_leftmost() {
+        assert_eq!(CnfStyle::from_val_str("100000000000"), CnfStyle::FIRST_ROW);
+    }
+
+    #[test]
+    fn cnf_last_row_last_column_is_rightmost() {
+        assert_eq!(
+            CnfStyle::from_val_str("000000000001"),
+            CnfStyle::LAST_ROW_LAST_COLUMN
+        );
+    }
+
+    #[test]
+    fn cnf_all_twelve_bits() {
+        assert_eq!(CnfStyle::from_val_str("111111111111"), CnfStyle::all());
+    }
+
+    #[test]
+    fn cnf_empty_is_empty() {
+        assert_eq!(CnfStyle::from_val_str(""), CnfStyle::empty());
+    }
+
+    #[test]
+    fn cnf_short_string_sets_only_leading_bits() {
+        assert_eq!(
+            CnfStyle::from_val_str("11"),
+            CnfStyle::FIRST_ROW | CnfStyle::LAST_ROW
+        );
+    }
+
+    #[test]
+    fn cnf_chars_beyond_twelve_are_ignored() {
+        assert_eq!(
+            CnfStyle::from_val_str("100000000000ZZZ"),
+            CnfStyle::FIRST_ROW
+        );
+    }
+
+    #[test]
+    fn cnf_non_one_chars_leave_bits_unset() {
+        // Only '1' sets a bit; '0' and anything else leave it clear.
+        assert_eq!(CnfStyle::from_val_str("0x0000000000"), CnfStyle::empty());
+    }
+
+    #[test]
+    fn ptab_leader_maps_to_tab_leader() {
+        assert_eq!(TabLeader::from(PTabLeader::None), TabLeader::None);
+        assert_eq!(TabLeader::from(PTabLeader::Dot), TabLeader::Dot);
+        assert_eq!(TabLeader::from(PTabLeader::Hyphen), TabLeader::Hyphen);
+        assert_eq!(
+            TabLeader::from(PTabLeader::Underscore),
+            TabLeader::Underscore
+        );
+        assert_eq!(TabLeader::from(PTabLeader::MiddleDot), TabLeader::MiddleDot);
+    }
+}
+
 // ── Conditional Formatting ───────────────────────────────────────────────────
 
 bitflags::bitflags! {

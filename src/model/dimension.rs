@@ -9,7 +9,7 @@ pub trait Unit: Copy + Clone + fmt::Debug + PartialEq + Eq {
 
 /// A dimension value parameterized by its unit of measurement.
 /// Integer storage for lossless OOXML round-tripping.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Dimension<U: Unit> {
     raw: i64,
     _unit: PhantomData<U>,
@@ -42,6 +42,24 @@ impl<U: Unit> fmt::Debug for Dimension<U> {
 impl<U: Unit> Default for Dimension<U> {
     fn default() -> Self {
         Self::ZERO
+    }
+}
+
+// Ordering depends only on the stored value, never on the phantom unit, so
+// `Dimension<U>` is `Ord` for *every* `U: Unit`. Deriving these would instead
+// synthesize a spurious `U: Ord` bound — and no unit marker implements `Ord` —
+// leaving the derived impl unusable and forcing callers to compare `.raw()` by
+// hand. These manual impls (like the manual `Default`/arithmetic above) drop the
+// bound.
+impl<U: Unit> PartialOrd for Dimension<U> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<U: Unit> Ord for Dimension<U> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
     }
 }
 
@@ -193,5 +211,85 @@ impl Dimension<ThousandthPercent> {
     /// here rather than open-coding the divisor.
     pub fn to_fraction(self) -> f32 {
         self.raw as f32 / 100_000.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// f32 equality with a small tolerance (clippy forbids bare `==` on floats).
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-6, "{a} != {b}");
+    }
+
+    #[test]
+    fn twips_to_half_points() {
+        // 20 twips = 1 pt = 2 half-points; the conversion divides by 10.
+        assert_eq!(Dimension::<Twips>::new(20).to_half_points().raw(), 2);
+        assert_eq!(Dimension::<Twips>::new(1440).to_half_points().raw(), 144);
+    }
+
+    #[test]
+    fn twips_emu_roundtrip() {
+        // 1 twip = 635 EMU; 1 inch = 1440 twip = 914400 EMU.
+        assert_eq!(Dimension::<Twips>::new(1440).to_emu().raw(), 914_400);
+        assert_eq!(Dimension::<Emu>::new(914_400).to_twips().raw(), 1440);
+    }
+
+    #[test]
+    fn to_points_conversions() {
+        approx(Dimension::<Twips>::new(1440).to_points_f32(), 72.0);
+        approx(Dimension::<Twips>::new(240).to_points_f32(), 12.0);
+        approx(Dimension::<HalfPoints>::new(24).to_points_f32(), 12.0);
+        approx(Dimension::<Emu>::new(12_700).to_points_f32(), 1.0);
+        approx(Dimension::<EighthPoints>::new(8).to_points_f32(), 1.0);
+    }
+
+    #[test]
+    fn half_points_to_twips() {
+        assert_eq!(Dimension::<HalfPoints>::new(24).to_twips().raw(), 240);
+    }
+
+    #[test]
+    fn eighth_points_to_half_points() {
+        // 8 eighth-points = 1 pt = 2 half-points; divides by 4.
+        assert_eq!(Dimension::<EighthPoints>::new(8).to_half_points().raw(), 2);
+    }
+
+    #[test]
+    fn thousandth_percent_to_fraction() {
+        approx(
+            Dimension::<ThousandthPercent>::new(50_000).to_fraction(),
+            0.5,
+        );
+        approx(
+            Dimension::<ThousandthPercent>::new(100_000).to_fraction(),
+            1.0,
+        );
+        approx(Dimension::<ThousandthPercent>::new(0).to_fraction(), 0.0);
+    }
+
+    #[test]
+    fn arithmetic_ops() {
+        let a = Dimension::<Twips>::new(100);
+        let b = Dimension::<Twips>::new(30);
+        assert_eq!((a + b).raw(), 130);
+        assert_eq!((a - b).raw(), 70);
+        assert_eq!((a * 3).raw(), 300);
+        assert_eq!((a / 4).raw(), 25); // integer division truncates
+        assert_eq!((-a).raw(), -100);
+    }
+
+    #[test]
+    fn zero_and_default() {
+        assert_eq!(Dimension::<Twips>::ZERO.raw(), 0);
+        assert_eq!(Dimension::<Emu>::default().raw(), 0);
+    }
+
+    #[test]
+    fn ordering_and_equality() {
+        assert!(Dimension::<Twips>::new(10) < Dimension::<Twips>::new(20));
+        assert_eq!(Dimension::<Twips>::new(5), Dimension::<Twips>::new(5));
     }
 }

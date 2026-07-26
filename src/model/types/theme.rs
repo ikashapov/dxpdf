@@ -148,3 +148,39 @@ pub enum ScriptTag {
     /// Unrecognized script code — preserved as-is.
     Other(Box<str>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_maps_each_index_to_its_slot() {
+        // Distinct value per slot catches an accidental field swap in `resolve`.
+        let cs = ThemeColorScheme {
+            dark1: 1,
+            light1: 2,
+            dark2: 3,
+            light2: 4,
+            accent1: 5,
+            accent2: 6,
+            accent3: 7,
+            accent4: 8,
+            accent5: 9,
+            accent6: 10,
+            hyperlink: 11,
+            followed_hyperlink: 12,
+        };
+        assert_eq!(cs.resolve(ThemeColorIndex::Dark1), 1);
+        assert_eq!(cs.resolve(ThemeColorIndex::Light1), 2);
+        assert_eq!(cs.resolve(ThemeColorIndex::Dark2), 3);
+        assert_eq!(cs.resolve(ThemeColorIndex::Light2), 4);
+        assert_eq!(cs.resolve(ThemeColorIndex::Accent1), 5);
+        assert_eq!(cs.resolve(ThemeColorIndex::Accent2), 6);
+        assert_eq!(cs.resolve(ThemeColorIndex::Accent3), 7);
+        assert_eq!(cs.resolve(ThemeColorIndex::Accent4), 8);
+        assert_eq!(cs.resolve(ThemeColorIndex::Accent5), 9);
+        assert_eq!(cs.resolve(ThemeColorIndex::Accent6), 10);
+        assert_eq!(cs.resolve(ThemeColorIndex::Hyperlink), 11);
+        assert_eq!(cs.resolve(ThemeColorIndex::FollowedHyperlink), 12);
+    }
+}

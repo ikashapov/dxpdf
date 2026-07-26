@@ -180,3 +180,41 @@ pub struct SectionRevisionIds {
     /// Session that last modified section properties.
     pub sect: Option<RevisionSaveId>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revision_save_id_parses_eight_digit_hex() {
+        assert_eq!(
+            RevisionSaveId::from_hex("00A2B3C4").unwrap().value(),
+            0x00A2_B3C4
+        );
+        assert_eq!(
+            RevisionSaveId::from_hex("FFFFFFFF").unwrap().value(),
+            0xFFFF_FFFF
+        );
+    }
+
+    #[test]
+    fn revision_save_id_rejects_non_hex() {
+        assert!(RevisionSaveId::from_hex("XYZ").is_none());
+        assert!(RevisionSaveId::from_hex("").is_none());
+        assert!(RevisionSaveId::from_hex("-1").is_none());
+    }
+
+    #[test]
+    fn revision_save_id_rejects_overflow() {
+        // Nine hex digits exceed u32::MAX.
+        assert!(RevisionSaveId::from_hex("1FFFFFFFF").is_none());
+    }
+
+    #[test]
+    fn typed_id_accessors_round_trip() {
+        assert_eq!(RelId::new("rId7").as_str(), "rId7");
+        assert_eq!(NumId::new(3).value(), 3);
+        assert_eq!(StyleId::new("Heading1").as_str(), "Heading1");
+        assert_eq!(VmlShapeId::new("_x0000_t202").as_str(), "_x0000_t202");
+    }
+}

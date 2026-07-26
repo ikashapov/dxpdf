@@ -30,3 +30,24 @@ impl Default for DocumentSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_tab_stop_is_720_twips_per_spec() {
+        // §17.15.1.25: an omitted `w:defaultTabStop` is 720 twips (0.5"), not
+        // the 0 a derived `Default` would produce. Guards against a "simplify
+        // to #[derive(Default)]" regression.
+        assert_eq!(DocumentSettings::default().default_tab_stop.raw(), 720);
+    }
+
+    #[test]
+    fn remaining_defaults() {
+        let s = DocumentSettings::default();
+        assert!(!s.even_and_odd_headers);
+        assert!(s.rsid_root.is_none());
+        assert!(s.rsids.is_empty());
+    }
+}

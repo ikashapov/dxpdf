@@ -194,3 +194,39 @@ pub struct NumberingReference {
     pub num_id: i64,
     pub level: u8,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outline_level_from_ooxml_is_one_based() {
+        // OOXML `w:outlineLvl` is 0-based (0 = Heading 1); storage is 1-based.
+        assert_eq!(OutlineLevel::from_ooxml(0).unwrap().value(), 1);
+        assert_eq!(OutlineLevel::from_ooxml(8).unwrap().value(), 9);
+    }
+
+    #[test]
+    fn outline_level_from_ooxml_rejects_out_of_range() {
+        assert!(OutlineLevel::from_ooxml(9).is_none());
+        assert!(OutlineLevel::from_ooxml(255).is_none());
+    }
+
+    #[test]
+    fn outline_level_new_accepts_valid_range() {
+        assert_eq!(OutlineLevel::new(1).value(), 1);
+        assert_eq!(OutlineLevel::new(9).value(), 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "outline level must be 1..=9")]
+    fn outline_level_new_rejects_zero() {
+        OutlineLevel::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "outline level must be 1..=9")]
+    fn outline_level_new_rejects_ten() {
+        OutlineLevel::new(10);
+    }
+}
