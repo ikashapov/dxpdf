@@ -640,3 +640,46 @@ fn position_tab_lays_out_by_position() {
         "right ptab should right-align near the margin, got center={x_center} right={x_right}"
     );
 }
+
+/// Regression: a body-anchored `wps:wsp` shape's text-box content (`wps:txbx`)
+/// must render. `layout_section` emitted the shape's fill/stroke but dropped its
+/// `text_commands`, so shape text vanished in the body (it only worked for
+/// paragraph-anchored-in-cell and header/footer shapes, via the stacker).
+#[test]
+fn body_shape_txbx_text_is_rendered() {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+
+    let doc_xml = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+  <w:body><w:p><w:r><w:drawing>
+    <wp:anchor distT="0" distB="0" distL="0" distR="0" relativeHeight="1" behindDoc="0" locked="0" allowOverlap="1">
+      <wp:simplePos x="0" y="0"/>
+      <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+      <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+      <wp:extent cx="2743200" cy="914400"/><wp:wrapNone/><wp:docPr id="1" name="tb"/>
+      <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+        <wps:wsp><wps:cNvSpPr/>
+          <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr>
+          <wps:txbx><w:txbxContent><w:p><w:r><w:t>SHAPETEXTZZ</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+          <wps:bodyPr/>
+        </wps:wsp>
+      </a:graphicData></a:graphic>
+    </wp:anchor>
+  </w:drawing></w:r></w:p></w:body>
+</w:document>"#;
+
+    let docx = make_docx(doc_xml);
+    let doc = dxpdf::docx::parse(&docx).expect("parse");
+    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let found = pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.contains("SHAPETEXTZZ")));
+    assert!(
+        found,
+        "wps:txbx text-box content must render as a Text draw command"
+    );
+}

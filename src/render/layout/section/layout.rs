@@ -387,6 +387,18 @@ impl ParagraphFloatCheckpoint {
     }
 }
 
+/// §17.17.1 / §20.1.2.1.1: emit a floating shape's `wps:txbx` text over its
+/// fill. Each command is in shape-local coordinates; shift by the shape's
+/// resolved page origin `(fs.x, shape_y)`. Mirrors the stacker's shape-text
+/// emission (`section::stacker`) so body/page-anchored shapes render their text,
+/// not just the fill/stroke.
+fn emit_shape_text(state: &mut PageLayoutState<'_>, fs: &FloatingShape, shape_y: Pt) {
+    for mut cmd in fs.text_commands.iter().cloned() {
+        cmd.shift(fs.x, shape_y);
+        state.current_page.commands.push(cmd);
+    }
+}
+
 fn register_paragraph_floats(
     state: &mut PageLayoutState<'_>,
     floating_images: &[FloatingImage],
@@ -459,6 +471,7 @@ fn register_paragraph_floats(
                 stroke: fs.stroke.clone(),
                 effects: fs.effects.clone(),
             });
+            emit_shape_text(state, fs, shape_y);
             if y_end > state.cursor_y {
                 state.cursor_y = y_end;
             }
@@ -1715,6 +1728,7 @@ pub(crate) fn layout_section_with_clearance(
                         stroke: fs.stroke.clone(),
                         effects: fs.effects.clone(),
                     });
+                    emit_shape_text(&mut state, fs, shape_y);
                 }
 
                 // Collect footnotes for this page and reduce the available
