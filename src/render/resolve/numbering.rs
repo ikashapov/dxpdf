@@ -138,8 +138,12 @@ fn to_letter_lower(n: u32) -> String {
     if n == 0 {
         return String::new();
     }
+    // ST_NumberFormat `lowerLetter`: Word repeats the letter on overflow —
+    // a…z, then aa, bb, …, zz, aaa (a *repeating* scheme, not bijective
+    // base-26). Item 27 is "aa", not "a" again.
     let idx = ((n - 1) % 26) as u8;
-    String::from((b'a' + idx) as char)
+    let count = ((n - 1) / 26) as usize + 1;
+    std::iter::repeat_n((b'a' + idx) as char, count).collect()
 }
 
 fn to_letter_upper(n: u32) -> String {
@@ -419,5 +423,32 @@ mod tests {
         let levels = resolved.get(&NumId::new(1)).unwrap();
         assert_eq!(levels[0].format, NumberFormat::None);
         assert_eq!(levels[0].start, 1);
+    }
+
+    #[test]
+    fn lower_letter_repeats_on_overflow() {
+        // §17.9 lowerLetter: a…z then aa, bb, … (repeating, not bijective).
+        assert_eq!(format_number(1, NumberFormat::LowerLetter), "a");
+        assert_eq!(format_number(26, NumberFormat::LowerLetter), "z");
+        assert_eq!(format_number(27, NumberFormat::LowerLetter), "aa");
+        assert_eq!(format_number(28, NumberFormat::LowerLetter), "bb");
+        assert_eq!(format_number(52, NumberFormat::LowerLetter), "zz");
+        assert_eq!(format_number(53, NumberFormat::LowerLetter), "aaa");
+    }
+
+    #[test]
+    fn upper_letter_matches_lower_uppercased() {
+        assert_eq!(format_number(27, NumberFormat::UpperLetter), "AA");
+    }
+
+    #[test]
+    fn roman_and_ordinal_formats() {
+        assert_eq!(format_number(4, NumberFormat::LowerRoman), "iv");
+        assert_eq!(format_number(2026, NumberFormat::UpperRoman), "MMXXVI");
+        assert_eq!(format_number(1, NumberFormat::Ordinal), "1st");
+        assert_eq!(format_number(2, NumberFormat::Ordinal), "2nd");
+        assert_eq!(format_number(11, NumberFormat::Ordinal), "11th");
+        assert_eq!(format_number(23, NumberFormat::Ordinal), "23rd");
+        assert_eq!(format_number(111, NumberFormat::Ordinal), "111th");
     }
 }
