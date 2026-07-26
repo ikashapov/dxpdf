@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::rc::Rc;
 
 use super::super::draw_command::DrawCommand;
-use super::super::fragment::Fragment;
+use super::super::fragment::{Fragment, LinkTarget};
 use super::types::{LineSpacingRule, MeasureTextFn, ParagraphStyle, TabStopDef};
 use super::{LineLayoutParams, LinePlacement, LEADER_CHAR_WIDTH_FALLBACK, LEADER_FONT_SIZE_CAP};
 use crate::render::dimension::Pt;
@@ -431,28 +431,28 @@ pub(super) fn emit_line_commands(
                         text_scale: font.text_scale,
                     });
 
-                    if let Some(url) = hyperlink_url {
+                    if let Some(link) = hyperlink_url {
                         let rect = crate::render::geometry::PtRect::from_xywh(
                             x,
                             *cursor_y,
                             rendered_width,
                             line_height,
                         );
-                        if url.starts_with("http://")
-                            || url.starts_with("https://")
-                            || url.starts_with("mailto:")
-                            || url.starts_with("ftp://")
-                        {
-                            commands.push(DrawCommand::LinkAnnotation {
-                                rect,
-                                url: url.clone(),
-                            });
-                        } else {
-                            // Internal bookmark link.
-                            commands.push(DrawCommand::InternalLink {
-                                rect,
-                                destination: url.clone(),
-                            });
+                        // The external/internal kind is carried on the fragment
+                        // (§17.16.22), so route by the ADT — no URL-scheme guess.
+                        match link {
+                            LinkTarget::External(url) => {
+                                commands.push(DrawCommand::LinkAnnotation {
+                                    rect,
+                                    url: url.clone(),
+                                })
+                            }
+                            LinkTarget::Internal(dest) => {
+                                commands.push(DrawCommand::InternalLink {
+                                    rect,
+                                    destination: dest.clone(),
+                                })
+                            }
                         }
                     }
 

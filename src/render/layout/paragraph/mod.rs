@@ -532,7 +532,7 @@ pub fn layout_paragraph(
 mod tests {
     use super::*;
     use crate::model::{Alignment, PTabAlignment, PTabRelativeTo};
-    use crate::render::layout::fragment::{FontProps, TextMetrics};
+    use crate::render::layout::fragment::{FontProps, LinkTarget, TextMetrics};
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
 
@@ -570,7 +570,7 @@ mod tests {
     fn hyperlink_frag(text: &str, width: f32, url: &str) -> Fragment {
         let mut fragment = text_frag(text, width);
         if let Fragment::Text { hyperlink_url, .. } = &mut fragment {
-            *hyperlink_url = Some(url.to_string());
+            *hyperlink_url = Some(LinkTarget::External(url.to_string()));
         }
         fragment
     }
@@ -842,6 +842,68 @@ mod tests {
             .expect("beta hyperlink annotation");
         assert!((link_rect.origin.x.raw() - 35.0).abs() < 0.01);
         assert!((link_rect.size.width.raw() - 25.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn non_http_external_link_emits_uri_annotation() {
+        // Regression: an external URL whose scheme isn't in the old
+        // http/https/mailto/ftp allowlist (here `file://`) must still be a URI
+        // LinkAnnotation, not misrouted to an internal GoTo. Routing is by the
+        // fragment's LinkTarget kind now, not a URL-scheme guess.
+        let mut frag = text_frag("doc", 20.0);
+        if let Fragment::Text { hyperlink_url, .. } = &mut frag {
+            *hyperlink_url = Some(LinkTarget::External("file://server/report.docx".into()));
+        }
+        let result = layout_paragraph(
+            &[frag],
+            &body_constraints(200.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+        assert!(
+            result.commands.iter().any(|c| matches!(
+                c,
+                DrawCommand::LinkAnnotation { url, .. } if url == "file://server/report.docx"
+            )),
+            "file:// external link must be a URI annotation"
+        );
+        assert!(
+            !result
+                .commands
+                .iter()
+                .any(|c| matches!(c, DrawCommand::InternalLink { .. })),
+            "external link must not be misrouted to an internal GoTo"
+        );
+    }
+
+    #[test]
+    fn internal_link_emits_goto_destination() {
+        let mut frag = text_frag("entry", 40.0);
+        if let Fragment::Text { hyperlink_url, .. } = &mut frag {
+            *hyperlink_url = Some(LinkTarget::Internal("_Toc123".into()));
+        }
+        let result = layout_paragraph(
+            &[frag],
+            &body_constraints(200.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+        assert!(
+            result.commands.iter().any(|c| matches!(
+                c,
+                DrawCommand::InternalLink { destination, .. } if destination == "_Toc123"
+            )),
+            "internal bookmark link must be a GoTo destination"
+        );
+        assert!(
+            !result
+                .commands
+                .iter()
+                .any(|c| matches!(c, DrawCommand::LinkAnnotation { .. })),
+            "internal link must not be emitted as an external URI"
+        );
     }
 
     #[test]

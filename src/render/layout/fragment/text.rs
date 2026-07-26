@@ -6,7 +6,7 @@ use crate::render::emoji::resolve::{EmojiFamily, EmojiTypeface};
 use crate::render::layout::measurer::TextMeasurer;
 use crate::render::resolve::color::RgbColor;
 
-use super::{FontProps, Fragment, FragmentBorder, TextMetrics};
+use super::{FontProps, Fragment, FragmentBorder, LinkTarget, TextMetrics};
 
 /// §17.18.40 ST_HighlightColor: map highlight enum to RGB.
 /// These are the fixed palette colors defined in the OOXML spec.
@@ -133,7 +133,7 @@ pub(super) fn emit_text_fragments<F>(
     text: &str,
     font: &FontProps,
     style: &TextRunStyle,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     measurer: Option<&TextMeasurer<'_>>,
     fragments: &mut Vec<Fragment>,
@@ -192,7 +192,7 @@ pub(super) fn emit_text_words<F>(
     text: &str,
     font: &FontProps,
     style: &TextRunStyle,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     fragments: &mut Vec<Fragment>,
 ) where
@@ -221,7 +221,7 @@ pub(super) fn emit_text_words<F>(
             width: w,
             trimmed_width: tw,
             metrics: m,
-            hyperlink_url: hyperlink_url.map(String::from),
+            hyperlink_url: hyperlink_url.cloned(),
             baseline_offset: style.baseline_offset,
             text_offset: Pt::ZERO,
             is_footnote_ref: false,
@@ -238,7 +238,7 @@ pub(super) fn emit_emoji_or_fallback<F>(
     cluster: &EmojiCluster<'_>,
     font: &FontProps,
     style: &TextRunStyle,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     measurer: &TextMeasurer<'_>,
     fragments: &mut Vec<Fragment>,

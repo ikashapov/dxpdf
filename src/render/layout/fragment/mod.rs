@@ -87,6 +87,19 @@ pub struct FragmentBorder {
     pub space: Pt,
 }
 
+/// The target of a hyperlink carried on a text fragment. Keeps the
+/// §17.16.22 external-vs-internal distinction (from `HyperlinkTarget`) as a
+/// closed ADT so the emitter routes each to the right PDF annotation
+/// (external → URI action, internal → GoTo a named destination) instead of
+/// re-deriving it from a URL-scheme string check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// A resolved external URI (`http:`, `mailto:`, `file:`, …).
+    External(String),
+    /// An internal bookmark name (`w:hyperlink/@w:anchor`).
+    Internal(String),
+}
+
 /// A measured fragment — the atomic unit for line fitting.
 #[derive(Clone, Debug)]
 pub enum Fragment {
@@ -109,7 +122,11 @@ pub enum Fragment {
         trimmed_width: Pt,
         /// Font metrics (ascent + descent = text height).
         metrics: TextMetrics,
-        hyperlink_url: Option<String>,
+        /// Hyperlink target (external URI or internal bookmark), if this
+        /// fragment is inside a `w:hyperlink`. Named `hyperlink_url` for
+        /// historical reasons; carries the external/internal kind, not a bare
+        /// URL, so the emitter never has to guess from the string.
+        hyperlink_url: Option<LinkTarget>,
         baseline_offset: Pt,
         /// Horizontal offset for drawing text within the fragment width.
         /// Used for right/center-justified list labels where the text is

@@ -14,8 +14,9 @@ use super::text::{
     TextRunStyle,
 };
 use super::{
-    font_props_from_run, to_roman_lower, FontProps, Fragment, FragmentBorder, TextMetrics,
-    SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO, SUPERSCRIPT_FONT_SIZE_RATIO,
+    font_props_from_run, to_roman_lower, FontProps, Fragment, FragmentBorder, LinkTarget,
+    TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
+    SUPERSCRIPT_FONT_SIZE_RATIO,
 };
 
 /// §17.3.2.4: convert a run-level [`crate::model::Border`] into a render-side
@@ -251,7 +252,7 @@ fn emit_field_substitution<F>(
     >,
     paragraph_run_defaults: Option<&RunProperties>,
     theme: Option<&crate::model::Theme>,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     measurer: Option<&crate::render::layout::measurer::TextMeasurer<'_>>,
     fragments: &mut Vec<Fragment>,
@@ -368,7 +369,7 @@ pub struct FragmentCtx<'a> {
 pub fn collect_fragments<F>(
     inlines: &[Inline],
     ctx: &FragmentCtx<'_>,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     footnote_counter: &mut u32,
     endnote_counter: &mut u32,
@@ -623,16 +624,23 @@ where
                     }
                 }
                 Inline::Hyperlink(link) => {
-                    let url: Option<&str> = match &link.target {
-                        crate::model::HyperlinkTarget::ExternalUrl(url) => Some(url.as_str()),
-                        crate::model::HyperlinkTarget::Internal { anchor } => Some(anchor.as_str()),
-                        // An unresolved rId (no matching relationship) has no URL.
+                    // Preserve the external/internal kind as a closed ADT so
+                    // the emitter routes external→URI and internal→GoTo without
+                    // guessing from the string (§17.16.22).
+                    let target: Option<LinkTarget> = match &link.target {
+                        crate::model::HyperlinkTarget::ExternalUrl(url) => {
+                            Some(LinkTarget::External(url.clone()))
+                        }
+                        crate::model::HyperlinkTarget::Internal { anchor } => {
+                            Some(LinkTarget::Internal(anchor.clone()))
+                        }
+                        // An unresolved rId (no matching relationship) has no link.
                         crate::model::HyperlinkTarget::ExternalRel(_) => None,
                     };
                     let mut sub = collect_fragments(
                         &link.content,
                         ctx,
-                        url,
+                        target.as_ref(),
                         measure_text,
                         footnote_counter,
                         endnote_counter,
@@ -775,7 +783,7 @@ where
                         width: w,
                         trimmed_width: w,
                         metrics: m,
-                        hyperlink_url: hyperlink_url.map(String::from),
+                        hyperlink_url: hyperlink_url.cloned(),
                         baseline_offset: Pt::ZERO,
                         text_offset: Pt::ZERO,
                         is_footnote_ref: false,
@@ -1156,7 +1164,10 @@ mod tests {
         } = &frags[0]
         {
             assert_eq!(&**text, "click ");
-            assert_eq!(hyperlink_url.as_deref(), Some("https://example.com"));
+            assert_eq!(
+                hyperlink_url,
+                &Some(LinkTarget::External("https://example.com".into()))
+            );
         } else {
             panic!("expected Text fragment");
         }
