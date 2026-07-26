@@ -965,3 +965,132 @@ pub struct VmlTextBox {
     /// §17.17.1: block-level content from w:txbxContent.
     pub content: Vec<Block>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn common_with_id(id: &str) -> VmlCommonAttrs {
+        VmlCommonAttrs {
+            id: Some(VmlShapeId::new(id)),
+            ..Default::default()
+        }
+    }
+
+    fn shape(id: &str) -> VmlPrimitive {
+        VmlPrimitive::Shape(VmlShape {
+            common: common_with_id(id),
+            shape_type_ref: None,
+            vml_path: None,
+        })
+    }
+
+    #[test]
+    fn pict_shapes_filters_to_shape_variant() {
+        // Only the `<v:shape>` primitives are yielded; rect/oval are skipped.
+        let pict = Pict {
+            shape_type: None,
+            primitives: vec![
+                shape("s1"),
+                VmlPrimitive::Rect(VmlRect {
+                    common: common_with_id("r1"),
+                }),
+                shape("s2"),
+                VmlPrimitive::Oval(VmlOval {
+                    common: common_with_id("o1"),
+                }),
+            ],
+        };
+        let ids: Vec<&str> = pict
+            .shapes()
+            .map(|s| s.common.id.as_ref().unwrap().as_str())
+            .collect();
+        assert_eq!(ids, ["s1", "s2"]);
+    }
+
+    #[test]
+    fn pict_shapes_mut_allows_mutation() {
+        let mut pict = Pict {
+            shape_type: None,
+            primitives: vec![shape("s1")],
+        };
+        for s in pict.shapes_mut() {
+            s.common.id = Some(VmlShapeId::new("changed"));
+        }
+        assert_eq!(
+            pict.shapes()
+                .next()
+                .unwrap()
+                .common
+                .id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "changed"
+        );
+    }
+
+    /// Every `VmlPrimitive` variant must return its own `common` — guards the
+    /// large match in `common()` against a mis-wired arm.
+    #[test]
+    fn common_returns_each_variants_attrs() {
+        let variants = [
+            shape("a"),
+            VmlPrimitive::Rect(VmlRect {
+                common: common_with_id("b"),
+            }),
+            VmlPrimitive::RoundRect(VmlRoundRect {
+                common: common_with_id("c"),
+                arcsize: None,
+            }),
+            VmlPrimitive::Oval(VmlOval {
+                common: common_with_id("d"),
+            }),
+            VmlPrimitive::Line(VmlLine {
+                common: common_with_id("e"),
+                from: None,
+                to: None,
+            }),
+            VmlPrimitive::PolyLine(VmlPolyLine {
+                common: common_with_id("f"),
+                points: vec![],
+            }),
+            VmlPrimitive::Arc(VmlArc {
+                common: common_with_id("g"),
+                start_angle: None,
+                end_angle: None,
+            }),
+            VmlPrimitive::Curve(VmlCurve {
+                common: common_with_id("h"),
+                from: None,
+                control1: None,
+                control2: None,
+                to: None,
+            }),
+            VmlPrimitive::Image(VmlImage {
+                common: common_with_id("i"),
+                src: None,
+            }),
+            VmlPrimitive::Group(Box::new(VmlGroup {
+                common: common_with_id("j"),
+                coord_size: None,
+                coord_origin: None,
+                children: vec![],
+            })),
+        ];
+        let ids: Vec<&str> = variants
+            .iter()
+            .map(|p| p.common().id.as_ref().unwrap().as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+    }
+
+    #[test]
+    fn common_mut_mutates_in_place() {
+        let mut p = VmlPrimitive::Rect(VmlRect {
+            common: common_with_id("before"),
+        });
+        p.common_mut().id = Some(VmlShapeId::new("after"));
+        assert_eq!(p.common().id.as_ref().unwrap().as_str(), "after");
+    }
+}
