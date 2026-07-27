@@ -38,12 +38,25 @@ pub(super) fn inject_list_label(
     };
 
     // Update counters: increment this level, reset deeper levels.
+    //
+    // The map holds the *current* (last-emitted) value, which is what
+    // `format_list_label` reads. §17.9.28 permits `w:start="0"` (and
+    // §17.9.27 `w:startOverride="0"`), so the first item must seed the
+    // counter with `start` directly — seeding `start - 1` and adding one
+    // underflows `u32` at zero, panicking debug builds and silently
+    // wrapping in release.
     {
+        use std::collections::hash_map::Entry;
         let counters = &mut state.list_counters;
-        let count = counters
-            .entry((num_id, level))
-            .or_insert_with(|| levels.get(level as usize).map(|l| l.start).unwrap_or(1) - 1);
-        *count += 1;
+        match counters.entry((num_id, level)) {
+            Entry::Vacant(slot) => {
+                slot.insert(levels.get(level as usize).map(|l| l.start).unwrap_or(1));
+            }
+            Entry::Occupied(mut slot) => {
+                let next = slot.get().saturating_add(1);
+                slot.insert(next);
+            }
+        }
         // Reset deeper levels.
         let max_level = levels.len() as u8;
         for deeper in (level + 1)..max_level {

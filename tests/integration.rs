@@ -140,6 +140,44 @@ fn convert_docx_with_two_numbering_definitions() {
     assert_eq!(&pdf[..5], b"%PDF-");
 }
 
+/// §17.9.28: `w:start` is an `ST_DecimalNumber`, so a list may legally start at
+/// zero. Seeding the running counter with `start - 1` underflowed `u32` and
+/// panicked ("attempt to subtract with overflow") in any build with overflow
+/// checks on; release silently wrapped through `u32::MAX` back to the right
+/// answer, hiding the crash outside debug/test builds.
+#[test]
+fn numbering_starting_at_zero_converts() {
+    let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"#;
+    let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="0"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+      <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+    </w:numbering>"#;
+    let pdf = dxpdf::convert(&make_numbered_docx(document, numbering)).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
+/// §17.9.27: `w:startOverride` reaches the same counter seed as `w:start`, so
+/// a zero override must not underflow either.
+#[test]
+fn numbering_start_override_of_zero_converts() {
+    let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Only</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"#;
+    let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+      <w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="0"/></w:lvlOverride></w:num>
+    </w:numbering>"#;
+    let pdf = dxpdf::convert(&make_numbered_docx(document, numbering)).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
 #[test]
 fn decimal_integer_measurements_convert_without_preprocessing() {
     let docx = simple_docx(

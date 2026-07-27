@@ -709,10 +709,19 @@ fn resolve_anchor_y(
             relative_from,
             alignment,
         } => {
-            let (margin_top, page_height, margin_bottom) = match frame {
-                AnchorFrame::Page => (pc.margins.top, pc.page_size.height, pc.margins.bottom),
-                AnchorFrame::Stack => (Pt::ZERO, Pt::ZERO, Pt::ZERO),
-            };
+            // `Stack` has no resolved container extent at extraction time —
+            // the stacker decides the frame origin later — so there is no
+            // area to align within. Collapse to the paragraph origin, the
+            // same convention the `Offset` arm above uses. Emitting an
+            // `Absolute` page coordinate here would be doubly wrong: the
+            // caller shifts stack coordinates into page space afterwards,
+            // and with the frame's margins zeroed `Bottom`/`Center` resolve
+            // to negative y — off the top of the page.
+            if frame == AnchorFrame::Stack {
+                return FloatingImageY::RelativeToParagraph(Pt::ZERO);
+            }
+            let (margin_top, page_height, margin_bottom) =
+                (pc.margins.top, pc.page_size.height, pc.margins.bottom);
             let (area_top, area_height) = match relative_from {
                 AnchorRelativeFrom::Page => (Pt::ZERO, page_height),
                 AnchorRelativeFrom::Margin => (
@@ -1084,5 +1093,105 @@ mod tests {
     fn wps_choice_suppresses_fallback_absolute_position() {
         let inline = Inline::AlternateContent(ac_with_wps_choice());
         assert!(find_vml_absolute_position(&inline).is_none());
+    }
+
+    // ── §20.4.2.10 vertical anchor resolution ────────────────────────────
+
+    use super::{resolve_anchor_y, AnchorFrame};
+    use crate::model::AnchorAlignment;
+    use crate::render::dimension::Pt;
+    use crate::render::layout::build::BuildState;
+    use crate::render::layout::section::FloatingImageY;
+
+    fn default_state() -> BuildState {
+        BuildState {
+            page_config: Default::default(),
+            footnote_counter: 0,
+            endnote_counter: 0,
+            list_counters: Default::default(),
+            field_ctx: Default::default(),
+            shape_default_text_color: None,
+            shape_default_font_family: None,
+        }
+    }
+
+    fn anchor_with_v(vertical_position: AnchorPosition) -> AnchorProperties {
+        let ImagePlacement::Anchor(mut a) = anchored_wps_image().placement else {
+            unreachable!("fixture is anchored")
+        };
+        a.vertical_position = vertical_position;
+        a
+    }
+
+    fn v_align(alignment: AnchorAlignment) -> AnchorProperties {
+        anchor_with_v(AnchorPosition::Align {
+            relative_from: AnchorRelativeFrom::Margin,
+            alignment,
+        })
+    }
+
+    /// Regression: the `Align` arm used to ignore `AnchorFrame`, returning an
+    /// `Absolute` *page* coordinate for stack-framed anchors. With the frame's
+    /// margins zeroed that put `Center`/`Bottom` at negative y — so an anchored
+    /// float in a table cell, header, or footer using `<wp:align>` rendered at
+    /// or above the top of the page instead of next to its paragraph.
+    #[test]
+    fn stack_frame_align_is_paragraph_relative() {
+        let state = default_state();
+        for alignment in [
+            AnchorAlignment::Top,
+            AnchorAlignment::Center,
+            AnchorAlignment::Bottom,
+        ] {
+            let y = resolve_anchor_y(
+                &v_align(alignment),
+                Pt::new(50.0),
+                &state,
+                AnchorFrame::Stack,
+            );
+            let FloatingImageY::RelativeToParagraph(offset) = y else {
+                panic!("{alignment:?} in Stack frame must be paragraph-relative");
+            };
+            assert_eq!(offset, Pt::ZERO, "{alignment:?} collapses to the paragraph");
+        }
+    }
+
+    /// The `Offset` arm already honored the frame — pinned so the two arms
+    /// can't drift apart again.
+    #[test]
+    fn stack_frame_offset_is_paragraph_relative() {
+        let anchor = anchor_with_v(AnchorPosition::Offset {
+            relative_from: AnchorRelativeFrom::Margin,
+            offset: Dimension::new(914400), // 1 inch in EMU
+        });
+        let y = resolve_anchor_y(&anchor, Pt::new(50.0), &default_state(), AnchorFrame::Stack);
+        let FloatingImageY::RelativeToParagraph(offset) = y else {
+            panic!("Offset in Stack frame must be paragraph-relative");
+        };
+        assert!((offset.raw() - 72.0).abs() < 1e-3, "1in = 72pt");
+    }
+
+    /// `Page` frame still resolves alignment against the real margin box.
+    /// Default page: 792pt tall, 72pt margins → content area 72..720.
+    #[test]
+    fn page_frame_align_resolves_against_margin_box() {
+        let state = default_state();
+        let content_h = Pt::new(50.0);
+        let cases = [
+            (AnchorAlignment::Top, 72.0),
+            (AnchorAlignment::Center, 72.0 + (648.0 - 50.0) * 0.5),
+            (AnchorAlignment::Bottom, 72.0 + 648.0 - 50.0),
+        ];
+        for (alignment, expected) in cases {
+            let y = resolve_anchor_y(&v_align(alignment), content_h, &state, AnchorFrame::Page);
+            let FloatingImageY::Absolute(got) = y else {
+                panic!("{alignment:?} in Page frame must be absolute");
+            };
+            assert!(
+                (got.raw() - expected).abs() < 1e-3,
+                "{alignment:?}: expected {expected}, got {}",
+                got.raw()
+            );
+        }
     }
 }
