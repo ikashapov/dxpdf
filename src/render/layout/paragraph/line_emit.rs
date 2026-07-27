@@ -848,8 +848,48 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
 
 #[cfg(test)]
 mod tests {
-    use super::find_next_tab_stop;
+    use std::borrow::Cow;
+    use std::rc::Rc;
+
+    use super::{find_next_tab_stop, split_oversized_fragments};
+    use crate::model;
     use crate::render::dimension::Pt;
+    use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
+    use crate::render::layout::paragraph::TabStopDef;
+    use crate::render::resolve::color::RgbColor;
+
+    fn text_frag(text: &str, width: f32) -> Fragment {
+        Fragment::Text {
+            text: Rc::from(text),
+            font: Rc::new(FontProps {
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: false,
+                italic: false,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            color: RgbColor::BLACK,
+            width: Pt::new(width),
+            trimmed_width: Pt::new(width),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+            hyperlink_url: None,
+            shading: None,
+            border: None,
+            baseline_offset: Pt::ZERO,
+            text_offset: Pt::ZERO,
+            is_footnote_ref: false,
+        }
+    }
+
+    // ── find_next_tab_stop ────────────────────────────────────────────────────
 
     #[test]
     fn default_interval_36pt_advances_half_inch() {
@@ -875,5 +915,72 @@ mod tests {
         // A degenerate w:defaultTabStop of 0 must not stall the tab grid.
         let (pos, _) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::ZERO);
         assert_eq!(pos.raw(), 36.0);
+    }
+
+    #[test]
+    fn custom_tab_stop_preferred_over_default_grid() {
+        // A 72pt custom stop beats the 36pt default grid when the cursor is before it.
+        let tabs = vec![TabStopDef {
+            position: Pt::new(72.0),
+            alignment: model::TabAlignment::Left,
+            leader: model::TabLeader::None,
+        }];
+        let (pos, ts) = find_next_tab_stop(Pt::new(10.0), &tabs, Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 72.0, "custom stop wins over 36pt grid");
+        assert!(ts.is_some(), "custom TabStopDef returned");
+    }
+
+    #[test]
+    fn cursor_past_all_custom_stops_falls_back_to_default_grid() {
+        // All custom stops are behind the cursor — fall back to the default interval.
+        let tabs = vec![TabStopDef {
+            position: Pt::new(72.0),
+            alignment: model::TabAlignment::Left,
+            leader: model::TabLeader::None,
+        }];
+        // cursor=80 → floor(80/36)+1 = 2+1 = 3 → 3×36 = 108
+        let (pos, ts) = find_next_tab_stop(Pt::new(80.0), &tabs, Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 108.0, "default grid past the custom stop");
+        assert!(ts.is_none(), "no custom stop returned");
+    }
+
+    // ── split_oversized_fragments ─────────────────────────────────────────────
+
+    #[test]
+    fn split_oversized_text_into_per_char_fragments() {
+        // "ab" at 60pt is wider than max_width=20pt → split into two 30pt chars
+        // (uniform fallback — no measurer provided).
+        let frags = vec![text_frag("ab", 60.0)];
+        let result = split_oversized_fragments(&frags, Pt::new(20.0), None);
+        assert_eq!(result.len(), 2, "one fragment per character");
+        for frag in result.iter() {
+            if let Fragment::Text { width, .. } = frag {
+                assert!((width.raw() - 30.0).abs() < 1e-4, "uniform fallback 60/2");
+            } else {
+                panic!("expected Text fragment");
+            }
+        }
+    }
+
+    #[test]
+    fn no_split_needed_returns_borrowed_slice() {
+        // Fragment already fits — must return Cow::Borrowed (zero allocation).
+        let frags = vec![text_frag("hi", 10.0)];
+        let result = split_oversized_fragments(&frags, Pt::new(100.0), None);
+        assert!(
+            matches!(result, Cow::Borrowed(_)),
+            "no-split path must not allocate"
+        );
+    }
+
+    #[test]
+    fn single_char_fragment_is_never_split() {
+        // A single-character fragment wider than max_width cannot be split further.
+        let frags = vec![text_frag("M", 200.0)];
+        let result = split_oversized_fragments(&frags, Pt::new(10.0), None);
+        assert!(
+            matches!(result, Cow::Borrowed(_)),
+            "single-char oversized fragment borrows — nothing to split"
+        );
     }
 }
