@@ -16,6 +16,35 @@ pub struct ResolvedStyle {
     pub table: Option<TableProperties>,
     /// §17.7.6.6: table style conditional formatting overrides.
     pub table_style_overrides: Vec<crate::model::TableStyleOverride>,
+    /// §17.7.4.9: this style is a table-of-contents *entry* style (`toc 1` …
+    /// `toc 9`), either directly or through its `basedOn` chain.
+    ///
+    /// Derived here rather than tested at the render boundary because the
+    /// signal is the **primary style name**, not the `w:styleId` spelling —
+    /// see [`is_toc_entry_name`].
+    pub is_toc_entry: bool,
+}
+
+/// §17.7.4.9: recognize the built-in primary style names for table-of-contents
+/// **entries** — `toc 1` … `toc 9`.
+///
+/// `<w:name>` carries the *built-in* style name, which is locale-independent:
+/// Word writes `toc 1` whatever the UI language, while the `w:styleId` is an
+/// arbitrary identifier a producer may spell however it likes. Matching on the
+/// name is therefore both narrower and wider than matching the ID — it does not
+/// catch an unrelated user style called `TOCustom`, and it does catch a
+/// localized document whose ToC style IDs are not spelled `TOC1`.
+///
+/// Deliberately excludes `TOC Heading` (the heading *above* a ToC, not an
+/// entry) and `toc` with no level, neither of which is an entry style.
+fn is_toc_entry_name(name: &str) -> bool {
+    // OOXML style names compare case-insensitively.
+    let rest = if name.len() >= 4 && name[..4].eq_ignore_ascii_case("toc ") {
+        &name[4..]
+    } else {
+        return false;
+    };
+    matches!(rest.parse::<u8>(), Ok(1..=9))
 }
 
 /// Resolve all styles in the stylesheet by walking `basedOn` chains.
@@ -62,6 +91,7 @@ fn resolve_one(
         let table = style.table_properties.clone();
         merge_paragraph_properties(&mut para, &sheet.doc_defaults_paragraph);
         merge_run_properties(&mut run, &sheet.doc_defaults_run);
+        let is_toc_entry = style.name.as_deref().is_some_and(is_toc_entry_name);
         resolved.insert(
             id.clone(),
             ResolvedStyle {
@@ -69,6 +99,7 @@ fn resolve_one(
                 run,
                 table,
                 table_style_overrides: style.table_style_overrides.clone(),
+                is_toc_entry,
             },
         );
         return;
@@ -112,6 +143,15 @@ fn resolve_one(
 
     visiting.remove(id);
 
+    // §17.7.4.9: ToC-entry-ness follows the `basedOn` chain, so a user style
+    // derived from `toc 2` is still a ToC entry.
+    let is_toc_entry = style.name.as_deref().is_some_and(is_toc_entry_name)
+        || style
+            .based_on
+            .as_ref()
+            .and_then(|parent| resolved.get(parent))
+            .is_some_and(|parent| parent.is_toc_entry);
+
     resolved.insert(
         id.clone(),
         ResolvedStyle {
@@ -119,6 +159,7 @@ fn resolve_one(
             run,
             table,
             table_style_overrides: style.table_style_overrides.clone(),
+            is_toc_entry,
         },
     );
 }
@@ -402,5 +443,91 @@ mod tests {
             Some(Dimension::<HalfPoints>::new(22)),
             "inherited from doc default"
         );
+    }
+
+    // ── §17.7.4.9 ToC entry detection ────────────────────────────────────
+
+    /// A paragraph style carrying a primary style name.
+    fn named_style(name: &str, based_on: Option<&str>) -> Style {
+        Style {
+            name: Some(name.to_string()),
+            ..style(based_on, None, None)
+        }
+    }
+
+    #[test]
+    fn toc_entry_names_are_levels_one_through_nine() {
+        for level in 1..=9 {
+            assert!(
+                is_toc_entry_name(&format!("toc {level}")),
+                "toc {level} is an entry style"
+            );
+        }
+        // OOXML style names compare case-insensitively.
+        assert!(is_toc_entry_name("TOC 3"));
+        assert!(is_toc_entry_name("Toc 3"));
+    }
+
+    #[test]
+    fn non_entry_toc_names_are_rejected() {
+        for name in [
+            "TOC Heading", // the heading above a ToC, not an entry
+            "toc",         // no level
+            "toc 0",       // levels are 1..=9
+            "toc 10",
+            "toc 1x",
+            "table of contents",
+            "TOCustom", // the false positive the old styleId prefix test hit
+            "",
+        ] {
+            assert!(
+                !is_toc_entry_name(name),
+                "{name:?} is not a ToC entry style"
+            );
+        }
+    }
+
+    /// The signal is the primary style **name**, not the `w:styleId` spelling:
+    /// a producer may use any ID, and Word writes the locale-independent
+    /// built-in name regardless of UI language.
+    #[test]
+    fn toc_entry_is_detected_from_name_not_style_id() {
+        let sheet = make_sheet(vec![
+            // Localized/arbitrary ID, built-in ToC name → is an entry.
+            (StyleId::new("Verzeichnis1"), named_style("toc 1", None)),
+            // TOC-prefixed ID, unrelated name → is NOT an entry.
+            (StyleId::new("TOCustom"), named_style("My Custom", None)),
+            // The ToC heading is not an entry.
+            (StyleId::new("TOCHeading"), named_style("TOC Heading", None)),
+        ]);
+        let resolved = resolve_styles(&sheet, None);
+
+        assert!(
+            resolved[&StyleId::new("Verzeichnis1")].is_toc_entry,
+            "a localized style ID with the built-in toc name is an entry"
+        );
+        assert!(
+            !resolved[&StyleId::new("TOCustom")].is_toc_entry,
+            "a TOC-prefixed ID with an unrelated name is not an entry"
+        );
+        assert!(
+            !resolved[&StyleId::new("TOCHeading")].is_toc_entry,
+            "the ToC heading is not an entry"
+        );
+    }
+
+    #[test]
+    fn toc_entry_is_inherited_through_based_on() {
+        let sheet = make_sheet(vec![
+            (StyleId::new("TOC2"), named_style("toc 2", None)),
+            (StyleId::new("MyToc"), named_style("My ToC", Some("TOC2"))),
+            (StyleId::new("Deeper"), named_style("Deeper", Some("MyToc"))),
+            (StyleId::new("Unrelated"), named_style("Body", None)),
+        ]);
+        let resolved = resolve_styles(&sheet, None);
+
+        assert!(resolved[&StyleId::new("MyToc")].is_toc_entry, "one hop");
+        assert!(resolved[&StyleId::new("Deeper")].is_toc_entry, "two hops");
+        assert!(!resolved[&StyleId::new("Unrelated")].is_toc_entry);
     }
 }

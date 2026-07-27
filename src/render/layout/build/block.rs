@@ -103,10 +103,18 @@ pub(super) fn build_paragraph_block(
     // Word suppresses Hyperlink character style (blue/underline) for ToC
     // entries in print view. Strip visual hyperlink styling but keep the
     // click annotation URL.
-    if p.style_id
+    //
+    // §17.7.4.9: identified by the resolved style's *primary style name*
+    // (`toc 1` … `toc 9`, locale-independent), not by the `w:styleId`
+    // spelling — a `starts_with("TOC")` test both over-matches (an unrelated
+    // user style `TOCustom`) and under-matches (producers that don't spell
+    // their ToC style IDs `TOC1`).
+    let is_toc_entry = p
+        .style_id
         .as_ref()
-        .is_some_and(|id| id.as_str().starts_with("TOC") || id.as_str().starts_with("toc"))
-    {
+        .and_then(|id| ctx.resolved.styles.get(id))
+        .is_some_and(|s| s.is_toc_entry);
+    if is_toc_entry {
         for frag in &mut fragments {
             if let Fragment::Text {
                 font,
