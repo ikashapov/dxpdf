@@ -1,6 +1,5 @@
 //! Line placement, command emission, and related helpers.
 
-use std::borrow::Cow;
 use std::rc::Rc;
 
 use super::super::draw_command::DrawCommand;
@@ -649,75 +648,6 @@ pub(super) fn emit_line_commands(
     }
 }
 
-/// Split text fragments wider than `max_width` into per-character fragments.
-/// Uses accurate measurements when a measurer is provided, otherwise
-/// falls back to uniform width distribution.
-///
-/// Returns [`Cow::Borrowed`] on the common no-split path so callers avoid
-/// deep-cloning every paragraph's fragment vector; only an actual split
-/// materializes an owned `Vec`.
-pub(super) fn split_oversized_fragments<'a>(
-    fragments: &'a [Fragment],
-    max_width: Pt,
-    measure: MeasureTextFn<'_>,
-) -> Cow<'a, [Fragment]> {
-    // Fast path: check if any fragment actually needs splitting.
-    let needs_split = fragments.iter().any(
-        |f| matches!(f, Fragment::Text { width, text, .. } if *width > max_width && text.len() > 1),
-    );
-    if !needs_split {
-        return Cow::Borrowed(fragments);
-    }
-
-    let mut result = Vec::with_capacity(fragments.len());
-    // Reusable buffer for single-character measurement (avoids per-char heap allocation).
-    let mut ch_buf = [0u8; 4];
-    for frag in fragments {
-        match frag {
-            Fragment::Text {
-                text,
-                width,
-                font,
-                color,
-                shading,
-                border,
-                metrics,
-                hyperlink_url,
-                baseline_offset,
-                ..
-            } if *width > max_width && text.chars().count() > 1 => {
-                let char_count = text.chars().count();
-                let per_char_fallback = *width / char_count as f32;
-                for ch in text.chars() {
-                    let ch_str = ch.encode_utf8(&mut ch_buf);
-                    let (w, char_metrics) = if let Some(m) = measure {
-                        m(ch_str, font)
-                    } else {
-                        (per_char_fallback, *metrics)
-                    };
-                    result.push(Fragment::Text {
-                        text: Rc::from(&*ch_str),
-                        font: font.clone(),
-                        color: *color,
-                        shading: *shading,
-                        border: *border,
-                        width: w,
-                        trimmed_width: w,
-                        metrics: char_metrics,
-                        hyperlink_url: hyperlink_url.clone(),
-                        baseline_offset: *baseline_offset,
-                        text_offset: Pt::ZERO,
-                        // Per-character split of an over-wide word — not a mark.
-                        is_footnote_ref: false,
-                    });
-                }
-            }
-            _ => result.push(frag.clone()),
-        }
-    }
-    Cow::Owned(result)
-}
-
 /// True for fragments that place content by tab semantics — a regular tab
 /// stop (§17.3.1.37) or an absolute-position tab (§17.3.1.30). Both terminate
 /// a tab zone and suppress paragraph alignment for the line.
@@ -848,46 +778,10 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-    use std::rc::Rc;
-
-    use super::{find_next_tab_stop, split_oversized_fragments};
+    use super::find_next_tab_stop;
     use crate::model;
     use crate::render::dimension::Pt;
-    use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
     use crate::render::layout::paragraph::TabStopDef;
-    use crate::render::resolve::color::RgbColor;
-
-    fn text_frag(text: &str, width: f32) -> Fragment {
-        Fragment::Text {
-            text: Rc::from(text),
-            font: Rc::new(FontProps {
-                family: Rc::from("Test"),
-                size: Pt::new(12.0),
-                bold: false,
-                italic: false,
-                underline: false,
-                char_spacing: Pt::ZERO,
-                text_scale: 1.0,
-                underline_position: Pt::ZERO,
-                underline_thickness: Pt::ZERO,
-            }),
-            color: RgbColor::BLACK,
-            width: Pt::new(width),
-            trimmed_width: Pt::new(width),
-            metrics: TextMetrics {
-                ascent: Pt::new(10.0),
-                descent: Pt::new(4.0),
-                leading: Pt::ZERO,
-            },
-            hyperlink_url: None,
-            shading: None,
-            border: None,
-            baseline_offset: Pt::ZERO,
-            text_offset: Pt::ZERO,
-            is_footnote_ref: false,
-        }
-    }
 
     // ── find_next_tab_stop ────────────────────────────────────────────────────
 
@@ -942,45 +836,5 @@ mod tests {
         let (pos, ts) = find_next_tab_stop(Pt::new(80.0), &tabs, Pt::new(1000.0), Pt::new(36.0));
         assert_eq!(pos.raw(), 108.0, "default grid past the custom stop");
         assert!(ts.is_none(), "no custom stop returned");
-    }
-
-    // ── split_oversized_fragments ─────────────────────────────────────────────
-
-    #[test]
-    fn split_oversized_text_into_per_char_fragments() {
-        // "ab" at 60pt is wider than max_width=20pt → split into two 30pt chars
-        // (uniform fallback — no measurer provided).
-        let frags = vec![text_frag("ab", 60.0)];
-        let result = split_oversized_fragments(&frags, Pt::new(20.0), None);
-        assert_eq!(result.len(), 2, "one fragment per character");
-        for frag in result.iter() {
-            if let Fragment::Text { width, .. } = frag {
-                assert!((width.raw() - 30.0).abs() < 1e-4, "uniform fallback 60/2");
-            } else {
-                panic!("expected Text fragment");
-            }
-        }
-    }
-
-    #[test]
-    fn no_split_needed_returns_borrowed_slice() {
-        // Fragment already fits — must return Cow::Borrowed (zero allocation).
-        let frags = vec![text_frag("hi", 10.0)];
-        let result = split_oversized_fragments(&frags, Pt::new(100.0), None);
-        assert!(
-            matches!(result, Cow::Borrowed(_)),
-            "no-split path must not allocate"
-        );
-    }
-
-    #[test]
-    fn single_char_fragment_is_never_split() {
-        // A single-character fragment wider than max_width cannot be split further.
-        let frags = vec![text_frag("M", 200.0)];
-        let result = split_oversized_fragments(&frags, Pt::new(10.0), None);
-        assert!(
-            matches!(result, Cow::Borrowed(_)),
-            "single-char oversized fragment borrows — nothing to split"
-        );
     }
 }

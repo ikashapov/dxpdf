@@ -15,11 +15,13 @@ use crate::render::resolve::images::MediaEntry;
 
 mod collect;
 mod segment;
+mod split;
 mod text;
 
 pub use collect::{
     collect_fragments, FieldContext, FootnoteTracker, FragmentCtx, RecordedFootnote,
 };
+pub use split::split_oversized_fragments;
 
 // ── Superscript / subscript rendering constants ───────────────────────────────
 // §17.3.2.42: these ratios are "application-defined" per the spec; the values

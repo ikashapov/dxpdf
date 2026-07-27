@@ -17,10 +17,10 @@ use super::BoxConstraints;
 use crate::render::dimension::Pt;
 use crate::render::geometry::{PtOffset, PtRect, PtSize};
 
+use crate::render::layout::fragment::split_oversized_fragments;
+
 use borders::{emit_paragraph_borders_and_shading, emit_segment_borders_and_shading, SegmentEdges};
-use line_emit::{
-    compute_line_placements, emit_line_commands, resolve_line_height, split_oversized_fragments,
-};
+use line_emit::{compute_line_placements, emit_line_commands, resolve_line_height};
 
 // ── Tab leader rendering constants ────────────────────────────────────────────
 
@@ -208,16 +208,12 @@ pub(crate) fn place_paragraph<'a>(
             Some(v) => Cow::Owned(v),
             None => Cow::Borrowed(fragments),
         };
-        // Mirror `split_oversized_fragments`'s fast-path predicate so we only
-        // own the vector when a split will actually happen (no extra clone).
-        let needs_split = min_avail > Pt::ZERO
-            && clipped.iter().any(|f| {
-                matches!(f, Fragment::Text { width, text, .. } if *width > min_avail && text.len() > 1)
-            });
-        if needs_split {
-            Cow::Owned(split_oversized_fragments(&clipped, min_avail, measure_text).into_owned())
-        } else {
-            clipped
+        // `split_oversized_fragments` returns `None` when nothing needs
+        // splitting, so the borrow survives the common case untouched — no
+        // mirrored predicate, and no clone.
+        match split_oversized_fragments(&clipped, min_avail, measure_text) {
+            Some(split) => Cow::Owned(split),
+            None => clipped,
         }
     };
 

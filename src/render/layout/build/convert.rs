@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::model::{self, FirstLineIndent, LineSpacing};
 use crate::render::dimension::Pt;
@@ -325,61 +324,6 @@ pub(super) fn convert_table_border_config(b: &model::TableBorders) -> TableBorde
         inside_h: convert(&b.inside_h),
         inside_v: convert(&b.inside_v),
     }
-}
-
-/// Split text fragments wider than `max_width` into per-character fragments
-/// with individually measured widths. Used in narrow table cells for
-/// character-level line breaking.
-pub(super) fn split_oversized_fragments(
-    fragments: Vec<Fragment>,
-    max_width: Pt,
-    ctx: &BuildContext,
-) -> Vec<Fragment> {
-    if max_width <= Pt::ZERO {
-        return fragments;
-    }
-    let mut result = Vec::with_capacity(fragments.len());
-    for frag in fragments {
-        match &frag {
-            Fragment::Text {
-                text, width, font, ..
-            } if *width > max_width && text.chars().count() > 1 => {
-                // Re-measure each character individually.
-                for ch in text.chars() {
-                    let ch_str = ch.to_string();
-                    let (w, m) = ctx.measurer.measure(&ch_str, font);
-                    if let Fragment::Text {
-                        color,
-                        shading,
-                        border,
-                        hyperlink_url,
-                        baseline_offset,
-                        ..
-                    } = &frag
-                    {
-                        result.push(Fragment::Text {
-                            text: Rc::from(ch_str.as_str()),
-                            font: font.clone(),
-                            color: *color,
-                            shading: *shading,
-                            border: *border,
-                            width: w,
-                            trimmed_width: w,
-                            metrics: m,
-                            hyperlink_url: hyperlink_url.clone(),
-                            baseline_offset: *baseline_offset,
-                            text_offset: Pt::ZERO,
-                            // A per-character split of an over-wide word is never
-                            // a footnote mark (those are tiny superscripts).
-                            is_footnote_ref: false,
-                        });
-                    }
-                }
-            }
-            _ => result.push(frag),
-        }
-    }
-    result
 }
 
 /// Populate image data on Fragment::Image fragments from the media map.

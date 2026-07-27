@@ -13,9 +13,10 @@ use crate::render::resolve::conditional::{
 use crate::render::resolve::styles::ResolvedStyle;
 
 use super::block::build_paragraph_block;
+use crate::render::layout::fragment::split_oversized_fragments;
+
 use super::convert::{
     convert_cell_border_override, convert_table_border_config, merge_table_borders,
-    split_oversized_fragments,
 };
 use super::{BuildContext, BuildState};
 
@@ -547,7 +548,13 @@ fn build_cell_blocks(
                         floating_shapes,
                     } = lb
                     {
-                        let fragments = split_oversized_fragments(fragments, inner_width, ctx);
+                        // Keep the owned vector when no split is needed.
+                        let measure = |t: &str, f: &crate::render::layout::fragment::FontProps| {
+                            ctx.measurer.measure(t, f)
+                        };
+                        let fragments =
+                            split_oversized_fragments(&fragments, inner_width, Some(&measure))
+                                .unwrap_or(fragments);
                         LayoutBlock::Paragraph {
                             fragments,
                             style,
