@@ -847,14 +847,25 @@ fn decide_paragraph_split(
 
 /// Place a splittable paragraph, breaking its lines across pages as needed.
 ///
-/// The caller guarantees the paragraph is splittable (single column, no
-/// keepLines, no borders/shading/drop cap/floats/footnotes/floating objects,
-/// `>= 2` lines). Each iteration fits as many remaining lines as the current
-/// page holds, applies §17.3.1.44 widow/orphan control via
-/// [`decide_paragraph_split`], emits that segment, and page-breaks to continue.
-/// `line_start` advances by `>= 1` on every emitted segment and a `MoveWhole`
-/// always lands on a fresh page where progress is forced, so the loop
-/// terminates.
+/// The caller establishes splittability — see the `can_split` gate at the call
+/// site, which is the authority. It requires: no §17.3.1.14 `keepLines`, no
+/// floating images or shapes (those anchor to one page), `>= 2` fitted lines,
+/// and footnotes only within a single unbroken chunk (with explicit
+/// page/column breaks a reference→segment mapping is ambiguous, so those keep
+/// the atomic reservation).
+///
+/// Deliberately *not* required — each was allowed by a later change and this
+/// list is the historical trip hazard:
+/// - **Borders, shading and drop caps** split fine; they are drawn per segment
+///   (`emit_segment_borders_and_shading`).
+/// - **Multiple columns** split fine; §17.6.4 unequal-width columns work
+///   because each segment re-fits against its own column's width.
+///
+/// Each iteration fits as many remaining lines as the current page holds,
+/// applies §17.3.1.44 widow/orphan control via [`decide_paragraph_split`],
+/// emits that segment, and page-breaks to continue. `line_start` advances by
+/// `>= 1` on every emitted segment and a `MoveWhole` always lands on a fresh
+/// page where progress is forced, so the loop terminates.
 /// §17.11.23: reserve `footnotes` on the current page — measure each, subtract
 /// its height (and the separator gap for the first footnote on the page) from
 /// the available bottom, and queue it for rendering. Shared by the atomic
