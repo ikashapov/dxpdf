@@ -8,6 +8,7 @@ use crate::render::layout::section::{FloatingImage, FloatingImageY, FloatingShap
 use crate::render::resolve::shape_geometry::build_geometry;
 use crate::render::resolve::shape_visuals::resolve_shape_visuals;
 
+use super::convert::vml_style_length_to_pt;
 use super::{BuildContext, BuildState};
 
 /// Coordinate frame in which an anchor's position is resolved.
@@ -372,8 +373,8 @@ fn build_vml_floating_image(
         AnchorFrame::Stack => page_x - state.page_config.margins.left,
     };
 
-    let width = common.style.width.map(vml_length_to_pt)?;
-    let height = common.style.height.map(vml_length_to_pt)?;
+    let width = common.style.width.and_then(vml_style_length_to_pt)?;
+    let height = common.style.height.and_then(vml_style_length_to_pt)?;
     if width <= Pt::ZERO || height <= Pt::ZERO {
         return None;
     }
@@ -515,8 +516,8 @@ fn build_vml_rect_shape(
 
     // Size via `style.width` / `style.height`. A rect with no extent
     // can't meaningfully render.
-    let width = common.style.width.map(vml_length_to_pt)?;
-    let height = common.style.height.map(vml_length_to_pt)?;
+    let width = common.style.width.and_then(vml_style_length_to_pt)?;
+    let height = common.style.height.and_then(vml_style_length_to_pt)?;
     if width <= Pt::ZERO || height <= Pt::ZERO {
         return None;
     }
@@ -793,8 +794,8 @@ fn vml_absolute_position(style: &model::VmlStyle) -> Option<(Pt, Pt)> {
     if style.position != Some(CssPosition::Absolute) {
         return None;
     }
-    let x = style.margin_left.map(vml_length_to_pt)?;
-    let y = style.margin_top.map(vml_length_to_pt)?;
+    let x = style.margin_left.and_then(vml_style_length_to_pt)?;
+    let y = style.margin_top.and_then(vml_style_length_to_pt)?;
     Some((x, y))
 }
 
@@ -961,21 +962,6 @@ pub(super) fn build_shape_text_commands(
         commands.push(cmd);
     }
     commands
-}
-
-/// Convert a VML CSS length to points.
-fn vml_length_to_pt(len: model::VmlLength) -> Pt {
-    use crate::model::VmlLengthUnit;
-    let value = len.value as f32;
-    Pt::new(match len.unit {
-        VmlLengthUnit::Pt => value,
-        VmlLengthUnit::In => value * 72.0,
-        VmlLengthUnit::Cm => value * 72.0 / 2.54,
-        VmlLengthUnit::Mm => value * 72.0 / 25.4,
-        VmlLengthUnit::Px => value * 0.75, // 96dpi → 72pt/in
-        VmlLengthUnit::None => value / 914400.0 * 72.0, // bare number = EMU
-        _ => value,                        // Em, Percent — fallback to raw value
-    })
 }
 
 #[cfg(test)]

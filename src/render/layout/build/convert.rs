@@ -629,41 +629,55 @@ pub(super) fn populate_underline_metrics(fragments: &mut [Fragment], measurer: &
 /// Extract the display size for a picture bullet from its VML shape style.
 /// Falls back to 9pt × 9pt (common Word default for picture bullets).
 pub(super) fn pic_bullet_size(bullet: &model::NumPicBullet) -> PtSize {
-    use crate::model::VmlLengthUnit;
-
     let default = PtSize::new(Pt::new(9.0), Pt::new(9.0));
     let shape = match bullet.pict.as_ref().and_then(|p| p.shapes().next()) {
         Some(s) => s,
         None => return default,
     };
 
-    let to_pt = |len: &crate::model::VmlLength| -> Pt {
-        let val = len.value as f32;
-        match len.unit {
-            VmlLengthUnit::Pt => Pt::new(val),
-            VmlLengthUnit::In => Pt::new(val * 72.0),
-            VmlLengthUnit::Cm => Pt::new(val * 28.3465),
-            VmlLengthUnit::Mm => Pt::new(val * 2.83465),
-            VmlLengthUnit::Px => Pt::new(val * 0.75),
-            _ => Pt::new(val),
-        }
-    };
-
     let w = shape
         .common
         .style
         .width
-        .as_ref()
-        .map(to_pt)
+        .and_then(vml_style_length_to_pt)
         .unwrap_or(default.width);
     let h = shape
         .common
         .style
         .height
-        .as_ref()
-        .map(to_pt)
+        .and_then(vml_style_length_to_pt)
         .unwrap_or(default.height);
     PtSize::new(w, h)
+}
+
+/// §14.1.2: convert a VML **style** measurement (`width`, `height`,
+/// `margin-left`, …) to points.
+///
+/// The absolute units come from [`model::VmlLength::to_absolute_points`], the
+/// one unit table shared with the parse layer. What this function adds is the
+/// policy for the units that table leaves unresolved, which is specific to
+/// style measurements:
+///
+/// * a **bare number** is EMU — the interpretation the model documents for
+///   this context (on a primitive's `from`/`to` the same bare number would
+///   instead be local coordinate units, which is why the rule can't live on
+///   the model type);
+/// * **`%`** and **`em`** are relative to a containing box or font size that
+///   isn't available here, so they yield `None` rather than a fabricated
+///   number. Returning the raw value — the previous behaviour — turned
+///   `width:50%` into 50pt.
+pub(super) fn vml_style_length_to_pt(len: model::VmlLength) -> Option<Pt> {
+    use crate::model::VmlLengthUnit;
+    if let Some(pt) = len.to_absolute_points() {
+        return Some(Pt::new(pt));
+    }
+    match len.unit {
+        VmlLengthUnit::None => Some(Pt::new(len.value as f32 / 914400.0 * 72.0)),
+        // Unresolvable without a containing box / font size.
+        VmlLengthUnit::Em | VmlLengthUnit::Percent => None,
+        // `to_absolute_points` already handled every absolute unit.
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -910,5 +924,53 @@ mod tests {
         let (text, family) = remap_legacy_font_chars("abc", "Arial", "Calibri");
         assert_eq!(text, "abc");
         assert_eq!(family, "Arial");
+    }
+
+    // ── §14.1.2 style-measurement policy ─────────────────────────────────
+
+    fn vml_len(value: f64, unit: model::VmlLengthUnit) -> model::VmlLength {
+        model::VmlLength { value, unit }
+    }
+
+    #[test]
+    fn style_length_passes_absolute_units_through() {
+        use model::VmlLengthUnit;
+        assert_eq!(
+            vml_style_length_to_pt(vml_len(9.0, VmlLengthUnit::Pt)),
+            Some(Pt::new(9.0))
+        );
+        assert_eq!(
+            vml_style_length_to_pt(vml_len(1.0, VmlLengthUnit::In)),
+            Some(Pt::new(72.0))
+        );
+    }
+
+    /// Regression: the two render-layer converters disagreed here — one read a
+    /// bare number as EMU, the other as points, so the same `width:9` meant
+    /// 0.0007pt in one code path and 9pt in the other. EMU is the rule the
+    /// model documents for `style` measurements.
+    #[test]
+    fn style_length_reads_a_bare_number_as_emu() {
+        let got = vml_style_length_to_pt(vml_len(914400.0, model::VmlLengthUnit::None))
+            .expect("unitless resolves in a style measurement");
+        assert!(
+            (got.raw() - 72.0).abs() < 1e-3,
+            "914400 EMU is one inch, got {}",
+            got.raw()
+        );
+    }
+
+    /// Regression: `%` and `em` used to fall through to the raw value, so
+    /// `width:50%` became 50pt. They are unresolvable here; the caller
+    /// substitutes its own default.
+    #[test]
+    fn style_length_rejects_units_needing_a_container() {
+        for unit in [model::VmlLengthUnit::Percent, model::VmlLengthUnit::Em] {
+            assert_eq!(
+                vml_style_length_to_pt(vml_len(50.0, unit)),
+                None,
+                "{unit:?} needs a containing box / font size"
+            );
+        }
     }
 }

@@ -602,18 +602,12 @@ fn parse_vml_points(s: &str) -> Vec<VmlPoint> {
 /// the typed `VmlLength` for shape geometry but points/curves are
 /// scalar enough that a flat `f32` suffices.
 fn pt_value(len: &crate::docx::model::VmlLength) -> f32 {
-    use crate::docx::model::VmlLengthUnit;
-    let v = len.value as f32;
-    match len.unit {
-        VmlLengthUnit::Pt => v,
-        VmlLengthUnit::In => v * 72.0,
-        VmlLengthUnit::Cm => v * 28.3465,
-        VmlLengthUnit::Mm => v * 2.83465,
-        VmlLengthUnit::Px => v * 0.75,
-        // Em / Ex / Pc / Percent / Unitless: degrade to the raw value
-        // — these aren't expected on primitive coordinate attributes.
-        _ => v,
-    }
+    // Absolute units come from the shared table on `VmlLength`. The units it
+    // leaves unresolved (`%`, `em`, and a bare number) degrade to the raw
+    // value here: on a primitive's coordinate attributes a bare number is in
+    // the shape's *local* coordinate system, not EMU as it would be in a
+    // `style` measurement, and the relative units aren't expected at all.
+    len.to_absolute_points().unwrap_or(len.value as f32)
 }
 
 // ── textbox ───────────────────────────────────────────────────────────────

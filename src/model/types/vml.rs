@@ -862,6 +862,34 @@ pub struct VmlLength {
     pub unit: VmlLengthUnit,
 }
 
+impl VmlLength {
+    /// Convert to points when the unit is *absolute*.
+    ///
+    /// Returns `None` for units this type cannot resolve on its own:
+    ///
+    /// * [`VmlLengthUnit::Percent`] and [`VmlLengthUnit::Em`] are relative to a
+    ///   containing box or font size that only the caller knows.
+    /// * [`VmlLengthUnit::None`] — a bare number — means different things in
+    ///   different attributes: EMU in a `style` measurement, but *local
+    ///   coordinate units* (relative to `coordsize`) on a primitive's
+    ///   `from`/`to`/`points`. Callers apply the rule for their own context.
+    ///
+    /// This carries only the arithmetic that is context-free, so every caller
+    /// shares one unit table instead of restating it.
+    pub fn to_absolute_points(&self) -> Option<f32> {
+        let v = self.value as f32;
+        Some(match self.unit {
+            VmlLengthUnit::Pt => v,
+            VmlLengthUnit::In => v * 72.0,
+            VmlLengthUnit::Cm => v * 72.0 / 2.54,
+            VmlLengthUnit::Mm => v * 72.0 / 25.4,
+            // CSS reference pixel: 96dpi → 72pt/in.
+            VmlLengthUnit::Px => v * 0.75,
+            VmlLengthUnit::Em | VmlLengthUnit::Percent | VmlLengthUnit::None => return None,
+        })
+    }
+}
+
 /// CSS length unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmlLengthUnit {
@@ -1092,5 +1120,49 @@ mod tests {
         });
         p.common_mut().id = Some(VmlShapeId::new("after"));
         assert_eq!(p.common().id.as_ref().unwrap().as_str(), "after");
+    }
+
+    // ── §14.1.2 length units ─────────────────────────────────────────────
+
+    fn len(value: f64, unit: VmlLengthUnit) -> VmlLength {
+        VmlLength { value, unit }
+    }
+
+    #[test]
+    fn absolute_units_convert_to_points() {
+        let cases = [
+            (len(9.0, VmlLengthUnit::Pt), 9.0),
+            (len(1.0, VmlLengthUnit::In), 72.0),
+            (len(2.54, VmlLengthUnit::Cm), 72.0),
+            (len(25.4, VmlLengthUnit::Mm), 72.0),
+            (len(96.0, VmlLengthUnit::Px), 72.0), // 96dpi reference pixel
+        ];
+        for (input, expected) in cases {
+            let got = input.to_absolute_points().expect("absolute unit resolves");
+            assert!(
+                (got - expected).abs() < 1e-3,
+                "{:?} → {got}, expected {expected}",
+                input.unit
+            );
+        }
+    }
+
+    /// Units that need a containing box, a font size, or the attribute's own
+    /// context are `None` — never a fabricated number. Three separate
+    /// converters previously each invented their own answer here, and they
+    /// disagreed: a bare number was EMU in one and points in the others.
+    #[test]
+    fn context_dependent_units_are_unresolved() {
+        for unit in [
+            VmlLengthUnit::Percent,
+            VmlLengthUnit::Em,
+            VmlLengthUnit::None,
+        ] {
+            assert_eq!(
+                len(50.0, unit).to_absolute_points(),
+                None,
+                "{unit:?} cannot be resolved without context"
+            );
+        }
     }
 }
