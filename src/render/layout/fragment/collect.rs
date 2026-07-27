@@ -855,8 +855,8 @@ where
                 // §17.11.12: footnote reference — render as superscript number.
                 Inline::FootnoteRef(note_id) => {
                     let num_text = format!("{}", footnotes.record(*note_id));
-                    // §17.11.12: footnote reference uses superscript at 58% size.
-                    let ref_size = default_size * 0.58;
+                    // §17.11.12: footnote reference uses superscript sizing.
+                    let ref_size = default_size * super::SUPERSCRIPT_FONT_SIZE_RATIO;
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
@@ -869,8 +869,8 @@ where
                         underline_thickness: Pt::ZERO,
                     };
                     let (w, m) = measure_text(&num_text, &ref_font);
-                    // Superscript baseline offset: raise by ~40% of the full-size ascent.
-                    let baseline_offset = -(default_size * 0.4);
+                    // Raise the mark clear of the baseline (see the constant).
+                    let baseline_offset = -(default_size * super::NOTE_REF_BASELINE_OFFSET_RATIO);
                     fragments.push(Fragment::Text {
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),
@@ -892,7 +892,7 @@ where
                 Inline::EndnoteRef(_note_id) => {
                     *endnote_counter += 1;
                     let num_text = to_roman_lower(*endnote_counter);
-                    let ref_size = default_size * 0.58;
+                    let ref_size = default_size * super::SUPERSCRIPT_FONT_SIZE_RATIO;
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
@@ -905,7 +905,7 @@ where
                         underline_thickness: Pt::ZERO,
                     };
                     let (w, m) = measure_text(&num_text, &ref_font);
-                    let baseline_offset = -(default_size * 0.4);
+                    let baseline_offset = -(default_size * super::NOTE_REF_BASELINE_OFFSET_RATIO);
                     fragments.push(Fragment::Text {
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),

@@ -28,13 +28,24 @@ pub use split::split_oversized_fragments;
 // below match Word's rendering as documented in the OpenXML SDK reference.
 
 /// Font size of super/subscript text as a fraction of the base font size.
-pub(super) const SUPERSCRIPT_FONT_SIZE_RATIO: f32 = 0.58;
+/// Also the size of a note reference mark and its body number (§17.11.12).
+pub(crate) const SUPERSCRIPT_FONT_SIZE_RATIO: f32 = 0.58;
 
 /// Superscript baseline shift: fraction of base ascent to raise the text by.
 pub(super) const SUPERSCRIPT_ASCENT_OFFSET_RATIO: f32 = 0.33;
 
 /// Subscript baseline shift: fraction of base character height to lower the text by.
 pub(super) const SUBSCRIPT_HEIGHT_OFFSET_RATIO: f32 = 0.08;
+
+/// §17.11.12: baseline shift for a footnote/endnote reference mark, and for
+/// the matching number prefixed to the note body — as a fraction of the base
+/// **font size**.
+///
+/// Deliberately *not* [`SUPERSCRIPT_ASCENT_OFFSET_RATIO`]: that one is a
+/// fraction of the measured *ascent* and carries a different value (0.33).
+/// Note marks are raised relative to the font size so the mark and its body
+/// number line up without a measurement round-trip.
+pub(crate) const NOTE_REF_BASELINE_OFFSET_RATIO: f32 = 0.4;
 
 /// Font properties needed for rendering a text fragment.
 #[derive(Clone, Debug)]

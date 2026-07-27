@@ -222,7 +222,7 @@ pub(super) fn build_paragraph_block(
     for note in fn_refs {
         if let Some(content) = ctx.resolved.footnotes.get(&note.id) {
             let display = format!("{}", note.display);
-            let notes = build_note_content(note.id.value(), &display, content, ctx, state);
+            let notes = build_note_content(&display, content, ctx, state);
             for (_, frags, style) in notes {
                 para_footnotes.push((frags, style));
             }
@@ -259,7 +259,6 @@ pub(super) fn build_paragraph_block(
 
 /// Build note content (footnotes or endnotes) with a display number prefix.
 pub(super) fn build_note_content(
-    _note_id_value: i64,
     display_num: &str,
     content: &[Block],
     ctx: &BuildContext,
@@ -282,9 +281,11 @@ pub(super) fn build_note_content(
             // Prepend display number to the first paragraph.
             if i == 0 && !frags.is_empty() {
                 let num_text = format!("{}  ", display_num);
+                // §17.8.3.2 / §17.3.2.14: fall back to the document-level spec
+                // defaults rather than restating a font name here.
                 let font = frags[0].font_props().cloned().unwrap_or_else(|| FontProps {
-                    family: std::rc::Rc::from("Times New Roman"),
-                    size: Pt::new(10.0),
+                    family: std::rc::Rc::from(super::SPEC_FALLBACK_FONT),
+                    size: super::SPEC_DEFAULT_FONT_SIZE,
                     bold: false,
                     italic: false,
                     underline: false,
@@ -293,7 +294,8 @@ pub(super) fn build_note_content(
                     underline_position: Pt::ZERO,
                     underline_thickness: Pt::ZERO,
                 });
-                let ref_size = font.size * 0.58;
+                let ref_size =
+                    font.size * crate::render::layout::fragment::SUPERSCRIPT_FONT_SIZE_RATIO;
                 let ref_font = FontProps {
                     size: ref_size,
                     ..font
@@ -311,7 +313,8 @@ pub(super) fn build_note_content(
                         trimmed_width: w,
                         metrics: m,
                         hyperlink_url: None,
-                        baseline_offset: -(font.size * 0.4),
+                        baseline_offset: -(font.size
+                            * crate::render::layout::fragment::NOTE_REF_BASELINE_OFFSET_RATIO),
                         text_offset: Pt::ZERO,
                         is_footnote_ref: false,
                     },
@@ -346,13 +349,7 @@ pub(super) fn collect_endnotes(
     for (i, note_id) in en_ids.iter().enumerate() {
         let display = crate::render::layout::fragment::to_roman_lower((i + 1) as u32);
         if let Some(content) = ctx.resolved.endnotes.get(note_id) {
-            endnotes.extend(build_note_content(
-                note_id.value(),
-                &display,
-                content,
-                ctx,
-                state,
-            ));
+            endnotes.extend(build_note_content(&display, content, ctx, state));
         }
     }
 }
