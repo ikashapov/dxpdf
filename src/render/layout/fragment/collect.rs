@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
 use crate::model::{
-    Block, BorderStyle, FieldCharType, Inline, RunElement, RunProperties, TextRun, VerticalAlign,
+    Block, BorderStyle, FieldCharType, Inline, NoteId, RunElement, RunProperties, TextRun,
+    VerticalAlign,
 };
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::EmojiCluster;
@@ -18,6 +19,58 @@ use super::{
     TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
     SUPERSCRIPT_FONT_SIZE_RATIO,
 };
+
+/// §17.11.12: a footnote reference recorded while walking a paragraph's inlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordedFootnote {
+    /// The referenced note.
+    pub id: NoteId,
+    /// The sequential display number emitted as this reference's superscript.
+    pub display: u32,
+}
+
+/// §17.11.12: footnote numbering state threaded through fragment collection.
+///
+/// The display counter and the record of *which* notes were referenced advance
+/// at a single site ([`FootnoteTracker::record`]), so the footnote body a
+/// caller renders can never disagree with the superscript mark this walk
+/// emitted.
+///
+/// This replaced a design where the counter was advanced by this **recursive**
+/// walk (which descends into hyperlinks, non-substituted fields, MCE
+/// fallbacks, and VML text boxes) while callers re-derived the reference list
+/// from a **flat** scan of the paragraph's top-level inlines. The two walkers
+/// disagreed for any nested reference: its body was never emitted, and when it
+/// preceded a top-level reference the body's number no longer matched the mark.
+#[derive(Default, Debug)]
+pub struct FootnoteTracker {
+    /// Display number of the most recently emitted reference.
+    last_display: u32,
+    /// References recorded since the last [`FootnoteTracker::take_pending`].
+    pending: Vec<RecordedFootnote>,
+}
+
+impl FootnoteTracker {
+    /// Assign the next display number to `id`, record it, and return the number.
+    fn record(&mut self, id: NoteId) -> u32 {
+        self.last_display += 1;
+        self.pending.push(RecordedFootnote {
+            id,
+            display: self.last_display,
+        });
+        self.last_display
+    }
+
+    /// Take the references recorded since the last call, in encounter order.
+    ///
+    /// Every caller of [`collect_fragments`] must drain — including those that
+    /// don't render footnote bodies (headers/footers, footnote bodies
+    /// themselves). Otherwise their references leak into the next paragraph's
+    /// batch and are rendered against the wrong host.
+    pub fn take_pending(&mut self) -> Vec<RecordedFootnote> {
+        std::mem::take(&mut self.pending)
+    }
+}
 
 /// §17.3.2.4: convert a run-level [`crate::model::Border`] into a render-side
 /// [`FragmentBorder`], filtering out the spec's "no border" sentinel
@@ -371,7 +424,7 @@ pub fn collect_fragments<F>(
     ctx: &FragmentCtx<'_>,
     hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
-    footnote_counter: &mut u32,
+    footnotes: &mut FootnoteTracker,
     endnote_counter: &mut u32,
     field_ctx: FieldContext,
 ) -> Vec<Fragment>
@@ -642,7 +695,7 @@ where
                         ctx,
                         target.as_ref(),
                         measure_text,
-                        footnote_counter,
+                        footnotes,
                         endnote_counter,
                         field_ctx,
                     );
@@ -665,7 +718,7 @@ where
                             ctx,
                             hyperlink_url,
                             measure_text,
-                            footnote_counter,
+                            footnotes,
                             endnote_counter,
                             field_ctx,
                         );
@@ -751,7 +804,7 @@ where
                                 ctx,
                                 hyperlink_url,
                                 measure_text,
-                                footnote_counter,
+                                footnotes,
                                 endnote_counter,
                                 field_ctx,
                             );
@@ -800,9 +853,8 @@ where
                 | Inline::FootnoteRefMark
                 | Inline::EndnoteRefMark => {}
                 // §17.11.12: footnote reference — render as superscript number.
-                Inline::FootnoteRef(_note_id) => {
-                    *footnote_counter += 1;
-                    let num_text = format!("{}", *footnote_counter);
+                Inline::FootnoteRef(note_id) => {
+                    let num_text = format!("{}", footnotes.record(*note_id));
                     // §17.11.12: footnote reference uses superscript at 58% size.
                     let ref_size = default_size * 0.58;
                     let ref_font = FontProps {
@@ -901,7 +953,7 @@ where
                                         &pict_ctx,
                                         hyperlink_url,
                                         measure_text,
-                                        footnote_counter,
+                                        footnotes,
                                         endnote_counter,
                                         field_ctx,
                                     );
@@ -1025,7 +1077,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1044,7 +1096,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1071,7 +1123,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1099,7 +1151,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1130,7 +1182,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1151,7 +1203,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1201,7 +1253,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1234,7 +1286,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1264,7 +1316,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1289,7 +1341,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1308,7 +1360,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1334,7 +1386,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1354,7 +1406,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1583,7 +1635,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext {
                 page_number: Some(7),

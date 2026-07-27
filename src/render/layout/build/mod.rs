@@ -54,8 +54,10 @@ impl BuildContext<'_> {
 pub struct BuildState {
     /// Page configuration for the current section.
     pub page_config: crate::render::layout::page::PageConfig,
-    /// Sequential footnote display number (1, 2, 3...).
-    pub footnote_counter: u32,
+    /// §17.11.12: footnote display numbering plus the ordered record of which
+    /// notes each paragraph referenced. Advanced by `collect_fragments` and
+    /// drained per paragraph — see [`FootnoteTracker`].
+    pub footnotes: crate::render::layout::fragment::FootnoteTracker,
     /// Sequential endnote display number (i, ii, iii...).
     pub endnote_counter: u32,
     /// Per-(numId, level) running counters for list labels.
@@ -169,6 +171,10 @@ pub fn build_header_footer_content(
         match block {
             Block::Paragraph(p) => {
                 let (mut frags, props) = build_fragments(p, ctx, state, None, None);
+                // §17.11.12: headers/footers don't render footnote bodies, but
+                // they must still drain — otherwise a reference inside one
+                // would be attributed to the next body paragraph.
+                let _ = state.footnotes.take_pending();
                 let style =
                     paragraph_style_from_props(&props, Pt::from(ctx.resolved.default_tab_stop));
 

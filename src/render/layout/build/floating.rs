@@ -942,7 +942,7 @@ pub(super) fn build_shape_text_commands(
     // outer counters.
     let mut sub_state = BuildState {
         page_config: state.page_config.clone(),
-        footnote_counter: 0,
+        footnotes: Default::default(),
         endnote_counter: 0,
         list_counters: std::collections::HashMap::new(),
         field_ctx: state.field_ctx,
@@ -1106,7 +1106,7 @@ mod tests {
     fn default_state() -> BuildState {
         BuildState {
             page_config: Default::default(),
-            footnote_counter: 0,
+            footnotes: Default::default(),
             endnote_counter: 0,
             list_counters: Default::default(),
             field_ctx: Default::default(),

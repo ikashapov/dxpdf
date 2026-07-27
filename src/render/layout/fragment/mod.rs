@@ -17,7 +17,9 @@ mod collect;
 mod segment;
 mod text;
 
-pub use collect::{collect_fragments, FieldContext, FragmentCtx};
+pub use collect::{
+    collect_fragments, FieldContext, FootnoteTracker, FragmentCtx, RecordedFootnote,
+};
 
 // ── Superscript / subscript rendering constants ───────────────────────────────
 // §17.3.2.42: these ratios are "application-defined" per the spec; the values

@@ -61,6 +61,12 @@ pub(super) fn build_paragraph_block(
     cond: Option<&CellConditionalFormatting>,
 ) -> Option<LayoutBlock> {
     let (mut fragments, mut merged_props) = build_fragments(p, ctx, state, table_style, cond);
+    // Drain immediately: this paragraph owns exactly the references its own
+    // fragment collection recorded. Draining before the drop-cap early return
+    // below keeps them from leaking into the next paragraph's batch, and
+    // before `build_note_content` re-enters `build_fragments` (a footnote body
+    // may itself carry references) from mixing the two levels together.
+    let fn_refs = state.footnotes.take_pending();
 
     // §17.9.22: inject list label if paragraph has a numbering reference.
     super::list_label::inject_list_label(p, &mut fragments, &mut merged_props, ctx, state);
@@ -198,26 +204,17 @@ pub(super) fn build_paragraph_block(
 
     let page_break_before = merged_props.page_break_before.unwrap_or(false);
 
-    // Collect footnotes referenced in this paragraph.
-    // The footnote_counter was already incremented during fragment collection,
-    // so we count backwards to get the display number for each reference.
-    let fn_refs: Vec<_> = p
-        .content
-        .iter()
-        .filter_map(|i| {
-            if let model::Inline::FootnoteRef(id) = i {
-                Some(id)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let fn_base = state.footnote_counter - fn_refs.len() as u32;
+    // §17.11.12: render a body for each footnote this paragraph referenced.
+    // `collect_fragments` recorded them — id *and* the display number it
+    // emitted as the superscript — as it walked, so the body and the mark
+    // cannot disagree. Draining here also covers references nested inside
+    // hyperlinks, fields, and text boxes, which the previous flat scan of
+    // `p.content` missed entirely.
     let mut para_footnotes = Vec::new();
-    for (i, note_id) in fn_refs.iter().enumerate() {
-        let display = format!("{}", fn_base + i as u32 + 1);
-        if let Some(content) = ctx.resolved.footnotes.get(note_id) {
-            let notes = build_note_content(note_id.value(), &display, content, ctx, state);
+    for note in fn_refs {
+        if let Some(content) = ctx.resolved.footnotes.get(&note.id) {
+            let display = format!("{}", note.display);
+            let notes = build_note_content(note.id.value(), &display, content, ctx, state);
             for (_, frags, style) in notes {
                 para_footnotes.push((frags, style));
             }
@@ -268,6 +265,11 @@ pub(super) fn build_note_content(
     for (i, block) in content.iter().enumerate() {
         if let model::Block::Paragraph(p) = block {
             let (mut frags, merged_props) = build_fragments(p, ctx, state, None, None);
+            // §17.11.12: a footnote body may itself carry references. We don't
+            // render nested footnote bodies (matching the previous behaviour),
+            // but the references must be drained so they aren't attributed to
+            // the paragraph that hosts this note.
+            let _ = state.footnotes.take_pending();
 
             // Prepend display number to the first paragraph.
             if i == 0 && !frags.is_empty() {
@@ -430,7 +432,7 @@ pub(super) fn build_fragments(
         &frag_ctx,
         None,
         &measure,
-        &mut state.footnote_counter,
+        &mut state.footnotes,
         &mut state.endnote_counter,
         state.field_ctx,
     );
