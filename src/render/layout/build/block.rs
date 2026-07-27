@@ -449,3 +449,262 @@ pub(super) fn build_fragments(
 
     (fragments, merged_props)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::model::dimension::Dimension;
+    use crate::render::fonts::FontRegistry;
+    use crate::render::layout::measurer::TextMeasurer;
+    use crate::render::resolve::ResolvedDocument;
+
+    fn empty_resolved() -> ResolvedDocument {
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: model::ParagraphProperties::default(),
+            doc_defaults_run: model::RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn para(content: Vec<model::Inline>) -> Paragraph {
+        Paragraph {
+            style_id: None,
+            properties: model::ParagraphProperties::default(),
+            mark_run_properties: None,
+            content,
+            rsids: model::ParagraphRevisionIds::default(),
+        }
+    }
+
+    fn text_run(s: &str) -> model::Inline {
+        model::Inline::TextRun(Box::new(model::TextRun {
+            style_id: None,
+            properties: model::RunProperties::default(),
+            content: vec![model::RunElement::Text(s.to_string())],
+            rsids: model::RevisionIds::default(),
+        }))
+    }
+
+    /// Run a closure with a live `BuildContext` + `BuildState`. A real Skia
+    /// measurer is used, so assertions below are structural — never on
+    /// platform-dependent metric values.
+    fn with_ctx<R>(
+        resolved: &ResolvedDocument,
+        f: impl FnOnce(&BuildContext, &mut BuildState) -> R,
+    ) -> R {
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved,
+        };
+        let mut state = BuildState::default();
+        f(&ctx, &mut state)
+    }
+
+    fn resolved_style(paragraph: model::ParagraphProperties) -> ResolvedStyle {
+        ResolvedStyle {
+            paragraph,
+            run: model::RunProperties::default(),
+            table: None,
+            table_style_overrides: Vec::new(),
+            is_toc_entry: false,
+        }
+    }
+
+    #[test]
+    fn section_break_produces_no_layout_block() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let block = Block::SectionBreak(Box::default());
+            let mut pending = None;
+            assert!(
+                build_block(&block, Pt::new(400.0), ctx, state, &mut pending).is_none(),
+                "section breaks are consumed by resolve, not laid out"
+            );
+        });
+    }
+
+    /// §17.3.1.29: a paragraph with no runs still occupies one line. Without an
+    /// injected `LineBreak` the fragment list is empty and `layout_section`
+    /// drops the paragraph, collapsing it to zero height.
+    #[test]
+    fn empty_paragraph_gets_a_line_break_fragment() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut pending = None;
+            let block = build_paragraph_block(&para(vec![]), ctx, state, &mut pending, None, None)
+                .expect("empty paragraph still lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                matches!(fragments.as_slice(), [Fragment::LineBreak { line_height }] if line_height.raw() > 0.0),
+                "exactly one LineBreak with a real height"
+            );
+        });
+    }
+
+    #[test]
+    fn paragraph_with_content_gets_no_injected_line_break() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut pending = None;
+            let block = build_paragraph_block(
+                &para(vec![text_run("hi")]),
+                ctx,
+                state,
+                &mut pending,
+                None,
+                None,
+            )
+            .expect("lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                !fragments
+                    .iter()
+                    .any(|f| matches!(f, Fragment::LineBreak { .. })),
+                "no LineBreak injected when the paragraph has runs"
+            );
+        });
+    }
+
+    /// §17.3.1.11: a drop-cap paragraph emits no block of its own — it is held
+    /// aside and attached to the *following* paragraph.
+    #[test]
+    fn drop_cap_paragraph_is_deferred_onto_the_next_paragraph() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut cap = para(vec![text_run("D")]);
+            cap.properties.frame_properties = Some(model::FrameKind::DropCap {
+                style: model::DropCap::Drop,
+                lines: 3,
+                h_space: None,
+            });
+
+            let mut pending = None;
+            assert!(
+                build_paragraph_block(&cap, ctx, state, &mut pending, None, None).is_none(),
+                "the drop-cap paragraph itself produces no block"
+            );
+            let held = pending
+                .as_ref()
+                .expect("drop cap held for the next paragraph");
+            assert_eq!(held.lines, 3, "line span carried through");
+
+            // The next paragraph consumes it.
+            let next = build_paragraph_block(
+                &para(vec![text_run("body")]),
+                ctx,
+                state,
+                &mut pending,
+                None,
+                None,
+            )
+            .expect("lays out");
+            let LayoutBlock::Paragraph { style, .. } = next else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                style.drop_cap.is_some(),
+                "attached to the following paragraph"
+            );
+            assert!(pending.is_none(), "and taken, so it attaches only once");
+        });
+    }
+
+    /// §17.7.2 precedence inside a table cell: conditional formatting outranks
+    /// the table style, which outranks document defaults. Asserted on the
+    /// merged paragraph properties returned by `build_fragments`.
+    #[test]
+    fn conditional_formatting_outranks_table_style() {
+        let mut resolved = empty_resolved();
+        resolved.doc_defaults_paragraph.alignment = Some(model::Alignment::Start);
+        let table_style = resolved_style(model::ParagraphProperties {
+            alignment: Some(model::Alignment::Center),
+            ..Default::default()
+        });
+
+        with_ctx(&resolved, |ctx, state| {
+            // Table style alone.
+            let (_, props) = build_fragments(
+                &para(vec![text_run("x")]),
+                ctx,
+                state,
+                Some(&table_style),
+                None,
+            );
+            assert_eq!(
+                props.alignment,
+                Some(model::Alignment::Center),
+                "table style beats doc defaults"
+            );
+
+            // Conditional formatting on top of it.
+            let cond = CellConditionalFormatting {
+                cell_properties: None,
+                run_properties: None,
+                paragraph_properties: Some(model::ParagraphProperties {
+                    alignment: Some(model::Alignment::End),
+                    ..Default::default()
+                }),
+            };
+            let (_, props) = build_fragments(
+                &para(vec![text_run("x")]),
+                ctx,
+                state,
+                Some(&table_style),
+                Some(&cond),
+            );
+            assert_eq!(
+                props.alignment,
+                Some(model::Alignment::End),
+                "conditional formatting beats the table style"
+            );
+        });
+    }
+
+    /// The paragraph's own direct formatting outranks every table-level layer.
+    #[test]
+    fn direct_paragraph_properties_outrank_conditional_formatting() {
+        let resolved = empty_resolved();
+        let table_style = resolved_style(model::ParagraphProperties {
+            alignment: Some(model::Alignment::Center),
+            ..Default::default()
+        });
+        let cond = CellConditionalFormatting {
+            cell_properties: None,
+            run_properties: None,
+            paragraph_properties: Some(model::ParagraphProperties {
+                alignment: Some(model::Alignment::End),
+                ..Default::default()
+            }),
+        };
+
+        with_ctx(&resolved, |ctx, state| {
+            let mut p = para(vec![text_run("x")]);
+            p.properties.alignment = Some(model::Alignment::Both);
+            let (_, props) = build_fragments(&p, ctx, state, Some(&table_style), Some(&cond));
+            assert_eq!(
+                props.alignment,
+                Some(model::Alignment::Both),
+                "direct pPr wins over every table layer"
+            );
+        });
+    }
+}
