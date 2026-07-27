@@ -225,12 +225,13 @@ pub(super) fn measure_table_rows(
             let span = cell.grid_span.max(1) as usize;
             // Defensive clamp: malformed DOCX where gridBefore + spans + gridAfter
             // exceed the grid would otherwise panic in the slice index below.
-            let grid_end = (grid_idx + span).min(col_widths.len());
-            let cell_w: Pt = col_widths[grid_idx..grid_end].iter().copied().sum();
-            let cell_x: Pt = col_widths[..grid_idx.min(col_widths.len())]
-                .iter()
-                .copied()
-                .sum();
+            // Both ends need clamping — clamping only `grid_end` inverts the
+            // range (`start > end`), which panics just as an out-of-bounds end
+            // would. Mirrors the same clamp in `build/table.rs`.
+            let grid_start = grid_idx.min(col_widths.len());
+            let grid_end = (grid_start + span).min(col_widths.len());
+            let cell_w: Pt = col_widths[grid_start..grid_end].iter().copied().sum();
+            let cell_x: Pt = col_widths[..grid_start].iter().copied().sum();
 
             let b = &resolved_borders[row_idx][cell_ci];
             let extra_left = (border_width(b.left) - cell.margins.left).max(Pt::ZERO);

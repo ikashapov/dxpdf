@@ -74,11 +74,9 @@ pub struct BuildState {
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
-/// Built section output — layout blocks plus endnotes.
+/// Built section output — layout blocks.
 pub struct BuiltSection {
     pub blocks: Vec<LayoutBlock>,
-    /// Endnote content (display number, fragments, style) — rendered at document end.
-    pub endnotes: Vec<(String, Vec<Fragment>, ParagraphStyle)>,
 }
 
 /// Build layout blocks for one section by recursing into its block tree.
@@ -103,11 +101,22 @@ pub fn build_section_blocks(
         })
         .collect();
 
-    // Collect endnotes (rendered at document end).
+    BuiltSection { blocks }
+}
+
+/// §17.11.2: build the document's endnote content, rendered once at the end of
+/// the document.
+///
+/// Endnotes are **document-scoped**, not section-scoped: `ResolvedDocument`
+/// holds a single endnote map. Calling this per section would emit every
+/// endnote once per section, so it deliberately sits outside the section loop.
+pub fn build_document_endnotes(
+    ctx: &BuildContext,
+    state: &mut BuildState,
+) -> Vec<(String, Vec<Fragment>, ParagraphStyle)> {
     let mut endnotes = Vec::new();
     collect_endnotes(ctx, state, &mut endnotes);
-
-    BuiltSection { blocks, endnotes }
+    endnotes
 }
 
 /// Collected header/footer content with layout metadata.

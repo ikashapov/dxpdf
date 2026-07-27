@@ -292,3 +292,102 @@ fn layout_produces_text_commands() {
         );
     }
 }
+
+// ── §17.11.2 endnotes are document-scoped ───────────────────────────────────
+
+/// Build a DOCX carrying an `endnotes.xml` part plus the given body.
+fn docx_with_endnotes(body: &str) -> Vec<u8> {
+    use std::io::Write;
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let o = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", o).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>
+</Types>"#).unwrap();
+
+    zip.start_file("_rels/.rels", o).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#).unwrap();
+
+    zip.start_file("word/_rels/document.xml.rels", o).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdEn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+</Relationships>"#).unwrap();
+
+    zip.start_file("word/endnotes.xml", o).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:type="separator" w:id="0"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>
+  <w:endnote w:type="continuationSeparator" w:id="1"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>
+  <w:endnote w:id="2"><w:p><w:r><w:t>Zqxwmarker</w:t></w:r></w:p></w:endnote>
+</w:endnotes>"#).unwrap();
+
+    zip.start_file("word/document.xml", o).unwrap();
+    zip.write_all(
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>{body}</w:body>
+</w:document>"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+
+    zip.finish().unwrap().into_inner()
+}
+
+/// Count draw commands whose text contains `needle`, across every page.
+fn count_text_occurrences(
+    pages: &[dxpdf::render::layout::draw_command::LayoutedPage],
+    needle: &str,
+) -> usize {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter(|c| matches!(c, DrawCommand::Text { text, .. } if text.contains(needle)))
+        .count()
+}
+
+const SECT_PR: &str = r#"<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr>"#;
+
+/// Regression: `collect_endnotes` reads the document-wide endnote map but was
+/// called once per section from `build_section_blocks`, and the caller extended
+/// a shared vector — so an N-section document rendered every endnote N times.
+/// §17.11.2: endnotes are document-scoped and belong outside the section loop.
+#[test]
+fn endnotes_are_not_duplicated_across_sections() {
+    let one_section = format!(
+        r#"<w:p><w:r><w:t>Body</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>{SECT_PR}"#
+    );
+    let three_sections = format!(
+        r#"<w:p><w:pPr>{SECT_PR}</w:pPr><w:r><w:t>S1</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>
+           <w:p><w:pPr>{SECT_PR}</w:pPr><w:r><w:t>S2</w:t></w:r></w:p>
+           <w:p><w:r><w:t>S3</w:t></w:r></w:p>{SECT_PR}"#
+    );
+
+    for (label, body, sections) in [
+        ("1 section", one_section, 1),
+        ("3 sections", three_sections, 3),
+    ] {
+        let doc = dxpdf::docx::parse(&docx_with_endnotes(&body)).unwrap();
+        let (resolved, pages) = dxpdf::render::resolve_and_layout(&doc);
+        assert_eq!(resolved.sections.len(), sections, "{label}: section count");
+        assert_eq!(
+            count_text_occurrences(&pages, "Zqxwmarker"),
+            1,
+            "{label}: the single endnote must be rendered exactly once"
+        );
+    }
+}

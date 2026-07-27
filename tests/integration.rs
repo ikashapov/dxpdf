@@ -178,6 +178,44 @@ fn numbering_start_override_of_zero_converts() {
     assert_eq!(&pdf[..5], b"%PDF-");
 }
 
+/// §17.4.14: a row may address more grid columns than `<w:tblGrid>` declares —
+/// producers emit this and Word recovers by extending the grid. The cell-width
+/// slice clamped only its end index, so the range inverted and panicked
+/// ("range start index 3 out of range for slice of length 2"). Unlike an
+/// arithmetic overflow this fires in release too, since slice bounds are
+/// always checked.
+#[test]
+fn table_row_with_more_cells_than_grid_columns_converts() {
+    let cell = |t: &str| format!("<w:tc><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>");
+    let docx = simple_docx(&format!(
+        r#"<w:tbl>
+          <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+          <w:tr>{}{}{}{}</w:tr>
+        </w:tbl><w:p/>"#,
+        cell("a"),
+        cell("b"),
+        cell("c"),
+        cell("d")
+    ));
+    let pdf = dxpdf::convert(&docx).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
+/// §17.4.17: same clamp, reached via `<w:gridBefore>` pointing past the grid.
+#[test]
+fn table_grid_before_past_declared_columns_converts() {
+    let docx = simple_docx(
+        r#"<w:tbl>
+          <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+          <w:tr><w:trPr><w:gridBefore w:val="5"/></w:trPr>
+            <w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:tbl><w:p/>"#,
+    );
+    let pdf = dxpdf::convert(&docx).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
 #[test]
 fn decimal_integer_measurements_convert_without_preprocessing() {
     let docx = simple_docx(

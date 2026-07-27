@@ -191,6 +191,12 @@ pub(super) fn build_table(
                     for ci in 0..col_idx {
                         grid_start += row.cells[ci].properties.grid_span.unwrap_or(1) as usize;
                     }
+                    // A row may address more grid columns than `tblGrid` declares —
+                    // a `gridBefore` past the end, or simply more `<w:tc>` than
+                    // `<w:gridCol>`. Both occur in real producer output and Word
+                    // recovers from them. Clamp *both* ends: clamping only the end
+                    // inverts the range and panics on the slice.
+                    let grid_start = grid_start.min(col_widths.len());
                     let grid_end = (grid_start + span).min(col_widths.len());
                     let cell_width: Pt = col_widths[grid_start..grid_end].iter().copied().sum();
                     // Per-side cascade against the table default (see

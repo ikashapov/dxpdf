@@ -88,7 +88,7 @@ impl Default for RenderOptions {
 
 use crate::model::Block;
 use crate::render::layout::build::{
-    build_section_blocks, default_line_height, BuildContext, BuildState,
+    build_document_endnotes, build_section_blocks, default_line_height, BuildContext, BuildState,
 };
 use crate::render::layout::draw_command::LayoutedPage;
 use crate::render::layout::header_footer::{
@@ -187,7 +187,6 @@ pub fn layout_document(
     let mut state = BuildState::default();
     let dlh = default_line_height(&ctx);
     let mut all_pages = Vec::new();
-    let mut all_endnotes = Vec::new();
     let mut last_config = PageConfig::default();
     // Per-section metadata for deferred header/footer rendering.
     // Carries the section's resolved slot sets, `<w:titlePg/>` flag,
@@ -268,9 +267,6 @@ pub fn layout_document(
             &clearance,
         );
 
-        // Collect endnotes for rendering at document end.
-        all_endnotes.extend(built.endnotes);
-
         last_config = config.clone();
 
         // Check if the NEXT section is continuous — if so, save the last page
@@ -302,6 +298,10 @@ pub fn layout_document(
             logical_page_base,
         });
     }
+
+    // §17.11.2: endnotes are document-scoped — built once, after every section,
+    // so a multi-section document doesn't repeat them per section.
+    let all_endnotes = build_document_endnotes(&ctx, &mut state);
 
     // Phase 2: render headers/footers with correct NUMPAGES (total page count).
     let total_pages = all_pages.len();
