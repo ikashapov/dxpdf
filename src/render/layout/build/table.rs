@@ -271,7 +271,7 @@ pub(super) fn build_table(
             right_gap: pos.right_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             bottom_gap: pos.bottom_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             x_align: pos.x_align,
-            // §17.4.59: tblpY — absolute Y offset from the vertical anchor.
+            // §17.4.58: tblpY — absolute Y offset from the vertical anchor.
             y_offset: pos.y.map(Pt::from).unwrap_or(Pt::ZERO),
             // §17.4.58: default vertical anchor is "text".
             vert_anchor: pos.vert_anchor.unwrap_or(crate::model::TableAnchor::Text),

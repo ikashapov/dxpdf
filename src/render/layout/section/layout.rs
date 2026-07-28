@@ -87,7 +87,7 @@ struct PageLayoutState<'doc> {
     abs_floats_dirty: bool,
     /// Index of the first block on the current page (for forward scanning).
     page_start_block: usize,
-    /// §17.4.59: y-start of the most recent paragraph (floating-table anchor).
+    /// §17.4.58: y-start of the most recent paragraph (floating-table anchor).
     last_para_start_y: Pt,
     /// §17.4.38: style_id of the previous table for adjacent border collapse.
     prev_table_style_id: Option<StyleId>,
@@ -1768,7 +1768,7 @@ pub(crate) fn layout_section_with_clearance(
                 if let Some(fi) = float_info {
                     // Run an un-paginated layout once to get the table's
                     // width (for x positioning + alignment overrides) and
-                    // total height (for the §17.4.59 page-push heuristic).
+                    // total height (for the §17.4.58 page-push heuristic).
                     // The actual emission uses `layout_table_paginated`
                     // below so rows that overflow split across pages.
                     let table = layout_table(
@@ -1803,7 +1803,7 @@ pub(crate) fn layout_section_with_clearance(
                         _ => table_x,
                     };
 
-                    // §17.4.59: anchor-page heuristic — if the cursor isn't
+                    // §17.4.58: anchor-page heuristic — if the cursor isn't
                     // already at top of page and the table won't fit below
                     // it, push the table to the next page before resolving
                     // the anchor. This matches Word's "don't anchor on a
@@ -1815,7 +1815,7 @@ pub(crate) fn layout_section_with_clearance(
                         state.prev_space_after = Pt::ZERO;
                     }
 
-                    // §17.4.59: resolve `tblpY` on the (possibly new)
+                    // §17.4.58: resolve `tblpY` on the (possibly new)
                     // current page, then §17.4.57 resolve collisions with
                     // prior floats. On `Spillover`, push to next page and
                     // re-resolve with the new (empty) float list.
@@ -1871,7 +1871,7 @@ pub(crate) fn layout_section_with_clearance(
                     // Floating table breaks the adjacent table chain.
                     state.prev_table_style_id = None;
 
-                    // §17.4.59: paginate at row boundaries when the table
+                    // §17.4.58: paginate at row boundaries when the table
                     // would overflow. First slice gets the anchor page's
                     // remaining height (`bottom - float_y_start`);
                     // continuation slices get the selected body height for
@@ -1897,7 +1897,7 @@ pub(crate) fn layout_section_with_clearance(
                         },
                     );
 
-                    // §17.4.59: anchor only the first slice; continuation
+                    // §17.4.58: anchor only the first slice; continuation
                     // slices flow at the top of subsequent pages. Encoded
                     // by the `Anchor` / `Continuation` enum variants in
                     // the placement plan.

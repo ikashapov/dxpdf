@@ -1859,7 +1859,7 @@ mod tests {
         );
     }
 
-    // ── §17.4.59 — floating-table page overflow ────────────────────────
+    // ── §17.4.58 — floating-table page overflow ────────────────────────
     //
     // A floating table (`<w:tbl>` with `<w:tblpPr>`) that is taller than
     // the available height on its anchor page must split at row
@@ -2911,7 +2911,7 @@ mod tests {
     }
 
     /// The continuation slice starts at the top content area on page 2
-    /// (margin.top), not at the original `tblpY` anchor. §17.4.59 only
+    /// (margin.top), not at the original `tblpY` anchor. §17.4.58 only
     /// anchors the first slice; the continuation flows at the top of
     /// each subsequent page. Behavioral check: the first text on page
     /// 2 must sit *higher* on the page than the first text on page 1

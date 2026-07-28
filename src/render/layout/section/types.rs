@@ -69,7 +69,7 @@ impl WrapMode {
     }
 }
 
-/// §17.4.58 / §17.4.59: positioning data for a floating table.
+/// §17.4.58: positioning data for a floating table.
 #[derive(Debug, Clone)]
 pub struct TableFloatInfo {
     /// Gap between the table's right edge and surrounding text.
@@ -78,7 +78,7 @@ pub struct TableFloatInfo {
     pub bottom_gap: Pt,
     /// §17.4.58: horizontal alignment override (tblpXSpec).
     pub x_align: Option<crate::model::TableXAlign>,
-    /// §17.4.59: absolute Y offset from the vertical anchor.
+    /// §17.4.58: absolute Y offset from the vertical anchor.
     pub y_offset: Pt,
     /// §17.4.58: vertical anchor reference (text / margin / page).
     pub vert_anchor: crate::model::TableAnchor,

@@ -1,4 +1,4 @@
-//! §17.4.59 — page placement for a floating table that may span pages.
+//! §17.4.58 — page placement for a floating table that may span pages.
 //!
 //! When a `<w:tbl>` with `<w:tblpPr>` (a floating-table anchor) is taller
 //! than the available height on its anchor page, Word breaks it at row
@@ -10,7 +10,7 @@
 //! upstream by [`crate::render::layout::table::layout_table_paginated`];
 //! we take its `Vec<TableSlice>` and assign each slice to a page slot.
 //!
-//! OOXML §17.4.59 specifies `tblpY` semantics for the anchor itself but
+//! OOXML §17.4.58 specifies `tblpY` semantics for the anchor itself but
 //! does not formally describe overflow behavior. The continuation-at-top
 //! rule mirrors Microsoft Word's observable behavior and is the
 //! convention every consumer that handles overflow follows.
