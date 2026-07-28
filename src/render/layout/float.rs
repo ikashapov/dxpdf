@@ -23,6 +23,23 @@ pub enum FloatSource {
     },
 }
 
+impl FloatSource {
+    /// §17.4.57 — whether `tblOverlap` governs collisions with this float.
+    ///
+    /// It does not, for images and shapes. `tblOverlap` is defined purely
+    /// between *floating tables*: "whether the current table shall allow
+    /// other floating tables to overlap its extents". A table may still
+    /// visually overlap a floating image, and Word lets it.
+    ///
+    /// Named rather than spelled `matches!(.., Table { .. })` at the use
+    /// site because the interesting content is the spec rule, not the
+    /// pattern — the anchor resolver reads as "skip what tblOverlap
+    /// doesn't govern".
+    pub fn participates_in_table_overlap(&self) -> bool {
+        matches!(self, Self::Table { .. })
+    }
+}
+
 /// A floating element that affects text layout on the current page.
 #[derive(Debug, Clone)]
 pub struct ActiveFloat {
