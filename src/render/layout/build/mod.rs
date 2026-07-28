@@ -56,7 +56,8 @@ pub struct BuildState {
     pub page_config: crate::render::layout::page::PageConfig,
     /// §17.11.12: footnote display numbering plus the ordered record of which
     /// notes each paragraph referenced. Advanced by `collect_fragments` and
-    /// drained per paragraph — see [`FootnoteTracker`].
+    /// drained per paragraph — see
+    /// [`FootnoteTracker`](crate::render::layout::fragment::FootnoteTracker).
     pub footnotes: crate::render::layout::fragment::FootnoteTracker,
     /// Sequential endnote display number (i, ii, iii...).
     pub endnote_counter: u32,

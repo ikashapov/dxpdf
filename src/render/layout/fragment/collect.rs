@@ -32,7 +32,7 @@ pub struct RecordedFootnote {
 /// §17.11.12: footnote numbering state threaded through fragment collection.
 ///
 /// The display counter and the record of *which* notes were referenced advance
-/// at a single site ([`FootnoteTracker::record`]), so the footnote body a
+/// at a single site (the private `record` method), so the footnote body a
 /// caller renders can never disagree with the superscript mark this walk
 /// emitted.
 ///

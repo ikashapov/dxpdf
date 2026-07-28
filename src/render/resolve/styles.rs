@@ -21,7 +21,7 @@ pub struct ResolvedStyle {
     ///
     /// Derived here rather than tested at the render boundary because the
     /// signal is the **primary style name**, not the `w:styleId` spelling —
-    /// see [`is_toc_entry_name`].
+    /// see the private `is_toc_entry_name` helper below.
     pub is_toc_entry: bool,
 }
 

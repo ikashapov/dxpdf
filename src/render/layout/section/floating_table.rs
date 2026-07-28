@@ -36,8 +36,12 @@ pub(super) enum FloatingTableAnchor {
     /// `tblOverlap=Never` collision: the table was pushed below the
     /// last conflicting float. `from`/`to` are kept for diagnostics.
     Shifted { from: Pt, to: Pt },
-    /// The shifted anchor would extend the table past `page_bottom`.
+    /// A *collision-induced* shift pushed the table past `page_bottom`.
     /// The caller must push a new page and re-resolve.
+    ///
+    /// Only ever returned when prior floats actually moved the anchor.
+    /// A table that overflows purely because it is taller than the body
+    /// is **not** a spillover — see [`resolve_floating_anchor`].
     Spillover,
 }
 
@@ -45,12 +49,33 @@ pub(super) enum FloatingTableAnchor {
 /// prior `ActiveFloat`s registered for the current page.
 ///
 /// - `overlap == Some(Never)`: iteratively push the anchor below any
-///   float whose y-range intersects `[anchor, anchor + height]`. If
-///   the resulting `anchor + height > page_bottom`, return
-///   `Spillover`.
+///   float whose y-range intersects `[anchor, anchor + height]`. If a
+///   shift happened *and* the shifted anchor would extend the table
+///   past `page_bottom`, return `Spillover`.
 /// - `overlap == Some(Overlap)` or `None` (the §17.4.39 default): the
 ///   anchor is returned unchanged on the current page; overlap with
 ///   prior floats is permitted.
+///
+/// # Overflow is not spillover
+///
+/// `Spillover` is conditioned on `shifted_any`, and that condition is
+/// load-bearing rather than cosmetic. The caller answers `Spillover` by
+/// pushing a fresh page and calling back in; `push_new_page` clears the
+/// page's float list, so the retry sees `prior == []` and cannot shift.
+///
+/// Without the `shifted_any` guard, a table taller than the body area
+/// re-reports `Spillover` forever: `requested` collapses to the page
+/// top, and `page_top + height > page_bottom` holds on every page, so
+/// each iteration allocates one more `LayoutedPage` and retries. That
+/// is an unbounded loop — it was reachable from an ordinary document
+/// (a long table plus `<w:tblOverlap w:val="never"/>`) and ran until
+/// the OS killed the process.
+///
+/// A table that simply doesn't fit needs *pagination*, not relocation,
+/// so it is returned as `OnCurrentPage` and sliced at row boundaries by
+/// `layout_table_paginated_with_page_heights` — the same path the
+/// permitted-overlap case already takes. Pairing the guard with the
+/// cleared float list bounds the caller at one page push per table.
 pub(super) fn resolve_floating_anchor(
     requested: Pt,
     height: Pt,
@@ -88,15 +113,20 @@ pub(super) fn resolve_floating_anchor(
         }
     }
 
+    if !shifted_any {
+        // Nothing moved the anchor, so a fresh page would resolve to the
+        // same place. Overflow here is a pagination problem, not a
+        // placement one.
+        return FloatingTableAnchor::OnCurrentPage(anchor);
+    }
+
     if anchor + height > page_bottom {
         FloatingTableAnchor::Spillover
-    } else if shifted_any {
+    } else {
         FloatingTableAnchor::Shifted {
             from: requested,
             to: anchor,
         }
-    } else {
-        FloatingTableAnchor::OnCurrentPage(anchor)
     }
 }
 
@@ -142,7 +172,7 @@ impl FloatingTablePagePlacement {
 ///
 /// Invariant: if `pages` is non-empty, `pages[0]` is always `Anchor`
 /// and every subsequent entry is `Continuation`. Constructed only via
-/// [`plan_floating_table_pages`], which preserves this.
+/// [`plan_floating_table_pages_with_page_tops`], which preserves this.
 #[derive(Debug)]
 pub(super) struct FloatingTablePlan {
     pub(super) pages: Vec<FloatingTablePagePlacement>,
@@ -426,6 +456,80 @@ mod tests {
             Pt::new(700.0),
         );
         assert_eq!(resolved, FloatingTableAnchor::Spillover);
+    }
+
+    /// A table taller than the page body, with nothing to collide
+    /// with, is **not** a spillover.
+    ///
+    /// This is the termination guard. The caller answers `Spillover`
+    /// by pushing a fresh page and re-resolving; a fresh page has an
+    /// empty float list, so it would resolve to exactly this call and
+    /// report `Spillover` again — one `LayoutedPage` allocated per
+    /// iteration, forever, until the process is OOM-killed. Overflow
+    /// with no shift means "paginate me", not "move me".
+    #[test]
+    fn anchor_taller_than_page_is_not_spillover() {
+        let resolved = resolve_floating_anchor(
+            Pt::new(40.0),
+            Pt::new(2000.0), // far taller than the 700pt body
+            Some(TableOverlap::Never),
+            &[],
+            Pt::new(700.0),
+        );
+        assert_eq!(
+            resolved,
+            FloatingTableAnchor::OnCurrentPage(Pt::new(40.0)),
+            "overflow without a collision-induced shift must not spill"
+        );
+    }
+
+    /// Same guard, but with prior floats present that simply don't
+    /// block the anchor. `shifted_any` is still false, so the presence
+    /// of floats must not turn overflow into a spillover.
+    #[test]
+    fn anchor_taller_than_page_with_non_blocking_priors_is_not_spillover() {
+        // Float sits entirely above the requested anchor.
+        let prior = vec![float_at(10.0, 30.0)];
+        let resolved = resolve_floating_anchor(
+            Pt::new(40.0),
+            Pt::new(2000.0),
+            Some(TableOverlap::Never),
+            &prior,
+            Pt::new(700.0),
+        );
+        assert_eq!(resolved, FloatingTableAnchor::OnCurrentPage(Pt::new(40.0)));
+    }
+
+    /// The caller's retry is bounded: whatever spills on a populated
+    /// page resolves on the next one, because `push_new_page` clears
+    /// the float list. Re-resolving a spilled table against `&[]` must
+    /// therefore always terminate the loop — even when the table is
+    /// too tall for the fresh page too.
+    #[test]
+    fn spillover_retry_on_empty_page_always_terminates() {
+        let prior = vec![float_at(80.0, 680.0)];
+        let first = resolve_floating_anchor(
+            Pt::new(100.0),
+            Pt::new(2000.0),
+            Some(TableOverlap::Never),
+            &prior,
+            Pt::new(700.0),
+        );
+        assert_eq!(first, FloatingTableAnchor::Spillover);
+
+        // What the caller does next: fresh page, empty float list,
+        // anchor collapsed to the page top.
+        let retry = resolve_floating_anchor(
+            Pt::new(40.0),
+            Pt::new(2000.0),
+            Some(TableOverlap::Never),
+            &[],
+            Pt::new(700.0),
+        );
+        assert!(
+            !matches!(retry, FloatingTableAnchor::Spillover),
+            "a second spillover would loop the caller forever"
+        );
     }
 
     /// Edge: anchor at the exact `y_end` of a float is **not** an

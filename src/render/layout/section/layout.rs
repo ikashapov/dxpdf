@@ -1819,6 +1819,13 @@ pub(crate) fn layout_section_with_clearance(
                     // current page, then §17.4.39 resolve collisions with
                     // prior floats. On `Spillover`, push to next page and
                     // re-resolve with the new (empty) float list.
+                    //
+                    // This loop terminates because `Spillover` requires a
+                    // collision-induced shift and `push_new_page` clears
+                    // `page_floats`: the retry has no floats to collide
+                    // with, so it cannot spill again. A table too tall for
+                    // the body comes back as `OnCurrentPage` and is sliced
+                    // by the pagination call below, never re-resolved.
                     let float_y_start = loop {
                         let requested_y = if fi.y_offset > Pt::ZERO {
                             let anchor_y = match fi.vert_anchor {
