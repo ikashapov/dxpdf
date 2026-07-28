@@ -220,8 +220,12 @@ impl<'doc> PageLayoutState<'doc> {
                     let boundary = scan_inline_page_boundary(fragments, &mut scan_col, num_cols);
                     if boundary != ForwardScanBoundary::BeforeParagraphFloat {
                         for fi in fi_list {
-                            if fi.is_wrap_top_and_bottom() {
-                                continue; // handled as block spacers, not floats
+                            // §20.4.2.15/.18: only wrap-enabled modes narrow
+                            // text. `TopAndBottom` is a block spacer and
+                            // `None` is a pure overlay — matches the gate in
+                            // `has_absolute_wrap_float` below.
+                            if !fi.wrap_mode.registers_as_wrap_float() {
+                                continue;
                             }
                             if let FloatingImageY::Absolute(img_y) = fi.y {
                                 self.current_page_abs_floats.push(float::ActiveFloat {
@@ -425,7 +429,7 @@ fn register_paragraph_floats(
             if y_end > state.cursor_y {
                 state.cursor_y = y_end;
             }
-        } else {
+        } else if fi.wrap_mode.registers_as_wrap_float() {
             let float_entry = float::ActiveFloat {
                 page_x: fi.x - fi.dist_left,
                 page_y_start: y_start,

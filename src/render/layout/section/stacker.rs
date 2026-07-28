@@ -151,7 +151,7 @@ pub fn stack_blocks(
                         if bottom > cursor_y {
                             cursor_y = bottom;
                         }
-                    } else {
+                    } else if fi.wrap_mode.registers_as_wrap_float() {
                         page_floats.push(float::ActiveFloat {
                             page_x: fi.x - fi.dist_left,
                             page_y_start: y_start,
@@ -676,5 +676,81 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![false, true]
         );
+    }
+
+    // ── §20.4.2.15 wrapNone ──────────────────────────────────────────────
+
+    fn text_xs(result: &StackResult) -> Vec<f32> {
+        result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.x.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wide_para(images: Vec<FloatingImage>) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: vec![text_fragment(), text_fragment(), text_fragment()],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: images,
+            floating_shapes: vec![],
+        }
+    }
+
+    fn sized_image(width: f32, wrap: WrapMode) -> FloatingImage {
+        let mut i = image(60.0, wrap, FloatingImageY::RelativeToParagraph(Pt::ZERO));
+        i.size = crate::render::geometry::PtSize::new(Pt::new(width), Pt::new(60.0));
+        i
+    }
+
+    /// Regression: a `wrapNone` image was registered as an active wrap float,
+    /// so text narrowed around a drawing that §20.4.2.15 says "shall not cause
+    /// text to wrap — it shall be displayed either in front of or behind the
+    /// text". A 200pt-wide float pushed the text from x=0 to x=200.
+    #[test]
+    fn wrap_none_image_does_not_reflow_text() {
+        let baseline = stack(&[wide_para(vec![])]);
+        let overlaid = stack(&[wide_para(vec![sized_image(200.0, WrapMode::None)])]);
+        assert_eq!(
+            text_xs(&overlaid),
+            text_xs(&baseline),
+            "a wrapNone image overlays the text and must not move it"
+        );
+    }
+
+    /// ...but it is still *drawn*, and still expands the stacked height so a
+    /// table cell contains it. Only the wrap registration was wrong.
+    #[test]
+    fn wrap_none_image_is_still_emitted() {
+        let result = stack(&[wide_para(vec![sized_image(200.0, WrapMode::None)])]);
+        assert_eq!(image_ys(&result), vec![0.0], "the image is painted");
+        assert!(
+            (result.height.raw() - 60.0).abs() < 1e-4,
+            "height still reaches the image bottom, got {}",
+            result.height.raw()
+        );
+    }
+
+    /// The wrap-enabled modes are unaffected — they still narrow the text.
+    #[test]
+    fn wrapping_modes_still_reflow_text() {
+        let baseline = stack(&[wide_para(vec![])]);
+        for wrap in [
+            WrapMode::Square(WrapText::BothSides),
+            WrapMode::Tight(WrapText::BothSides),
+            WrapMode::Through(WrapText::BothSides),
+        ] {
+            let wrapped = stack(&[wide_para(vec![sized_image(200.0, wrap)])]);
+            assert_ne!(
+                text_xs(&wrapped),
+                text_xs(&baseline),
+                "{wrap:?} must still narrow the line"
+            );
+        }
     }
 }
