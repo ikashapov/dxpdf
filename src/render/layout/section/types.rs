@@ -223,3 +223,100 @@ pub struct ContinuationState {
     pub page: LayoutedPage,
     pub cursor_y: Pt,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::dimension::Emu;
+    use crate::model::geometry::EdgeInsets;
+    use crate::model::TextWrap;
+
+    fn insets() -> EdgeInsets<Emu> {
+        EdgeInsets::new(
+            Dimension::new(0),
+            Dimension::new(0),
+            Dimension::new(0),
+            Dimension::new(0),
+        )
+    }
+
+    /// The model → layout seam must be **total**: every §20.4.2.14-18 wrap
+    /// type maps to a distinct `WrapMode`, and the per-line side constraint
+    /// survives the conversion (it is the only part of `TextWrap` layout
+    /// still needs — distances are baked into the resolved rect).
+    #[test]
+    fn from_model_maps_every_wrap_type() {
+        assert_eq!(WrapMode::from_model(&TextWrap::None), WrapMode::None);
+        assert_eq!(
+            WrapMode::from_model(&TextWrap::Square {
+                distance: insets(),
+                wrap_text: WrapText::Left,
+            }),
+            WrapMode::Square(WrapText::Left),
+        );
+        assert_eq!(
+            WrapMode::from_model(&TextWrap::Tight {
+                distance: insets(),
+                wrap_text: WrapText::Right,
+                polygon: None,
+            }),
+            WrapMode::Tight(WrapText::Right),
+        );
+        assert_eq!(
+            WrapMode::from_model(&TextWrap::Through {
+                distance: insets(),
+                wrap_text: WrapText::Largest,
+                polygon: None,
+            }),
+            WrapMode::Through(WrapText::Largest),
+        );
+        assert_eq!(
+            WrapMode::from_model(&TextWrap::TopAndBottom {
+                distance_top: Dimension::new(0),
+                distance_bottom: Dimension::new(0),
+            }),
+            WrapMode::TopAndBottom,
+        );
+    }
+
+    /// The predicate that decides whether a drawing narrows surrounding text.
+    /// §20.4.2.15 `wrapNone` is a pure overlay and §20.4.2.18 `wrapTopAndBottom`
+    /// is a block spacer — neither participates. Callers that bypassed this and
+    /// used a bare `else` instead let `wrapNone` images reflow text.
+    #[test]
+    fn only_wrap_enabled_modes_register_as_floats() {
+        for mode in [
+            WrapMode::Square(WrapText::BothSides),
+            WrapMode::Tight(WrapText::BothSides),
+            WrapMode::Through(WrapText::BothSides),
+        ] {
+            assert!(mode.registers_as_wrap_float(), "{mode:?} narrows text");
+        }
+        for mode in [WrapMode::None, WrapMode::TopAndBottom] {
+            assert!(
+                !mode.registers_as_wrap_float(),
+                "{mode:?} must not narrow text"
+            );
+        }
+    }
+
+    /// The side constraint round-trips for wrap-enabled modes; the modes that
+    /// have none report `BothSides`. That fallback is only meaningful because
+    /// non-registering modes never reach a line-narrowing call site — see
+    /// `only_wrap_enabled_modes_register_as_floats`.
+    #[test]
+    fn wrap_text_round_trips_and_defaults_to_both_sides() {
+        for side in [
+            WrapText::BothSides,
+            WrapText::Left,
+            WrapText::Right,
+            WrapText::Largest,
+        ] {
+            assert_eq!(WrapMode::Square(side).wrap_text(), side);
+            assert_eq!(WrapMode::Tight(side).wrap_text(), side);
+            assert_eq!(WrapMode::Through(side).wrap_text(), side);
+        }
+        assert_eq!(WrapMode::None.wrap_text(), WrapText::BothSides);
+        assert_eq!(WrapMode::TopAndBottom.wrap_text(), WrapText::BothSides);
+    }
+}
