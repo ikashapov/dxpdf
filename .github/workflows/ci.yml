@@ -34,6 +34,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Rustdoc warnings are silent locally unless you happen to run
+      # `cargo doc`, so broken intra-doc links accumulated unnoticed until a
+      # review counted 11 of them. `-D warnings` catches dangling `[`links`]`,
+      # links from public docs to private items, and prose that rustdoc parses
+      # as HTML (`Vec<Thing>` outside backticks).
+      - name: Doc links
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

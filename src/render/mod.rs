@@ -66,7 +66,8 @@ pub struct RenderOptions {
 
 impl RenderOptions {
     /// Set the target image resolution in pixels per inch. Non-positive or
-    /// non-finite requests are clamped up to [`MIN_IMAGE_DPI`].
+    /// non-finite requests are clamped up to the crate's minimum DPI
+    /// (`MIN_IMAGE_DPI`, an internal constant).
     pub fn with_image_dpi(mut self, image_dpi: f32) -> Self {
         self.image_dpi = sanitize_image_dpi(image_dpi);
         self

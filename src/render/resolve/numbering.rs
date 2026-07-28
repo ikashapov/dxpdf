@@ -28,7 +28,8 @@ pub struct ResolvedNumberingLevel {
     pub is_legal: bool,
 }
 
-/// Resolve numbering definitions into a flat lookup: NumId → Vec<ResolvedNumberingLevel>.
+/// Resolve numbering definitions into a flat lookup: `NumId` →
+/// `Vec<ResolvedNumberingLevel>`.
 /// Each instance's abstract definition is looked up and level overrides applied.
 pub fn resolve_numbering(
     defs: &NumberingDefinitions,

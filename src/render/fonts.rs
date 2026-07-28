@@ -431,7 +431,7 @@ impl FontRegistry {
     /// family is neither registered as an embedded font nor present in the
     /// host's font system.
     ///
-    /// Unlike [`resolve`], this does not fall back to substitutes or to the
+    /// Unlike [`Self::resolve`], this does not fall back to substitutes or to the
     /// system default — necessary for the emoji pipeline, where substituting
     /// a non-emoji typeface for a missing color emoji font is never correct.
     pub fn resolve_exact(&self, family: &str, style: FontStyle) -> Option<TypefaceEntry> {
@@ -578,7 +578,7 @@ struct LastCall {
 /// `FontRegistry::resolve` lookups and `Font::from_typeface` construction.
 ///
 /// `fonts` owns the resolved `Font`s (append-only, so slot indices stay
-/// stable); `index` maps a case-folded [`FontKey`] to a slot; `last` is a
+/// stable); `index` maps a case-folded `FontKey` to a slot; `last` is a
 /// one-entry fast path keyed on the raw inputs of the previous call, so the
 /// common per-word case costs no allocation and no hashing.
 ///

@@ -5,7 +5,7 @@
 //! follows UTS #51 (Unicode Emoji): the decision is made from codepoint
 //! properties, never from the run's font name.
 //!
-//! Spec references for individual rules are inline in [`classify_cluster`].
+//! Spec references for individual rules are inline in `classify_cluster`.
 
 use unicode_properties::{EmojiStatus, UnicodeEmoji};
 use unicode_segmentation::UnicodeSegmentation;

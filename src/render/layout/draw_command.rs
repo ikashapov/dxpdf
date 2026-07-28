@@ -204,9 +204,9 @@ pub struct ResolvedBlip {
     pub format: crate::model::ImageFormat,
     /// Fraction of the source to crop: values in `[0, 1]` relative to the
     /// blip's natural extent. Derive this from the blip's `a:srcRect` via
-    /// [`crate::render::resolve::images::relative_rect_to_fraction`] — the same
-    /// converter the picture path uses — so cropped fills and cropped pictures
-    /// stay in lockstep.
+    /// `resolve::images::relative_rect_to_fraction` — the same converter the
+    /// picture path uses — so cropped fills and cropped pictures stay in
+    /// lockstep.
     pub src_rect: Option<PtRect>,
 }
 

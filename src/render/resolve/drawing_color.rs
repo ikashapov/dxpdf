@@ -10,7 +10,7 @@
 //!
 //! * **RGB-direct**: `red`/`green`/`blue` and their `Off`/`Mod` siblings
 //!   act directly on sRGB channels. Absolute forms overwrite the channel;
-//!   offsets add a signed percentage; multipliers scale (clamped to [0,1]).
+//!   offsets add a signed percentage; multipliers scale (clamped to `[0,1]`).
 //! * **HSL-space**: `hue`/`sat`/`lum` and their siblings convert the color
 //!   to HSL, modify the named component, and convert back.
 //!

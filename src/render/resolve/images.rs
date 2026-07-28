@@ -67,7 +67,7 @@ pub(crate) fn relative_rect_to_fraction(rel: &RelativeRect) -> Option<PtRect> {
 /// is no crop, so the whole image is drawn. Word crops the source *before*
 /// stretching it into the display frame; ignoring this squashes cropped logos
 /// (the visible aspect ratio no longer matches the frame). The conversion
-/// itself lives in [`relative_rect_to_fraction`], shared with the shape-fill
+/// itself lives in `relative_rect_to_fraction`, shared with the shape-fill
 /// blip path (`ResolvedBlip::src_rect`).
 pub fn extract_src_rect(image: &Image) -> Option<PtRect> {
     let GraphicContent::Picture(pic) = image.graphic.as_ref()? else {
