@@ -2816,7 +2816,7 @@ mod tests {
         }
     }
 
-    /// §17.4.39: two floating tables both declaring `tblOverlap=Never`
+    /// §17.4.57: two floating tables both declaring `tblOverlap=Never`
     /// must not draw at overlapping y-positions on the same page. The
     /// second table either slides down past the first or spills to
     /// the next page.
@@ -2872,7 +2872,7 @@ mod tests {
         }
     }
 
-    /// §17.4.39 default behavior (overlap omitted) — overlap is
+    /// §17.4.57 default behavior (overlap omitted) — overlap is
     /// permitted. Two tables at the same anchor on the same page
     /// DO draw at overlapping y-positions. This is intentional.
     #[test]

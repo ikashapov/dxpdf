@@ -25,7 +25,7 @@ use crate::render::dimension::Pt;
 use crate::render::layout::float::ActiveFloat;
 use crate::render::layout::table::TableSlice;
 
-/// §17.4.39 — outcome of resolving a floating table's requested
+/// §17.4.57 — outcome of resolving a floating table's requested
 /// anchor against prior floats on the same page.
 #[derive(Debug, PartialEq)]
 pub(super) enum FloatingTableAnchor {
@@ -45,14 +45,14 @@ pub(super) enum FloatingTableAnchor {
     Spillover,
 }
 
-/// §17.4.39 — resolve a floating table's requested anchor y against
+/// §17.4.57 — resolve a floating table's requested anchor y against
 /// prior `ActiveFloat`s registered for the current page.
 ///
 /// - `overlap == Some(Never)`: iteratively push the anchor below any
 ///   float whose y-range intersects `[anchor, anchor + height]`. If a
 ///   shift happened *and* the shifted anchor would extend the table
 ///   past `page_bottom`, return `Spillover`.
-/// - `overlap == Some(Overlap)` or `None` (the §17.4.39 default): the
+/// - `overlap == Some(Overlap)` or `None` (the §17.4.57 default): the
 ///   anchor is returned unchanged on the current page; overlap with
 ///   prior floats is permitted.
 ///
@@ -341,9 +341,9 @@ mod tests {
         assert_eq!(plan.pages[1].slice().size.height.raw(), 56.7);
     }
 
-    // ── §17.4.39 — anchor resolution against prior floats ──────────────
+    // ── §17.4.57 — anchor resolution against prior floats ──────────────
 
-    /// Default behavior (`overlap == None`, the §17.4.39 default
+    /// Default behavior (`overlap == None`, the §17.4.57 default
     /// `Overlap`): the anchor is returned unchanged even when prior
     /// floats would intersect.
     #[test]
@@ -378,7 +378,7 @@ mod tests {
     }
 
     /// `Never` + overlap with one float: shift the anchor to the
-    /// float's `y_end`. Spec §17.4.39 — two tables anchored on the
+    /// float's `y_end`. Spec §17.4.57 — two tables anchored on the
     /// same page that both forbid overlap must be repositioned to
     /// avoid drawing over each other.
     #[test]

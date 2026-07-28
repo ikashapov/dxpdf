@@ -1816,7 +1816,7 @@ pub(crate) fn layout_section_with_clearance(
                     }
 
                     // §17.4.59: resolve `tblpY` on the (possibly new)
-                    // current page, then §17.4.39 resolve collisions with
+                    // current page, then §17.4.57 resolve collisions with
                     // prior floats. On `Spillover`, push to next page and
                     // re-resolve with the new (empty) float list.
                     //
@@ -1930,12 +1930,12 @@ pub(crate) fn layout_section_with_clearance(
                             state.current_page.commands.push(cmd);
                         }
 
-                        // §17.4.56 / §17.4.39: register every slice as a
+                        // §17.4.56 / §17.4.57: register every slice as a
                         // float on its respective page. The anchor slice
                         // drives text wrapping for body paragraphs that
                         // follow; continuation slices are registered so
                         // subsequent floating tables can see them during
-                        // collision resolution (§17.4.39 `tblOverlap`).
+                        // collision resolution (§17.4.57 `tblOverlap`).
                         log::debug!(
                             "[layout]   register table float ({}): x={:.1} y={:.1}-{:.1} w={:.1} block_idx={block_idx}",
                             if is_anchor { "anchor" } else { "continuation" },
