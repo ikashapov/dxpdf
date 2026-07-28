@@ -313,16 +313,40 @@ pub(crate) fn layout_table_paginated_with_page_heights(
             }
         }
 
-        // No split possible — move the whole group to the next page.
-        slices.push(std::mem::take(&mut current_slice));
-        remaining = page_height_for_slice(slices.len());
-        // §17.4.49: prepend the repeating header rows only when this group
-        // sits past the headers. When advancing because a header row itself
-        // doesn't fit, the row is part of the table's first appearance —
-        // emitting `Range(0..header_count)` here would duplicate it.
-        if !is_header && header_count > 0 {
-            current_slice.push(SliceItem::Range(0..header_count));
-            remaining -= header_height;
+        // No split possible — move the whole group to the next page, but only
+        // if the next page is actually roomier than what is left here.
+        //
+        // A group taller than a whole page never fits anywhere. Advancing
+        // unconditionally then abandons `current_slice` while it is still
+        // empty — the caller turns that empty leading slice into a page push,
+        // so a table starting at the top of a page emitted a **blank page**
+        // and the group overflowed the next one just the same (the warning
+        // below fired either way). Same shape as the E4c floating-table
+        // spillover: acting on a condition the action cannot change.
+        //
+        // Comparing against the *post-header* room is what makes this exact —
+        // repeating headers can leave a fresh page with less usable space than
+        // the current one, and in that case staying put overflows by less.
+        // `slices.len() + 1` because this decision happens *before* the push
+        // that would append the current slice — the index being queried is the
+        // page the group would move onto, not the one it is leaving.
+        let next_page_height = page_height_for_slice(slices.len() + 1);
+        let next_remaining = if !is_header && header_count > 0 {
+            next_page_height - header_height
+        } else {
+            next_page_height
+        };
+        if next_remaining > remaining {
+            slices.push(std::mem::take(&mut current_slice));
+            remaining = next_page_height;
+            // §17.4.49: prepend the repeating header rows only when this group
+            // sits past the headers. When advancing because a header row itself
+            // doesn't fit, the row is part of the table's first appearance —
+            // emitting `Range(0..header_count)` here would duplicate it.
+            if !is_header && header_count > 0 {
+                current_slice.push(SliceItem::Range(0..header_count));
+                remaining -= header_height;
+            }
         }
         if group.height > remaining {
             log::warn!(
@@ -1802,6 +1826,142 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(row_counts, vec![1, 1, 2]);
+    }
+
+    // ── §17.4.85 lone vMerge=Restart ─────────────────────────────────────
+
+    /// A `Restart` cell with no `Continue` row under it is an ordinary cell.
+    ///
+    /// It used to fall through *both* height paths: `measure_table_rows`
+    /// skipped every merged cell (deferring to the span calculation) and
+    /// `expand_rows_for_vmerge` returned early because the "span" is one row.
+    /// The row therefore got zero height while still emitting its content, so
+    /// whatever followed the table drew on top of it.
+    ///
+    /// Asserted against the unmerged control rather than a literal, so the
+    /// test states the actual rule — a lone restart behaves like no merge at
+    /// all — instead of pinning today's line height.
+    #[test]
+    fn lone_vmerge_restart_row_gets_the_same_height_as_an_unmerged_cell() {
+        let build = |vmerge: Option<VerticalMergeState>| {
+            let mut row = tall_row(3);
+            row.cells[0].vertical_merge = vmerge;
+            layout_table(
+                &[row],
+                &[Pt::new(40.0)],
+                &body_constraints(),
+                Pt::new(14.0),
+                None,
+                None,
+                false,
+            )
+        };
+
+        let lone_restart = build(Some(VerticalMergeState::Restart));
+        let control = build(None);
+
+        assert!(
+            control.size.height > Pt::ZERO,
+            "control must have real height for this test to mean anything"
+        );
+        assert_eq!(
+            lone_restart.size.height, control.size.height,
+            "a restart with nothing continuing below it is an ordinary cell"
+        );
+    }
+
+    /// The companion guard: a *genuine* merge span must still take its height
+    /// from `expand_rows_for_vmerge` across the whole span. Folding a
+    /// `Restart` cell into its first row unconditionally — the naive fix for
+    /// the case above — double-counts it against the rows below and inflates
+    /// the table.
+    #[test]
+    fn genuine_vmerge_span_height_is_not_double_counted() {
+        let mut restart = tall_row(6); // 6 lines ≈ 84pt of content
+        restart.cells[0].vertical_merge = Some(VerticalMergeState::Restart);
+        let mut cont = tall_row(0);
+        cont.cells[0].vertical_merge = Some(VerticalMergeState::Continue);
+
+        let result = layout_table(
+            &[restart, cont],
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+
+        // The span is exactly the restart cell's content: 6 lines × 14pt.
+        assert!(
+            (result.size.height.raw() - 84.0).abs() < 0.01,
+            "merged span should total the restart cell's content height (84pt), got {}",
+            result.size.height.raw()
+        );
+    }
+
+    // ── §17.4.1 page advance must gain space ─────────────────────────────
+
+    /// A row group taller than a whole page fits nowhere, so advancing to a
+    /// fresh page cannot help — it only abandons an empty leading slice, which
+    /// the section layer turns into a blank page.
+    ///
+    /// `available_height == page_height` models the table starting at the top
+    /// of a page, which is exactly when the old code emitted the blank.
+    #[test]
+    fn oversized_group_at_page_top_does_not_emit_an_empty_leading_slice() {
+        let mut row = tall_row(20); // ≈ 280pt
+        row.cant_split = Some(true);
+
+        let slices = layout_table_paginated(
+            &[row],
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(100.0),
+                page_height: Pt::new(100.0), // a fresh page is no roomier
+                suppress_first_row_top: false,
+            },
+        );
+
+        assert_eq!(slices.len(), 1, "no page to gain, so no page to push");
+        assert!(
+            !slices[0].commands.is_empty(),
+            "the single slice must carry the content, not be an abandoned empty"
+        );
+    }
+
+    /// The converse, so the fix can't be "never advance": when the table
+    /// starts part-way down a page, a fresh page *is* roomier and the group
+    /// must still move.
+    #[test]
+    fn oversized_group_still_advances_when_the_next_page_is_roomier() {
+        let mut row = tall_row(5); // ≈ 70pt
+        row.cant_split = Some(true);
+
+        let slices = layout_table_paginated(
+            &[row],
+            &[Pt::new(40.0)],
+            &body_constraints(),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(30.0), // little left here
+                page_height: Pt::new(100.0),     // but a full page next
+                suppress_first_row_top: false,
+            },
+        );
+
+        assert_eq!(slices.len(), 2, "advancing gains 70pt, so it must advance");
+        assert!(
+            slices[0].commands.is_empty(),
+            "leading slice is the advance"
+        );
+        assert!(!slices[1].commands.is_empty());
     }
 
     // ── In-cell paragraph splitting semantics (§17.3.1.14/.15/.44) ───────

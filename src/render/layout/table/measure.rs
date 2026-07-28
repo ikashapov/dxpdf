@@ -255,7 +255,23 @@ pub(super) fn measure_table_rows(
                 )
             };
 
-            if cell.vertical_merge.is_none() {
+            // §17.4.85: a merged cell's height is normally decided by
+            // `expand_rows_for_vmerge` over the whole span, not here — folding a
+            // `Restart` cell's full content into its *first* row would double-count
+            // it against the rows below.
+            //
+            // Unless the span is a span of one. A `Restart` with no `Continue`
+            // under it is an ordinary cell, and `expand_rows_for_vmerge` skips it
+            // (it returns early when the group is a single row), so if this branch
+            // skipped it too the row would get **no** height from any path while
+            // still emitting its content — following blocks then draw on top of
+            // the table. Word treats a restart with nothing continuing as a plain
+            // cell, which is what this reproduces.
+            let continues_below =
+                row_idx + 1 < num_rows && is_vmerge_continue(&rows[row_idx + 1], grid_idx);
+            let is_lone_restart =
+                cell.vertical_merge == Some(VerticalMergeState::Restart) && !continues_below;
+            if cell.vertical_merge.is_none() || is_lone_restart {
                 max_height = max_height.max(layout.content_height + cell.margins.vertical());
             }
 
