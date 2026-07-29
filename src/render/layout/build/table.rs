@@ -243,7 +243,6 @@ pub(super) fn build_table(
                 is_header: row.properties.is_header,
                 cant_split: row.properties.cant_split,
                 grid_before: row.properties.grid_before,
-                grid_after: row.properties.grid_after,
                 // §17.4.61: row-level tblPrEx.tblBorders — per-side
                 // override of the table's effective borders. We merge
                 // *at the model layer* (Option<Border> with style=None

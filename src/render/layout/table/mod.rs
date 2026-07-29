@@ -537,7 +537,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
@@ -571,7 +570,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
             TableRowInput {
@@ -580,7 +578,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
         ];
@@ -633,7 +630,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         // Column B is only 80 wide, so "long " + "text" (120) wraps
@@ -659,7 +655,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
@@ -707,7 +702,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0)];
@@ -752,7 +746,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
@@ -798,7 +791,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 1,
-            grid_after: 1,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(100.0), Pt::new(200.0), Pt::new(10.0)];
@@ -825,18 +817,33 @@ mod tests {
         assert_eq!(result.size.width.raw(), 320.0);
     }
 
+    /// §17.4.16: a row whose cells don't reach the last grid column leaves the
+    /// remainder empty — the `gridAfter` region — without stretching into it.
+    ///
+    /// The row declares no `gridAfter`: layout derives the right edge from
+    /// `grid_before` plus the cells' spans, so the trailing gap is a
+    /// *consequence* of the cells, not a separate input. (This test previously
+    /// set a `grid_after` field that no layout code read, so it asserted the
+    /// same positions whether the field was right, wrong, or absent.)
     #[test]
-    fn grid_after_does_not_overflow() {
-        // §17.4.16: gridAfter=2 leaves the rightmost two columns of a 4-column
-        // grid empty for this row. Cells must fit within the leftmost two
-        // columns and not overflow into the gridAfter region.
+    fn row_shorter_than_the_grid_leaves_the_trailing_columns_empty() {
+        // Shaded cells so the emitted rects expose each cell's *width* — text
+        // x-positions alone cannot see a cell stretching rightward, since the
+        // second cell's x is fixed by the first cell's grid column either way.
+        let shaded = |text: &str| TableCellInput {
+            shading: Some(RgbColor {
+                r: 200,
+                g: 200,
+                b: 200,
+            }),
+            ..simple_cell(text)
+        };
         let rows = vec![TableRowInput {
-            cells: vec![simple_cell("X"), simple_cell("Y")],
+            cells: vec![shaded("X"), shaded("Y")],
             height_rule: None,
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 2,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(100.0), Pt::new(200.0), Pt::new(10.0)];
@@ -851,31 +858,51 @@ mod tests {
         );
 
         let xs = text_x_positions(&result.commands);
-        assert_eq!(xs.len(), 2);
-        assert_eq!(xs[0], 0.0, "first cell at col 0");
-        assert_eq!(xs[1], 10.0, "second cell at col 1");
-        // The cells together occupy 10 + 100 = 110pt; the right 210pt are
-        // empty (gridAfter region). Total table width stays at 320pt.
+        assert_eq!(xs, vec![0.0, 10.0], "cells sit at grid columns 0 and 1");
+
+        // Each cell occupies exactly its own column — not the 210pt of unused
+        // grid to the right.
+        let rects: Vec<(f32, f32)> = result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, .. } => {
+                    Some((rect.origin.x.raw(), rect.size.width.raw()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rects,
+            vec![(0.0, 10.0), (10.0, 100.0)],
+            "cells must not stretch into the trailing grid columns"
+        );
+
+        // The table still spans the whole declared grid; the gap is empty, not
+        // removed.
         assert_eq!(result.size.width.raw(), 320.0);
     }
 
+    /// §17.4.17 + §17.4.38: a row inset from **both** table edges takes
+    /// `inside_v` on both sides, never the outer `left`/`right`.
+    ///
+    /// `grid_before = 1` moves the first cell off the left edge; the two cells
+    /// then span only grid columns 1–2 of 4, so the last one stops short of the
+    /// right edge as well. Distinct widths identify which border was applied —
+    /// `left`/`right` are 4pt, `inside_v` is 1pt — so a single 4pt rect
+    /// anywhere in the output means an outer border leaked onto an interior
+    /// edge.
+    ///
+    /// The right-edge half of this used to be spelled `grid_after: 1` on a
+    /// field no layout code read; it is the cells' spans that place that edge.
     #[test]
-    fn grid_before_first_cell_uses_inside_v_left_border() {
-        // §17.4.17 + §17.4.38: with gridBefore>0, the row's first cell is not
-        // at the table's left edge, so its left border must come from
-        // `inside_v`, not `left`. Mirror for gridAfter>0 and the right edge.
-        //
-        // We use distinct border widths to identify which table border was
-        // applied: `left`/`right` = 4pt, `inside_v` = 1pt. With grid_before=1
-        // and grid_after=1 in a 4-column grid, both cells must use only the
-        // 1pt borders for left/right edges; no 4pt border rect should appear.
+    fn row_inset_from_both_edges_uses_inside_v_on_both_sides() {
         let rows = vec![TableRowInput {
             cells: vec![simple_cell("A"), simple_cell("B")],
             height_rule: None,
             is_header: None,
             cant_split: None,
             grid_before: 1,
-            grid_after: 1,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(50.0), Pt::new(50.0), Pt::new(10.0)];
@@ -968,7 +995,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 1,
-            grid_after: 0,
             border_overrides: None,
         };
         let row_b = TableRowInput {
@@ -989,7 +1015,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(50.0), Pt::new(100.0), Pt::new(150.0)];
@@ -1065,7 +1090,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
@@ -1109,7 +1133,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0)];
@@ -1186,7 +1209,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
             TableRowInput {
@@ -1198,7 +1220,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
             TableRowInput {
@@ -1215,7 +1236,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
         ];
@@ -1288,7 +1308,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let row1 = TableRowInput {
@@ -1308,7 +1327,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
@@ -1384,7 +1402,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }
@@ -1420,7 +1437,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }
@@ -1595,7 +1611,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let row1 = TableRowInput {
@@ -1612,7 +1627,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(40.0)];

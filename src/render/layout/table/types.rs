@@ -27,10 +27,15 @@ pub struct TableRowInput {
     pub cant_split: Option<bool>,
     /// §17.4.17: number of grid columns to skip at the row's start. The first
     /// cell's leftmost grid column is `grid_before`, not 0.
+    ///
+    /// There is deliberately no `grid_after` counterpart. §17.4.16 `gridAfter`
+    /// is *derivable* — the row's right edge is `grid_before` plus the sum of
+    /// its cells' `grid_span`s — and every consumer here works from that
+    /// running grid column already, including the border resolution that
+    /// decides whether the last cell sits at the table edge (`insideV`) or not.
+    /// The model keeps `gridAfter` as parsed (`model::TableRowProperties`);
+    /// carrying it into layout added a field nothing read.
     pub grid_before: u32,
-    /// §17.4.16: number of grid columns to skip after the row's last cell.
-    /// The last cell's rightmost grid column is `num_grid_cols - grid_after - 1`.
-    pub grid_after: u32,
     /// §17.4.61 `<w:tblPrEx><w:tblBorders/></w:tblPrEx>` — per-row
     /// override of the table-level `tblBorders`. When set, each side
     /// independently replaces the corresponding side of the table's

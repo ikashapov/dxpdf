@@ -387,7 +387,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }

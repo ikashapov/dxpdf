@@ -196,7 +196,6 @@ mod tests {
                     is_header: Some(*header),
                     cant_split: Some(true),
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 })
                 .collect(),
@@ -1760,7 +1759,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             }],
             col_widths: vec![Pt::new(100.0)],
@@ -1893,7 +1891,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }
@@ -2267,7 +2264,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             }],
             col_widths: vec![Pt::new(100.0)],
@@ -2341,7 +2337,6 @@ mod tests {
                     is_header: None,
                     cant_split: None,
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 },
                 TableRowInput {
@@ -2373,7 +2368,6 @@ mod tests {
                     is_header: None,
                     cant_split: None,
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 },
                 TableRowInput {
@@ -2401,7 +2395,6 @@ mod tests {
                     is_header: None,
                     cant_split: None,
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 },
             ],

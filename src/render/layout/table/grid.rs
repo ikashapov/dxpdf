@@ -219,7 +219,7 @@ mod tests {
         assert!(widths.is_empty());
     }
 
-    // ── grid_before / grid_after lookups ─────────────────────────────────
+    // ── grid_before lookups ──────────────────────────────────────────────────────────────────────────────
 
     use super::super::types::CellVAlign;
     use crate::render::geometry::PtEdgeInsets;
@@ -236,18 +236,13 @@ mod tests {
         }
     }
 
-    fn row_with_offsets(
-        cells: Vec<TableCellInput>,
-        grid_before: u32,
-        grid_after: u32,
-    ) -> TableRowInput {
+    fn row_with_offsets(cells: Vec<TableCellInput>, grid_before: u32) -> TableRowInput {
         TableRowInput {
             cells,
             height_rule: None,
             is_header: None,
             cant_split: None,
             grid_before,
-            grid_after,
             border_overrides: None,
         }
     }
@@ -256,7 +251,7 @@ mod tests {
     fn find_cell_skips_grid_before() {
         // §17.4.17: gridBefore=1 means cell 0 starts at grid_col 1.
         // §17.4.16: gridAfter=1 means the row leaves grid_col 3 empty.
-        let row = row_with_offsets(vec![empty_cell(1), empty_cell(1)], 1, 1);
+        let row = row_with_offsets(vec![empty_cell(1), empty_cell(1)], 1);
         assert!(find_cell_at_grid_col(&row, 0).is_none());
         assert!(find_cell_at_grid_col(&row, 1).is_some());
         assert!(find_cell_at_grid_col(&row, 2).is_some());
@@ -265,7 +260,7 @@ mod tests {
 
     #[test]
     fn cell_index_at_grid_col_skips_grid_before() {
-        let row = row_with_offsets(vec![empty_cell(1), empty_cell(1)], 1, 1);
+        let row = row_with_offsets(vec![empty_cell(1), empty_cell(1)], 1);
         assert_eq!(cell_index_at_grid_col(&row, 0), None);
         assert_eq!(cell_index_at_grid_col(&row, 1), Some(0));
         assert_eq!(cell_index_at_grid_col(&row, 2), Some(1));
@@ -275,7 +270,7 @@ mod tests {
     #[test]
     fn find_cell_with_grid_span_after_grid_before() {
         // gridBefore=2; one cell with span=2 should occupy grid cols 2 and 3.
-        let row = row_with_offsets(vec![empty_cell(2)], 2, 0);
+        let row = row_with_offsets(vec![empty_cell(2)], 2);
         assert!(find_cell_at_grid_col(&row, 0).is_none());
         assert!(find_cell_at_grid_col(&row, 1).is_none());
         assert!(find_cell_at_grid_col(&row, 2).is_some());
@@ -301,7 +296,7 @@ mod tests {
     }
 
     fn plain_row(cells: Vec<TableCellInput>) -> TableRowInput {
-        row_with_offsets(cells, 0, 0)
+        row_with_offsets(cells, 0)
     }
 
     /// A `MeasuredTable` carrying only the per-row heights `build_row_groups`
@@ -522,7 +517,7 @@ mod tests {
                 merged_cell(None),                              // grid col 1
             ]),
             // gridBefore=1: this row's cells[0] is at grid column 1, not 0.
-            row_with_offsets(vec![merged_cell(Some(VerticalMergeState::Continue))], 1, 0),
+            row_with_offsets(vec![merged_cell(Some(VerticalMergeState::Continue))], 1),
         ];
         let layouts = vec![
             vec![layout_entry(84.0, 0), layout_entry(0.0, 1)],
