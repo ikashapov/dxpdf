@@ -152,6 +152,22 @@ fn cut_for_cell(
     }
 
     let cont_top = largest_legal_cut(&entry.layout.lines, budget)?;
+    // Load-bearing for **termination**, not tidiness.
+    //
+    // `cont_top` becomes this cell's `shift`, and `split_row_at` derives
+    // `second.height = mr.height - max(shift)`. `mod.rs`'s continuation loop
+    // re-splits `second` until it fits, so a cut with `shift == 0` would hand
+    // back a continuation identical to its input and spin forever. This check
+    // is what makes "`find_row_cut` returned `Some`" imply "the row strictly
+    // shrank", which is the loop's whole termination argument.
+    //
+    // Today it is unreachable: `largest_legal_cut` returns a line's `top_y`,
+    // and the stacker emits strictly increasing tops, so offset 0 never comes
+    // back for a real cell. That makes this a backstop for an invariant owned
+    // by another module rather than by this one — keep it, and note that only
+    // `zero_offset_cut_is_rejected_so_the_shift_is_never_zero` covers it,
+    // because it builds the degenerate entry by hand. Nothing routed through
+    // `measure_table_rows` can.
     if cont_top <= Pt::ZERO {
         return None;
     }
@@ -365,5 +381,241 @@ fn command_primary_y(cmd: &DrawCommand) -> Pt {
         | DrawCommand::LinkAnnotation { rect, .. }
         | DrawCommand::InternalLink { rect, .. } => rect.origin.y,
         DrawCommand::Path { origin, .. } => origin.y,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::geometry::PtEdgeInsets;
+    use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
+    use crate::render::layout::paragraph::ParagraphStyle;
+    use crate::render::layout::section::LayoutBlock;
+    use crate::render::layout::table::types::{CellVAlign, TableCellInput};
+    use crate::render::resolve::color::RgbColor;
+    use std::rc::Rc;
+
+    fn text_frag(text: &str) -> Fragment {
+        Fragment::Text {
+            text: text.into(),
+            font: Rc::new(FontProps {
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: false,
+                italic: false,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            color: RgbColor::BLACK,
+            width: Pt::new(30.0),
+            trimmed_width: Pt::new(30.0),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+            hyperlink_url: None,
+            shading: None,
+            border: None,
+            baseline_offset: Pt::ZERO,
+            text_offset: Pt::ZERO,
+            is_footnote_ref: false,
+        }
+    }
+
+    /// One cell, `n` lines (each fragment wraps to its own line at width 40).
+    fn row_n_lines(n: usize, margin: f32) -> TableRowInput {
+        let m = PtEdgeInsets::new(
+            Pt::new(margin),
+            Pt::new(margin),
+            Pt::new(margin),
+            Pt::new(margin),
+        );
+        TableRowInput {
+            cells: vec![TableCellInput {
+                blocks: vec![LayoutBlock::Paragraph {
+                    fragments: (0..n).map(|i| text_frag(&format!("L{i} "))).collect(),
+                    style: ParagraphStyle::default(),
+                    page_break_before: false,
+                    footnotes: vec![],
+                    floating_images: vec![],
+                    floating_shapes: vec![],
+                }],
+                margins: m,
+                grid_span: 1,
+                shading: None,
+                cell_borders: None,
+                vertical_merge: None,
+                vertical_align: CellVAlign::Top,
+            }],
+            height_rule: None,
+            is_header: None,
+            cant_split: None,
+            grid_before: 0,
+            grid_after: 0,
+            border_overrides: None,
+        }
+    }
+
+    fn measure(rows: &[TableRowInput]) -> super::super::types::MeasuredTable {
+        super::super::measure::measure_table_rows(
+            rows,
+            &[Pt::new(40.0)],
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// **The termination invariant** for `mod.rs`'s continuation loop.
+    ///
+    /// That loop re-splits the continuation half until it fits, so it only
+    /// terminates if every accepted cut strictly shrinks the row. Here that
+    /// property is asserted directly, across a grid of line counts, available
+    /// heights straddling the line-height and widow-control boundaries, and
+    /// cell margins large enough to swallow the budget.
+    ///
+    /// If this ever fails, `layout_table_paginated` hangs — the same class of
+    /// defect as the floating-table spillover loop (E4c).
+    #[test]
+    fn every_accepted_cut_strictly_shrinks_the_row() {
+        for n_lines in [2usize, 3, 5, 12] {
+            for avail in [1.0f32, 5.0, 13.9, 14.0, 14.1, 27.9, 28.0, 100.0, 1000.0] {
+                for margin in [0.0f32, 3.0, 20.0] {
+                    let rows = vec![row_n_lines(n_lines, margin)];
+                    let measured = measure(&rows);
+                    let input = RowCutInput {
+                        mr: &measured.rows[0],
+                        row: &rows[0],
+                        available: Pt::new(avail),
+                    };
+                    let Some(cut) = find_row_cut(&input) else {
+                        continue;
+                    };
+                    let parts = split_row_at(&measured.rows[0], &cut);
+                    assert!(
+                        parts.second.height < measured.rows[0].height,
+                        "cut made no progress (lines={n_lines} avail={avail} \
+                         margin={margin}): {:.2} -> {:.2}",
+                        measured.rows[0].height.raw(),
+                        parts.second.height.raw(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The mechanism behind the invariant: an accepted cut always carries a
+    /// strictly positive shift, because `cut_for_cell` rejects `cont_top == 0`.
+    /// `split_row_at` subtracts `max(shift)` from the row height, so a zero
+    /// shift would return the continuation unchanged.
+    #[test]
+    fn accepted_cuts_carry_a_positive_shift() {
+        let rows = vec![row_n_lines(6, 0.0)];
+        let measured = measure(&rows);
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available: Pt::new(60.0),
+        })
+        .expect("a 6-line row must be splittable at 60pt");
+        let max_shift = cut.cells.iter().map(|c| c.shift).fold(Pt::ZERO, Pt::max);
+        assert!(
+            max_shift > Pt::ZERO,
+            "shift must be positive or the continuation loop cannot progress"
+        );
+    }
+
+    /// The `cont_top <= 0` guard, exercised directly.
+    ///
+    /// It cannot be reached through `measure_table_rows`: the stacker emits
+    /// strictly increasing line tops, so `largest_legal_cut` never returns 0
+    /// for a real cell. Deleting the guard therefore breaks no test that goes
+    /// through the normal path — which is exactly why this one bypasses it and
+    /// hands `cut_for_cell` a synthetic entry whose two lines share `top_y = 0`.
+    ///
+    /// Accepting that cut would give `shift == 0`, and `mod.rs`'s continuation
+    /// loop would re-split an unchanged row forever. The guard backstops a
+    /// stacker invariant this module cannot enforce, so its test must not
+    /// depend on that invariant holding.
+    #[test]
+    fn zero_offset_cut_is_rejected_so_the_shift_is_never_zero() {
+        let flat_line = |para: usize| CellLine {
+            top_y: Pt::ZERO,
+            para,
+            interior_atomic: false,
+            widow_control: false,
+            keep_next: false,
+        };
+        let lines = vec![flat_line(0), flat_line(1)];
+
+        // The cut model does offer offset 0 as "legal" ...
+        assert_eq!(
+            largest_legal_cut(&lines, Pt::new(100.0)),
+            Some(Pt::ZERO),
+            "two lines sharing a top expose a zero-offset cut"
+        );
+
+        // ... and `cut_for_cell` must refuse it anyway.
+        let entry = CellLayoutEntry {
+            layout: crate::render::layout::cell::CellLayout {
+                commands: Vec::new(),
+                content_height: Pt::new(28.0),
+                lines,
+            },
+            cell_x: Pt::ZERO,
+            cell_w: Pt::new(40.0),
+            grid_col: 0,
+        };
+        assert!(
+            cut_for_cell(&entry, Pt::ZERO, Pt::ZERO, Pt::new(100.0)).is_none(),
+            "a zero-offset cut must be rejected - accepting it gives shift == 0 \
+             and the continuation loop never progresses"
+        );
+    }
+
+    /// A single line offers no cut at all (`n < 2`), so an unsplittable row
+    /// spills whole rather than looping.
+    #[test]
+    fn fewer_than_two_lines_yields_no_cut() {
+        assert_eq!(largest_legal_cut(&[], Pt::new(100.0)), None);
+        let one = vec![CellLine {
+            top_y: Pt::ZERO,
+            para: 0,
+            interior_atomic: false,
+            widow_control: false,
+            keep_next: false,
+        }];
+        assert_eq!(largest_legal_cut(&one, Pt::new(100.0)), None);
+    }
+
+    /// End-to-end bound: a 40-line row on a page that fits two lines produces
+    /// 20 slices and halts. Pins that the loop consumes lines rather than
+    /// merely shrinking by an epsilon.
+    #[test]
+    fn iterative_continuation_split_halts_with_a_bounded_slice_count() {
+        use crate::render::geometry::PtSize;
+        use crate::render::layout::table::{layout_table_paginated, TablePaginationConfig};
+        use crate::render::layout::BoxConstraints;
+
+        let rows = vec![row_n_lines(40, 0.0)];
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            &BoxConstraints::loose(PtSize::new(Pt::new(400.0), Pt::new(1000.0))),
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(28.0), // exactly two 14pt lines
+                page_height: Pt::new(28.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 20, "40 lines at 2 per page");
     }
 }
