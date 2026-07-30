@@ -89,11 +89,28 @@ pub(super) fn resolve_cell_effective_borders(
 /// §17.4.43: resolve a border conflict between two competing borders on
 /// a shared edge.  Returns the winning border (or `None` if both are `None`).
 ///
-/// Algorithm per [MS-OI29500] §17.4.66:
-///   1. `none` yields to the opposing border; `nil` suppresses both.
-///   2. Weight = border_width_eighths × border_number.  Higher wins.
-///   3. Equal weight: style precedence list.
-///   4. Equal style: darker color wins (R+B+2G, then B+2G, then G).
+/// Tie-breaking per [MS-OI29500] §17.4.66, in order:
+///   1. Absent yields to present.
+///   2. Weight = width × style number.  Higher wins.
+///   3. Equal weight: heavier style wins (`Double` over `Single`).
+///   4. Equal style: darker colour wins (`R+B+2G`, then `B+2G`, then `G`).
+///
+/// **The comparison is a total order, and that is the point.** The caller feeds
+/// this (upper row's bottom, lower row's top) and (left cell's right, right
+/// cell's left), so a rule that stops at step 2 leaves the winner decided by
+/// *which side of the edge a border came from* — an implementation detail. Ties
+/// used to fall through to whichever argument came first, which meant an
+/// equal-weight 3pt single beat a 1pt double or lost to it depending on
+/// argument order, and of two equal borders differing only in colour the paler
+/// one won half the time. `resolve_border_conflict(a, b)` now always equals
+/// `resolve_border_conflict(b, a)`.
+///
+/// Step 1 is narrower than the spec's: an explicit `<w:top w:val="nil"/>` and
+/// "no border specified" both arrive here as `None`, because
+/// `resolve_override` collapses them upstream. So an explicit nil *yields* to
+/// the opposing border instead of suppressing it. `emit.rs` keeps the
+/// distinction for its own top-border restore (`user_suppressed_top`), so the
+/// information exists — it is just not threaded this far. Tracked as E5b#8.
 pub(super) fn resolve_border_conflict(
     a: Option<TableBorderLine>,
     b: Option<TableBorderLine>,
@@ -101,12 +118,50 @@ pub(super) fn resolve_border_conflict(
     match (a, b) {
         (None, b) => b,
         (a, None) => a,
-        (Some(a), Some(b)) => Some(if border_weight(&b) > border_weight(&a) {
-            b
-        } else {
-            a
+        (Some(a), Some(b)) => Some(match border_precedence(&a).cmp(&border_precedence(&b)) {
+            std::cmp::Ordering::Less => b,
+            _ => a,
         }),
     }
+}
+
+/// Sort key for §17.4.43 conflict resolution — greater wins.
+///
+/// Returns integers so the key is `Ord`: comparing `f32` weights directly would
+/// need `partial_cmp`, and a `NaN` width (unreachable, but the type permits it)
+/// would silently make the comparison non-transitive and reintroduce the
+/// order-dependence this exists to remove.
+///
+/// Colour is inverted (`u32::MAX - luminance`) so that *darker* sorts greater,
+/// matching "darker colour wins".
+fn border_precedence(b: &TableBorderLine) -> (u32, u8, u32, u32, u32) {
+    let (l0, l1, l2) = colour_luminance(b);
+    (
+        // Weight in eighths of a point, rounded — the spec's `sz` unit.
+        (border_weight(b) * 8.0).round().max(0.0) as u32,
+        style_rank(b.style),
+        u32::MAX - l0,
+        u32::MAX - l1,
+        u32::MAX - l2,
+    )
+}
+
+/// §17.4.43 style precedence. Only `Single` and `Double` reach layout (the
+/// other 24 §17.4.38 styles are approximated as `Single` — see
+/// `convert_model_border`), so the full precedence list is not modelled; of the
+/// two that exist, `Double` is the heavier.
+fn style_rank(style: TableBorderStyle) -> u8 {
+    match style {
+        TableBorderStyle::Single => 1,
+        TableBorderStyle::Double => 2,
+    }
+}
+
+/// [MS-OI29500] §17.4.66 darkness keys, compared in order: `R+B+2G`, then
+/// `B+2G`, then `G`. Lower is darker.
+fn colour_luminance(b: &TableBorderLine) -> (u32, u32, u32) {
+    let (r, g, bl) = (b.color.r as u32, b.color.g as u32, b.color.b as u32);
+    (r + bl + 2 * g, bl + 2 * g, g)
 }
 
 /// Emit all four borders for a cell as filled rectangles.
@@ -176,15 +231,19 @@ pub(super) fn emit_cell_borders(
     }
 }
 
-/// §17.4.43: compute border weight = width_eighths × style_number.
-/// We only support Single (1) and Double (3).
+/// §17.4.43: border weight = width × style number, in points.
+///
+/// The spec states the rule in eighths of a point (`w:sz`), but every use is a
+/// *comparison* between two weights, and converting both to eighths scales both
+/// by the same 8 — so the factor cancels. Keeping it in points avoids implying
+/// that a unit conversion is load-bearing here. `border_precedence` scales to
+/// eighths once, where rounding to an integer sort key does depend on the unit.
 fn border_weight(b: &TableBorderLine) -> f32 {
-    let eighths = b.width.raw() * 8.0; // width is in points, sz is eighths
     let style_number = match b.style {
         TableBorderStyle::Single => 1.0,
         TableBorderStyle::Double => 3.0,
     };
-    eighths * style_number
+    b.width.raw() * style_number
 }
 
 /// Extract border width or zero if absent.
@@ -476,6 +535,174 @@ mod tests {
                 interior_top.raw(),
                 interior_bottom.raw(),
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use crate::render::resolve::color::RgbColor;
+
+    const BLACK: RgbColor = RgbColor { r: 0, g: 0, b: 0 };
+    const PALE: RgbColor = RgbColor {
+        r: 220,
+        g: 220,
+        b: 220,
+    };
+
+    fn line(width: f32, style: TableBorderStyle, color: RgbColor) -> TableBorderLine {
+        TableBorderLine {
+            width: Pt::new(width),
+            color,
+            style,
+        }
+    }
+
+    /// A representative spread: both styles, several widths, both colours.
+    fn sample_borders() -> Vec<TableBorderLine> {
+        let mut v = Vec::new();
+        for &w in &[0.5f32, 1.0, 2.0, 3.0, 6.0] {
+            for &s in &[TableBorderStyle::Single, TableBorderStyle::Double] {
+                for &c in &[BLACK, PALE] {
+                    v.push(line(w, s, c));
+                }
+            }
+        }
+        v
+    }
+
+    /// **The property that matters.** The caller passes (upper row's bottom,
+    /// lower row's top) and (left cell's right, right cell's left), so a
+    /// resolution that depends on argument order makes the rendered border
+    /// depend on which *side of the edge* it was declared on.
+    ///
+    /// Before this was a total order, ties fell through to whichever argument
+    /// came first: an equal-weight 3pt single beat a 1pt double or lost to it
+    /// depending on the call, and of two borders differing only in colour the
+    /// paler one won half the time.
+    #[test]
+    fn resolution_is_independent_of_argument_order() {
+        let borders = sample_borders();
+        for a in &borders {
+            for b in &borders {
+                let ab = resolve_border_conflict(Some(*a), Some(*b));
+                let ba = resolve_border_conflict(Some(*b), Some(*a));
+                assert_eq!(
+                    (ab.map(|x| (x.width, x.style, x.color))),
+                    (ba.map(|x| (x.width, x.style, x.color))),
+                    "order-dependent for {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    /// Step 2 — the heavier border wins outright.
+    #[test]
+    fn heavier_weight_wins() {
+        let thin = line(0.5, TableBorderStyle::Single, BLACK);
+        let thick = line(2.0, TableBorderStyle::Single, BLACK);
+        assert_eq!(
+            resolve_border_conflict(Some(thin), Some(thick)).map(|b| b.width),
+            Some(Pt::new(2.0))
+        );
+        assert_eq!(
+            resolve_border_conflict(Some(thick), Some(thin)).map(|b| b.width),
+            Some(Pt::new(2.0))
+        );
+    }
+
+    /// Step 3 — equal weight, so the heavier *style* decides. 3pt single and
+    /// 1pt double both weigh 3 (width × style number), which is exactly the tie
+    /// the old code resolved by argument position.
+    #[test]
+    fn equal_weight_prefers_the_heavier_style() {
+        let single = line(3.0, TableBorderStyle::Single, BLACK);
+        let double = line(1.0, TableBorderStyle::Double, BLACK);
+        assert_eq!(
+            border_weight(&single),
+            border_weight(&double),
+            "same weight"
+        );
+
+        for (a, b) in [(single, double), (double, single)] {
+            assert_eq!(
+                resolve_border_conflict(Some(a), Some(b)).map(|x| x.style),
+                Some(TableBorderStyle::Double),
+                "Double outranks Single at equal weight"
+            );
+        }
+    }
+
+    /// Step 4 — equal weight and style, so the darker colour decides.
+    #[test]
+    fn equal_weight_and_style_prefers_the_darker_colour() {
+        let dark = line(1.0, TableBorderStyle::Single, BLACK);
+        let pale = line(1.0, TableBorderStyle::Single, PALE);
+        for (a, b) in [(dark, pale), (pale, dark)] {
+            assert_eq!(
+                resolve_border_conflict(Some(a), Some(b)).map(|x| x.color),
+                Some(BLACK),
+                "darker colour wins regardless of argument order"
+            );
+        }
+    }
+
+    /// The §17.4.66 darkness keys are compared in order `R+B+2G`, then `B+2G`,
+    /// then `G` — so two colours with the same total brightness are separated by
+    /// the later keys rather than by argument order.
+    #[test]
+    fn darkness_tie_breaks_on_the_secondary_keys() {
+        // R+B+2G equal (both 255*2 = 510... constructed to match), differing in
+        // the B+2G term.
+        let a = line(
+            1.0,
+            TableBorderStyle::Single,
+            RgbColor { r: 100, g: 0, b: 0 },
+        );
+        let b = line(
+            1.0,
+            TableBorderStyle::Single,
+            RgbColor { r: 0, g: 0, b: 100 },
+        );
+        assert_eq!(
+            colour_luminance(&a).0,
+            colour_luminance(&b).0,
+            "primary key ties"
+        );
+        // a has B+2G = 0, b has B+2G = 100 → a is "darker" by the second key.
+        let winner = resolve_border_conflict(Some(a), Some(b)).expect("some");
+        assert_eq!(winner.color, RgbColor { r: 100, g: 0, b: 0 });
+        // And symmetric.
+        assert_eq!(
+            resolve_border_conflict(Some(b), Some(a)).map(|x| x.color),
+            Some(RgbColor { r: 100, g: 0, b: 0 })
+        );
+    }
+
+    /// Step 1 — an absent border yields to a present one, in both directions,
+    /// and two absent borders stay absent.
+    #[test]
+    fn absent_yields_to_present() {
+        let some = line(1.0, TableBorderStyle::Single, BLACK);
+        assert_eq!(
+            resolve_border_conflict(None, Some(some)).map(|b| b.width),
+            Some(Pt::new(1.0))
+        );
+        assert_eq!(
+            resolve_border_conflict(Some(some), None).map(|b| b.width),
+            Some(Pt::new(1.0))
+        );
+        assert!(resolve_border_conflict(None, None).is_none());
+    }
+
+    /// Identical borders resolve to themselves — the reflexive case, which a
+    /// comparison built on `partial_cmp` of `f32` could get wrong.
+    #[test]
+    fn identical_borders_resolve_to_themselves() {
+        for b in sample_borders() {
+            let r = resolve_border_conflict(Some(b), Some(b)).expect("some");
+            assert_eq!((r.width, r.style, r.color), (b.width, b.style, b.color));
         }
     }
 }
