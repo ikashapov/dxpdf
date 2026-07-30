@@ -1,8 +1,7 @@
 use std::rc::Rc;
 
 use crate::model::{
-    Block, BorderStyle, FieldCharType, Inline, NoteId, RunElement, RunProperties, TextRun,
-    VerticalAlign,
+    Block, FieldCharType, Inline, NoteId, RunElement, RunProperties, TextRun, VerticalAlign,
 };
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::EmojiCluster;
@@ -73,20 +72,20 @@ impl FootnoteTracker {
 }
 
 /// §17.3.2.4: convert a run-level [`crate::model::Border`] into a render-side
-/// [`FragmentBorder`], filtering out the spec's "no border" sentinel
-/// ([`BorderStyle::None`]).
+/// [`FragmentBorder`], filtering out the spec's "no border" styles.
 ///
-/// `<w:bdr w:val="nil"/>` and `<w:bdr w:val="none"/>` (§17.18.2 ST_Border)
-/// both signal "no border"; the parser collapses them to `BorderStyle::None`
-/// in a `Some(Border { ... })`. The model preserves the explicit `Some` so
-/// it can override an inherited border in the §17.7.2 cascade — but at the
-/// render boundary we drop the variant, otherwise the painter would draw
-/// a hairline box around every word.
+/// `<w:bdr w:val="nil"/>` and `<w:bdr w:val="none"/>` (§17.18.2 ST_Border) are
+/// kept apart by the model, because table border conflict resolution needs the
+/// difference — but a run border has no adjacent edge to conflict with, so here
+/// they are genuinely equivalent and `draws_nothing` covers both. The model
+/// preserves the explicit `Some` so it can override an inherited border in the
+/// §17.7.2 cascade; at the render boundary we drop it, otherwise the painter
+/// would draw a hairline box around every word.
 pub(super) fn run_border_to_fragment(
     border: Option<&crate::model::Border>,
 ) -> Option<FragmentBorder> {
     let b = border?;
-    if b.style == BorderStyle::None {
+    if b.style.draws_nothing() {
         return None;
     }
     Some(FragmentBorder {
@@ -188,7 +187,7 @@ where
         baseline_offset += Pt::from(pos);
     }
 
-    // §17.3.2.4: run-level border (filtered to drop BorderStyle::None).
+    // §17.3.2.4: run-level border (filtered to drop the no-border styles).
     let border = run_border_to_fragment(effective_props.border.as_ref());
 
     let text_style = TextRunStyle {
@@ -1004,7 +1003,7 @@ mod tests {
     //
     // The cascade may carry a child run whose `<w:bdr w:val="nil"/>`
     // (or "none") explicitly turns off an inherited border. The model
-    // preserves this as `Some(Border { style: BorderStyle::None, .. })`
+    // preserves this as `Some(Border { style: nil-or-none, .. })`
     // so the §17.7.2 merge can distinguish "explicit no border" from
     // "field absent → inherit". At the render boundary we must drop the
     // sentinel; otherwise the painter draws a hairline box around every

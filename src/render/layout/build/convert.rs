@@ -235,7 +235,7 @@ pub(super) fn resolve_paragraph_borders(
     let pbdr = props.borders.as_ref()?;
 
     let convert = |b: &model::Border| -> Option<BorderLine> {
-        if b.style == model::BorderStyle::None {
+        if b.style.draws_nothing() {
             return None;
         }
         Some(BorderLine {
@@ -294,16 +294,27 @@ fn convert_model_border(b: &model::Border, state: &mut BuildState) -> TableBorde
 }
 
 /// Convert a model cell border to a `CellBorderOverride`.
+///
+/// Three inputs, three outcomes ([MS-OI29500] §17.4.66):
+///
+/// | Markup | Result | Meaning |
+/// |---|---|---|
+/// | edge omitted | `None` | inherit: style → `tblPrEx` → table borders |
+/// | `val="none"` | `None` | **same as omitted** — the spec's cascade starts with *"if the cell border is omitted or none"* |
+/// | `val="nil"` | `Some(Suppress)` | draw nothing, and win the shared-edge conflict |
+/// | anything else | `Some(Border(..))` | that border, subject to conflict resolution |
+///
+/// `none` collapsing to `None` is the whole point: it makes an explicit
+/// `<w:top w:val="none"/>` behave as if the author had written nothing, which
+/// is what the spec says and the opposite of suppressing the edge.
 pub(super) fn convert_cell_border_override(
     b: &Option<model::Border>,
     state: &mut BuildState,
 ) -> Option<CellBorderOverride> {
-    b.as_ref().map(|b| {
-        if b.style == model::BorderStyle::None {
-            CellBorderOverride::Nil
-        } else {
-            CellBorderOverride::Border(convert_model_border(b, state))
-        }
+    b.as_ref().and_then(|b| match b.style {
+        model::BorderStyle::Nil => Some(CellBorderOverride::Suppress),
+        model::BorderStyle::None => None,
+        _ => Some(CellBorderOverride::Border(convert_model_border(b, state))),
     })
 }
 
@@ -332,7 +343,7 @@ pub(super) fn convert_table_border_config(
 ) -> TableBorderConfig {
     let mut convert = |border: &Option<model::Border>| -> Option<TableBorderLine> {
         border.as_ref().and_then(|b| {
-            if b.style == model::BorderStyle::None {
+            if b.style.draws_nothing() {
                 None
             } else {
                 Some(convert_model_border(b, state))

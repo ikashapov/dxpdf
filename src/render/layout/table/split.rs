@@ -303,7 +303,16 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
         .borders
         .iter()
         .map(|b| CellBorders {
-            top: b.top.or(b.bottom),
+            // The continuation's top is the *cut* edge the split invented, not
+            // the author's top edge, so it takes the row's bottom border
+            // whenever the original top paints nothing. That deliberately
+            // includes a suppressed top: `nil` on the row's own top edge says
+            // nothing about a boundary that only exists because of the split.
+            top: if b.top.line().is_some() {
+                b.top
+            } else {
+                b.bottom
+            },
             bottom: b.bottom,
             left: b.left,
             right: b.right,
@@ -386,6 +395,7 @@ fn command_primary_y(cmd: &DrawCommand) -> Pt {
 
 #[cfg(test)]
 mod tests {
+    use super::super::borders::CellEdge;
     use super::*;
     use crate::render::geometry::PtEdgeInsets;
     use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
@@ -806,10 +816,13 @@ mod tests {
         };
         let mut mr = measure(&[row_n_lines(6, 0.0)]).rows.pop().expect("one row");
         mr.borders[0] = CellBorders {
-            top: None, // resolved away by conflict resolution
-            bottom: Some(bottom),
-            left: None,
-            right: None,
+            // Absent, not Suppressed: resolved away by conflict resolution, not
+            // by an author `nil` — the fallback applies to both, but this test
+            // is about the conflict-resolution case.
+            top: CellEdge::Absent,
+            bottom: CellEdge::Line(bottom),
+            left: CellEdge::Absent,
+            right: CellEdge::Absent,
         };
         let rows = [row_n_lines(6, 0.0)];
         let cut = find_row_cut(&RowCutInput {
@@ -821,11 +834,11 @@ mod tests {
         let parts = split_row_at(&mr, &cut);
 
         assert!(
-            parts.first.borders[0].top.is_none(),
+            parts.first.borders[0].top.line().is_none(),
             "the first half keeps the original borders verbatim"
         );
         assert_eq!(
-            parts.second.borders[0].top.map(|b| b.width),
+            parts.second.borders[0].top.line().map(|b| b.width),
             Some(Pt::new(2.0)),
             "the continuation falls back to the original bottom for its top edge"
         );
@@ -846,10 +859,10 @@ mod tests {
         };
         let mut mr = measure(&[row_n_lines(6, 0.0)]).rows.pop().expect("one row");
         mr.borders[0] = CellBorders {
-            top: Some(thin),
-            bottom: Some(thick),
-            left: None,
-            right: None,
+            top: CellEdge::Line(thin),
+            bottom: CellEdge::Line(thick),
+            left: CellEdge::Absent,
+            right: CellEdge::Absent,
         };
         let rows = [row_n_lines(6, 0.0)];
         let cut = find_row_cut(&RowCutInput {
@@ -861,7 +874,7 @@ mod tests {
         let parts = split_row_at(&mr, &cut);
 
         assert_eq!(
-            parts.second.borders[0].top.map(|b| b.width),
+            parts.second.borders[0].top.line().map(|b| b.width),
             Some(Pt::new(1.0)),
             "an existing top border wins over the bottom fallback"
         );

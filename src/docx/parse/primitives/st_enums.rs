@@ -32,8 +32,8 @@ use crate::docx::model::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StBorderType {
-    /// §17.18.2: "no border" sentinel (distinct from `none` per spec but
-    /// treated identically by the model).
+    /// §17.18.2: "no border" — distinct from `none`, and carried through as
+    /// such. See `BorderStyle` for why the two must not be merged.
     Nil,
     None,
     Single,
@@ -66,7 +66,11 @@ pub enum StBorderType {
 impl From<StBorderType> for BorderStyle {
     fn from(s: StBorderType) -> Self {
         match s {
-            StBorderType::Nil | StBorderType::None => Self::None,
+            // §17.18.2: kept distinct. Both draw nothing, but [MS-OI29500]
+            // §17.4.66 gives them opposite behaviour in table border conflict
+            // resolution — `nil` suppresses the shared edge, `none` yields.
+            StBorderType::Nil => Self::Nil,
+            StBorderType::None => Self::None,
             StBorderType::Single => Self::Single,
             StBorderType::Thick => Self::Thick,
             StBorderType::Double => Self::Double,

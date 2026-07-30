@@ -5,12 +5,12 @@ use crate::render::dimension::Pt;
 use crate::render::layout::cell::{layout_cell, CellLayout};
 
 use super::borders::{
-    border_width, resolve_border_conflict, resolve_cell_effective_borders, CellBorders,
+    border_width, resolve_border_conflict, resolve_cell_effective_borders, CellBorders, CellEdge,
 };
 use super::grid::{cell_index_at_grid_col, expand_rows_for_vmerge, is_vmerge_continue};
 use super::types::{
-    CellLayoutEntry, MeasuredRow, MeasuredTable, RowHeightRule, TableBorderConfig, TableBorderLine,
-    TableRowInput, VerticalMergeState,
+    CellLayoutEntry, MeasuredRow, MeasuredTable, RowHeightRule, TableBorderConfig, TableRowInput,
+    VerticalMergeState,
 };
 
 /// Measure all table rows: resolve borders, lay out cell content, compute heights.
@@ -64,10 +64,10 @@ pub(super) fn measure_table_rows(
                     col_widths.len(),
                 );
                 if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
-                    b_top = None;
+                    b_top = CellEdge::Absent;
                 }
                 if row_idx + 1 < num_rows && is_vmerge_continue(&rows[row_idx + 1], grid_idx) {
-                    b_bottom = None;
+                    b_bottom = CellEdge::Absent;
                 }
                 row_borders.push(CellBorders {
                     top: b_top,
@@ -91,7 +91,7 @@ pub(super) fn measure_table_rows(
                 let left = resolved_borders[row_idx][cell_ci + 1].left;
                 let winner = resolve_border_conflict(right, left);
                 resolved_borders[row_idx][cell_ci].right = winner;
-                resolved_borders[row_idx][cell_ci + 1].left = None;
+                resolved_borders[row_idx][cell_ci + 1].left = CellEdge::Absent;
             }
         }
 
@@ -116,13 +116,14 @@ pub(super) fn measure_table_rows(
             let lower = upper + 1;
 
             // Per-column resolved border for this inter-row edge.
-            let resolved: Vec<Option<TableBorderLine>> = (0..ncols)
+            let resolved: Vec<CellEdge> = (0..ncols)
                 .map(|gc| {
-                    let ub = cell_index_at_grid_col(&rows[upper], gc)
-                        .and_then(|ci| resolved_borders[upper][ci].bottom);
-                    let lt = cell_index_at_grid_col(&rows[lower], gc)
-                        .and_then(|ci| resolved_borders[lower][ci].top);
-                    resolve_border_conflict(ub, lt)
+                    let edge = |row: usize, pick: fn(&CellBorders) -> CellEdge| {
+                        cell_index_at_grid_col(&rows[row], gc)
+                            .map(|ci| pick(&resolved_borders[row][ci]))
+                            .unwrap_or(CellEdge::Absent)
+                    };
+                    resolve_border_conflict(edge(upper, |b| b.bottom), edge(lower, |b| b.top))
                 })
                 .collect();
 
@@ -135,7 +136,8 @@ pub(super) fn measure_table_rows(
             // its own top *and* the covering row its bottom → a doubled line.
             let can_own = |row_idx: usize| -> bool {
                 let covers_bordered_cols = (0..ncols).all(|gc| {
-                    resolved[gc].is_none() || cell_index_at_grid_col(&rows[row_idx], gc).is_some()
+                    resolved[gc].line().is_none()
+                        || cell_index_at_grid_col(&rows[row_idx], gc).is_some()
                 });
                 covers_bordered_cols
                     && grid_indices[row_idx]
@@ -160,7 +162,7 @@ pub(super) fn measure_table_rows(
                     }
                 }
                 for b in resolved_borders[upper].iter_mut() {
-                    b.bottom = None;
+                    b.bottom = CellEdge::Absent;
                 }
             } else {
                 // Upper row owns the edge: each upper cell paints its uniform
@@ -182,7 +184,7 @@ pub(super) fn measure_table_rows(
                             *c = true;
                         }
                     } else {
-                        resolved_borders[upper][ci].bottom = None;
+                        resolved_borders[upper][ci].bottom = CellEdge::Absent;
                     }
                 }
                 for (ci, &start) in grid_indices[lower].iter().enumerate() {
@@ -194,11 +196,11 @@ pub(super) fn measure_table_rows(
                     if (start..end).any(|gc| covered[gc]) {
                         // Any column already painted from above → defer the
                         // whole cell so a partly-covered span can't double up.
-                        resolved_borders[lower][ci].top = None;
+                        resolved_borders[lower][ci].top = CellEdge::Absent;
                     } else if (start..end).all(|gc| resolved[gc] == resolved[start]) {
                         resolved_borders[lower][ci].top = resolved[start];
                     } else {
-                        resolved_borders[lower][ci].top = None;
+                        resolved_borders[lower][ci].top = CellEdge::Absent;
                     }
                 }
             }
@@ -207,7 +209,7 @@ pub(super) fn measure_table_rows(
         // §17.4.38: suppress first-row top borders for adjacent table collapse.
         if suppress_first_row_top && !resolved_borders.is_empty() {
             for b in &mut resolved_borders[0] {
-                b.top = None;
+                b.top = CellEdge::Absent;
             }
         }
     }
@@ -329,6 +331,7 @@ pub(super) fn measure_table_rows(
 
 #[cfg(test)]
 mod tests {
+    use super::super::borders::CellEdge;
     use super::super::types::{
         CellBorderConfig, CellBorderOverride, CellVAlign, TableBorderConfig, TableBorderLine,
         TableBorderStyle, TableCellInput, TableRowInput,
@@ -391,28 +394,33 @@ mod tests {
         }
     }
 
-    /// §17.4.43 regression: a `gridSpan` upper cell facing several lower
-    /// cells must not drop the later cells' top borders (previously only the
-    /// first lower cell was resolved and the rest nulled), and the whole
-    /// shared edge must be drawn from a single side so the line does not
-    /// split across two y positions. Mirrors the real doc's
-    /// `[spacer | Function: | Qualitätssicherung]` row under a `gridSpan`
-    /// header.
+    /// [MS-OI29500] §17.4.66 regression: a `gridSpan` upper cell facing several
+    /// lower cells must not drop the later cells' top borders (previously only
+    /// the first lower cell was resolved and the rest nulled), and the whole
+    /// shared edge must be drawn from a single side so the line does not split
+    /// across two y positions. Mirrors the real doc's
+    /// `[spacer | Function: | Qualitätssicherung]` row under a `gridSpan` header.
+    ///
+    /// Non-uniformity comes from a **heavier border on one column**, not from a
+    /// `nil`. It used to come from a nil, which worked only while nil resolved
+    /// to "absent": now that nil suppresses (§17.4.66), a nil under the wide
+    /// cell makes its run uniformly suppressed and the upper row owns the edge —
+    /// the opposite branch, so the configuration no longer reaches the bug this
+    /// test exists for. Suppression is covered separately by
+    /// `nil_suppresses_across_a_gridspan_mismatch`.
     #[test]
     fn wide_upper_cell_draws_whole_edge_from_lower_row() {
         let s = single(0.5);
+        let heavy = single(2.0);
         let rows = vec![
-            // Row 0: gridSpan=2 header (bottom nil) over spacer+Function,
-            // then two single cells over the Qualitätssicherung span.
+            // Row 0: gridSpan=2 header over spacer+Function, then two single
+            // cells over the Qualitätssicherung span. All bottoms inherit.
+            row(vec![cell(2, None), cell(1, None), cell(1, None)]),
+            // Row 1: [spacer | Function (heavy top) | Q (gridSpan=2)]. The heavy
+            // top on column 1 alone makes the wide upper cell's run non-uniform.
             row(vec![
-                cell(2, Some(cb(None, Some(CellBorderOverride::Nil)))),
                 cell(1, None),
-                cell(1, None),
-            ]),
-            // Row 1: [nil spacer | Function (single top) | Q (gridSpan=2)].
-            row(vec![
-                cell(1, Some(cb(Some(CellBorderOverride::Nil), None))),
-                cell(1, Some(cb(Some(CellBorderOverride::Border(s)), None))),
+                cell(1, Some(cb(Some(CellBorderOverride::Border(heavy)), None))),
                 cell(2, None),
             ]),
         ];
@@ -429,32 +437,93 @@ mod tests {
         // Whole edge drawn from the lower row → every upper bottom cleared,
         // so Function and Qualitätssicherung tops share one y position.
         for b in &m.rows[0].borders {
-            assert_eq!(b.bottom, None, "upper bottoms cleared (edge owned below)");
+            assert_eq!(
+                b.bottom,
+                CellEdge::Absent,
+                "upper bottoms cleared (edge owned below)"
+            );
         }
-        assert_eq!(m.rows[1].borders[0].top, None, "spacer keeps no top border");
         assert_eq!(
-            m.rows[1].borders[1].top,
+            m.rows[1].borders[0].top.line(),
             Some(s),
-            "Function keeps its top border across the gridSpan mismatch"
+            "spacer column keeps the inherited insideH"
         );
         assert_eq!(
-            m.rows[1].borders[2].top,
+            m.rows[1].borders[1].top.line(),
+            Some(heavy),
+            "Function keeps its heavier top border across the gridSpan mismatch"
+        );
+        assert_eq!(
+            m.rows[1].borders[2].top.line(),
             Some(s),
             "Qualitätssicherung top drawn from the same (lower) side as Function"
         );
     }
 
-    /// §17.4.43 regression: a nil spacer among the cells above a wide
-    /// `gridSpan` cell must not punch a gap through that cell's top border —
-    /// the spacer's edge resolves to the wide cell's inherited insideH.
+    /// §17.4.66 step 0: a `nil` bottom on a wide upper cell suppresses the
+    /// shared edge for **every column it spans**, including one where the lower
+    /// cell declares a real border. Suppression is not a weight comparison — the
+    /// lower border is present and still loses.
+    ///
+    /// This is the configuration `wide_upper_cell_draws_whole_edge_from_lower_row`
+    /// used to carry, kept here for what it now demonstrates.
     #[test]
-    fn nil_spacer_above_wide_cell_leaves_no_gap() {
+    fn nil_suppresses_across_a_gridspan_mismatch() {
+        let s = single(0.5);
+        let rows = vec![
+            row(vec![
+                cell(2, Some(cb(None, Some(CellBorderOverride::Suppress)))),
+                cell(1, None),
+                cell(1, None),
+            ]),
+            row(vec![
+                cell(1, Some(cb(Some(CellBorderOverride::Suppress), None))),
+                cell(1, Some(cb(Some(CellBorderOverride::Border(s)), None))),
+                cell(2, None),
+            ]),
+        ];
+        let cols = vec![Pt::new(100.0); 4];
+        let m = measure_table_rows(
+            &rows,
+            &cols,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            m.rows[0].borders[0].bottom,
+            CellEdge::Suppressed,
+            "the nil bottom suppresses its whole span, beating Function's declared top"
+        );
+        assert_eq!(
+            m.rows[1].borders[1].top.line(),
+            None,
+            "Function's own single top is suppressed by the nil above it"
+        );
+        // Columns outside the nil span are unaffected.
+        assert_eq!(m.rows[0].borders[1].bottom.line(), Some(s));
+        assert_eq!(m.rows[0].borders[2].bottom.line(), Some(s));
+    }
+
+    /// §17.4.66: a `nil` bottom among the cells above a wide `gridSpan` cell
+    /// **does** punch a gap through that cell's top border, because nil
+    /// suppresses the shared edge rather than yielding to the wide cell's
+    /// inherited `insideH`.
+    ///
+    /// This test previously asserted the opposite ("must not punch a gap"), and
+    /// the assertion was correct only under the pre-§17.4.66 reading where nil
+    /// collapsed to "absent" and lost every conflict. The gap is what the author
+    /// asked for by writing `<w:bottom w:val="nil"/>`.
+    #[test]
+    fn nil_spacer_above_wide_cell_punches_a_gap() {
         let s = single(0.5);
         let rows = vec![
             // Row 0: [inherits single | nil spacer | inherits single].
             row(vec![
                 cell(1, None),
-                cell(1, Some(cb(None, Some(CellBorderOverride::Nil)))),
+                cell(1, Some(cb(None, Some(CellBorderOverride::Suppress)))),
                 cell(1, None),
             ]),
             // Row 1: one gridSpan=3 cell inheriting insideH as its top.
@@ -470,16 +539,20 @@ mod tests {
             false,
         );
 
-        // Every upper bottom carries a single border → continuous, no gap.
-        assert_eq!(m.rows[0].borders[0].bottom, Some(s));
+        assert_eq!(m.rows[0].borders[0].bottom.line(), Some(s));
         assert_eq!(
             m.rows[0].borders[1].bottom,
-            Some(s),
-            "nil spacer bottom filled from the wide cell's top border"
+            CellEdge::Suppressed,
+            "the nil spacer suppresses its column instead of inheriting"
         );
-        assert_eq!(m.rows[0].borders[2].bottom, Some(s));
-        // The wide lower cell's top is drawn once from above.
-        assert_eq!(m.rows[1].borders[0].top, None);
+        assert_eq!(
+            m.rows[0].borders[1].bottom.line(),
+            None,
+            "so nothing is painted there — the gap is deliberate"
+        );
+        assert_eq!(m.rows[0].borders[2].bottom.line(), Some(s));
+        // The wide lower cell's top is still drawn once, from above.
+        assert_eq!(m.rows[1].borders[0].top.line(), None);
     }
 
     /// §17.4.43 regression: an upper `gridSpan` cell that leaves the last
@@ -509,11 +582,12 @@ mod tests {
         // Upper can't cover col 2, so the lower row owns the whole edge:
         // its bottom is cleared (no doubling), the lower tops carry the line.
         assert_eq!(
-            m.rows[0].borders[0].bottom, None,
+            m.rows[0].borders[0].bottom.line(),
+            None,
             "upper bottom cleared so the straddling lower cell isn't doubled"
         );
-        assert_eq!(m.rows[1].borders[0].top, Some(s));
-        assert_eq!(m.rows[1].borders[1].top, Some(s));
+        assert_eq!(m.rows[1].borders[0].top.line(), Some(s));
+        assert_eq!(m.rows[1].borders[1].top.line(), Some(s));
     }
 
     /// Aligned grids keep the pre-existing "upper cell owns the shared edge"
@@ -535,8 +609,8 @@ mod tests {
             false,
         );
         for ci in 0..2 {
-            assert_eq!(m.rows[0].borders[ci].bottom, Some(s));
-            assert_eq!(m.rows[1].borders[ci].top, None);
+            assert_eq!(m.rows[0].borders[ci].bottom.line(), Some(s));
+            assert_eq!(m.rows[1].borders[ci].top.line(), None);
         }
     }
 }

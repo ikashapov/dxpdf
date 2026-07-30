@@ -82,11 +82,18 @@ pub enum VerticalMergeState {
     Continue,
 }
 
-/// §17.7.6: a conditional border override for a single cell edge.
+/// §17.7.6: a border override for a single cell edge.
+///
+/// There is deliberately **no variant for `val="none"`**. Per [MS-OI29500]
+/// §17.4.66 an explicit `none` is indistinguishable from an omitted edge — both
+/// inherit and both yield — so `convert_cell_border_override` maps it to
+/// `Option::None` and it never reaches here. Only `nil`, which suppresses,
+/// needs to be represented.
 #[derive(Clone, Copy, Debug)]
 pub enum CellBorderOverride {
-    /// §17.4.38 val="nil": explicitly no border on this edge.
-    Nil,
+    /// §17.18.2 `val="nil"`: draw nothing on this edge *and* win the conflict
+    /// against whatever the adjacent cell declares.
+    Suppress,
     /// A specific border line on this edge.
     Border(TableBorderLine),
 }

@@ -63,8 +63,20 @@ pub struct Border {
     pub color: Color,
 }
 
+/// §17.18.2 `ST_Border`.
+///
+/// `Nil` and `None` are **not** synonyms and must not be merged. Both draw
+/// nothing, but [MS-OI29500] §17.4.66 separates them in table border conflict
+/// resolution: a `nil` edge *suppresses* the shared border outright, while a
+/// `none` edge behaves exactly like an omitted one — it inherits from the style
+/// and table-level borders, and yields to the opposing cell's border. Use
+/// [`BorderStyle::draws_nothing`] wherever only "is there a line to paint"
+/// matters, so the distinction can't be lost by an `== None` comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BorderStyle {
+    /// `val="nil"` — no border, and it wins conflict resolution.
+    Nil,
+    /// `val="none"` — no border, but inherits and yields like an omitted edge.
     None,
     Single,
     Thick,
@@ -91,6 +103,22 @@ pub enum BorderStyle {
     ThreeDEngrave,
     Outset,
     Inset,
+}
+
+impl BorderStyle {
+    /// Whether this style paints no line at all — true for both `nil` and
+    /// `none` (§17.18.2).
+    ///
+    /// Every consumer that only asks "is there a border to draw" should call
+    /// this rather than comparing against a variant, because the two differ
+    /// solely in table conflict resolution ([MS-OI29500] §17.4.66). Comparing
+    /// `== BorderStyle::None` is how the distinction was lost before: it
+    /// silently answered "no" for `nil` too, at every site outside the table
+    /// resolver where the difference is genuinely irrelevant — and at the one
+    /// site where it isn't.
+    pub fn draws_nothing(self) -> bool {
+        matches!(self, Self::Nil | Self::None)
+    }
 }
 
 // ── Shading ──────────────────────────────────────────────────────────────────

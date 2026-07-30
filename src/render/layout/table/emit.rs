@@ -5,11 +5,10 @@ use crate::render::geometry::PtRect;
 
 use crate::render::layout::draw_command::DrawCommand;
 
-use super::borders::{border_width, emit_cell_borders, CellBorders};
+use super::borders::{border_width, emit_cell_borders, CellBorders, CellEdge};
 use super::grid::is_vmerge_continue;
 use super::types::{
-    CellBorderOverride, CellVAlign, MeasuredRow, MeasuredTable, TableBorderLine, TableRowInput,
-    VerticalMergeState,
+    CellVAlign, MeasuredRow, MeasuredTable, TableBorderLine, TableRowInput, VerticalMergeState,
 };
 
 /// Layered command buffers for table rendering: shading, content, borders.
@@ -133,21 +132,17 @@ fn emit_one_row(
             }
         }
 
-        // §17.4.38: restore top border when this row is the first in its
-        // slice and the resolved top was removed (conflict resolution or
-        // adjacent-table collapse). An explicit `<w:top w:val="nil"/>` on the
-        // cell must NOT be restored — the user asked for no border.
-        let user_suppressed_top = matches!(
-            cell_input
-                .cell_borders
-                .as_ref()
-                .and_then(|cb| cb.top.as_ref()),
-            Some(CellBorderOverride::Nil)
-        );
-        let cell_top = if mr.borders[cell_ci].top.is_none() && !user_suppressed_top {
-            top_border_override
-        } else {
-            mr.borders[cell_ci].top
+        // §17.4.38: restore the top border when this row starts a slice and the
+        // resolved top was removed by conflict resolution or adjacent-table
+        // collapse. An edge the author set to `nil` must NOT be restored — they
+        // asked for no border — and `CellEdge` already says which is which, so
+        // this reads the resolved edge instead of re-deriving intent from
+        // `cell_input`. That also fixes the `none` case for free: `none` now
+        // resolves to `Absent` and is restorable, where the old re-derivation
+        // lumped it in with `nil` and left a continuation slice with no top.
+        let cell_top = match mr.borders[cell_ci].top {
+            CellEdge::Absent => top_border_override.into(),
+            resolved => resolved,
         };
         let b_left = mr.borders[cell_ci].left;
         let b_right = mr.borders[cell_ci].right;
@@ -518,10 +513,10 @@ mod tests {
     /// single row.
     #[test]
     fn top_border_override_skips_a_cell_that_explicitly_suppressed_its_top() {
-        use crate::render::layout::table::types::CellBorderConfig;
+        use crate::render::layout::table::types::{CellBorderConfig, CellBorderOverride};
 
         let nil_top = CellBorderConfig {
-            top: Some(CellBorderOverride::Nil),
+            top: Some(CellBorderOverride::Suppress),
             bottom: None,
             left: None,
             right: None,
@@ -541,7 +536,10 @@ mod tests {
             false,
         );
         assert!(
-            measured.rows[0].borders.iter().all(|b| b.top.is_none()),
+            measured.rows[0]
+                .borders
+                .iter()
+                .all(|b| b.top.line().is_none()),
             "both cells must resolve to no top border for this test to mean anything"
         );
 
