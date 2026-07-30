@@ -42,7 +42,10 @@ pub(super) fn resolve_cell_effective_borders(
     // Start with table-level borders mapped to cell edges.
     let tb = table_borders;
     let is_first_row = row_idx == 0;
-    let is_last_row = row_idx == num_rows - 1;
+    // `row_idx + 1 == num_rows`, not `row_idx == num_rows - 1`: the latter
+    // underflows on an empty table. No caller passes `num_rows == 0` today, but
+    // the parameter is free and the guard would live entirely in the callers.
+    let is_last_row = row_idx + 1 == num_rows;
     let is_first_col = cell_grid_col == 0;
     let is_last_col = cell_grid_col + cell_grid_span >= num_grid_cols;
 
@@ -704,5 +707,126 @@ mod conflict_tests {
             let r = resolve_border_conflict(Some(b), Some(b)).expect("some");
             assert_eq!((r.width, r.style, r.color), (b.width, b.style, b.color));
         }
+    }
+}
+
+/// §17.4.38 edge mapping: which of the six table-level borders each cell edge
+/// draws from, given the cell's position in the grid.
+#[cfg(test)]
+mod edge_mapping_tests {
+    use super::*;
+    use crate::render::geometry::PtEdgeInsets;
+    use crate::render::layout::table::CellVAlign;
+    use crate::render::resolve::color::RgbColor;
+
+    /// Every edge gets its own width, so a resolved border names the config
+    /// field it came from.
+    const TOP: f32 = 1.0;
+    const BOTTOM: f32 = 2.0;
+    const LEFT: f32 = 3.0;
+    const RIGHT: f32 = 4.0;
+    const INSIDE_H: f32 = 5.0;
+    const INSIDE_V: f32 = 6.0;
+
+    fn edge(width: f32) -> Option<TableBorderLine> {
+        Some(TableBorderLine {
+            width: Pt::new(width),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        })
+    }
+
+    fn config() -> TableBorderConfig {
+        TableBorderConfig {
+            top: edge(TOP),
+            bottom: edge(BOTTOM),
+            left: edge(LEFT),
+            right: edge(RIGHT),
+            inside_h: edge(INSIDE_H),
+            inside_v: edge(INSIDE_V),
+        }
+    }
+
+    fn plain_cell() -> TableCellInput {
+        TableCellInput {
+            blocks: vec![],
+            margins: PtEdgeInsets::ZERO,
+            grid_span: 1,
+            shading: None,
+            cell_borders: None,
+            vertical_merge: None,
+            vertical_align: CellVAlign::Top,
+        }
+    }
+
+    /// `(top, bottom, left, right)` widths, so a failure reads as which edges
+    /// were mis-mapped rather than as four separate assertions.
+    fn widths(
+        row_idx: usize,
+        grid_col: usize,
+        num_rows: usize,
+        num_grid_cols: usize,
+    ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+        let (t, b, l, r) = resolve_cell_effective_borders(
+            &plain_cell(),
+            Some(&config()),
+            row_idx,
+            grid_col,
+            1,
+            num_rows,
+            num_grid_cols,
+        );
+        let w = |e: Option<TableBorderLine>| e.map(|e| e.width.raw());
+        (w(t), w(b), w(l), w(r))
+    }
+
+    /// A 3×3 grid: the corners take the outer borders, the middle takes
+    /// `insideH`/`insideV` on all four sides.
+    #[test]
+    fn outer_edges_use_outer_borders_and_interior_edges_use_inside() {
+        assert_eq!(
+            widths(0, 0, 3, 3),
+            (Some(TOP), Some(INSIDE_H), Some(LEFT), Some(INSIDE_V)),
+            "top-left cell"
+        );
+        assert_eq!(
+            widths(1, 1, 3, 3),
+            (
+                Some(INSIDE_H),
+                Some(INSIDE_H),
+                Some(INSIDE_V),
+                Some(INSIDE_V)
+            ),
+            "centre cell"
+        );
+        assert_eq!(
+            widths(2, 2, 3, 3),
+            (Some(INSIDE_H), Some(BOTTOM), Some(INSIDE_V), Some(RIGHT)),
+            "bottom-right cell"
+        );
+    }
+
+    /// A single-row, single-column table is both first and last on both axes,
+    /// so it takes all four outer borders and neither inside border.
+    #[test]
+    fn a_one_cell_table_takes_all_four_outer_borders() {
+        assert_eq!(
+            widths(0, 0, 1, 1),
+            (Some(TOP), Some(BOTTOM), Some(LEFT), Some(RIGHT))
+        );
+    }
+
+    /// E5b#7. `num_rows == 0` is unreachable through `layout_table` — it returns
+    /// early on empty input, and every other caller is inside a row loop — but
+    /// `num_rows` is a free parameter of a `pub(super)` function, so the
+    /// last-row test must not depend on a caller having checked it.
+    /// `row_idx == num_rows - 1` underflows here; `row_idx + 1 == num_rows`
+    /// answers "no row is the last row of an empty table".
+    #[test]
+    fn an_empty_table_does_not_underflow_the_last_row_check() {
+        assert_eq!(
+            widths(0, 0, 0, 3),
+            (Some(TOP), Some(INSIDE_H), Some(LEFT), Some(INSIDE_V))
+        );
     }
 }
