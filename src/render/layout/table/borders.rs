@@ -89,13 +89,16 @@ pub(super) fn resolve_cell_effective_borders(
     (top, bottom, left, right)
 }
 
-/// §17.4.43: resolve a border conflict between two competing borders on
-/// a shared edge.  Returns the winning border (or `None` if both are `None`).
+/// Resolve a border conflict between two competing borders on a shared edge.
+/// Returns the winning border (or `None` if both are `None`).
 ///
-/// Tie-breaking per [MS-OI29500] §17.4.66, in order:
+/// The algorithm is **not in ISO/IEC 29500-1** — the standard only says a method
+/// exists. It is spelled out in [MS-OI29500] §17.4.66 (`tcBorders`, note a),
+/// which is the authority for every step below:
 ///   1. Absent yields to present.
-///   2. Weight = width × style number.  Higher wins.
-///   3. Equal weight: heavier style wins (`Double` over `Single`).
+///   2. Weight = width in eighths of a point × style number. Higher wins.
+///   3. Equal weight: the style **earlier in the spec's precedence list** wins —
+///      `Single` over `Double`. See `style_precedence_index`.
 ///   4. Equal style: darker colour wins (`R+B+2G`, then `B+2G`, then `G`).
 ///
 /// **The comparison is a total order, and that is the point.** The caller feeds
@@ -128,34 +131,52 @@ pub(super) fn resolve_border_conflict(
     }
 }
 
-/// Sort key for §17.4.43 conflict resolution — greater wins.
+/// Sort key for [MS-OI29500] §17.4.66 conflict resolution — greater wins.
 ///
 /// Returns integers so the key is `Ord`: comparing `f32` weights directly would
 /// need `partial_cmp`, and a `NaN` width (unreachable, but the type permits it)
 /// would silently make the comparison non-transitive and reintroduce the
 /// order-dependence this exists to remove.
 ///
-/// Colour is inverted (`u32::MAX - luminance`) so that *darker* sorts greater,
-/// matching "darker colour wins".
+/// **Two fields are inverted, and for the same reason.** The spec states both
+/// style and colour as "lower value wins" rankings — earliest in the precedence
+/// list, and smallest brightness. This key is "greater wins", so each is
+/// subtracted from its type's maximum. Inverting one and not the other is the
+/// defect this layout is meant to make obvious.
 fn border_precedence(b: &TableBorderLine) -> (u32, u8, u32, u32, u32) {
     let (l0, l1, l2) = colour_luminance(b);
     (
         // Weight in eighths of a point, rounded — the spec's `sz` unit.
         (border_weight(b) * 8.0).round().max(0.0) as u32,
-        style_rank(b.style),
+        u8::MAX - style_precedence_index(b.style),
         u32::MAX - l0,
         u32::MAX - l1,
         u32::MAX - l2,
     )
 }
 
-/// §17.4.43 style precedence. Only `Single` and `Double` reach layout (the
-/// other 24 §17.4.38 styles are approximated as `Single` — see
-/// `convert_model_border`), so the full precedence list is not modelled; of the
-/// two that exist, `Double` is the heavier.
-fn style_rank(style: TableBorderStyle) -> u8 {
+/// [MS-OI29500] §17.4.66 style precedence: at equal weight, *"the higher of the
+/// two on this precedence list shall be displayed"*, the list being
+///
+/// > single, thick, double, dotted, dashed, dotDash, dotDotDash, triple,
+/// > thinThickSmallGap, … outset, inset
+///
+/// "Higher on the list" means **earlier**, so this returns the 0-based index
+/// into it and **lower wins** — `border_precedence` inverts it.
+///
+/// So `Single` beats `Double` at equal weight, which is worth stating plainly
+/// because the intuition runs the other way: a double border has the greater
+/// *style number* (3 vs 1) and therefore the greater weight at equal width, and
+/// it is easy to carry that ordering into the tie-break, where the spec
+/// reverses it. Equal weight means the single is three times wider — a 3pt
+/// solid line against two 0.33pt hairlines — and the spec prefers the single.
+///
+/// Only `Single` and `Double` reach layout (the other 24 §17.4.38 styles are
+/// approximated as `Single` — see `convert_model_border`), so only their two
+/// positions are modelled: single is first, double is third.
+fn style_precedence_index(style: TableBorderStyle) -> u8 {
     match style {
-        TableBorderStyle::Single => 1,
+        TableBorderStyle::Single => 0,
         TableBorderStyle::Double => 2,
     }
 }
@@ -615,11 +636,18 @@ mod conflict_tests {
         );
     }
 
-    /// Step 3 — equal weight, so the heavier *style* decides. 3pt single and
-    /// 1pt double both weigh 3 (width × style number), which is exactly the tie
-    /// the old code resolved by argument position.
+    /// Step 3 — equal weight, so position in the spec's precedence list decides,
+    /// and **`Single` wins**. 3pt single and 1pt double both weigh 3
+    /// (width × style number), which is exactly the tie the pre-E5b#2 code
+    /// resolved by argument position.
+    ///
+    /// This test previously asserted the opposite, and was mutation-checked in
+    /// that state — the code and the assertion shared one error, so no mutation
+    /// could expose it. [MS-OI29500] §17.4.66 orders the list
+    /// `single, thick, double, …` and displays *"the higher of the two on this
+    /// precedence list"*, i.e. the earlier one.
     #[test]
-    fn equal_weight_prefers_the_heavier_style() {
+    fn equal_weight_prefers_the_earlier_style_in_the_precedence_list() {
         let single = line(3.0, TableBorderStyle::Single, BLACK);
         let double = line(1.0, TableBorderStyle::Double, BLACK);
         assert_eq!(
@@ -631,8 +659,33 @@ mod conflict_tests {
         for (a, b) in [(single, double), (double, single)] {
             assert_eq!(
                 resolve_border_conflict(Some(a), Some(b)).map(|x| x.style),
+                Some(TableBorderStyle::Single),
+                "Single is earlier in the precedence list, so it wins at equal weight"
+            );
+        }
+    }
+
+    /// The tie-break must not leak into the *weight* comparison: a double
+    /// border of equal width still outweighs a single (style number 3 vs 1) and
+    /// wins at step 2, before precedence is consulted.
+    ///
+    /// Pins the two steps apart. Ranking `Single` above `Double` is only correct
+    /// as a tie-break; applied one step earlier it would invert every ordinary
+    /// single-vs-double edge in a table.
+    #[test]
+    fn precedence_does_not_override_weight() {
+        let single = line(1.0, TableBorderStyle::Single, BLACK);
+        let double = line(1.0, TableBorderStyle::Double, BLACK);
+        assert!(
+            border_weight(&double) > border_weight(&single),
+            "equal width, double is heavier"
+        );
+
+        for (a, b) in [(single, double), (double, single)] {
+            assert_eq!(
+                resolve_border_conflict(Some(a), Some(b)).map(|x| x.style),
                 Some(TableBorderStyle::Double),
-                "Double outranks Single at equal weight"
+                "the heavier border wins outright, regardless of precedence"
             );
         }
     }
