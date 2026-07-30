@@ -38,7 +38,12 @@ pub(super) fn emit_table_rows(
     for row_idx in row_range {
         let mr = &measured.rows[row_idx];
         let is_first_in_range = row_idx == range_start;
-        let has_next_in_slice = row_idx + 1 < num_rows;
+        // Deliberately the *table's* row count, not the range's: this mirrors
+        // `measure_table_rows`' own condition for reserving `border_gap_below`
+        // (`row_idx + 1 < num_rows`), so the two always agree about whether a
+        // gap exists. A row that ends a page slice but not the table still has
+        // its reserved gap, and its bottom border belongs in it.
+        let has_reserved_bottom_gap = row_idx + 1 < num_rows;
         emit_one_row(
             mr,
             &rows[row_idx],
@@ -49,7 +54,7 @@ pub(super) fn emit_table_rows(
             } else {
                 None
             },
-            has_next_in_slice,
+            has_reserved_bottom_gap,
             Some((measured, rows, row_idx)),
         );
     }
@@ -66,7 +71,7 @@ pub(super) fn emit_split_row(
     cursor_y: &mut Pt,
     bufs: &mut TableCommandBuffers<'_>,
     top_border_override: Option<TableBorderLine>,
-    has_next_in_slice: bool,
+    has_reserved_bottom_gap: bool,
 ) {
     emit_one_row(
         mr,
@@ -74,7 +79,7 @@ pub(super) fn emit_split_row(
         cursor_y,
         bufs,
         top_border_override,
-        has_next_in_slice,
+        has_reserved_bottom_gap,
         None,
     );
 }
@@ -85,7 +90,15 @@ fn emit_one_row(
     cursor_y: &mut Pt,
     bufs: &mut TableCommandBuffers<'_>,
     top_border_override: Option<TableBorderLine>,
-    has_next_in_slice: bool,
+    // Whether space was reserved below this row for its bottom border, so the
+    // border is drawn *under* the content rather than inset into it.
+    //
+    // Not a positional fact, which is why the two callers derive it
+    // differently and both are right: `emit_table_rows` repeats
+    // `measure_table_rows`' reservation condition, while a split row's halves
+    // carry their own (`split_row_at` zeroes the first half's gap — a cut edge
+    // has none — and passes the original's to the second).
+    has_reserved_bottom_gap: bool,
     // For vMerge=Restart cells, resolve the full merged span height.
     // `None` disables the lookup (used for split rows and for standalone
     // emission paths that don't carry a merge context).
@@ -161,7 +174,7 @@ fn emit_one_row(
         let continues_below = vmerge_ctx.is_some_and(|(_, rows, row_idx)| {
             row_idx + 1 < rows.len() && is_vmerge_continue(&rows[row_idx + 1], entry.grid_col)
         });
-        let bottom_border_gap = if has_next_in_slice {
+        let bottom_border_gap = if has_reserved_bottom_gap {
             if continues_below {
                 mr.border_gap_below
             } else {
@@ -602,5 +615,62 @@ mod tests {
             .filter(|c| matches!(c, DrawCommand::Rect { color, .. } if *color == RED))
             .count();
         assert_eq!(count, 1, "exactly one restored top edge, on row 0");
+    }
+
+    /// A row that ends a page slice but not the *table* keeps its reserved
+    /// bottom-border gap.
+    ///
+    /// `has_reserved_bottom_gap` is derived from the table's row count, not the
+    /// emitted range's — it has to be, because `measure_table_rows` reserves
+    /// `border_gap_below` on exactly that condition and `cursor_y` advances by
+    /// it. Deriving it per slice instead would inset the border into the last
+    /// row of every page, leaving the reserved gap empty.
+    ///
+    /// Three 14pt rows with 2pt inside borders, split so rows 0-1 land on the
+    /// first slice: row 1 ends that slice, and its border must still sit in the
+    /// gap below it (y = 30..32), not inside its content box.
+    #[test]
+    fn a_row_ending_a_slice_keeps_its_reserved_bottom_gap() {
+        let line = single(2.0, RED);
+        let borders = crate::render::layout::table::TableBorderConfig {
+            top: None,
+            bottom: Some(line),
+            left: None,
+            right: None,
+            inside_h: Some(line),
+            inside_v: None,
+        };
+        let rows: Vec<TableRowInput> = (0..3).map(|_| row(vec![cell(1, None, None)])).collect();
+        let slices = crate::render::layout::table::layout_table_paginated(
+            &rows,
+            &[Pt::new(50.0)],
+            Pt::new(14.0),
+            Some(&borders),
+            None,
+            &crate::render::layout::table::TablePaginationConfig {
+                available_height: Pt::new(34.0),
+                page_height: Pt::new(34.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2, "3 rows at 16pt each over a 34pt page");
+
+        let border_bands: Vec<(f32, f32)> = slices[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, color } if *color == RED => Some((
+                    rect.origin.y.raw(),
+                    rect.origin.y.raw() + rect.size.height.raw(),
+                )),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            border_bands.contains(&(30.0, 32.0)),
+            "row 1 ends the slice at y=30; its bottom border belongs in the \
+             reserved gap 30..32, got {border_bands:?}"
+        );
     }
 }

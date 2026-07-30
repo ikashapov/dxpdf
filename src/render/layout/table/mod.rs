@@ -396,7 +396,12 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                         );
                     }
                     SliceItem::Split { row_idx, mr } | SliceItem::Continuation { row_idx, mr } => {
-                        let has_next = item_idx + 1 < items.len();
+                        // A split half's bottom border sits in a reserved gap
+                        // only when something follows it on *this* slice. The
+                        // last item on a page ends at a cut or page edge, where
+                        // `split_row_at` reserved no gap, so the border is
+                        // inset into the row instead.
+                        let has_reserved_bottom_gap = item_idx + 1 < items.len();
                         emit_split_row(
                             mr,
                             &rows[*row_idx],
@@ -407,7 +412,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                                 border_commands: &mut border_commands,
                             },
                             top_override,
-                            has_next,
+                            has_reserved_bottom_gap,
                         );
                     }
                 }
