@@ -36,6 +36,7 @@ pub(super) fn build_block(
             Some(LayoutBlock::Table {
                 rows: built.rows,
                 col_widths: built.col_widths,
+                cell_spacing: built.cell_spacing,
                 border_config: built.border_config,
                 indent: built.indent,
                 alignment: built.alignment,

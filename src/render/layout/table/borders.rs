@@ -467,6 +467,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&TableBorderConfig {
                 top: Some(TableBorderLine {
@@ -568,6 +569,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&all_single),
             None,

@@ -29,6 +29,10 @@ use split::{find_row_cut, split_row_at, RowCutInput};
 pub(crate) fn measure_leading_table_group_height(
     rows: &[TableRowInput],
     col_widths: &[Pt],
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -43,6 +47,7 @@ pub(crate) fn measure_leading_table_group_height(
     let measured = measure_table_rows(
         &rows[..measured_end],
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -64,6 +69,10 @@ pub(crate) fn measure_leading_table_group_height(
 pub fn layout_table(
     rows: &[TableRowInput],
     col_widths: &[Pt],
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -79,6 +88,7 @@ pub fn layout_table(
     let measured = measure_table_rows(
         rows,
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -109,7 +119,9 @@ pub fn layout_table(
 
     TableLayout {
         commands,
-        size: PtSize::new(measured.table_width, cursor_y),
+        // §17.4.44: each row reserves its own leading gap, so the only one left
+        // to add is the trailing gap at the table's bottom edge.
+        size: PtSize::new(measured.table_width, cursor_y + cell_spacing),
     }
 }
 
@@ -147,6 +159,10 @@ pub(crate) struct TablePaginationHeights<F> {
 pub fn layout_table_paginated(
     rows: &[TableRowInput],
     col_widths: &[Pt],
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -156,6 +172,7 @@ pub fn layout_table_paginated(
     layout_table_paginated_with_page_heights(
         rows,
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -170,6 +187,10 @@ pub fn layout_table_paginated(
 pub(crate) fn layout_table_paginated_with_page_heights(
     rows: &[TableRowInput],
     col_widths: &[Pt],
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -190,6 +211,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
     let measured = measure_table_rows(
         rows,
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -511,7 +533,7 @@ mod tests {
 
     #[test]
     fn empty_table() {
-        let result = layout_table(&[], &[], Pt::new(14.0), None, None, false);
+        let result = layout_table(&[], &[], Pt::ZERO, Pt::new(14.0), None, None, false);
         assert!(result.commands.is_empty());
         assert_eq!(result.size, PtSize::ZERO);
     }
@@ -527,7 +549,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         assert_eq!(result.size.width.raw(), 200.0);
         assert_eq!(result.size.height.raw(), 14.0);
@@ -561,7 +591,15 @@ mod tests {
             },
         ];
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         assert_eq!(result.size.width.raw(), 200.0);
         assert_eq!(result.size.height.raw(), 28.0); // 2 rows * 14pt
@@ -605,7 +643,15 @@ mod tests {
         }];
         // Column B is only 80 wide, so "long " + "text" (120) wraps
         let col_widths = vec![Pt::new(200.0), Pt::new(80.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         assert_eq!(result.size.height.raw(), 28.0, "row height = tallest cell");
     }
@@ -621,7 +667,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         assert_eq!(
             result.size.height.raw(),
@@ -660,7 +714,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         let rect_count = result
             .commands
@@ -696,7 +758,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         // Cell gets full 200pt width, text should still render
         assert_eq!(result.size.width.raw(), 200.0);
@@ -733,7 +803,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(100.0), Pt::new(200.0), Pt::new(10.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         let xs = text_x_positions(&result.commands);
         assert_eq!(xs.len(), 2, "two text fragments expected");
@@ -778,7 +856,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(100.0), Pt::new(200.0), Pt::new(10.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         let xs = text_x_positions(&result.commands);
         assert_eq!(xs, vec![0.0, 10.0], "cells sit at grid columns 0 and 1");
@@ -852,6 +938,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -943,6 +1030,7 @@ mod tests {
         let result = layout_table(
             &[row_a, row_b],
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1014,7 +1102,15 @@ mod tests {
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
-        let result = layout_table(&rows, &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &rows,
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         // Row height = content(14) + top(5) + bottom(5) = 24
         assert_eq!(result.size.height.raw(), 24.0);
@@ -1054,6 +1150,7 @@ mod tests {
         let normal = layout_table(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -1069,6 +1166,7 @@ mod tests {
         let suppressed = layout_table(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -1154,6 +1252,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &[Pt::new(100.0), Pt::new(100.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -1240,7 +1339,15 @@ mod tests {
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
-        let result = layout_table(&[row0, row1], &col_widths, Pt::new(14.0), None, None, false);
+        let result = layout_table(
+            &[row0, row1],
+            &col_widths,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
 
         // Text position for "Total" comes first (row 0, cell 0).
         let total_y = result
@@ -1362,6 +1469,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1417,6 +1525,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1454,6 +1563,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1532,6 +1642,7 @@ mod tests {
         let slices = layout_table_paginated(
             &[row0, row1],
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1576,6 +1687,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1627,6 +1739,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1670,6 +1783,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1709,6 +1823,7 @@ mod tests {
         let slices = layout_table_paginated_with_page_heights(
             &rows,
             &col_widths,
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1754,7 +1869,15 @@ mod tests {
         let build = |vmerge: Option<VerticalMergeState>| {
             let mut row = tall_row(3);
             row.cells[0].vertical_merge = vmerge;
-            layout_table(&[row], &[Pt::new(40.0)], Pt::new(14.0), None, None, false)
+            layout_table(
+                &[row],
+                &[Pt::new(40.0)],
+                Pt::ZERO,
+                Pt::new(14.0),
+                None,
+                None,
+                false,
+            )
         };
 
         let lone_restart = build(Some(VerticalMergeState::Restart));
@@ -1785,6 +1908,7 @@ mod tests {
         let result = layout_table(
             &[restart, cont],
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1815,6 +1939,7 @@ mod tests {
         let slices = layout_table_paginated(
             &[row],
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1843,6 +1968,7 @@ mod tests {
         let slices = layout_table_paginated(
             &[row],
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1875,6 +2001,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1902,6 +2029,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1929,6 +2057,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1960,6 +2089,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1990,6 +2120,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -2020,6 +2151,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,

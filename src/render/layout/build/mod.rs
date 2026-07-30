@@ -276,6 +276,7 @@ pub fn build_header_footer_content(
                 layout_blocks.push(LayoutBlock::Table {
                     rows: built.rows,
                     col_widths: built.col_widths,
+                    cell_spacing: built.cell_spacing,
                     border_config: built.border_config,
                     indent: built.indent,
                     alignment: built.alignment,

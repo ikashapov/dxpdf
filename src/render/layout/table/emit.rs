@@ -103,7 +103,11 @@ fn emit_one_row(
     // emission paths that don't carry a merge context).
     vmerge_ctx: Option<(&MeasuredTable, &[TableRowInput], usize)>,
 ) {
-    let row_height = mr.height;
+    // §17.4.44: the row's box starts one cell-spacing below the cursor; its
+    // content box is what remains. Both are zero-cost when no spacing is set.
+    let leading = mr.leading_gap;
+    let row_top = *cursor_y + leading;
+    let row_height = mr.height - leading;
     for (cell_ci, (entry, cell_input)) in mr.entries.iter().zip(row.cells.iter()).enumerate() {
         // §17.4.85: the merged span, used below for vAlign and here for
         // shading. Hoisted above the shading so both read the same height —
@@ -126,7 +130,7 @@ fn emit_one_row(
         if cell_input.vertical_merge != Some(VerticalMergeState::Continue) {
             if let Some(color) = cell_input.shading {
                 bufs.commands.push(DrawCommand::Rect {
-                    rect: PtRect::from_xywh(entry.cell_x, *cursor_y, entry.cell_w, effective_h),
+                    rect: PtRect::from_xywh(entry.cell_x, row_top, entry.cell_w, effective_h),
                     color,
                 });
             }
@@ -162,7 +166,7 @@ fn emit_one_row(
 
         for cmd in &entry.layout.commands {
             let mut cmd = cmd.clone();
-            cmd.shift(entry.cell_x + dx, *cursor_y + dy_border + dy_valign);
+            cmd.shift(entry.cell_x + dx, row_top + dy_border + dy_valign);
             bufs.content_commands.push(cmd);
         }
 
@@ -188,12 +192,12 @@ fn emit_one_row(
             },
             entry.cell_x,
             entry.cell_w,
-            *cursor_y,
+            row_top,
             row_height + bottom_border_gap,
         );
     }
 
-    *cursor_y += row_height + mr.border_gap_below;
+    *cursor_y += mr.height + mr.border_gap_below;
 }
 
 /// Total vertical space owned by a vMerge=Restart cell at `grid_col`.
@@ -207,7 +211,10 @@ fn merged_span_height(
     start_row: usize,
     grid_col: usize,
 ) -> Pt {
-    let mut total = measured.rows[start_row].height;
+    // The span starts below its own leading gap; every row it swallows
+    // contributes that row's full height, gap included, because a merged cell
+    // covers the spacing between the rows it spans.
+    let mut total = measured.rows[start_row].height - measured.rows[start_row].leading_gap;
     let mut row = start_row + 1;
     while row < rows.len() && is_vmerge_continue(&rows[row], grid_col) {
         total += measured.rows[row - 1].border_gap_below;
@@ -340,6 +347,7 @@ mod tests {
         let table = crate::render::layout::table::layout_table(
             &rows,
             &[Pt::new(50.0), Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -363,6 +371,7 @@ mod tests {
         let table = crate::render::layout::table::layout_table(
             &rows,
             &[Pt::new(50.0), Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -395,6 +404,7 @@ mod tests {
         let table = crate::render::layout::table::layout_table(
             &rows,
             &[Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -421,6 +431,7 @@ mod tests {
         let table = crate::render::layout::table::layout_table(
             &rows,
             &[Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -482,6 +493,7 @@ mod tests {
         let table = crate::render::layout::table::layout_table(
             &rows,
             &[Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&all_edges(single(1.0, RED))),
             None,
@@ -530,6 +542,7 @@ mod tests {
         let measured = crate::render::layout::table::measure::measure_table_rows(
             &rows,
             &[Pt::new(50.0), Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -585,6 +598,7 @@ mod tests {
         let measured = crate::render::layout::table::measure::measure_table_rows(
             &rows,
             &[Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -642,6 +656,7 @@ mod tests {
         let slices = crate::render::layout::table::layout_table_paginated(
             &rows,
             &[Pt::new(50.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,

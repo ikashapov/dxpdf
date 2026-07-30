@@ -23,13 +23,47 @@ use super::{BuildContext, BuildState};
 /// Result of building a table from the model.
 pub(super) struct BuiltTable {
     pub(super) rows: Vec<TableRowInput>,
+    /// Grid slots, already shrunk by `cell_spacing`.
     pub(super) col_widths: Vec<Pt>,
+    /// §17.4.44 `tblCellSpacing` in points; zero when unset.
+    pub(super) cell_spacing: Pt,
     pub(super) border_config: Option<crate::render::layout::table::TableBorderConfig>,
     /// §17.4.51: table indentation from left margin.
     pub(super) indent: Pt,
     /// §17.4.28: table horizontal alignment (left/center/right).
     pub(super) alignment: Option<model::Alignment>,
     pub(super) float_info: Option<super::super::section::TableFloatInfo>,
+}
+
+/// §17.4.44: resolve `tblCellSpacing` to points.
+///
+/// `CT_TblWidth` allows `pct` and `auto`, and the spec says both **are ignored**
+/// for this element — only `dxa` carries a usable value. `nil` and an omitted
+/// element are zero, which is every table in the test corpora.
+fn resolve_cell_spacing(m: Option<model::TableMeasure>) -> Pt {
+    match m {
+        Some(model::TableMeasure::Twips(tw)) => Pt::from(tw).max(Pt::ZERO),
+        // Auto / Pct / Nil / absent.
+        _ => Pt::ZERO,
+    }
+}
+
+/// Carve one `cell_spacing` out of the grid so the slots plus one spacing add
+/// up to the table's own width, scaling the columns proportionally.
+///
+/// Clamped: a spacing at least as large as the table would leave nothing to
+/// scale, so the columns collapse to zero rather than going negative. Word
+/// caps the usable spacing well below that, but the file format does not.
+fn reserve_cell_spacing(col_widths: Vec<Pt>, cell_spacing: Pt) -> Vec<Pt> {
+    if cell_spacing <= Pt::ZERO || col_widths.is_empty() {
+        return col_widths;
+    }
+    let total: Pt = col_widths.iter().copied().sum();
+    if total <= cell_spacing {
+        return vec![Pt::ZERO; col_widths.len()];
+    }
+    let scale = (total - cell_spacing).raw() / total.raw();
+    col_widths.into_iter().map(|w| w * scale).collect()
 }
 
 /// Recursively build a table: resolve styles, conditional formatting, and
@@ -136,6 +170,13 @@ pub(super) fn build_table(
     } else {
         compute_column_widths(&grid_cols, num_cols, target_width)
     };
+    // §17.4.44: cell spacing is carved out of the table's own width rather than
+    // added to it — the spec calls it "the minimum amount of space which shall
+    // be left between all cells", not extra width. Reserving one spacing here
+    // and offsetting each cell by one in `measure_table_rows` yields exactly
+    // `cell_spacing` between adjacent cells *and* at both table edges.
+    let cell_spacing = resolve_cell_spacing(t.properties.cell_spacing);
+    let col_widths = reserve_cell_spacing(col_widths, cell_spacing);
     let style_overrides = raw_table_style
         .map(|s| s.table_style_overrides.as_slice())
         .unwrap_or(&[]);
@@ -304,6 +345,7 @@ pub(super) fn build_table(
     BuiltTable {
         rows,
         col_widths,
+        cell_spacing,
         border_config,
         indent,
         alignment: t.properties.alignment,
@@ -577,6 +619,7 @@ fn build_cell_blocks(
                 blocks.push(LayoutBlock::Table {
                     rows: built.rows,
                     col_widths: built.col_widths,
+                    cell_spacing: built.cell_spacing,
                     border_config: built.border_config,
                     indent: built.indent,
                     alignment: built.alignment,
@@ -683,5 +726,59 @@ mod tests {
         normalize_row_uniform_vertical_insets(&mut cells);
         // No panic, no work done.
         assert!(cells.is_empty());
+    }
+
+    /// §17.4.44: `CT_TblWidth` permits `pct` and `auto`, and the spec says both
+    /// are **ignored** for this element — only `dxa` carries a usable value.
+    /// Honouring a percentage here would scale the gap with the table width,
+    /// which is exactly what the spec rules out.
+    #[test]
+    fn cell_spacing_only_honours_dxa() {
+        use crate::model::dimension::Dimension;
+        assert_eq!(
+            resolve_cell_spacing(Some(model::TableMeasure::Twips(Dimension::new(240)))),
+            Pt::new(12.0),
+            "240 twips = 12pt"
+        );
+        for ignored in [
+            Some(model::TableMeasure::Pct(Dimension::new(2500))),
+            Some(model::TableMeasure::Auto),
+            Some(model::TableMeasure::Nil),
+            None,
+        ] {
+            assert_eq!(resolve_cell_spacing(ignored), Pt::ZERO, "{ignored:?}");
+        }
+    }
+
+    /// The spacing is carved *out of* the table, so the slots shrink by exactly
+    /// one spacing in total and keep their proportions.
+    #[test]
+    fn reserving_spacing_shrinks_the_grid_by_exactly_one_spacing() {
+        let widths = vec![Pt::new(60.0), Pt::new(40.0)];
+        let out = reserve_cell_spacing(widths, Pt::new(10.0));
+        let total: Pt = out.iter().copied().sum();
+        assert_eq!(total, Pt::new(90.0), "one spacing removed in total");
+        // Proportions preserved: 60:40 becomes 54:36.
+        assert_eq!(out[0], Pt::new(54.0));
+        assert_eq!(out[1], Pt::new(36.0));
+    }
+
+    /// Zero spacing must be a byte-for-byte no-op — every table that does not
+    /// set `tblCellSpacing` goes through this path.
+    #[test]
+    fn reserving_zero_spacing_leaves_the_grid_untouched() {
+        let widths = vec![Pt::new(60.0), Pt::new(40.0)];
+        assert_eq!(reserve_cell_spacing(widths.clone(), Pt::ZERO), widths);
+    }
+
+    /// A spacing at least as wide as the table leaves nothing to distribute.
+    /// Word caps the value long before this, but the file format does not, and
+    /// scaling by a negative factor would put cells at negative widths.
+    #[test]
+    fn spacing_wider_than_the_table_collapses_columns_rather_than_going_negative() {
+        let widths = vec![Pt::new(30.0), Pt::new(30.0)];
+        let out = reserve_cell_spacing(widths, Pt::new(60.0));
+        assert_eq!(out, vec![Pt::ZERO, Pt::ZERO]);
+        assert!(out.iter().all(|w| *w >= Pt::ZERO));
     }
 }

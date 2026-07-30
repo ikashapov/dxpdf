@@ -352,6 +352,7 @@ pub fn stack_blocks(
             LayoutBlock::Table {
                 rows,
                 col_widths,
+                cell_spacing,
                 border_config,
                 indent,
                 alignment,
@@ -366,6 +367,7 @@ pub fn stack_blocks(
                 let table = layout_table(
                     rows,
                     col_widths,
+                    *cell_spacing,
                     default_line_height,
                     border_config.as_ref(),
                     measure_text,

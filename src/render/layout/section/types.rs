@@ -203,7 +203,11 @@ pub enum LayoutBlock {
     },
     Table {
         rows: Vec<TableRowInput>,
+        /// Grid slot widths, already shrunk by `cell_spacing` so the slots plus
+        /// one spacing sum to the table's own width.
         col_widths: Vec<Pt>,
+        /// §17.4.44 `tblCellSpacing` resolved to points; zero when unset.
+        cell_spacing: Pt,
         /// §17.4.38: resolved table border configuration.
         border_config: Option<super::super::table::TableBorderConfig>,
         /// §17.4.51: table indentation from left margin.

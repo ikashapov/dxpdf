@@ -24,12 +24,18 @@ use super::types::{
 pub(super) fn measure_table_rows(
     rows: &[TableRowInput],
     col_widths: &[Pt],
+    // §17.4.44 `tblCellSpacing`, already resolved to points. Zero for every
+    // table that does not set it, which is the overwhelming majority.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: crate::render::layout::paragraph::MeasureTextFn<'_>,
     suppress_first_row_top: bool,
 ) -> MeasuredTable {
-    let table_width: Pt = col_widths.iter().copied().sum();
+    // §17.4.44: the slots were shrunk by one `cell_spacing` before they got
+    // here, so adding it back recovers the table's own outer width — the
+    // spacing is carved out of the table, not added to it.
+    let table_width: Pt = col_widths.iter().copied().sum::<Pt>() + cell_spacing;
     let num_rows = rows.len();
     let mut row_heights = Vec::with_capacity(num_rows);
 
@@ -82,9 +88,17 @@ pub(super) fn measure_table_rows(
             grid_indices.push(row_grid);
         }
 
-        // §17.4.43: conflict resolution at vertical shared edges (a cell's
+        // [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ... then all
+        // cell borders and outer table borders display."* With a gap between
+        // them, adjacent cells share no edge, so there is no conflict to
+        // resolve and every cell keeps its own four borders. Collapsing them
+        // here would delete borders that must be drawn, and drawing both sides
+        // of a collapsed edge would double every line.
+        let collapse_borders = cell_spacing <= Pt::ZERO;
+
+        // §17.4.66: conflict resolution at vertical shared edges (a cell's
         // right vs. its right neighbour's left). Drawn once on the left cell.
-        for row_idx in 0..num_rows {
+        for row_idx in 0..if collapse_borders { num_rows } else { 0 } {
             let num_cells = rows[row_idx].cells.len();
             for cell_ci in 0..num_cells.saturating_sub(1) {
                 let right = resolved_borders[row_idx][cell_ci].right;
@@ -112,7 +126,11 @@ pub(super) fn measure_table_rows(
         // columns whose resolved border is uniform; upper is preferred (it
         // keeps the aligned-grid path and page-split top restoration valid).
         let ncols = col_widths.len();
-        for upper in 0..num_rows.saturating_sub(1) {
+        for upper in 0..if collapse_borders {
+            num_rows.saturating_sub(1)
+        } else {
+            0
+        } {
             let lower = upper + 1;
 
             // Per-column resolved border for this inter-row edge.
@@ -232,8 +250,16 @@ pub(super) fn measure_table_rows(
             // would. Mirrors the same clamp in `build/table.rs`.
             let grid_start = grid_idx.min(col_widths.len());
             let grid_end = (grid_start + span).min(col_widths.len());
-            let cell_w: Pt = col_widths[grid_start..grid_end].iter().copied().sum();
-            let cell_x: Pt = col_widths[..grid_start].iter().copied().sum();
+            // §17.4.44: the grid slots were already shrunk so they sum to
+            // `table_width - cell_spacing`; offsetting every cell by one
+            // spacing and taking one off its width then leaves exactly
+            // `cell_spacing` between adjacent cells *and* at both table edges,
+            // without changing the table's own width. A `gridSpan` cell
+            // absorbs the interior gaps it covers, which is what a merged cell
+            // should do.
+            let slots: Pt = col_widths[grid_start..grid_end].iter().copied().sum();
+            let cell_w: Pt = (slots - cell_spacing).max(Pt::ZERO);
+            let cell_x: Pt = col_widths[..grid_start].iter().copied().sum::<Pt>() + cell_spacing;
 
             let b = &resolved_borders[row_idx][cell_ci];
             let extra_left = (border_width(b.left) - cell.margins.left).max(Pt::ZERO);
@@ -292,7 +318,13 @@ pub(super) fn measure_table_rows(
             None => {}
         }
 
-        row_heights.push(max_height);
+        // §17.4.44: the row's box reserves its own leading gap, mirroring the
+        // horizontal inset above — `emit_one_row` places content one spacing
+        // below the cursor, so consecutive rows end up exactly `cell_spacing`
+        // apart. `RowHeightRule` is applied to the *content* height first, so a
+        // `trHeight` still means the height of the row's content, not of the
+        // content plus a gap the author never asked for.
+        row_heights.push(max_height + cell_spacing);
         row_cell_layouts.push(entries);
     }
 
@@ -306,7 +338,10 @@ pub(super) fn measure_table_rows(
         .zip(row_heights.iter())
         .enumerate()
         .map(|(row_idx, ((entries, borders), &height))| {
-            let border_gap_below = if row_idx + 1 < num_rows {
+            // With cell spacing there is no shared edge to reserve room for:
+            // every cell draws its own bottom border inside its own box, and
+            // the gap between rows is the spacing itself.
+            let border_gap_below = if row_idx + 1 < num_rows && cell_spacing <= Pt::ZERO {
                 borders
                     .iter()
                     .map(|b| border_width(b.bottom))
@@ -318,6 +353,7 @@ pub(super) fn measure_table_rows(
                 entries,
                 borders,
                 height,
+                leading_gap: cell_spacing,
                 border_gap_below,
             }
         })
@@ -428,6 +464,7 @@ mod tests {
         let m = measure_table_rows(
             &rows,
             &cols,
+            Pt::ZERO,
             Pt::new(10.0),
             Some(&all_single()),
             None,
@@ -486,6 +523,7 @@ mod tests {
         let m = measure_table_rows(
             &rows,
             &cols,
+            Pt::ZERO,
             Pt::new(10.0),
             Some(&all_single()),
             None,
@@ -533,6 +571,7 @@ mod tests {
         let m = measure_table_rows(
             &rows,
             &cols,
+            Pt::ZERO,
             Pt::new(10.0),
             Some(&all_single()),
             None,
@@ -573,6 +612,7 @@ mod tests {
         let m = measure_table_rows(
             &rows,
             &cols,
+            Pt::ZERO,
             Pt::new(10.0),
             Some(&all_single()),
             None,
@@ -603,6 +643,7 @@ mod tests {
         let m = measure_table_rows(
             &rows,
             &cols,
+            Pt::ZERO,
             Pt::new(10.0),
             Some(&all_single()),
             None,
@@ -611,6 +652,148 @@ mod tests {
         for ci in 0..2 {
             assert_eq!(m.rows[0].borders[ci].bottom.line(), Some(s));
             assert_eq!(m.rows[1].borders[ci].top.line(), None);
+        }
+    }
+
+    /// §17.4.44 geometry. The invariant that matters is a *uniform* gap: exactly
+    /// one `cell_spacing` between adjacent cells **and** at both table edges,
+    /// with the table's own width unchanged.
+    ///
+    /// Slots are pre-shrunk by `reserve_cell_spacing` (build side), so this
+    /// feeds slots summing to `width - spacing` and checks the resulting edges.
+    #[test]
+    fn cell_spacing_leaves_a_uniform_gap_and_keeps_the_table_width() {
+        let spacing = Pt::new(10.0);
+        // Table is 100pt wide; slots therefore sum to 90.
+        let slots = vec![Pt::new(45.0), Pt::new(45.0)];
+        let rows = vec![row(vec![cell(1, None), cell(1, None)])];
+        let m = measure_table_rows(
+            &rows,
+            &slots,
+            spacing,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            m.table_width,
+            Pt::new(100.0),
+            "spacing comes out of the table"
+        );
+
+        let e = &m.rows[0].entries;
+        let left_edge = e[0].cell_x;
+        let gap_between = e[1].cell_x - (e[0].cell_x + e[0].cell_w);
+        let right_edge = m.table_width - (e[1].cell_x + e[1].cell_w);
+        assert_eq!(left_edge, spacing, "gap at the table's left edge");
+        assert_eq!(gap_between, spacing, "gap between adjacent cells");
+        assert_eq!(right_edge, spacing, "gap at the table's right edge");
+    }
+
+    /// A `gridSpan` cell absorbs the interior gaps it covers — it is one cell,
+    /// so the spacing between the columns it spans belongs to it.
+    #[test]
+    fn a_gridspan_cell_absorbs_the_gaps_it_covers() {
+        let spacing = Pt::new(10.0);
+        let slots = vec![Pt::new(30.0); 3]; // 90 + 10 spacing = 100 wide
+        let rows = vec![
+            row(vec![cell(3, None)]),
+            row(vec![cell(1, None), cell(1, None), cell(1, None)]),
+        ];
+        let m = measure_table_rows(
+            &rows,
+            &slots,
+            spacing,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+
+        let wide = &m.rows[0].entries[0];
+        let narrow = &m.rows[1].entries;
+        assert_eq!(wide.cell_x, spacing);
+        assert_eq!(wide.cell_w, Pt::new(80.0), "spans 90 of slot minus one gap");
+        // The wide cell covers both interior gaps plus the two narrow cells
+        // between them, so its right edge matches the last narrow cell's.
+        assert_eq!(
+            wide.cell_x + wide.cell_w,
+            narrow[2].cell_x + narrow[2].cell_w
+        );
+    }
+
+    /// Vertically the rule is the same: one spacing between row boxes, and one
+    /// above the first row. The row's own height carries its leading gap.
+    #[test]
+    fn cell_spacing_separates_rows_vertically() {
+        let spacing = Pt::new(6.0);
+        let slots = vec![Pt::new(94.0)];
+        let rows = vec![row(vec![cell(1, None)]), row(vec![cell(1, None)])];
+        let m = measure_table_rows(
+            &rows,
+            &slots,
+            spacing,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+
+        for r in &m.rows {
+            assert_eq!(r.leading_gap, spacing);
+            assert_eq!(
+                r.border_gap_below,
+                Pt::ZERO,
+                "no shared edge to reserve for once cells are separated"
+            );
+        }
+        // These cells are empty, so the whole of each row's height is the
+        // reserved gap — added exactly once per row, not once per cell.
+        for r in &m.rows {
+            assert_eq!(r.height, spacing);
+        }
+    }
+
+    /// [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ... then all cell
+    /// borders and outer table borders display."* Separated cells share no edge,
+    /// so conflict resolution is skipped and **both** sides keep their border —
+    /// where collapsing would have kept one and cleared the other.
+    #[test]
+    fn nonzero_cell_spacing_disables_border_collapsing() {
+        let slots = vec![Pt::new(45.0), Pt::new(45.0)];
+        let rows = vec![
+            row(vec![cell(1, None), cell(1, None)]),
+            row(vec![cell(1, None), cell(1, None)]),
+        ];
+        let measure = |spacing: Pt| {
+            measure_table_rows(
+                &rows,
+                &slots,
+                spacing,
+                Pt::new(10.0),
+                Some(&all_single()),
+                None,
+                false,
+            )
+        };
+
+        // Collapsed (no spacing): the right/left pair resolves to one border on
+        // the left cell, and the shared horizontal edge is owned by one row.
+        let collapsed = measure(Pt::ZERO);
+        assert!(collapsed.rows[0].borders[1].left.line().is_none());
+        assert!(collapsed.rows[1].borders[0].top.line().is_none());
+
+        // Spaced: every cell keeps all four of its own borders.
+        let spaced = measure(Pt::new(8.0));
+        for r in &spaced.rows {
+            for b in &r.borders {
+                assert!(b.left.line().is_some(), "left kept");
+                assert!(b.right.line().is_some(), "right kept");
+                assert!(b.top.line().is_some(), "top kept");
+                assert!(b.bottom.line().is_some(), "bottom kept");
+            }
         }
     }
 }

@@ -1334,6 +1334,7 @@ pub(crate) fn layout_section_with_clearance(
                             Some(LayoutBlock::Table {
                                 rows,
                                 col_widths,
+                                cell_spacing,
                                 border_config,
                                 ..
                             }) if !rows.is_empty() => {
@@ -1344,6 +1345,7 @@ pub(crate) fn layout_section_with_clearance(
                                 let leading_group_height = measure_leading_table_group_height(
                                     rows,
                                     col_widths,
+                                    *cell_spacing,
                                     ctx.default_line_height,
                                     border_config.as_ref(),
                                     ctx.measure_text,
@@ -1808,6 +1810,7 @@ pub(crate) fn layout_section_with_clearance(
             LayoutBlock::Table {
                 rows,
                 col_widths,
+                cell_spacing,
                 border_config,
                 indent,
                 alignment,
@@ -1826,6 +1829,7 @@ pub(crate) fn layout_section_with_clearance(
                     let table = layout_table(
                         rows,
                         col_widths,
+                        *cell_spacing,
                         ctx.default_line_height,
                         border_config.as_ref(),
                         ctx.measure_text,
@@ -1929,6 +1933,7 @@ pub(crate) fn layout_section_with_clearance(
                     let slices = layout_table_paginated_with_page_heights(
                         rows,
                         col_widths,
+                        *cell_spacing,
                         ctx.default_line_height,
                         border_config.as_ref(),
                         ctx.measure_text,
@@ -2021,6 +2026,7 @@ pub(crate) fn layout_section_with_clearance(
                 let slices = layout_table_paginated_with_page_heights(
                     rows,
                     col_widths,
+                    *cell_spacing,
                     ctx.default_line_height,
                     border_config.as_ref(),
                     ctx.measure_text,

@@ -149,7 +149,12 @@ pub struct TableLayout {
 pub(super) struct MeasuredRow {
     pub(super) entries: Vec<CellLayoutEntry>,
     pub(super) borders: Vec<super::borders::CellBorders>,
+    /// Total vertical space the row owns, **including** `leading_gap`.
     pub(super) height: Pt,
+    /// §17.4.44: cell spacing reserved above this row's content, so the gap to
+    /// the row above is exactly one `tblCellSpacing`. Zero without spacing,
+    /// which is every table that does not set it.
+    pub(super) leading_gap: Pt,
     /// §17.4.38: maximum bottom border width for gap between this row and the next.
     pub(super) border_gap_below: Pt,
 }

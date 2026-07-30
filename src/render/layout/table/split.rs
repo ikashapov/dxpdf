@@ -320,16 +320,22 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
         .collect();
 
     SplitRow {
+        // §17.4.44: both halves are row boxes placed against a cursor, so each
+        // keeps the original leading gap — the continuation sits one spacing
+        // below the top of the table area on its page, exactly as the first
+        // half sits one spacing below the row above it.
         first: MeasuredRow {
             entries: first_entries,
             borders: first_borders,
             height: first_h,
+            leading_gap: mr.leading_gap,
             border_gap_below: Pt::ZERO,
         },
         second: MeasuredRow {
             entries: second_entries,
             borders: second_borders,
             height: second_h,
+            leading_gap: mr.leading_gap,
             border_gap_below: mr.border_gap_below,
         },
     }
@@ -473,6 +479,7 @@ mod tests {
         super::super::measure::measure_table_rows(
             rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -613,6 +620,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,

@@ -367,6 +367,7 @@ mod tests {
                     entries: Vec::new(),
                     borders: Vec::new(),
                     height: Pt::new(h),
+                    leading_gap: Pt::ZERO,
                     border_gap_below: Pt::new(gap),
                 })
                 .collect(),
@@ -465,6 +466,7 @@ mod tests {
             blocks: vec![LayoutBlock::Table {
                 rows: Vec::new(),
                 col_widths: Vec::new(),
+                cell_spacing: Pt::ZERO,
                 border_config: None,
                 indent: Pt::ZERO,
                 alignment: None,

@@ -200,6 +200,7 @@ mod tests {
                 })
                 .collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -1762,6 +1763,7 @@ mod tests {
                 border_overrides: None,
             }],
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -1901,6 +1903,7 @@ mod tests {
         LayoutBlock::Table {
             rows: (0..n).map(|i| row_with_label(&format!("r{i}"))).collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2267,6 +2270,7 @@ mod tests {
                 border_overrides: None,
             }],
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2399,6 +2403,7 @@ mod tests {
                 },
             ],
             col_widths: vec![Pt::new(50.0), Pt::new(50.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2461,6 +2466,7 @@ mod tests {
                 .map(|i| row_with_label(&format!("row{i}")))
                 .collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2794,6 +2800,7 @@ mod tests {
         LayoutBlock::Table {
             rows: (0..n).map(|i| row_with_label(&format!("r{i}"))).collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
