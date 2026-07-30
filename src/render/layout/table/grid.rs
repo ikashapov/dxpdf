@@ -103,8 +103,18 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
         .any(|b| matches!(b, LayoutBlock::Table { .. }))
 }
 
-/// §17.4.85: expand the last row of each vertical merge group so the
-/// Restart cell's content fits within the combined spanned row heights.
+/// §17.4.85: grow the rows of each vertical merge group so the `Restart`
+/// cell's content fits within their combined height. The shortfall is spread
+/// **evenly** over the spanned rows.
+///
+/// Even distribution is a choice, not a spec rule, and ECMA-376 cannot settle
+/// it — §17.4.85 defines which cells merge and says nothing about height, and
+/// §17.4.81 `trHeight`/`auto` defers to "the height required by its contents"
+/// without defining "contents" for a cell that spans rows. See
+/// `docs/table-layout.md` for the full analysis and the experiment that would
+/// settle it. Pinned by
+/// `expand_spreads_overflow_across_the_merge_span`, so it cannot change
+/// silently. Tracked as E5a#6.
 pub(super) fn expand_rows_for_vmerge(
     rows: &[TableRowInput],
     row_cell_layouts: &[Vec<CellLayoutEntry>],
