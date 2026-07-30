@@ -107,6 +107,9 @@ pub fn stack_blocks(
 
                 // Register floating images.
                 let content_top = cursor_y + effective_style.space_before;
+                // Where the paragraph would start with no `TopAndBottom` band,
+                // so the band's effect on the cursor can be told apart from it.
+                let pre_band_cursor = cursor_y;
                 // §20.4.2.18: `wrapTopAndBottom` floats occupy a band of their
                 // own above the paragraph and **stack** — each sits below the
                 // one before it, and the paragraph starts below the whole band.
@@ -220,6 +223,21 @@ pub fn stack_blocks(
                             wrap_text: fs.wrap_mode.wrap_text().into(),
                         });
                     }
+                }
+
+                // §20.4.2.18: the band was placed from `content_top`, which
+                // already includes `space_before`, and the cursor now sits at
+                // the band's bottom. `place_paragraph` applies `space_before`
+                // again inside the paragraph box, so without this the text is
+                // pushed a second `space_before` below the band it is supposed
+                // to sit directly beneath — contradicting the band comment
+                // above ("the paragraph starts below the whole band").
+                //
+                // Only when the band actually moved the cursor: a float with a
+                // negative `wp:posOffset` that resolves above the paragraph
+                // leaves the cursor alone and needs no correction.
+                if cursor_y > pre_band_cursor {
+                    cursor_y -= effective_style.space_before;
                 }
 
                 float::prune_floats(&mut page_floats, cursor_y);
@@ -499,6 +517,17 @@ mod tests {
             .collect()
     }
 
+    fn text_ys(result: &StackResult) -> Vec<f32> {
+        result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.y.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
     // ── §20.4.2.18 wrapTopAndBottom ──────────────────────────────────────
 
     /// Regression: the float anchor was computed once before the loop, so every
@@ -751,5 +780,96 @@ mod tests {
                 "{wrap:?} must still narrow the line"
             );
         }
+    }
+
+    /// §20.4.2.18: the paragraph sits **directly** below the band.
+    ///
+    /// The band starts at `content_top` (`cursor_y + space_before`), so the
+    /// spacing is already spent by the time the float is placed;
+    /// `place_paragraph` then applies `space_before` again inside the paragraph
+    /// box. Text landed a second `space_before` below the band — 60.0 for a
+    /// 10pt space and a 30pt float, where the band ends at 40 and the baseline
+    /// belongs at 50.
+    #[test]
+    fn space_before_is_not_applied_twice_around_a_top_and_bottom_band() {
+        const SPACE: f32 = 10.0;
+        const FLOAT_H: f32 = 30.0;
+        const ASCENT: f32 = 10.0;
+
+        let block = LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style: styled(SPACE, 0.0, None),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![top_bottom(FLOAT_H)],
+            floating_shapes: vec![],
+        };
+        let result = stack(&[block]);
+
+        assert_eq!(
+            image_ys(&result),
+            vec![SPACE],
+            "the band still starts after space_before"
+        );
+        assert_eq!(
+            text_ys(&result),
+            vec![SPACE + FLOAT_H + ASCENT],
+            "the first line sits directly below the band, not a second space below it"
+        );
+    }
+
+    /// The control: with no band, `space_before` is applied exactly once, so
+    /// the fix must not have removed it outright.
+    #[test]
+    fn space_before_still_applies_without_a_band() {
+        const SPACE: f32 = 10.0;
+        const ASCENT: f32 = 10.0;
+        let result = stack(&[text_para(styled(SPACE, 0.0, None))]);
+        assert_eq!(text_ys(&result), vec![SPACE + ASCENT]);
+    }
+
+    /// A non-`TopAndBottom` float leaves the cursor alone, so it must not
+    /// trigger the correction either.
+    #[test]
+    fn a_square_wrap_float_does_not_change_paragraph_spacing() {
+        const SPACE: f32 = 10.0;
+        const ASCENT: f32 = 10.0;
+        let block = LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style: styled(SPACE, 0.0, None),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![image(
+                30.0,
+                WrapMode::Square(WrapText::BothSides),
+                FloatingImageY::RelativeToParagraph(Pt::ZERO),
+            )],
+            floating_shapes: vec![],
+        };
+        let result = stack(&[block]);
+        assert_eq!(text_ys(&result), vec![SPACE + ASCENT]);
+    }
+
+    /// Two stacked floats consume the space once between them, not once per
+    /// float — the correction is applied after the whole band, not per float.
+    #[test]
+    fn stacked_band_consumes_space_before_only_once() {
+        const SPACE: f32 = 10.0;
+        const ASCENT: f32 = 10.0;
+        let block = LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style: styled(SPACE, 0.0, None),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![top_bottom(30.0), top_bottom(40.0)],
+            floating_shapes: vec![],
+        };
+        let result = stack(&[block]);
+        assert_eq!(image_ys(&result), vec![SPACE, SPACE + 30.0]);
+        assert_eq!(
+            text_ys(&result),
+            vec![SPACE + 70.0 + ASCENT],
+            "text sits below the 70pt band, with space_before counted once"
+        );
     }
 }
