@@ -614,4 +614,300 @@ mod tests {
         );
         assert_eq!(slices.len(), 20, "40 lines at 2 per page");
     }
+
+    // ── Cut correctness (E5b#4) ──────────────────────────────────────────
+    //
+    // The tests above pin *termination*. These pin what the cut actually
+    // produces: which lines land on each side, where the partition boundary
+    // falls, that both halves keep their margins, and that a continuation
+    // inherits a visible top edge.
+
+    /// Text of every `Text` command, in order.
+    fn texts(cmds: &[DrawCommand]) -> Vec<String> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Baseline y of every `Text` command, in order.
+    fn baselines(cmds: &[DrawCommand]) -> Vec<f32> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.y.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A 6-line cell cut with room for 4 lines splits 4 / 2, and each line
+    /// appears on exactly one side — no duplication, no loss.
+    ///
+    /// The cut model and the draw commands are partitioned by *separate*
+    /// thresholds (`line_cut_y` in content coordinates, `content_cut_y` in
+    /// cell-box coordinates, differing by the top margin), so the two can
+    /// disagree. Asserting the actual line texts is what catches that.
+    #[test]
+    fn cut_partitions_lines_without_duplicating_or_dropping_any() {
+        let rows = vec![row_n_lines(6, 0.0)];
+        let measured = measure(&rows);
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available: Pt::new(4.0 * 14.0),
+        })
+        .expect("6 lines with room for 4 must be splittable");
+        let parts = split_row_at(&measured.rows[0], &cut);
+
+        let first = texts(&parts.first.entries[0].layout.commands);
+        let second = texts(&parts.second.entries[0].layout.commands);
+
+        assert_eq!(first.len() + second.len(), 6, "no line lost or duplicated");
+        assert_eq!(first, vec!["L0 ", "L1 ", "L2 ", "L3 "]);
+        assert_eq!(second, vec!["L4 ", "L5 "]);
+    }
+
+    /// §17.4.40: the continuation's first line sits at the cell's natural top
+    /// margin, not at the cut offset — the tail is shifted up by exactly the
+    /// content the first half retained, so the cut edge keeps its padding.
+    #[test]
+    fn continuation_first_line_is_rebased_to_the_cell_top() {
+        let rows = vec![row_n_lines(6, 0.0)];
+        let measured = measure(&rows);
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available: Pt::new(4.0 * 14.0),
+        })
+        .expect("splittable");
+        let parts = split_row_at(&measured.rows[0], &cut);
+
+        let before = baselines(&measured.rows[0].entries[0].layout.commands);
+        let first = baselines(&parts.first.entries[0].layout.commands);
+        let second = baselines(&parts.second.entries[0].layout.commands);
+
+        assert_eq!(
+            first,
+            before[..4],
+            "first half keeps its original baselines"
+        );
+        // The tail is shifted up by the retained content height (4 lines).
+        let shift = before[4] - second[0];
+        assert!(
+            (shift - 4.0 * 14.0).abs() < 0.01,
+            "tail shifted by the retained content height, got {shift}"
+        );
+        assert_eq!(
+            second[0], before[0],
+            "the continuation's first line lands where the original first line did"
+        );
+    }
+
+    /// The continuation's line *model* is rebased by the same shift as its
+    /// commands, so a further split re-evaluates §17.3.1.44 widow control
+    /// against the lines that actually remain rather than stale offsets.
+    #[test]
+    fn continuation_line_model_is_rebased_with_the_commands() {
+        let rows = vec![row_n_lines(6, 0.0)];
+        let measured = measure(&rows);
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available: Pt::new(4.0 * 14.0),
+        })
+        .expect("splittable");
+        let parts = split_row_at(&measured.rows[0], &cut);
+
+        let second_lines = &parts.second.entries[0].layout.lines;
+        assert_eq!(second_lines.len(), 2, "two lines continue");
+        assert_eq!(
+            second_lines[0].top_y,
+            Pt::ZERO,
+            "the continuation's first line starts at content offset 0"
+        );
+        assert_eq!(parts.first.entries[0].layout.lines.len(), 4);
+    }
+
+    /// `partition_lines` uses a strict `<`, so a line whose top sits exactly on
+    /// the threshold belongs to the **continuation**. That boundary is what
+    /// makes the retained height equal `cont_top` rather than overshooting by a
+    /// line; getting it backwards would put `cont_top`'s own line on both the
+    /// first half and the continuation's height budget.
+    #[test]
+    fn a_line_exactly_at_the_threshold_goes_to_the_continuation() {
+        let line_at = |top: f32, para: usize| CellLine {
+            top_y: Pt::new(top),
+            para,
+            interior_atomic: false,
+            widow_control: false,
+            keep_next: false,
+        };
+        let lines = vec![line_at(0.0, 0), line_at(14.0, 0), line_at(28.0, 0)];
+        let (first, second) = partition_lines(&lines, Pt::new(14.0), Pt::new(14.0));
+
+        assert_eq!(first.len(), 1, "only the line strictly above the cut stays");
+        assert_eq!(second.len(), 2);
+        assert_eq!(
+            second[0].top_y,
+            Pt::ZERO,
+            "the threshold line becomes the continuation's first, rebased to 0"
+        );
+        assert_eq!(second[1].top_y, Pt::new(14.0));
+    }
+
+    /// §17.4.40: both halves preserve the cell's vertical margins, which is the
+    /// stated reason the cut keeps `margin_top + margin_bottom` in its height
+    /// budget — text must not collide with the cut-edge border.
+    #[test]
+    fn both_halves_account_for_the_cell_margins() {
+        const MARGIN: f32 = 5.0;
+        let rows = vec![row_n_lines(6, MARGIN)];
+        let measured = measure(&rows);
+        // Room for 2 lines of content plus both margins.
+        let available = Pt::new(2.0 * 14.0 + 2.0 * MARGIN);
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available,
+        })
+        .expect("splittable with margins");
+        let parts = split_row_at(&measured.rows[0], &cut);
+
+        assert!(
+            parts.first.height <= available,
+            "first half ({:.1}) must fit the space it was given ({:.1})",
+            parts.first.height.raw(),
+            available.raw()
+        );
+        // The retained content is 2 lines; the half is that plus both margins.
+        assert!(
+            (parts.first.height.raw() - (2.0 * 14.0 + 2.0 * MARGIN)).abs() < 0.01,
+            "first-half height is retained content + both margins, got {:.1}",
+            parts.first.height.raw()
+        );
+        assert!(
+            parts.second.height > Pt::ZERO,
+            "the continuation keeps real height"
+        );
+    }
+
+    /// A continuation inherits a visible top edge: `top: b.top.or(b.bottom)`.
+    /// Without the fallback a row whose top border was resolved away (the
+    /// common mid-table case, where the edge is drawn as the row above's
+    /// bottom) would continue onto the next page with no top line at all.
+    #[test]
+    fn continuation_inherits_a_top_border_from_the_original_bottom() {
+        let bottom = super::super::types::TableBorderLine {
+            width: Pt::new(2.0),
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            style: super::super::types::TableBorderStyle::Single,
+        };
+        let mut mr = measure(&[row_n_lines(6, 0.0)]).rows.pop().expect("one row");
+        mr.borders[0] = CellBorders {
+            top: None, // resolved away by conflict resolution
+            bottom: Some(bottom),
+            left: None,
+            right: None,
+        };
+        let rows = [row_n_lines(6, 0.0)];
+        let cut = find_row_cut(&RowCutInput {
+            mr: &mr,
+            row: &rows[0],
+            available: Pt::new(4.0 * 14.0),
+        })
+        .expect("splittable");
+        let parts = split_row_at(&mr, &cut);
+
+        assert!(
+            parts.first.borders[0].top.is_none(),
+            "the first half keeps the original borders verbatim"
+        );
+        assert_eq!(
+            parts.second.borders[0].top.map(|b| b.width),
+            Some(Pt::new(2.0)),
+            "the continuation falls back to the original bottom for its top edge"
+        );
+    }
+
+    /// An explicit top border is *not* replaced by the bottom — `or` must not
+    /// become an unconditional overwrite.
+    #[test]
+    fn continuation_keeps_an_explicit_top_border() {
+        let thin = super::super::types::TableBorderLine {
+            width: Pt::new(1.0),
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            style: super::super::types::TableBorderStyle::Single,
+        };
+        let thick = super::super::types::TableBorderLine {
+            width: Pt::new(4.0),
+            ..thin
+        };
+        let mut mr = measure(&[row_n_lines(6, 0.0)]).rows.pop().expect("one row");
+        mr.borders[0] = CellBorders {
+            top: Some(thin),
+            bottom: Some(thick),
+            left: None,
+            right: None,
+        };
+        let rows = [row_n_lines(6, 0.0)];
+        let cut = find_row_cut(&RowCutInput {
+            mr: &mr,
+            row: &rows[0],
+            available: Pt::new(4.0 * 14.0),
+        })
+        .expect("splittable");
+        let parts = split_row_at(&mr, &cut);
+
+        assert_eq!(
+            parts.second.borders[0].top.map(|b| b.width),
+            Some(Pt::new(1.0)),
+            "an existing top border wins over the bottom fallback"
+        );
+    }
+
+    /// The command partition boundary, exercised directly.
+    ///
+    /// It cannot be reached through real layout: `command_primary_y` uses a
+    /// text command's *baseline* (box top + ascent) while `content_cut_y` is a
+    /// box top, so no text command ever lands exactly on the threshold —
+    /// flipping `<` to `<=` breaks no end-to-end test. Rect-shaped commands
+    /// (cell shading, images, paragraph borders) *are* keyed on their top edge,
+    /// so the boundary is reachable in principle; this pins it with synthetic
+    /// commands rather than relying on metrics that happen to avoid it.
+    ///
+    /// A command exactly at the threshold belongs to the continuation, matching
+    /// `partition_lines` — the two must agree or the halves disagree about what
+    /// they contain.
+    #[test]
+    fn a_command_exactly_at_the_threshold_goes_to_the_continuation() {
+        use crate::render::geometry::PtRect;
+        let rect_at = |y: f32| DrawCommand::Rect {
+            rect: PtRect::from_xywh(Pt::ZERO, Pt::new(y), Pt::new(10.0), Pt::new(2.0)),
+            color: crate::render::resolve::color::RgbColor::BLACK,
+        };
+        let cmds = vec![rect_at(0.0), rect_at(14.0), rect_at(28.0)];
+
+        let (first, second) = partition_commands(&cmds, Pt::new(14.0), Pt::new(14.0));
+
+        let ys = |v: &[DrawCommand]| -> Vec<f32> {
+            v.iter()
+                .map(|c| match c {
+                    DrawCommand::Rect { rect, .. } => rect.origin.y.raw(),
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            ys(&first),
+            vec![0.0],
+            "only the command strictly above the cut stays"
+        );
+        assert_eq!(
+            ys(&second),
+            vec![0.0, 14.0],
+            "the threshold command continues, rebased by the shift"
+        );
+    }
 }
