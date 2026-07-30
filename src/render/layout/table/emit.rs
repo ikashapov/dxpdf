@@ -430,4 +430,177 @@ mod tests {
             "the span ends at the Continue row; row 2 is not part of it"
         );
     }
+
+    // ── Buffer layering and the nil/override interaction (E5b#3) ─────────
+
+    const RED: RgbColor = RgbColor { r: 255, g: 0, b: 0 };
+
+    fn single(width: f32, color: RgbColor) -> TableBorderLine {
+        TableBorderLine {
+            width: Pt::new(width),
+            color,
+            style: crate::render::layout::table::types::TableBorderStyle::Single,
+        }
+    }
+
+    fn all_edges(line: TableBorderLine) -> crate::render::layout::table::TableBorderConfig {
+        crate::render::layout::table::TableBorderConfig {
+            top: Some(line),
+            bottom: Some(line),
+            left: Some(line),
+            right: Some(line),
+            inside_h: Some(line),
+            inside_v: Some(line),
+        }
+    }
+
+    /// Index of the first command matching `pred`.
+    fn index_of(cmds: &[DrawCommand], pred: impl Fn(&DrawCommand) -> bool) -> usize {
+        cmds.iter()
+            .position(pred)
+            .expect("expected command not emitted")
+    }
+
+    /// The three buffers concatenate as shading → content → borders, and that
+    /// order is load-bearing: a cell's background is painted before its
+    /// neighbours' borders, so a background can never cover a shared edge, and
+    /// text is never hidden under a background.
+    ///
+    /// Asserted on the *final* command list, which is what the painter walks —
+    /// the buffers themselves are an implementation detail.
+    #[test]
+    fn commands_layer_shading_then_content_then_borders() {
+        let rows = vec![row(vec![cell(1, None, Some(GREY))])];
+        let table = crate::render::layout::table::layout_table(
+            &rows,
+            &[Pt::new(50.0)],
+            Pt::new(14.0),
+            Some(&all_edges(single(1.0, RED))),
+            None,
+            false,
+        );
+
+        let shading = index_of(
+            &table.commands,
+            |c| matches!(c, DrawCommand::Rect { color, .. } if *color == GREY),
+        );
+        let text = index_of(&table.commands, |c| matches!(c, DrawCommand::Text { .. }));
+        let border = index_of(
+            &table.commands,
+            |c| matches!(c, DrawCommand::Rect { color, .. } if *color == RED),
+        );
+
+        assert!(
+            shading < text && text < border,
+            "expected shading({shading}) < content({text}) < borders({border})"
+        );
+    }
+
+    /// §17.4.38: a continuation slice restores a top border that *resolution*
+    /// removed — but never one the author removed with `<w:top w:val="nil"/>`.
+    ///
+    /// Both cells resolve to no top border, so both are candidates for the
+    /// override; only the one without an explicit nil may take it. Driving
+    /// `emit_table_rows` directly is what makes the two cases comparable in a
+    /// single row.
+    #[test]
+    fn top_border_override_skips_a_cell_that_explicitly_suppressed_its_top() {
+        use crate::render::layout::table::types::CellBorderConfig;
+
+        let nil_top = CellBorderConfig {
+            top: Some(CellBorderOverride::Nil),
+            bottom: None,
+            left: None,
+            right: None,
+        };
+        let mut suppressed = cell(1, None, None);
+        suppressed.cell_borders = Some(nil_top);
+
+        // Cell 0 says "no top border, deliberately"; cell 1 says nothing.
+        let rows = vec![row(vec![suppressed, cell(1, None, None)])];
+        // No table borders at all, so both cells resolve `top: None`.
+        let measured = crate::render::layout::table::measure::measure_table_rows(
+            &rows,
+            &[Pt::new(50.0), Pt::new(50.0)],
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+        assert!(
+            measured.rows[0].borders.iter().all(|b| b.top.is_none()),
+            "both cells must resolve to no top border for this test to mean anything"
+        );
+
+        let mut commands = Vec::new();
+        let mut content = Vec::new();
+        let mut borders = Vec::new();
+        let mut cursor_y = Pt::ZERO;
+        emit_table_rows(
+            &measured,
+            &rows,
+            0..1,
+            &mut cursor_y,
+            &mut TableCommandBuffers {
+                commands: &mut commands,
+                content_commands: &mut content,
+                border_commands: &mut borders,
+            },
+            Some(single(3.0, RED)),
+        );
+
+        let restored_xs: Vec<f32> = borders
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, color } if *color == RED => Some(rect.origin.x.raw()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            restored_xs,
+            vec![50.0],
+            "only cell 1 (x=50) takes the override; cell 0 asked for no top border"
+        );
+    }
+
+    /// The override applies only to the *first* row of the emitted range — a
+    /// continuation slice gets one restored top edge, not one per row.
+    #[test]
+    fn top_border_override_applies_only_to_the_first_row_of_the_range() {
+        let rows = vec![
+            row(vec![cell(1, None, None)]),
+            row(vec![cell(1, None, None)]),
+        ];
+        let measured = crate::render::layout::table::measure::measure_table_rows(
+            &rows,
+            &[Pt::new(50.0)],
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+
+        let mut commands = Vec::new();
+        let mut content = Vec::new();
+        let mut borders = Vec::new();
+        let mut cursor_y = Pt::ZERO;
+        emit_table_rows(
+            &measured,
+            &rows,
+            0..2,
+            &mut cursor_y,
+            &mut TableCommandBuffers {
+                commands: &mut commands,
+                content_commands: &mut content,
+                border_commands: &mut borders,
+            },
+            Some(single(3.0, RED)),
+        );
+
+        let count = borders
+            .iter()
+            .filter(|c| matches!(c, DrawCommand::Rect { color, .. } if *color == RED))
+            .count();
+        assert_eq!(count, 1, "exactly one restored top edge, on row 0");
+    }
 }
