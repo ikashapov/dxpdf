@@ -955,6 +955,7 @@ pub(super) fn build_shape_text_commands(
         // rather than once per render — bounded over-reporting in a rare case,
         // preferred over making `state` mutable through ten signatures.
         warned_border_styles: std::collections::HashSet::new(),
+        warned_row_cell_spacing: false,
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
@@ -1103,6 +1104,7 @@ mod tests {
             list_counters: Default::default(),
             field_ctx: Default::default(),
             warned_border_styles: Default::default(),
+            warned_row_cell_spacing: false,
             shape_default_text_color: None,
             shape_default_font_family: None,
         }

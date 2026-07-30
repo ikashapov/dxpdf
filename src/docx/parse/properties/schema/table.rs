@@ -197,12 +197,20 @@ pub(crate) struct TblpPrXml {
 pub(crate) struct TblPrExXml {
     #[serde(rename = "tblBorders", default)]
     tbl_borders: Option<TableBordersXml>,
+    /// §17.4.41: per-row override of the table's `tblCellSpacing`.
+    #[serde(
+        rename = "tblCellSpacing",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+    )]
+    tbl_cell_spacing: Option<TableMeasureXml>,
 }
 
 impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
     fn from(x: TblPrExXml) -> Self {
         Self {
             borders: x.tbl_borders.map(Into::into),
+            cell_spacing: x.tbl_cell_spacing.map(Into::into),
         }
     }
 }
@@ -316,6 +324,13 @@ pub(crate) struct TrPrXml {
         deserialize_with = "deserialize_optional_nonnegative_table_measure"
     )]
     w_after: Option<TableMeasureXml>,
+    /// §17.4.42: row-level override of the table's `tblCellSpacing`.
+    #[serde(
+        rename = "tblCellSpacing",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+    )]
+    tbl_cell_spacing: Option<TableMeasureXml>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -334,10 +349,16 @@ impl From<TrHeightXml> for TableRowHeight {
     fn from(x: TrHeightXml) -> Self {
         Self {
             value: x.val.unwrap_or_default(),
+            // §17.4.81 says an omitted `hRule` means `auto`; [MS-OI29500]
+            // §17.4.80(a) records that **Word assumes `atLeast`**, and Word is
+            // what produced these files. Defaulting to `Auto` here would be
+            // indistinguishable from an explicit `hRule="auto"`, where the
+            // standard says the `val` is ignored — so the two must not collapse
+            // to the same variant.
             rule: x
                 .rule
                 .map(Into::into)
-                .unwrap_or(crate::docx::model::HeightRule::Auto),
+                .unwrap_or(crate::docx::model::HeightRule::AtLeast),
         }
     }
 }
@@ -354,6 +375,7 @@ impl From<TrPrXml> for TableRowProperties {
             w_before: x.w_before.map(Into::into),
             grid_after: x.grid_after.map(|v| v.val).unwrap_or(0),
             w_after: x.w_after.map(Into::into),
+            cell_spacing: x.tbl_cell_spacing.map(Into::into),
         }
     }
 }
@@ -716,5 +738,57 @@ mod tests {
         let tc = parse_tc_pr(r#"<tcPr><noWrap/><cnfStyle val="100000000000"/></tcPr>"#);
         assert_eq!(tc.no_wrap, Some(true));
         assert_eq!(tc.cnf_style, Some(CnfStyle::FIRST_ROW));
+    }
+
+    /// §17.4.81 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
+    /// `hRule` means `auto`; Word assumes `atLeast`, and Word wrote these files.
+    ///
+    /// The distinction is load-bearing rather than cosmetic: with `hRule="auto"`
+    /// the standard says `val` is **ignored**, so collapsing "omitted" into
+    /// `Auto` would make every Word row with a `trHeight` lose its minimum
+    /// height — or, as before this change, force an explicit `auto` to be
+    /// treated as a minimum it should not have.
+    #[test]
+    fn omitted_hrule_is_at_least_but_explicit_auto_is_auto() {
+        use crate::docx::model::HeightRule;
+        let parse = |xml: &str| -> crate::docx::model::TableRowHeight {
+            quick_xml::de::from_str::<TrHeightXml>(xml).unwrap().into()
+        };
+        assert_eq!(parse(r#"<trHeight val="440"/>"#).rule, HeightRule::AtLeast);
+        assert_eq!(
+            parse(r#"<trHeight val="440" hRule="auto"/>"#).rule,
+            HeightRule::Auto
+        );
+        assert_eq!(
+            parse(r#"<trHeight val="440" hRule="atLeast"/>"#).rule,
+            HeightRule::AtLeast
+        );
+        assert_eq!(
+            parse(r#"<trHeight val="440" hRule="exact"/>"#).rule,
+            HeightRule::Exact
+        );
+        // The value survives in every case; only the rule decides its meaning.
+        assert_eq!(parse(r#"<trHeight val="440"/>"#).value.raw(), 440);
+    }
+
+    /// §17.4.41 / §17.4.42: both cell-spacing overrides now reach the model.
+    /// Layout applies spacing per table and warns rather than honouring these,
+    /// but dropping them at the parser would make that gap invisible.
+    #[test]
+    fn cell_spacing_overrides_reach_the_model() {
+        let tr: crate::docx::model::TableRowProperties = quick_xml::de::from_str::<TrPrXml>(
+            r#"<trPr><tblCellSpacing w="72" type="dxa"/></trPr>"#,
+        )
+        .unwrap()
+        .into();
+        assert!(tr.cell_spacing.is_some(), "row-level §17.4.42");
+
+        let ex: crate::docx::model::TableRowPropertyExceptions =
+            quick_xml::de::from_str::<TblPrExXml>(
+                r#"<tblPrEx><tblCellSpacing w="72" type="dxa"/></tblPrEx>"#,
+            )
+            .unwrap()
+            .into();
+        assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.41");
     }
 }

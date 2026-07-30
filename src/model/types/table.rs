@@ -110,6 +110,8 @@ pub struct TableRow {
 pub struct TableRowPropertyExceptions {
     /// Per-row replacement for `TableProperties.borders`.
     pub borders: Option<TableBorders>,
+    /// §17.4.41: per-row replacement for `TableProperties.cell_spacing`.
+    pub cell_spacing: Option<TableMeasure>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,6 +126,8 @@ pub struct TableRowProperties {
     /// §17.4.17: number of grid columns to skip before the first cell of the row.
     /// Default 0 when omitted from `<w:trPr>`.
     pub grid_before: u32,
+    /// §17.4.42: row-level override of the table's `tblCellSpacing`.
+    pub cell_spacing: Option<TableMeasure>,
     /// §17.4.86: preferred width of the leading space before the first cell.
     /// Note: when present and divergent from the corresponding `tblGrid` columns'
     /// summed widths, treated as informational only — column widths are not

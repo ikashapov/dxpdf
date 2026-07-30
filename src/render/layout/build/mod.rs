@@ -82,6 +82,10 @@ pub struct BuildState {
     /// (like `Measurer::warned_emoji`) rather than to the process, so a second
     /// document still reports its own.
     pub warned_border_styles: std::collections::HashSet<model::BorderStyle>,
+    /// §17.4.41 / §17.4.42: a row overrode the table's `tblCellSpacing`, which
+    /// layout applies per *table*, not per row. Reported once per render for
+    /// the same reason as `warned_border_styles`.
+    pub warned_row_cell_spacing: bool,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────

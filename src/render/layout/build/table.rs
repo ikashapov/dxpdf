@@ -35,6 +35,28 @@ pub(super) struct BuiltTable {
     pub(super) float_info: Option<super::super::section::TableFloatInfo>,
 }
 
+/// §17.4.81: turn a parsed `trHeight` into a layout constraint.
+///
+/// `exact` pins the height, `atLeast` is a minimum, and `auto` **ignores `val`**
+/// — the row sizes to its content and carries no constraint at all, hence the
+/// `None`.
+///
+/// An omitted `hRule` never reaches here as `Auto`: the parse seam defaults it
+/// to `AtLeast`, matching Word ([MS-OI29500] §17.4.80(a)) rather than the
+/// standard's `auto`. That default is what makes returning `None` for `auto`
+/// safe — otherwise every Word row with a `trHeight` would lose its minimum.
+fn row_height_rule(
+    h: model::TableRowHeight,
+) -> Option<crate::render::layout::table::RowHeightRule> {
+    use crate::model::HeightRule;
+    use crate::render::layout::table::RowHeightRule;
+    match h.rule {
+        HeightRule::Exact => Some(RowHeightRule::Exact(Pt::from(h.value))),
+        HeightRule::AtLeast => Some(RowHeightRule::AtLeast(Pt::from(h.value))),
+        HeightRule::Auto => None,
+    }
+}
+
 /// §17.4.44: resolve `tblCellSpacing` to points.
 ///
 /// `CT_TblWidth` allows `pct` and `auto`, and the spec says both **are ignored**
@@ -273,16 +295,38 @@ pub(super) fn build_table(
             let mut cells = cells;
             normalize_row_uniform_vertical_insets(&mut cells);
 
+            // §17.4.41 / §17.4.42: a row (or its `tblPrEx`) may override the
+            // table's `tblCellSpacing`. Layout applies spacing per *table* —
+            // the grid slots are shrunk once, up front — so a per-row value
+            // cannot be honoured without a per-row grid. Report it rather than
+            // dropping it silently; the parsed value stays on the model.
+            let row_spacing = row.properties.cell_spacing.or_else(|| {
+                row.property_exceptions
+                    .as_ref()
+                    .and_then(|e| e.cell_spacing)
+            });
+            if let Some(rs) = row_spacing {
+                if resolve_cell_spacing(Some(rs)) != cell_spacing && !state.warned_row_cell_spacing
+                {
+                    state.warned_row_cell_spacing = true;
+                    log::warn!(
+                        "§17.4.41/§17.4.42: row-level tblCellSpacing overrides are not applied; \
+                         using the table-level value ({cell_spacing:?})"
+                    );
+                }
+            }
+
             TableRowInput {
                 cells,
-                height_rule: row.properties.height.map(|h| {
-                    use crate::model::HeightRule;
-                    use crate::render::layout::table::RowHeightRule;
-                    match h.rule {
-                        HeightRule::Exact => RowHeightRule::Exact(Pt::from(h.value)),
-                        _ => RowHeightRule::AtLeast(Pt::from(h.value)),
-                    }
-                }),
+                // §17.4.81: `exact` pins the height, `atLeast` is a minimum,
+                // and `auto` **ignores `val`** — the row sizes to its content,
+                // so it carries no constraint at all. An omitted `hRule`
+                // arrives as `AtLeast` (Word's default, set at the parse seam),
+                // which is why folding `auto` in with it used to be invisible:
+                // [MS-OE376] §2.4.77(c) notes Word requires `val = 0` whenever
+                // `hRule="auto"`, making `AtLeast(0)` a no-op on Word output.
+                // Other producers are not bound by that.
+                height_rule: row.properties.height.and_then(row_height_rule),
                 is_header: row.properties.is_header,
                 cant_split: row.properties.cant_split,
                 grid_before: row.properties.grid_before,
@@ -780,5 +824,37 @@ mod tests {
         let out = reserve_cell_spacing(widths, Pt::new(60.0));
         assert_eq!(out, vec![Pt::ZERO, Pt::ZERO]);
         assert!(out.iter().all(|w| *w >= Pt::ZERO));
+    }
+
+    /// §17.4.81: `hRule="auto"` ignores `val`, so the row carries **no** height
+    /// constraint — it is not a zero-height minimum, and not a minimum of the
+    /// stated value either.
+    ///
+    /// Word writes `val="0"` alongside `hRule="auto"` ([MS-OE376] §2.4.77(c)),
+    /// which is why treating `auto` as `AtLeast(val)` was invisible on Word
+    /// output: `AtLeast(0)` constrains nothing. Other producers are not bound by
+    /// that, and a non-zero `val` under `auto` would have become a real minimum.
+    #[test]
+    fn auto_height_rule_carries_no_constraint() {
+        use crate::model::{HeightRule, TableRowHeight};
+        use crate::render::layout::table::RowHeightRule;
+        let to_layout = |rule, twips: i64| -> Option<RowHeightRule> {
+            row_height_rule(TableRowHeight {
+                value: crate::model::dimension::Dimension::new(twips),
+                rule,
+            })
+        };
+        assert!(
+            to_layout(HeightRule::Auto, 1000).is_none(),
+            "auto ignores val entirely"
+        );
+        assert!(matches!(
+            to_layout(HeightRule::AtLeast, 1000),
+            Some(RowHeightRule::AtLeast(_))
+        ));
+        assert!(matches!(
+            to_layout(HeightRule::Exact, 1000),
+            Some(RowHeightRule::Exact(_))
+        ));
     }
 }

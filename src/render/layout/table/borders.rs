@@ -307,7 +307,7 @@ pub(super) fn emit_cell_borders(
     }
 }
 
-/// §17.4.43: border weight = width × style number, in points.
+/// [MS-OI29500] §17.4.66: border weight = width × style number, in points.
 ///
 /// The spec states the rule in eighths of a point (`w:sz`), but every use is a
 /// *comparison* between two weights, and converting both to eighths scales both
@@ -513,7 +513,7 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, DrawCommand::Rect { color, .. } if *color == RgbColor::BLACK))
             .count();
-        // §17.4.43: shared edges drawn once after conflict resolution.
+        // [MS-OI29500] §17.4.66: shared edges drawn once after conflict resolution.
         // Top(2) + bottom(2) + left(1) + insideV(1) + right(1) = 7 border rects.
         assert_eq!(border_rect_count, 7);
     }

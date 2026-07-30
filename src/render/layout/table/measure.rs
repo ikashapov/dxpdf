@@ -109,7 +109,7 @@ pub(super) fn measure_table_rows(
             }
         }
 
-        // §17.4.43: conflict resolution at horizontal shared edges (row R's
+        // [MS-OI29500] §17.4.66: conflict resolution at horizontal shared edges (row R's
         // bottom vs. row R+1's top). Resolved *per grid column* because a
         // `gridSpan` cell in one row can face several cells in the other:
         //   • wide upper cell over several lower cells — resolving only the
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(m.rows[1].borders[0].top.line(), None);
     }
 
-    /// §17.4.43 regression: an upper `gridSpan` cell that leaves the last
+    /// [MS-OI29500] §17.4.66 regression: an upper `gridSpan` cell that leaves the last
     /// column uncovered (its gridAfter gap) must not "own" the edge, or a
     /// lower cell straddling that boundary would draw its own top over the
     /// upper bottom → a doubled line. Mirrors the real doc's `gridSpan=9`

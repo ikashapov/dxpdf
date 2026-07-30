@@ -37,7 +37,12 @@ pub const DEFAULT_IMAGE_DPI: f32 = 220.0;
 
 /// Lower bound applied to any requested image DPI. A non-positive request would
 /// produce a zero/negative downsample target, so it is clamped up to this floor.
-const MIN_IMAGE_DPI: f32 = 1.0;
+///
+/// Public alongside [`DEFAULT_IMAGE_DPI`] because [`RenderOptions::with_image_dpi`]
+/// silently clamps to it: a caller passing `0.0` gets this value back, and
+/// without the constant there is no way to predict or detect that from outside
+/// the crate.
+pub const MIN_IMAGE_DPI: f32 = 1.0;
 
 /// Clamp a requested image DPI to a positive, finite value: non-positive and
 /// non-finite (`NaN`, `±∞`) requests are floored to [`MIN_IMAGE_DPI`]. The
