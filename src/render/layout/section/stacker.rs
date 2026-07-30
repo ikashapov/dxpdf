@@ -348,7 +348,6 @@ pub fn stack_blocks(
                 let table = layout_table(
                     rows,
                     col_widths,
-                    &constraints,
                     default_line_height,
                     border_config.as_ref(),
                     measure_text,

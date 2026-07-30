@@ -1774,10 +1774,6 @@ pub(crate) fn layout_section_with_clearance(
                     let table = layout_table(
                         rows,
                         col_widths,
-                        &col_constraints(
-                            state.current_col,
-                            (state.bottom - state.page_top).max(Pt::ZERO),
-                        ),
                         ctx.default_line_height,
                         border_config.as_ref(),
                         ctx.measure_text,
@@ -1881,10 +1877,6 @@ pub(crate) fn layout_section_with_clearance(
                     let slices = layout_table_paginated_with_page_heights(
                         rows,
                         col_widths,
-                        &col_constraints(
-                            state.current_col,
-                            (state.bottom - state.page_top).max(Pt::ZERO),
-                        ),
                         ctx.default_line_height,
                         border_config.as_ref(),
                         ctx.measure_text,
@@ -1977,10 +1969,6 @@ pub(crate) fn layout_section_with_clearance(
                 let slices = layout_table_paginated_with_page_heights(
                     rows,
                     col_widths,
-                    &col_constraints(
-                        state.current_col,
-                        (state.bottom - state.page_top).max(Pt::ZERO),
-                    ),
                     ctx.default_line_height,
                     border_config.as_ref(),
                     ctx.measure_text,

@@ -157,7 +157,9 @@ pub(super) fn build_table(
         (None, Some(style)) => Some(*style),
         (None, None) => None,
     };
-    let border_config = tbl_borders.as_ref().map(convert_table_border_config);
+    let border_config = tbl_borders
+        .as_ref()
+        .map(|b| convert_table_border_config(b, state));
 
     // Build rows by iterating cells and recursing into their content.
     let rows: Vec<TableRowInput> = t
@@ -258,7 +260,7 @@ pub(super) fn build_table(
                             Some(table) => merge_table_borders(over, table),
                             None => *over,
                         };
-                        convert_table_border_config(&merged)
+                        convert_table_border_config(&merged, state)
                     }),
             }
         })
@@ -424,23 +426,25 @@ fn build_table_cell(
             // Direct cell borders: highest priority.  Fall through to
             // conditional for edges not specified directly.
             Some(CellBorderConfig {
-                top: convert_cell_border_override(&db.top)
-                    .or_else(|| cond_borders.and_then(|cb| convert_cell_border_override(&cb.top))),
-                bottom: convert_cell_border_override(&db.bottom).or_else(|| {
-                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.bottom))
+                top: convert_cell_border_override(&db.top, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.top, state))
                 }),
-                left: convert_cell_border_override(&db.left)
-                    .or_else(|| cond_borders.and_then(|cb| convert_cell_border_override(&cb.left))),
-                right: convert_cell_border_override(&db.right).or_else(|| {
-                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.right))
+                bottom: convert_cell_border_override(&db.bottom, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.bottom, state))
+                }),
+                left: convert_cell_border_override(&db.left, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.left, state))
+                }),
+                right: convert_cell_border_override(&db.right, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.right, state))
                 }),
             })
         }
         (None, Some(cb)) => Some(CellBorderConfig {
-            top: convert_cell_border_override(&cb.top),
-            bottom: convert_cell_border_override(&cb.bottom),
-            left: convert_cell_border_override(&cb.left),
-            right: convert_cell_border_override(&cb.right),
+            top: convert_cell_border_override(&cb.top, state),
+            bottom: convert_cell_border_override(&cb.bottom, state),
+            left: convert_cell_border_override(&cb.left, state),
+            right: convert_cell_border_override(&cb.right, state),
         }),
         (None, None) => None,
     };

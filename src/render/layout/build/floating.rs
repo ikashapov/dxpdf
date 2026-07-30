@@ -949,6 +949,12 @@ pub(super) fn build_shape_text_commands(
         field_ctx: state.field_ctx,
         shape_default_text_color,
         shape_default_font_family,
+        // Its own set: this sub-state is built from a `&BuildState`, so the
+        // parent's set can't be borrowed mutably here. A border style used
+        // only inside a shape text box is therefore reported once per shape
+        // rather than once per render — bounded over-reporting in a rare case,
+        // preferred over making `state` mutable through ten signatures.
+        warned_border_styles: std::collections::HashSet::new(),
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
@@ -1096,6 +1102,7 @@ mod tests {
             endnote_counter: 0,
             list_counters: Default::default(),
             field_ctx: Default::default(),
+            warned_border_styles: Default::default(),
             shape_default_text_color: None,
             shape_default_font_family: None,
         }

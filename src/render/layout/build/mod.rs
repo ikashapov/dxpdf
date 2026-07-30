@@ -73,6 +73,15 @@ pub struct BuildState {
     /// theme major/minor collection selected by `fontRef@idx`). `None` outside
     /// a shape text box.
     pub shape_default_font_family: Option<String>,
+    /// §17.4.38: border styles already reported as unsupported this render.
+    ///
+    /// The layout layer draws only `Single` and `Double`, so the other 24
+    /// `BorderStyle` variants are approximated by a solid line. Warning at
+    /// every call would emit one line per cell edge — thousands for a large
+    /// table — so each distinct style is reported once. Scoped to the render
+    /// (like `Measurer::warned_emoji`) rather than to the process, so a second
+    /// document still reports its own.
+    pub warned_border_styles: std::collections::HashSet<model::BorderStyle>,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────

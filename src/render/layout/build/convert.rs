@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::model::{self, FirstLineIndent, LineSpacing};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
+use crate::render::layout::build::BuildState;
 use crate::render::layout::fragment::Fragment;
 use crate::render::layout::measurer::TextMeasurer;
 use crate::render::layout::paragraph::TabStopDef;
@@ -263,26 +264,45 @@ pub(super) fn resolve_paragraph_borders(
 }
 
 /// Convert a model `Border` to a layout `TableBorderLine`.
-fn convert_model_border(b: &model::Border) -> TableBorderLine {
+///
+/// §17.4.38 defines 26 border styles; the painter draws two. `Double` maps
+/// through, and the remaining 24 — `Dotted`, `Dashed`, `Triple`, `Wave`,
+/// `DashDotStroked`, the `ThinThick*` family and the rest — are approximated
+/// by a solid line of the declared width and colour. The approximation is
+/// bounded (position, thickness and colour are all preserved; only the stroke
+/// pattern is lost) but it is not free, so each distinct style is reported once
+/// per render via `state.warned_border_styles`.
+fn convert_model_border(b: &model::Border, state: &mut BuildState) -> TableBorderLine {
+    let style = match b.style {
+        model::BorderStyle::Double => TableBorderStyle::Double,
+        model::BorderStyle::Single => TableBorderStyle::Single,
+        other => {
+            if state.warned_border_styles.insert(other) {
+                log::warn!(
+                    "[build] §17.4.38 border style {other:?} is not drawn; \
+                     approximating with a single solid line"
+                );
+            }
+            TableBorderStyle::Single
+        }
+    };
     TableBorderLine {
         width: Pt::from(b.width),
         color: resolve_color(b.color, ColorContext::Text),
-        style: match b.style {
-            model::BorderStyle::Double => TableBorderStyle::Double,
-            _ => TableBorderStyle::Single,
-        },
+        style,
     }
 }
 
 /// Convert a model cell border to a `CellBorderOverride`.
 pub(super) fn convert_cell_border_override(
     b: &Option<model::Border>,
+    state: &mut BuildState,
 ) -> Option<CellBorderOverride> {
     b.as_ref().map(|b| {
         if b.style == model::BorderStyle::None {
             CellBorderOverride::Nil
         } else {
-            CellBorderOverride::Border(convert_model_border(b))
+            CellBorderOverride::Border(convert_model_border(b, state))
         }
     })
 }
@@ -306,13 +326,16 @@ pub(super) fn merge_table_borders(
 
 /// Convert model `TableBorders` to a layout `TableBorderConfig`.
 /// §17.4.38: borders with `val="none"` or `val="nil"` are suppressed.
-pub(super) fn convert_table_border_config(b: &model::TableBorders) -> TableBorderConfig {
-    let convert = |border: &Option<model::Border>| -> Option<TableBorderLine> {
+pub(super) fn convert_table_border_config(
+    b: &model::TableBorders,
+    state: &mut BuildState,
+) -> TableBorderConfig {
+    let mut convert = |border: &Option<model::Border>| -> Option<TableBorderLine> {
         border.as_ref().and_then(|b| {
             if b.style == model::BorderStyle::None {
                 None
             } else {
-                Some(convert_model_border(b))
+                Some(convert_model_border(b, state))
             }
         })
     };
@@ -972,5 +995,82 @@ mod tests {
                 "{unit:?} needs a containing box / font size"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod border_style_tests {
+    use super::*;
+
+    fn border(style: model::BorderStyle) -> model::Border {
+        model::Border {
+            style,
+            width: crate::model::dimension::Dimension::new(8),
+            color: model::Color::Auto,
+            space: crate::model::dimension::Dimension::new(0),
+        }
+    }
+
+    /// §17.4.38: only `Single` and `Double` are drawn; the other 24 styles are
+    /// approximated by a solid line of the declared width and colour.
+    #[test]
+    fn unsupported_styles_collapse_to_single_preserving_width_and_colour() {
+        let mut state = BuildState::default();
+        for style in [
+            model::BorderStyle::Dotted,
+            model::BorderStyle::Dashed,
+            model::BorderStyle::Triple,
+            model::BorderStyle::Wave,
+            model::BorderStyle::DashDotStroked,
+            model::BorderStyle::ThinThickLargeGap,
+        ] {
+            let line = convert_model_border(&border(style), &mut state);
+            assert_eq!(
+                line.style,
+                TableBorderStyle::Single,
+                "{style:?} should approximate as a single line"
+            );
+            assert_eq!(line.width, Pt::from(border(style).width), "width preserved");
+        }
+    }
+
+    #[test]
+    fn supported_styles_are_not_approximated() {
+        let mut state = BuildState::default();
+        assert_eq!(
+            convert_model_border(&border(model::BorderStyle::Double), &mut state).style,
+            TableBorderStyle::Double
+        );
+        assert_eq!(
+            convert_model_border(&border(model::BorderStyle::Single), &mut state).style,
+            TableBorderStyle::Single
+        );
+        assert!(
+            state.warned_border_styles.is_empty(),
+            "styles that render faithfully must not be reported as approximated"
+        );
+    }
+
+    /// Each distinct style is recorded once, so the warning fires once per
+    /// render instead of once per cell edge — thousands of lines for a large
+    /// table with dotted borders.
+    #[test]
+    fn each_unsupported_style_is_recorded_exactly_once() {
+        let mut state = BuildState::default();
+        for _ in 0..50 {
+            convert_model_border(&border(model::BorderStyle::Dotted), &mut state);
+            convert_model_border(&border(model::BorderStyle::Dashed), &mut state);
+        }
+        assert_eq!(
+            state.warned_border_styles.len(),
+            2,
+            "one entry per distinct style, regardless of occurrence count"
+        );
+        assert!(state
+            .warned_border_styles
+            .contains(&model::BorderStyle::Dotted));
+        assert!(state
+            .warned_border_styles
+            .contains(&model::BorderStyle::Dashed));
     }
 }

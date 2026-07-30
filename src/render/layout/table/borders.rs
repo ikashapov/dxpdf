@@ -255,7 +255,7 @@ fn emit_border_rect(
 #[cfg(test)]
 mod tests {
     use crate::render::dimension::Pt;
-    use crate::render::geometry::{PtEdgeInsets, PtSize};
+    use crate::render::geometry::PtEdgeInsets;
     use crate::render::layout::draw_command::DrawCommand;
     use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
     use crate::render::layout::paragraph::ParagraphStyle;
@@ -264,7 +264,6 @@ mod tests {
         layout_table, CellVAlign, TableBorderConfig, TableBorderLine, TableBorderStyle,
         TableCellInput, TableRowInput,
     };
-    use crate::render::layout::BoxConstraints;
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
 
@@ -318,10 +317,6 @@ mod tests {
         }
     }
 
-    fn body_constraints() -> BoxConstraints {
-        BoxConstraints::loose(PtSize::new(Pt::new(400.0), Pt::new(1000.0)))
-    }
-
     #[test]
     fn borders_emit_lines() {
         let rows = vec![TableRowInput {
@@ -336,7 +331,6 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
             Pt::new(14.0),
             Some(&TableBorderConfig {
                 top: Some(TableBorderLine {
@@ -438,7 +432,6 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
             Pt::new(14.0),
             Some(&all_single),
             None,

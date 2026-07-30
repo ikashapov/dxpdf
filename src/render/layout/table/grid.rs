@@ -16,21 +16,31 @@ pub(super) struct RowGroup {
     pub(super) splittable: bool,
 }
 
-/// Compute column widths by scaling grid column values to fit available width.
-/// If `grid_cols` is empty, distributes equally.
+/// §17.4.14: compute column widths by scaling the declared `w:tblGrid` values
+/// to the available width.
+///
+/// A grid that is absent *or unusable* falls back to equal distribution. Both
+/// are the same situation: a grid summing to zero or less (every `w:gridCol`
+/// zero, or negative from a malformed file) carries no proportions to scale,
+/// and scaling it by any factor leaves every column at zero — cells laid out
+/// at zero width, with their content unreadable rather than merely misplaced.
 pub fn compute_column_widths(grid_cols: &[Pt], num_cols: usize, available_width: Pt) -> Vec<Pt> {
-    if !grid_cols.is_empty() {
-        let total: Pt = grid_cols.iter().copied().sum();
-        let scale = if total > Pt::ZERO {
-            available_width / total
-        } else {
-            1.0
-        };
-        grid_cols.iter().map(|w| *w * scale).collect()
-    } else if num_cols > 0 {
-        vec![available_width / num_cols as f32; num_cols]
+    let total: Pt = grid_cols.iter().copied().sum();
+    if !grid_cols.is_empty() && total > Pt::ZERO {
+        let scale = available_width / total;
+        return grid_cols.iter().map(|w| *w * scale).collect();
+    }
+    // Prefer the caller's column count; fall back to the degenerate grid's own
+    // length so a zero-summing grid still yields one column per `w:gridCol`.
+    let n = if num_cols > 0 {
+        num_cols
     } else {
-        vec![]
+        grid_cols.len()
+    };
+    if n > 0 {
+        vec![available_width / n as f32; n]
+    } else {
+        Vec::new()
     }
 }
 
@@ -217,6 +227,44 @@ mod tests {
     fn zero_cols_empty_result() {
         let widths = compute_column_widths(&[], 0, Pt::new(300.0));
         assert!(widths.is_empty());
+    }
+
+    /// §17.4.14: a grid that sums to zero carries no proportions, so it is
+    /// treated as absent. Scaling it instead leaves every column at zero and
+    /// every cell laying out at zero width.
+    #[test]
+    fn zero_summing_grid_falls_back_to_equal_distribution() {
+        let grid = vec![Pt::ZERO, Pt::ZERO, Pt::ZERO];
+        let widths = compute_column_widths(&grid, 3, Pt::new(300.0));
+        assert_eq!(
+            widths.iter().map(|w| w.raw()).collect::<Vec<_>>(),
+            vec![100.0, 100.0, 100.0]
+        );
+    }
+
+    /// Same for a negative total, which only a malformed file produces — the
+    /// old `scale = 1.0` fallback passed the negative widths straight through.
+    #[test]
+    fn negative_grid_total_falls_back_to_equal_distribution() {
+        let grid = vec![Pt::new(-40.0), Pt::new(10.0)];
+        let widths = compute_column_widths(&grid, 2, Pt::new(300.0));
+        assert_eq!(
+            widths.iter().map(|w| w.raw()).collect::<Vec<_>>(),
+            vec![150.0, 150.0],
+            "no column may come out negative"
+        );
+    }
+
+    /// With no caller column count, the degenerate grid's own length is used
+    /// so the table still has the right number of columns.
+    #[test]
+    fn zero_summing_grid_uses_its_own_length_when_num_cols_is_zero() {
+        let grid = vec![Pt::ZERO, Pt::ZERO];
+        let widths = compute_column_widths(&grid, 0, Pt::new(300.0));
+        assert_eq!(
+            widths.iter().map(|w| w.raw()).collect::<Vec<_>>(),
+            vec![150.0, 150.0]
+        );
     }
 
     // ── grid_before lookups ──────────────────────────────────────────────────────────────────────────────

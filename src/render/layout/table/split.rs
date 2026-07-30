@@ -597,15 +597,12 @@ mod tests {
     /// merely shrinking by an epsilon.
     #[test]
     fn iterative_continuation_split_halts_with_a_bounded_slice_count() {
-        use crate::render::geometry::PtSize;
         use crate::render::layout::table::{layout_table_paginated, TablePaginationConfig};
-        use crate::render::layout::BoxConstraints;
 
         let rows = vec![row_n_lines(40, 0.0)];
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &BoxConstraints::loose(PtSize::new(Pt::new(400.0), Pt::new(1000.0))),
             Pt::new(14.0),
             None,
             None,
