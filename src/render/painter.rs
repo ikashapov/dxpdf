@@ -361,19 +361,24 @@ fn render_page(
                 // Pass `rect.size` so the rasterizer allocates an image
                 // whose aspect matches the rect → uniform scaling at
                 // `draw_image_rect`, no anisotropic distortion.
-                let img = emoji_rasterizer.rasterize(&cluster, typeface, *size, rect.size);
-                // Mitchell cubic resampling — same filter we use for
-                // photographic image downsampling. Without explicit
-                // sampling, Skia defaults to nearest/bilinear which makes
-                // the emoji look blurry/pixelated at typical PDF zoom.
-                let sampling = SamplingOptions::from(CubicResampler::mitchell());
-                canvas.draw_image_rect_with_sampling_options(
-                    &img.image,
-                    None,
-                    to_rect(*rect),
-                    sampling,
-                    &default_paint,
-                );
+                // `None` means the offscreen surface could not be allocated;
+                // the rasterizer has already logged why. Leave the cluster
+                // blank, as an undecodable image is left blank above.
+                if let Some(img) = emoji_rasterizer.rasterize(&cluster, typeface, *size, rect.size)
+                {
+                    // Mitchell cubic resampling — same filter we use for
+                    // photographic image downsampling. Without explicit
+                    // sampling, Skia defaults to nearest/bilinear which makes
+                    // the emoji look blurry/pixelated at typical PDF zoom.
+                    let sampling = SamplingOptions::from(CubicResampler::mitchell());
+                    canvas.draw_image_rect_with_sampling_options(
+                        &img.image,
+                        None,
+                        to_rect(*rect),
+                        sampling,
+                        &default_paint,
+                    );
+                }
             }
             DrawCommand::Rect { rect, color } => {
                 rect_paint.set_color4f(to_color4f(*color), None);

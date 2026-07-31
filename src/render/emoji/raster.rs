@@ -60,6 +60,68 @@ impl SuperSample {
     }
 }
 
+/// Ceiling on the rasterized surface, in pixels.
+///
+/// The surface size is only a *resolution* choice: the painter draws the
+/// snapshot into [`EmojiImage::draw_size`] regardless of how many pixels back
+/// it, so reducing the pixel count of an absurd cluster changes nothing about
+/// where the emoji lands or how large it appears — only how crisp it is.
+///
+/// Without a ceiling the surface is `target × factor` with nothing relating it
+/// to the page it will be drawn on. `w:sz` is unbounded in the file format
+/// (Word's UI caps it at 1638 half-points, but the schema does not), and one
+/// run at `<w:sz w:val="20000"/>` — 10 000 pt — asks for a surface of roughly
+/// 40 000 × 55 000 px, or 8.8 GB.
+///
+/// 8 Mi px is ≈ 33 MB at N32 premul, and exceeds a full A4 page rasterized at
+/// the default 4 px/pt (2380 × 3368 = 8.0 M px). No emoji that fits on a page
+/// is affected; anything larger is clipped by the page anyway, so the ceiling
+/// costs no visible resolution.
+const MAX_RASTER_PIXELS: f64 = (8 * 1024 * 1024) as f64;
+
+/// The super-sample factor actually used for `target`: `requested`, reduced
+/// uniformly if `target × requested` would exceed [`MAX_RASTER_PIXELS`].
+///
+/// Reducing the *factor* rather than the pixel dimensions keeps the surface
+/// derivation single-sourced — the glyph size, the in-surface baseline, and
+/// both dimensions all scale from this one number, so a clamped surface stays
+/// internally consistent instead of drawing a full-size glyph onto a shrunken
+/// canvas. It also preserves the image/target aspect equality that keeps
+/// `draw_image_rect` isotropic (see `rasterize`).
+///
+/// A degenerate aspect (one axis near zero, the other enormous) can still ask
+/// for a surface that fits the area budget but overflows a single dimension;
+/// that is caught downstream by the allocation returning `None` rather than by
+/// distorting the aspect here.
+fn effective_super_sample(target: PtSize, requested: f32) -> f32 {
+    let (w, h) = (target.width.raw() as f64, target.height.raw() as f64);
+    let requested_f64 = requested as f64;
+    if !w.is_finite() || !h.is_finite() || !requested_f64.is_finite() {
+        return requested;
+    }
+    // `rasterize_uncached` rounds each axis *up*, so the budget has to be
+    // stated for the rounded-up surface — `ceil(x) < x + 1` — or the ceiling
+    // is one that only nearly holds.
+    let pixels = (w * requested_f64 + 1.0) * (h * requested_f64 + 1.0);
+    if pixels <= MAX_RASTER_PIXELS {
+        return requested;
+    }
+    let (a, b) = (w * h, w + h);
+    if a <= 0.0 {
+        // A zero-area rect can exceed the budget on one axis alone, but has
+        // no factor that fixes it. The allocation guard refuses the surface.
+        return requested;
+    }
+    // Largest factor satisfying the same inequality: the positive root of
+    // `a·f² + b·f + (1 − MAX_RASTER_PIXELS) = 0`.
+    let reduced = ((b * b + 4.0 * a * (MAX_RASTER_PIXELS - 1.0)).sqrt() - b) / (2.0 * a);
+    log::warn!(
+        "[emoji] cluster rect {w:.0}×{h:.0}pt at {requested} px/pt would need {pixels:.0} px \
+         (limit {MAX_RASTER_PIXELS:.0}); rasterizing at {reduced:.4} px/pt instead"
+    );
+    reduced as f32
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RasterConfig {
     pub super_sample: SuperSample,
@@ -185,6 +247,10 @@ impl EmojiRasterizer {
     /// [`TypefaceEntry`] — callers that hold an [`EmojiTypeface::Unavailable`]
     /// cannot reach this method. (See plan test X8.)
     ///
+    /// Returns `None` when the offscreen surface cannot be allocated. Nothing
+    /// is cached in that case, so a later call with a smaller `target` still
+    /// gets its chance; the caller draws nothing for this cluster.
+    ///
     /// [`EmojiTypeface::Unavailable`]: super::resolve::EmojiTypeface::Unavailable
     pub fn rasterize(
         &mut self,
@@ -192,7 +258,7 @@ impl EmojiRasterizer {
         typeface: &TypefaceEntry,
         size: Pt,
         target: PtSize,
-    ) -> &EmojiImage {
+    ) -> Option<&EmojiImage> {
         let scale = self.config.super_sample;
         let key = EmojiKey::new(cluster.text, typeface, size, scale, target);
         if !self.cache.contains_key(&key) {
@@ -204,10 +270,10 @@ impl EmojiRasterizer {
                 scale,
                 target,
                 bytes.as_deref().map(|v| v.as_slice()),
-            );
+            )?;
             self.cache.insert(key.clone(), image);
         }
-        self.cache.get(&key).expect("just inserted")
+        self.cache.get(&key)
     }
 
     /// Per-render typeface byte cache. Apple Color Emoji is ~190 MB on
@@ -233,8 +299,11 @@ fn rasterize_uncached(
     scale: SuperSample,
     target: PtSize,
     font_bytes: Option<&[u8]>,
-) -> EmojiImage {
-    let factor = scale.factor();
+) -> Option<EmojiImage> {
+    // Everything below scales from this one factor — glyph size, surface
+    // dimensions, and the in-surface baseline — so a clamped surface stays
+    // internally consistent. See `effective_super_sample`.
+    let factor = effective_super_sample(target, scale.factor());
     let scaled_size = f32::from(size) * factor;
     let font = Font::from_typeface(typeface.typeface.clone(), scaled_size);
 
@@ -267,8 +336,17 @@ fn rasterize_uncached(
     // output.
     let shaped = font_bytes.and_then(|b| shape_text(b, text, scaled_size).ok());
 
-    let mut surface = surfaces::raster_n32_premul((width_px, height_px))
-        .expect("raster_n32_premul returned None for non-degenerate dimensions");
+    // `None` here means Skia refused the allocation — a degenerate aspect that
+    // slipped past the area budget, or genuine memory pressure. Neither is a
+    // programming error, so the cluster is dropped rather than panicking
+    // through the public `convert()` API.
+    let Some(mut surface) = surfaces::raster_n32_premul((width_px, height_px)) else {
+        log::warn!(
+            "[emoji] could not allocate a {width_px}×{height_px} px surface for cluster \
+             {text:?} at {size:?}; the cluster will not be drawn"
+        );
+        return None;
+    };
     let canvas = surface.canvas();
 
     let mut paint = Paint::default();
@@ -312,12 +390,12 @@ fn rasterize_uncached(
     // The image dimensions exactly match `target × factor` (modulo ceil),
     // so draw_size returns to `target`. The painter draws `image` into a
     // rect of exactly these dimensions for uniform scaling.
-    EmojiImage {
+    Some(EmojiImage {
         image,
         pixels: (width_px, height_px),
         draw_size: target,
         baseline_offset: Pt::new(baseline_y_px / factor),
-    }
+    })
 }
 
 // ─── Tests (X1–X6 from docs/emoji-rendering.md) ──────────────────────────────
@@ -413,6 +491,7 @@ mod tests {
                 Pt::new(12.0),
                 default_target(),
             )
+            .expect("rasterization must succeed for a non-degenerate target")
             .clone();
         assert!(
             img.pixels.0 >= 1,
@@ -438,6 +517,7 @@ mod tests {
         let tf = any_typeface();
         let img = r
             .rasterize(&single_emoji(""), &tf, Pt::new(12.0), default_target())
+            .expect("rasterization must succeed for a non-degenerate target")
             .clone();
         assert!(img.pixels.0 >= 1);
         assert!(img.pixels.1 >= 1);
@@ -459,6 +539,7 @@ mod tests {
         let target = PtSize::new(Pt::new(11.0), Pt::new(18.0));
         let img = r
             .rasterize(&single_emoji("A"), &tf, Pt::new(11.0), target)
+            .expect("rasterization must succeed for a non-degenerate target")
             .clone();
         let img_aspect = img.pixels.0 as f32 / img.pixels.1 as f32;
         let target_aspect = target.width.raw() / target.height.raw();
@@ -497,6 +578,7 @@ mod tests {
                 Pt::new(24.0),
                 PtSize::new(Pt::new(24.0), Pt::new(36.0)),
             )
+            .expect("rasterization must succeed for a non-degenerate target")
             .clone();
         let peek = img.image.peek_pixels();
         // peek_pixels can return None if the image is GPU-backed; raster
@@ -562,12 +644,18 @@ mod tests {
         let mut r1 = EmojiRasterizer::new(RasterConfig {
             super_sample: SuperSample::OnePerPt,
         });
-        let img1 = r1.rasterize(&c, &tf, size, default_target()).clone();
+        let img1 = r1
+            .rasterize(&c, &tf, size, default_target())
+            .expect("rasterization must succeed for a non-degenerate target")
+            .clone();
 
         let mut r3 = EmojiRasterizer::new(RasterConfig {
             super_sample: SuperSample::ThreePerPt,
         });
-        let img3 = r3.rasterize(&c, &tf, size, default_target()).clone();
+        let img3 = r3
+            .rasterize(&c, &tf, size, default_target())
+            .expect("rasterization must succeed for a non-degenerate target")
+            .clone();
 
         // Outline glyphs scale linearly: at 3× super-sample the pixel
         // surface should be ~3× larger on each axis.
@@ -586,6 +674,138 @@ mod tests {
         assert!(
             (dw1 - dw3).abs() <= 2.0,
             "outline glyph draw widths must match within rounding, got {dw1} vs {dw3}"
+        );
+    }
+
+    // ─── Surface ceiling (G1#1) ───────────────────────────────────────────
+
+    /// An oversized target rect is the only thing the ceiling may affect.
+    /// Body text must go through untouched, or every emoji in the corpus
+    /// re-renders at a different resolution.
+    #[test]
+    fn ordinary_target_uses_the_requested_super_sample() {
+        assert_eq!(effective_super_sample(default_target(), 4.0), 4.0);
+        assert_eq!(
+            effective_super_sample(PtSize::new(Pt::new(72.0), Pt::new(96.0)), 6.0),
+            6.0
+        );
+    }
+
+    /// The documented boundary: a full A4 page at the default 4 px/pt is
+    /// 2380 × 3368 = 8.0 M px, which must still fit under the ceiling.
+    /// Nothing that fits on a page may be clamped.
+    #[test]
+    fn a4_page_at_default_super_sample_is_not_clamped() {
+        let a4 = PtSize::new(Pt::new(595.0), Pt::new(842.0));
+        assert_eq!(effective_super_sample(a4, 4.0), 4.0);
+    }
+
+    /// Past the ceiling the factor is reduced to land *at* the budget —
+    /// not below it, which would throw away resolution for nothing.
+    #[test]
+    fn oversized_target_is_reduced_to_the_pixel_budget() {
+        let huge = PtSize::new(Pt::new(5000.0), Pt::new(6000.0));
+        let factor = effective_super_sample(huge, 4.0);
+        assert!(factor < 4.0, "an oversized target must reduce the factor");
+        // Stated for the rounded-up surface, exactly as the ceiling is.
+        let area = (5000.0 * factor as f64).ceil() * (6000.0 * factor as f64).ceil();
+        assert!(
+            area <= MAX_RASTER_PIXELS,
+            "clamped area {area} must fit the {MAX_RASTER_PIXELS} px budget"
+        );
+        assert!(
+            area > MAX_RASTER_PIXELS * 0.99,
+            "clamped area {area} must use the budget, not undershoot it"
+        );
+    }
+
+    /// A non-finite rect must not propagate NaN into the surface
+    /// dimensions. The factor is returned unchanged; the allocation guard
+    /// downstream is what refuses the surface.
+    #[test]
+    fn non_finite_target_falls_back_to_the_requested_factor() {
+        let nan = PtSize::new(Pt::new(f32::NAN), Pt::new(18.0));
+        assert_eq!(effective_super_sample(nan, 4.0), 4.0);
+        let inf = PtSize::new(Pt::new(12.0), Pt::new(f32::INFINITY));
+        assert_eq!(effective_super_sample(inf, 4.0), 4.0);
+    }
+
+    /// G1#1 regression. `<w:sz w:val="20000"/>` (10 000 pt) used to ask for
+    /// an ~8.8 GB surface and panic through `expect`. The clamp must keep
+    /// the placement contract intact: `draw_size` is still the layout's
+    /// rect, and the image aspect still matches it (the property that keeps
+    /// `draw_image_rect` isotropic).
+    #[test]
+    fn oversized_cluster_rasterizes_within_the_pixel_budget() {
+        let mut r = EmojiRasterizer::default();
+        let tf = any_typeface();
+        let target = PtSize::new(Pt::new(5000.0), Pt::new(6000.0));
+        let img = r
+            .rasterize(&single_emoji("A"), &tf, Pt::new(5000.0), target)
+            .expect("an oversized cluster must still rasterize, not panic")
+            .clone();
+
+        let area = img.pixels.0 as f64 * img.pixels.1 as f64;
+        assert!(
+            area <= MAX_RASTER_PIXELS,
+            "surface {}×{} = {area} px exceeds the {MAX_RASTER_PIXELS} px budget",
+            img.pixels.0,
+            img.pixels.1
+        );
+        assert_eq!(
+            img.draw_size, target,
+            "clamping is a resolution choice — it must not move or resize the emoji"
+        );
+        let img_aspect = img.pixels.0 as f32 / img.pixels.1 as f32;
+        let target_aspect = target.width.raw() / target.height.raw();
+        let rel_err = (img_aspect - target_aspect).abs() / target_aspect;
+        assert!(
+            rel_err < 0.05,
+            "clamped image aspect {img_aspect:.4} must still match target \
+             {target_aspect:.4} (rel err {rel_err:.4})"
+        );
+    }
+
+    /// The residual case the area budget cannot reach: an infinite axis
+    /// bypasses the factor reduction entirely (there is no finite factor to
+    /// solve for), so the surface request saturates and Skia refuses it.
+    /// That must surface as `None`, not a panic — and must not poison the
+    /// cache, since a later call with a sane rect deserves its own attempt.
+    #[test]
+    fn unallocatable_surface_yields_none_and_caches_nothing() {
+        let mut r = EmojiRasterizer::default();
+        let tf = any_typeface();
+        let degenerate = PtSize::new(Pt::new(f32::INFINITY), Pt::new(18.0));
+        assert!(
+            r.rasterize(&single_emoji("A"), &tf, Pt::new(12.0), degenerate)
+                .is_none(),
+            "a surface Skia refuses must be reported, not panicked on"
+        );
+        assert_eq!(r.cached_count(), 0, "a failed rasterization must not cache");
+    }
+
+    /// The clamp reduces the *factor*, so the glyph size and the in-surface
+    /// baseline shrink with the surface. Clamping the pixel dimensions
+    /// instead would leave the baseline at `ascent × 4` — far below a
+    /// surface only a fraction that tall — and the glyph would be drawn
+    /// entirely off-canvas. A blank surface is the sensor for that.
+    #[test]
+    fn clamped_surface_still_contains_the_glyph() {
+        let mut r = EmojiRasterizer::default();
+        let tf = any_typeface();
+        let target = PtSize::new(Pt::new(5000.0), Pt::new(6000.0));
+        let img = r
+            .rasterize(&single_emoji("A"), &tf, Pt::new(5000.0), target)
+            .expect("an oversized cluster must still rasterize")
+            .clone();
+        let peek = img
+            .image
+            .peek_pixels()
+            .expect("raster image exposes pixels");
+        let bytes = peek.bytes().expect("RGBA pixel data must be readable");
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "the glyph must land inside the clamped surface, not below it"
         );
     }
 }
