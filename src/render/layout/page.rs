@@ -88,16 +88,25 @@ impl PageConfig {
             }
         }
 
-        // §17.6.4: compute column geometry.
-        let content_width = cfg.page_size.width - cfg.margins.left - cfg.margins.right;
-        cfg.columns = compute_columns(content_width, &sect.columns);
+        // §17.6.4: compute column geometry from the *clamped* text width, so a
+        // page whose margins exceed its width yields zero-width columns rather
+        // than negative ones.
+        cfg.columns = compute_columns(cfg.content_width(), &sect.columns);
 
         cfg
     }
 
-    /// Available width for body content (page width minus left and right margins).
+    /// Available width for body content (page width minus left and right
+    /// margins), never negative.
+    ///
+    /// The clamp is load-bearing, not defensive tidiness: margins wider than the
+    /// page are expressible in the file format, and a negative width flows
+    /// straight into `BoxConstraints::new`, whose `debug_assert!(min <= max)`
+    /// then fires — a panic through the public `convert()` API in debug builds,
+    /// and a negative-width layout in release. See also `compute_columns`,
+    /// which clamps the same quantity per column.
     pub fn content_width(&self) -> Pt {
-        self.page_size.width - self.margins.left - self.margins.right
+        (self.page_size.width - self.margins.left - self.margins.right).max(Pt::ZERO)
     }
 
     /// Number of columns in this section.
@@ -105,9 +114,10 @@ impl PageConfig {
         self.columns.len()
     }
 
-    /// Available height for body content (page height minus top and bottom margins).
+    /// Available height for body content (page height minus top and bottom
+    /// margins), never negative — same reasoning as [`PageConfig::content_width`].
     pub fn content_height(&self) -> Pt {
-        self.page_size.height - self.margins.top - self.margins.bottom
+        (self.page_size.height - self.margins.top - self.margins.bottom).max(Pt::ZERO)
     }
 }
 
@@ -127,16 +137,29 @@ const MIN_COLUMN_WIDTH: Pt = Pt::new(1.0);
 /// picked as a magic number: a column narrower than [`MIN_COLUMN_WIDTH`] cannot
 /// show anything, so a count implying narrower columns describes no layout a
 /// document could have meant.
-fn clamp_column_count(requested: u32, content_width: Pt) -> usize {
-    let requested = requested as usize;
+///
+/// **The gaps count.** `n` columns carry `n - 1` gaps of `space`, so the widest
+/// usable count solves
+/// `(content_width - space·(n-1)) / n >= MIN_COLUMN_WIDTH`, i.e.
+/// `n <= (content_width + space) / (MIN_COLUMN_WIDTH + space)`. **This is the
+/// only thing keeping the column width non-negative** — `compute_columns`
+/// deliberately does not clamp afterwards. Bounding on
+/// `content_width / MIN_COLUMN_WIDTH` alone ignores the gaps and still admits
+/// counts whose column width comes out **negative** — which is what made a
+/// 15-column section panic. Solving for the gaps is what makes the width
+/// non-negative *by construction* rather than by a later clamp.
+fn clamp_column_count(requested: u32, content_width: Pt, space: Pt) -> usize {
+    let requested = (requested as usize).max(1);
     if content_width <= Pt::ZERO {
         return 1;
     }
-    let max_by_page = ((content_width.raw() / MIN_COLUMN_WIDTH.raw()) as usize).max(1);
+    let space = space.raw().max(0.0);
+    let max_by_page =
+        (((content_width.raw() + space) / (MIN_COLUMN_WIDTH.raw() + space)) as usize).max(1);
     if requested > max_by_page {
         log::warn!(
-            "§17.6.4: w:num={requested} exceeds what a {content_width:?} text area can hold; \
-             clamped to {max_by_page}"
+            "§17.6.4: w:num={requested} does not fit a {content_width:?} text area at \
+             {space}pt spacing; clamped to {max_by_page}"
         );
     }
     requested.min(max_by_page)
@@ -170,11 +193,11 @@ fn compute_columns(content_width: Pt, columns: &Option<Columns>) -> Vec<ColumnGe
         _ => return single(),
     };
 
-    let num = clamp_column_count(cols.count.unwrap_or(1), content_width);
+    let default_space = cols.space.map(Pt::from).unwrap_or(DEFAULT_COLUMN_SPACE);
+    let num = clamp_column_count(cols.count.unwrap_or(1), content_width, default_space);
     if num <= 1 {
         return single();
     }
-    let default_space = cols.space.map(Pt::from).unwrap_or(DEFAULT_COLUMN_SPACE);
 
     // Individual definitions, only on an explicit `equalWidth="0"`.
     if cols.equal_width == Some(false) && !cols.columns.is_empty() {
@@ -203,6 +226,13 @@ fn compute_columns(content_width: Pt, columns: &Option<Columns>) -> Vec<ColumnGe
 
     // Equal-width columns.
     let total_gap = default_space * (num as f32 - 1.0);
+    // No clamp here on purpose. `clamp_column_count` is the single guarantee
+    // that this is positive, and a second `.max(Pt::ZERO)` was demonstrably
+    // inert — removing it changed no test, because the bound already excludes
+    // every count that could make it negative. Two mechanisms for one invariant
+    // means the redundant one rots unnoticed; if the bound below ever changes,
+    // this is the line that breaks, and `column_count_never_yields_a_negative_width`
+    // is the test that catches it.
     let col_width = (content_width - total_gap) / num as f32;
     let mut result = Vec::with_capacity(num);
     for i in 0..num {
@@ -290,11 +320,6 @@ mod tests {
     }
 
     // ── §17.6.4 compute_columns ──────────────────────────────────────────
-    //
-    // Deliberately **not** covered here: the sign-flip where enough columns
-    // make `col_width` negative. That is E6#1, still open; asserting today's
-    // output there would cement the defect instead of catching it. These tests
-    // stay inside the region where the geometry is well defined.
 
     use crate::model::{ColumnDefinition, Columns};
 
@@ -487,5 +512,96 @@ mod tests {
             }),
         );
         assert_eq!(degenerate.len(), 1);
+    }
+
+    // ── E6#1: no route may produce a negative width ──────────────────────
+    //
+    // Three distinct routes reached the same defect, and only the first was in
+    // the original finding. All three ended at `BoxConstraints::new`'s
+    // `debug_assert!(min_width <= max_width)` — a panic through the public
+    // `convert()` API in debug builds, a negative-width layout in release.
+
+    /// Route 1: more columns than the text area can hold at the given spacing.
+    /// The old bound (`content_width / MIN_COLUMN_WIDTH`) ignored the gaps, so
+    /// 15 columns on Letter still produced `-25.9pt` each.
+    #[test]
+    fn column_count_never_yields_a_negative_width() {
+        for n in [2u32, 13, 14, 15, 16, 50, 1000, u32::MAX] {
+            let g = cols_of(Columns {
+                count: Some(n),
+                ..base()
+            });
+            assert!(!g.is_empty(), "n={n}");
+            for (i, c) in g.iter().enumerate() {
+                assert!(
+                    c.width >= Pt::ZERO,
+                    "n={n} col{i} width {:?} is negative",
+                    c.width
+                );
+            }
+        }
+    }
+
+    /// Route 2: margins wider than the page. This one never reaches the column
+    /// arithmetic at all — a single-column section returns `content_width`
+    /// verbatim — so clamping inside `compute_columns` alone would have missed
+    /// it. `PageConfig::content_width` is where it has to be caught.
+    #[test]
+    fn margins_wider_than_the_page_clamp_to_zero_not_negative() {
+        let sect = SectionProperties {
+            page_size: Some(PageSize {
+                width: Some(Dimension::<Twips>::new(2000)), // 100pt
+                height: Some(Dimension::<Twips>::new(2000)),
+                orientation: None,
+            }),
+            page_margins: Some(PageMargins {
+                left: Some(Dimension::<Twips>::new(1440)),  // 72pt
+                right: Some(Dimension::<Twips>::new(1440)), // 72pt — 144 > 100
+                top: Some(Dimension::<Twips>::new(1440)),
+                bottom: Some(Dimension::<Twips>::new(1440)),
+                header: None,
+                footer: None,
+                gutter: None,
+            }),
+            ..Default::default()
+        };
+        let cfg = PageConfig::from_section(&sect);
+        assert_eq!(cfg.content_width(), Pt::ZERO, "clamped, not -44pt");
+        assert_eq!(cfg.content_height(), Pt::ZERO);
+        assert!(cfg.columns.iter().all(|c| c.width >= Pt::ZERO));
+    }
+
+    /// Route 3: a spacing larger than the whole text area, at a column count
+    /// that would otherwise be perfectly ordinary.
+    #[test]
+    fn spacing_wider_than_the_page_yields_one_column_not_negative_ones() {
+        let g = cols_of(Columns {
+            count: Some(2),
+            space: Some(Dimension::<Twips>::new(20000)), // 1000pt on a 468pt area
+            ..base()
+        });
+        assert_eq!(g.len(), 1, "two columns cannot fit a 1000pt gap");
+        assert!(g[0].width >= Pt::ZERO);
+    }
+
+    /// The bound solves for the gaps, so every admitted count leaves each column
+    /// at least `MIN_COLUMN_WIDTH` — not merely non-negative. On Letter with the
+    /// default 36pt spacing that is 13 columns, one below the old sign-flip.
+    #[test]
+    fn admitted_counts_leave_every_column_usably_wide() {
+        let g = cols_of(Columns {
+            count: Some(13),
+            ..base()
+        });
+        assert_eq!(g.len(), 13);
+        for c in &g {
+            assert!(c.width >= MIN_COLUMN_WIDTH, "got {:?}", c.width);
+        }
+        // 14 is where the gaps consume the area, so the count is reduced.
+        let over = cols_of(Columns {
+            count: Some(14),
+            ..base()
+        });
+        assert_eq!(over.len(), 13, "clamped to what fits");
     }
 }
