@@ -154,6 +154,26 @@ fn rebuild_sfnt(version: &[u8], mut tables: Vec<([u8; 4], Vec<u8>)>) -> Result<V
         out[off..off + data.len()].copy_from_slice(data);
     }
 
+    // §5.2: `head.checksumAdjustment` must read zero for *both* checksums that
+    // cover it — the `head` table's own directory entry and the whole-file
+    // total. Zero it before the loop below, not after: computing the table
+    // checksums first and then changing the field leaves the stored `head`
+    // checksum describing bytes that no longer exist. The whole-file invariant
+    // held either way, which is why nothing downstream noticed.
+    let head_adj_pos = match tables.iter().position(|(t, _)| t == HEAD_TAG) {
+        Some(i) => {
+            // A `head` too short to contain the field would otherwise have its
+            // "adjustment" written into padding or the following table.
+            if tables[i].1.len() < HEAD_CHECKSUM_ADJUSTMENT_OFFSET + 4 {
+                return Err("head table too short for checksumAdjustment".into());
+            }
+            let pos = offsets[i] + HEAD_CHECKSUM_ADJUSTMENT_OFFSET;
+            out[pos..pos + 4].copy_from_slice(&0u32.to_be_bytes());
+            Some(pos)
+        }
+        None => None,
+    };
+
     // Per-table checksums are computed over the padded table region.
     for (i, ((_, data), &off)) in tables.iter().zip(offsets.iter()).enumerate() {
         let rec = SFNT_HEADER_SIZE + i * TABLE_RECORD_SIZE;
@@ -162,18 +182,13 @@ fn rebuild_sfnt(version: &[u8], mut tables: Vec<([u8; 4], Vec<u8>)>) -> Result<V
         out[rec + 4..rec + 8].copy_from_slice(&checksum.to_be_bytes());
     }
 
-    // §5.2: head.checksumAdjustment = 0xB1B0AFBA - whole-file-checksum,
-    // computed with checksumAdjustment itself zeroed.
-    if let Some((i, _)) = tables.iter().enumerate().find(|(_, (t, _))| t == HEAD_TAG) {
-        let head_off = offsets[i];
-        if head_off + HEAD_CHECKSUM_ADJUSTMENT_OFFSET + 4 > out.len() {
-            return Err("head table truncated".into());
-        }
-        let adj_pos = head_off + HEAD_CHECKSUM_ADJUSTMENT_OFFSET;
-        out[adj_pos..adj_pos + 4].copy_from_slice(&0u32.to_be_bytes());
+    // §5.2: head.checksumAdjustment = 0xB1B0AFBA - whole-file checksum, taken
+    // with every directory entry final and the field itself still zero. Writing
+    // it is the last mutation, so the file then sums to the magic exactly.
+    if let Some(pos) = head_adj_pos {
         let total = sfnt_checksum(&out);
         let adjustment = HEAD_MAGIC.wrapping_sub(total);
-        out[adj_pos..adj_pos + 4].copy_from_slice(&adjustment.to_be_bytes());
+        out[pos..pos + 4].copy_from_slice(&adjustment.to_be_bytes());
     }
 
     Ok(out)
@@ -361,5 +376,125 @@ mod tests {
             find_table(&out, HEAD_TAG).expect("scan").is_some(),
             "the existing table must survive"
         );
+    }
+
+    // ── OpenType §5.2 checksums ──────────────────────────────────────────
+
+    /// Recompute a table's directory checksum the way a validator would.
+    fn stored_and_actual(sfnt: &[u8], tag: &[u8; 4]) -> Option<(u32, u32)> {
+        let n = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        (0..n).find_map(|i| {
+            let rec = SFNT_HEADER_SIZE + i * TABLE_RECORD_SIZE;
+            (&sfnt[rec..rec + 4] == tag).then(|| {
+                let stored = read_u32(sfnt, rec + 4);
+                let off = read_u32(sfnt, rec + 8) as usize;
+                let len = read_u32(sfnt, rec + 12) as usize;
+                let padded = (len + 3) & !3;
+                (stored, sfnt_checksum(&sfnt[off..off + padded]))
+            })
+        })
+    }
+
+    /// §5.2: the whole font, summed as big-endian `u32`s with
+    /// `checksumAdjustment` in place, must equal `0xB1B0AFBA`.
+    #[test]
+    fn the_whole_file_sums_to_the_head_magic() {
+        let mut head = vec![0u8; 54];
+        head[8..12].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let out = rebuild_sfnt(
+            b"\x00\x01\x00\x00",
+            vec![(*b"head", head), (*b"name", vec![1, 2, 3, 4, 5])],
+        )
+        .expect("build");
+        assert_eq!(sfnt_checksum(&out), HEAD_MAGIC);
+    }
+
+    /// §5.2: `head`'s *directory* checksum is the one taken with
+    /// `checksumAdjustment` zeroed.
+    ///
+    /// Previously the per-table loop ran first and the field was rewritten
+    /// afterwards, so the stored value described bytes that no longer existed —
+    /// it came out as the caller's incoming garbage (`0xdeadbeef` here) rather
+    /// than the spec's value. The whole-file invariant above still held, which
+    /// is exactly why this went unnoticed.
+    #[test]
+    fn head_directory_checksum_is_taken_with_the_adjustment_zeroed() {
+        let mut head = vec![0u8; 54];
+        head[8..12].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let out = rebuild_sfnt(
+            b"\x00\x01\x00\x00",
+            vec![(*b"head", head), (*b"name", vec![9, 9, 9, 9])],
+        )
+        .expect("build");
+
+        let (stored, _) = stored_and_actual(&out, HEAD_TAG).expect("head present");
+        // Reconstruct the spec value: head's bytes with the field zeroed.
+        let n = u16::from_be_bytes([out[4], out[5]]) as usize;
+        let (off, len) = (0..n)
+            .find_map(|i| {
+                let rec = SFNT_HEADER_SIZE + i * TABLE_RECORD_SIZE;
+                (&out[rec..rec + 4] == HEAD_TAG).then(|| {
+                    (
+                        read_u32(&out, rec + 8) as usize,
+                        read_u32(&out, rec + 12) as usize,
+                    )
+                })
+            })
+            .expect("head record");
+        let mut zeroed = out[off..off + ((len + 3) & !3)].to_vec();
+        zeroed[HEAD_CHECKSUM_ADJUSTMENT_OFFSET..HEAD_CHECKSUM_ADJUSTMENT_OFFSET + 4]
+            .copy_from_slice(&0u32.to_be_bytes());
+
+        assert_eq!(stored, sfnt_checksum(&zeroed), "§5.2 head checksum");
+        assert_ne!(
+            stored, 0xDEAD_BEEF,
+            "must not be the caller's incoming adjustment"
+        );
+    }
+
+    /// Every non-`head` table's stored checksum must match its bytes exactly —
+    /// nothing rewrites those after the loop.
+    #[test]
+    fn non_head_directory_checksums_match_their_bytes() {
+        let out = rebuild_sfnt(
+            b"\x00\x01\x00\x00",
+            vec![
+                (*b"head", vec![0u8; 54]),
+                (*b"name", vec![7; 13]),
+                (*b"cmap", vec![3; 8]),
+            ],
+        )
+        .expect("build");
+        for tag in [b"name", b"cmap"] {
+            let (stored, actual) = stored_and_actual(&out, tag).expect("table present");
+            assert_eq!(
+                stored,
+                actual,
+                "checksum for {:?}",
+                std::str::from_utf8(tag)
+            );
+        }
+    }
+
+    /// A font with no `head` still builds — the adjustment step is simply
+    /// skipped, and no whole-file invariant applies without the field.
+    #[test]
+    fn a_font_without_head_still_builds() {
+        let out = rebuild_sfnt(b"\x00\x01\x00\x00", vec![(*b"name", vec![1, 2, 3, 4])])
+            .expect("build without head");
+        let (stored, actual) = stored_and_actual(&out, b"name").expect("name present");
+        assert_eq!(stored, actual);
+    }
+
+    /// A `head` too short to hold `checksumAdjustment` is declined. Writing at
+    /// its nominal offset would have landed in padding or the next table.
+    #[test]
+    fn a_truncated_head_is_declined_not_written_past() {
+        let err = rebuild_sfnt(
+            b"\x00\x01\x00\x00",
+            vec![(*b"head", vec![0u8; 8]), (*b"name", vec![1, 2, 3, 4])],
+        )
+        .expect_err("must decline");
+        assert!(err.contains("head table too short"), "got: {err}");
     }
 }
