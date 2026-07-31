@@ -377,11 +377,16 @@ fn rasterize_uncached(
             canvas.draw_glyphs_at(&ids, &*positions, (0.0, 0.0), &font, &paint);
         }
         None => {
-            // Fallback: cmap-level draw_str. The bounds-based translation
-            // here is a best effort to land the glyph inside the surface.
-            let (_, bounds) = font.measure_str(text, None);
-            canvas.translate((-bounds.left(), -bounds.top()));
-            canvas.draw_str(text, (0.0, 0.0), &font, &paint);
+            // Fallback: cmap-level draw_str, no GSUB, so a multi-codepoint
+            // sequence renders as separate glyphs rather than its ligature.
+            // It must still honour `baseline_y_px` — `draw_str` takes the
+            // baseline origin, so this is the single-run equivalent of the
+            // shaped branch above. Landing the glyph by its own ink bounds
+            // instead would put identical input at a different height
+            // depending only on whether `to_font_data()` yielded bytes,
+            // and would discard the original-size-ascent correction that
+            // non-linear emoji metrics need.
+            canvas.draw_str(text, (0.0, baseline_y_px), &font, &paint);
         }
     }
 
@@ -674,6 +679,117 @@ mod tests {
         assert!(
             (dw1 - dw3).abs() <= 2.0,
             "outline glyph draw widths must match within rounding, got {dw1} vs {dw3}"
+        );
+    }
+
+    // ─── draw_str fallback (G1#2) ─────────────────────────────────────────
+
+    /// Topmost surface row carrying any ink, or `None` for a blank surface.
+    fn first_ink_row(img: &EmojiImage) -> Option<i32> {
+        let peek = img.image.peek_pixels()?;
+        let row_bytes = peek.row_bytes();
+        let bytes = peek.bytes()?;
+        (0..img.pixels.1).find(|&y| {
+            let start = y as usize * row_bytes;
+            let end = (start + row_bytes).min(bytes.len());
+            bytes[start..end].iter().any(|&b| b != 0)
+        })
+    }
+
+    /// The cmap-only fallback (reached when `to_font_data()` yields nothing)
+    /// must place the glyph on the same baseline as the shaped path. It
+    /// previously translated by the glyph's own ink bounds, so identical
+    /// input landed at a different height depending only on whether font
+    /// bytes happened to be available.
+    #[test]
+    fn draw_str_fallback_lands_on_the_same_baseline_as_shaping() {
+        let tf = any_typeface();
+        let Some((bytes, _)) = tf.typeface.to_font_data() else {
+            eprintln!("skipping: host typeface exposes no font data");
+            return;
+        };
+        let size = Pt::new(48.0);
+        let target = PtSize::new(Pt::new(48.0), Pt::new(64.0));
+        let shaped =
+            rasterize_uncached("A", &tf, size, SuperSample::FourPerPt, target, Some(&bytes))
+                .expect("shaped path must rasterize");
+        let fallback = rasterize_uncached("A", &tf, size, SuperSample::FourPerPt, target, None)
+            .expect("fallback path must rasterize");
+
+        let shaped_row = first_ink_row(&shaped).expect("shaped path must draw ink");
+        let fallback_row = first_ink_row(&fallback).expect("fallback path must draw ink");
+        assert!(
+            (shaped_row - fallback_row).abs() <= 1,
+            "fallback ink starts at row {fallback_row} but shaping puts it at \
+             {shaped_row}; the two paths must agree on the baseline"
+        );
+        // Both must sit *below* the top edge: the baseline is `ascent ×
+        // factor` down from it, so a cap-height glyph starts well inside the
+        // surface. Ink flush against row 0 is the signature of positioning by
+        // the glyph's own bounds instead.
+        assert!(
+            shaped_row > 1,
+            "ink at row {shaped_row} means the baseline was ignored"
+        );
+    }
+
+    /// The same agreement, on a font whose metrics are *non-linear* across
+    /// point sizes — the case the baseline handling exists for. On a Latin
+    /// system font `metrics().ascent` at the scaled size and
+    /// `ascent(original) × factor` coincide, so the test above cannot tell
+    /// them apart.
+    ///
+    /// Apple Color Emoji diverges, but only below ~24pt: measured
+    /// `-ascent / size` is 1.25 at 8–12pt, 1.045 at 22pt and 1.0 from 24pt
+    /// up. So this must run at a **small** size — at 12pt × 4 the correct
+    /// baseline is `15.0 × 4 = 60` px while the scaled font's own ascent is
+    /// 48 px, a 12-row gap. At 48pt both readings are 192 px and the bug is
+    /// invisible. Host-conditional, like X5.
+    #[test]
+    fn draw_str_fallback_honours_the_original_size_ascent() {
+        let registry = FontRegistry::new(FontMgr::new());
+        let lookup = RegistryLookup {
+            registry: &registry,
+        };
+        let entry = match resolve(&lookup, None) {
+            EmojiTypeface::Resolved { entry, .. } => entry,
+            EmojiTypeface::Unavailable { .. } => {
+                eprintln!("skipping: no color emoji typeface on this host");
+                return;
+            }
+        };
+        let Some((bytes, _)) = entry.typeface.to_font_data() else {
+            eprintln!("skipping: emoji typeface exposes no font data");
+            return;
+        };
+        // 12pt: inside the non-linear part of the metric curve.
+        let size = Pt::new(12.0);
+        let target = default_target();
+        let shaped = rasterize_uncached(
+            "\u{1F4DE}",
+            &entry,
+            size,
+            SuperSample::FourPerPt,
+            target,
+            Some(&bytes),
+        )
+        .expect("shaped path must rasterize");
+        let fallback = rasterize_uncached(
+            "\u{1F4DE}",
+            &entry,
+            size,
+            SuperSample::FourPerPt,
+            target,
+            None,
+        )
+        .expect("fallback path must rasterize");
+
+        let shaped_row = first_ink_row(&shaped).expect("shaped path must draw ink");
+        let fallback_row = first_ink_row(&fallback).expect("fallback path must draw ink");
+        assert!(
+            (shaped_row - fallback_row).abs() <= 1,
+            "fallback ink starts at row {fallback_row} but shaping puts it at {shaped_row}; \
+             the fallback must scale the *original*-size ascent, not read the scaled font's"
         );
     }
 
