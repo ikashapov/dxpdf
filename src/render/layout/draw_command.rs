@@ -360,4 +360,191 @@ mod tests {
             panic!();
         }
     }
+
+    // ── `shift` over every variant ───────────────────────────────────────
+    //
+    // The match in `shift` is exhaustive, so a *new* variant is a compile
+    // error — that half is free. What exhaustiveness cannot check is whether
+    // each arm moves the right field, which is what these cover. Six variants
+    // (`Underline`, `Image`, `EmojiCluster`, `LinkAnnotation`, `InternalLink`,
+    // `NamedDestination`) previously had no test at all, and `shift_x` had
+    // none on any variant.
+
+    const DX: f32 = 3.0;
+    const DY: f32 = 7.0;
+
+    fn origin_of(cmd: &DrawCommand) -> (f32, f32) {
+        match cmd {
+            DrawCommand::Text { position, .. } | DrawCommand::NamedDestination { position, .. } => {
+                (position.x.raw(), position.y.raw())
+            }
+            DrawCommand::Underline { line, .. } | DrawCommand::Line { line, .. } => {
+                (line.start.x.raw(), line.start.y.raw())
+            }
+            DrawCommand::Image { rect, .. }
+            | DrawCommand::EmojiCluster { rect, .. }
+            | DrawCommand::Rect { rect, .. }
+            | DrawCommand::LinkAnnotation { rect, .. }
+            | DrawCommand::InternalLink { rect, .. } => (rect.origin.x.raw(), rect.origin.y.raw()),
+            DrawCommand::Path { origin, .. } => (origin.x.raw(), origin.y.raw()),
+        }
+    }
+
+    /// A sample of each variant, all anchored at (10, 20).
+    fn one_of_each() -> Vec<(&'static str, DrawCommand)> {
+        let at = |x: f32, y: f32| PtOffset::new(Pt::new(x), Pt::new(y));
+        let rect = PtRect::from_xywh(Pt::new(10.0), Pt::new(20.0), Pt::new(4.0), Pt::new(4.0));
+        let seg = PtLineSegment {
+            start: at(10.0, 20.0),
+            end: at(30.0, 20.0),
+        };
+        vec![
+            (
+                "Text",
+                DrawCommand::Text {
+                    position: at(10.0, 20.0),
+                    text: "hi".into(),
+                    font_family: Rc::from("Arial"),
+                    char_spacing: Pt::ZERO,
+                    font_size: Pt::new(12.0),
+                    bold: false,
+                    italic: false,
+                    color: RgbColor::BLACK,
+                    text_scale: 1.0,
+                },
+            ),
+            (
+                "Underline",
+                DrawCommand::Underline {
+                    line: seg,
+                    color: RgbColor::BLACK,
+                    width: Pt::new(1.0),
+                },
+            ),
+            (
+                "Line",
+                DrawCommand::Line {
+                    line: seg,
+                    color: RgbColor::BLACK,
+                    width: Pt::new(1.0),
+                },
+            ),
+            (
+                "Rect",
+                DrawCommand::Rect {
+                    rect,
+                    color: RgbColor::BLACK,
+                },
+            ),
+            (
+                "Image",
+                DrawCommand::Image {
+                    rect,
+                    image_data: crate::render::resolve::images::MediaEntry {
+                        data: Rc::from(&[0u8][..]),
+                        format: crate::model::ImageFormat::Png,
+                    },
+                    src_rect: None,
+                },
+            ),
+            (
+                "LinkAnnotation",
+                DrawCommand::LinkAnnotation {
+                    rect,
+                    url: "https://example.invalid".into(),
+                },
+            ),
+            (
+                "InternalLink",
+                DrawCommand::InternalLink {
+                    rect,
+                    destination: "bm".into(),
+                },
+            ),
+            (
+                "NamedDestination",
+                DrawCommand::NamedDestination {
+                    position: at(10.0, 20.0),
+                    name: "bm".into(),
+                },
+            ),
+            (
+                "Path",
+                DrawCommand::Path {
+                    origin: at(10.0, 20.0),
+                    rotation: Dimension::new(0),
+                    flip_h: false,
+                    flip_v: false,
+                    extent: PtSize::new(Pt::new(4.0), Pt::new(4.0)),
+                    paths: Vec::new(),
+                    fill: ResolvedFill::None,
+                    stroke: None,
+                    effects: Vec::new(),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn shift_moves_every_variant_on_both_axes() {
+        for (name, mut cmd) in one_of_each() {
+            cmd.shift(Pt::new(DX), Pt::new(DY));
+            assert_eq!(origin_of(&cmd), (10.0 + DX, 20.0 + DY), "{name}");
+        }
+    }
+
+    #[test]
+    fn shift_x_and_shift_y_move_one_axis_each() {
+        for (name, mut cmd) in one_of_each() {
+            cmd.shift_x(Pt::new(DX));
+            assert_eq!(origin_of(&cmd), (10.0 + DX, 20.0), "{name} shift_x");
+        }
+        for (name, mut cmd) in one_of_each() {
+            cmd.shift_y(Pt::new(DY));
+            assert_eq!(origin_of(&cmd), (10.0, 20.0 + DY), "{name} shift_y");
+        }
+    }
+
+    /// A line has two endpoints; shifting must move both, or the segment
+    /// changes length instead of position.
+    #[test]
+    fn shift_moves_both_ends_of_a_segment() {
+        let mut cmd = DrawCommand::Line {
+            line: PtLineSegment {
+                start: PtOffset::new(Pt::new(10.0), Pt::new(20.0)),
+                end: PtOffset::new(Pt::new(30.0), Pt::new(20.0)),
+            },
+            color: RgbColor::BLACK,
+            width: Pt::new(1.0),
+        };
+        cmd.shift(Pt::new(DX), Pt::new(DY));
+        let DrawCommand::Line { line, .. } = cmd else {
+            unreachable!()
+        };
+        assert_eq!((line.start.x.raw(), line.start.y.raw()), (13.0, 27.0));
+        assert_eq!((line.end.x.raw(), line.end.y.raw()), (33.0, 27.0));
+    }
+
+    /// `Path` carries its geometry in shape-local coordinates, so `shift` must
+    /// move only the placement origin — moving the subpaths as well would
+    /// double-apply the offset.
+    #[test]
+    fn shift_leaves_path_extent_and_geometry_alone() {
+        let mut cmd = DrawCommand::Path {
+            origin: PtOffset::new(Pt::new(10.0), Pt::new(20.0)),
+            rotation: Dimension::new(0),
+            flip_h: false,
+            flip_v: false,
+            extent: PtSize::new(Pt::new(4.0), Pt::new(6.0)),
+            paths: Vec::new(),
+            fill: ResolvedFill::None,
+            stroke: None,
+            effects: Vec::new(),
+        };
+        cmd.shift(Pt::new(DX), Pt::new(DY));
+        let DrawCommand::Path { extent, .. } = cmd else {
+            unreachable!()
+        };
+        assert_eq!((extent.width.raw(), extent.height.raw()), (4.0, 6.0));
+    }
 }
