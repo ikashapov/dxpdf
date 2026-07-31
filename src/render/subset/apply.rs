@@ -326,17 +326,11 @@ fn check_shapeability(
     })
 }
 
-#[cfg(feature = "subset-fonts")]
 fn subset_with_fontcull(bytes: &[u8], unicodes: &[u32]) -> Result<Vec<u8>, String> {
     fontcull::subset_font_data_unicode(bytes, unicodes, &[]).map_err(|e| e.to_string())
 }
 
-#[cfg(not(feature = "subset-fonts"))]
-fn subset_with_fontcull(_bytes: &[u8], _unicodes: &[u32]) -> Result<Vec<u8>, String> {
-    Err("subset-fonts feature is disabled".to_string())
-}
-
-#[cfg(all(test, feature = "subset-fonts"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::EmbeddedFontVariant;

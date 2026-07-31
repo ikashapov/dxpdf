@@ -67,6 +67,15 @@ jobs:
       - name: Run tests
         run: cargo test --all
 
+      # `subset-fonts` is default-on, so `cargo test --all` never compiles the
+      # crate without it. AGENTS.md documents `--no-default-features` as a
+      # supported build; nothing verified it, which is how a `not(feature)`
+      # arm survived in a module that only exists *with* the feature. This
+      # catches the real failure mode: a `fontcull` reference leaking outside
+      # the gated module.
+      - name: Build without default features
+        run: cargo build --no-default-features
+
   build:
     name: Build release
     runs-on: ubuntu-latest

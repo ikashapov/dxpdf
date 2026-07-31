@@ -22,11 +22,16 @@
 //!   subset prefixes (`AAAAAA+`-style) are emitted by Skia's PDF backend at
 //!   write time — we only feed it smaller bytes.
 
+// No `#[cfg(feature = "subset-fonts")]` below, and none inside these modules:
+// `render::mod` gates `pub mod subset` on that feature, so everything here
+// compiles only when it is on and any inner gate is a tautology. The `not(...)`
+// arms that used to pair with them were unreachable code carrying justifications
+// that did not hold — one claimed Rust "still needs an implementation" for a
+// function that does not exist without the feature.
 pub mod apply;
 pub mod collect;
 pub mod extract;
 pub mod format;
-#[cfg(feature = "subset-fonts")]
 pub mod name_splice;
 
 pub use apply::{apply, SubsetOutcome, SubsetReport};
