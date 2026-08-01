@@ -346,6 +346,18 @@ mod tests {
             text_frag("text", 80.0),
             Fragment::Tab {
                 line_height: Pt::new(14.0),
+                font: Rc::new(FontProps {
+                    family: Rc::from("Test"),
+                    size: Pt::new(12.0),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    char_spacing: Pt::ZERO,
+                    text_scale: 1.0,
+                    underline_position: Pt::ZERO,
+                    underline_thickness: Pt::ZERO,
+                }),
+                color: RgbColor::BLACK,
                 fitting_width: None,
             },
             text_frag("more", 30.0),

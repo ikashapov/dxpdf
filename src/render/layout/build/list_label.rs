@@ -101,8 +101,20 @@ pub(super) fn inject_list_label(
         let drop_separator =
             level_def.map(|l| l.suffix) == Some(crate::model::LevelSuffix::Nothing);
         if !drop_separator {
+            // §17.3.1.38: a leader on this separator is drawn in the
+            // formatting in effect at the tab. A picture bullet has no text
+            // run of its own, so the paragraph defaults *are* that formatting.
+            let (fam, size, color, _, _) =
+                resolve_paragraph_defaults(para, ctx.resolved, false, None, None);
+            let sep_font = crate::render::layout::fragment::font_props_from_run(
+                &model::RunProperties::default(),
+                &fam,
+                size,
+            );
             let tab_frag = Fragment::Tab {
                 line_height: label_height,
+                font: Rc::new(sep_font),
+                color,
                 fitting_width: Some(hanging),
             };
             fragments.insert(0, tab_frag);
@@ -268,6 +280,10 @@ fn inject_text_label(
                 0,
                 Fragment::Tab {
                     line_height: h,
+                    // §17.3.1.38: the label's own formatting is what a leader
+                    // on this separator is drawn in.
+                    font: Rc::new(label_font.clone()),
+                    color: label_color,
                     fitting_width: Some(tab_fitting),
                 },
             );

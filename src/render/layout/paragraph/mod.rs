@@ -24,10 +24,6 @@ use line_emit::{compute_line_placements, emit_line_commands, resolve_line_height
 
 // ── Tab leader rendering constants ────────────────────────────────────────────
 
-/// Maximum font size used when measuring/drawing tab leader characters (pt).
-/// Caps at 12pt so leaders remain legible regardless of paragraph line height.
-const LEADER_FONT_SIZE_CAP: Pt = Pt::new(12.0);
-
 /// Fallback width for a single leader character when no measurer is available (pt).
 const LEADER_CHAR_WIDTH_FALLBACK: Pt = Pt::new(4.0);
 
@@ -766,6 +762,8 @@ mod tests {
                 &[
                     Fragment::Tab {
                         line_height: Pt::new(14.0),
+                        font: leader_font("Test", 12.0),
+                        color: RgbColor::BLACK,
                         fitting_width: Some(Pt::new(5.0)),
                     },
                     text_frag("alpha", 10.0),
@@ -1021,6 +1019,8 @@ mod tests {
                 text_frag("A", 10.0),
                 Fragment::Tab {
                     line_height: Pt::new(14.0),
+                    font: leader_font("Test", 12.0),
+                    color: RgbColor::BLACK,
                     fitting_width: None,
                 },
                 text_frag("B", 10.0),
@@ -1118,6 +1118,8 @@ mod tests {
             underlined_text_frag("alpha ", 25.0),
             Fragment::Tab {
                 line_height: Pt::new(14.0),
+                font: leader_font("Test", 12.0),
+                color: RgbColor::BLACK,
                 fitting_width: None,
             },
             text_frag("beta ", 25.0),
@@ -1149,6 +1151,8 @@ mod tests {
                 text_frag("1.", 10.0),
                 Fragment::Tab {
                     line_height: Pt::new(14.0),
+                    font: leader_font("Test", 12.0),
+                    color: RgbColor::BLACK,
                     fitting_width: Some(Pt::new(5.0)),
                 },
                 text_frag("alpha ", 20.0),
@@ -1183,6 +1187,8 @@ mod tests {
                 image_frag(10.0, 10.0),
                 Fragment::Tab {
                     line_height: Pt::new(14.0),
+                    font: leader_font("Test", 12.0),
+                    color: RgbColor::BLACK,
                     fitting_width: Some(Pt::new(5.0)),
                 },
                 text_frag("alpha ", 20.0),
@@ -1701,6 +1707,8 @@ mod tests {
             relative_to,
             leader: crate::model::TabLeader::None,
             line_height: Pt::new(12.0),
+            font: leader_font("Test", 12.0),
+            color: RgbColor::BLACK,
         }
     }
 
@@ -1791,5 +1799,265 @@ mod tests {
         let xs = text_xs(&result);
         assert_eq!(xs[0], 0.0, "left run not shifted by End alignment");
         assert_eq!(xs[1], 70.0, "right run ends at the right margin");
+    }
+
+    // ── Decimal tab alignment (§17.18.85 `ST_TabJc` = decimal) ──
+    //
+    // A decimal stop aligns the *separator* on the stop, not an edge of the
+    // zone. These use a 10pt-per-character measurer so the expected x values
+    // are exact arithmetic rather than font-dependent.
+
+    /// Measure every character as 10pt wide, so a prefix's width is
+    /// `10 * prefix.chars().count()`.
+    fn ten_pt_per_char(text: &str, _f: &FontProps) -> (Pt, TextMetrics) {
+        (
+            Pt::new(10.0 * text.chars().count() as f32),
+            TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+        )
+    }
+
+    fn decimal_stop_at(pos: f32) -> ParagraphStyle {
+        ParagraphStyle {
+            tabs: vec![TabStopDef {
+                position: Pt::new(pos),
+                alignment: crate::model::TabAlignment::Decimal,
+                leader: crate::model::TabLeader::None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Lay out `a<tab>zone` against a decimal stop at 100 and return the x of
+    /// the zone's text.
+    fn decimal_zone_x(zone: &str) -> f32 {
+        let measurer: &dyn Fn(&str, &FontProps) -> (Pt, TextMetrics) = &ten_pt_per_char;
+        let frags = vec![
+            text_frag("a", 10.0),
+            Fragment::Tab {
+                line_height: Pt::new(12.0),
+                font: leader_font("Test", 12.0),
+                color: RgbColor::BLACK,
+                fitting_width: None,
+            },
+            text_frag(zone, 10.0 * zone.chars().count() as f32),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &decimal_stop_at(100.0),
+            Pt::new(14.0),
+            Some(measurer),
+        );
+        *text_xs(&result).last().expect("zone text is emitted")
+    }
+
+    #[test]
+    fn decimal_tab_puts_the_separator_on_the_stop() {
+        // §17.18.85: the decimal separator lands on the stop, whatever the
+        // integer part's width. "1.5" has one char before the separator,
+        // "22.75" has two — so they start 10pt apart and their separators
+        // coincide at x=100.
+        assert_eq!(decimal_zone_x("1.5"), 90.0, "one char before the separator");
+        assert_eq!(
+            decimal_zone_x("22.75"),
+            80.0,
+            "two chars before the separator"
+        );
+        assert_eq!(
+            decimal_zone_x("333.125"),
+            70.0,
+            "three chars before the separator"
+        );
+    }
+
+    #[test]
+    fn decimal_tab_without_a_separator_right_aligns() {
+        // Word right-aligns a decimal-tabbed zone that has no separator —
+        // aligning its left edge would leave numeric columns ragged.
+        assert_eq!(
+            decimal_zone_x("1234"),
+            60.0,
+            "4 chars ending at the stop → 100 - 40"
+        );
+    }
+
+    #[test]
+    fn decimal_tab_aligns_on_the_first_separator() {
+        // A version string has several; the first is the alignment point.
+        assert_eq!(decimal_zone_x("1.2.3"), 90.0);
+    }
+
+    #[test]
+    fn decimal_tab_never_moves_content_backwards() {
+        // The zone is wider than the stop, so honouring the separator would
+        // place text left of the current pen. Clamp, as right/center do.
+        assert_eq!(
+            decimal_zone_x("1234567890123.5"),
+            10.0,
+            "separator would land at -30; clamped to the pen after 'a'"
+        );
+    }
+
+    // ── Tab leaders (§17.3.1.38) ──
+    //
+    // A leader carries no formatting of its own: §17.3.1.38 defines it as
+    // filling the tab with a character, and the character is drawn in the
+    // formatting in effect at the tab — i.e. the `<w:rPr>` of the run holding
+    // the `<w:tab/>`. These assert that, not the paragraph default.
+
+    /// Build a run font differing from every default, so a leader that
+    /// inherits it cannot pass by coincidence.
+    fn leader_font(family: &str, size: f32) -> Rc<FontProps> {
+        Rc::new(FontProps {
+            family: Rc::from(family),
+            size: Pt::new(size),
+            bold: false,
+            italic: false,
+            underline: false,
+            char_spacing: Pt::ZERO,
+            text_scale: 1.0,
+            underline_position: Pt::ZERO,
+            underline_thickness: Pt::ZERO,
+        })
+    }
+
+    fn dotted_stop_at(pos: f32) -> ParagraphStyle {
+        ParagraphStyle {
+            tabs: vec![TabStopDef {
+                position: Pt::new(pos),
+                alignment: crate::model::TabAlignment::Left,
+                leader: crate::model::TabLeader::Dot,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The first Text command whose text is all leader dots.
+    fn leader_command(result: &ParagraphLayout) -> &DrawCommand {
+        result
+            .commands
+            .iter()
+            .find(|c| match c {
+                DrawCommand::Text { text, .. } => {
+                    !text.is_empty() && text.chars().all(|c| c == '.')
+                }
+                _ => false,
+            })
+            .expect("a dotted tab stop must emit a leader command")
+    }
+
+    #[test]
+    fn tab_leader_inherits_the_run_font_and_colour() {
+        // §17.3.1.38: the leader is drawn in the tab run's own formatting.
+        // Previously it was hardcoded to Times New Roman / black.
+        let frags = vec![
+            text_frag("a", 10.0),
+            Fragment::Tab {
+                line_height: Pt::new(12.0),
+                font: leader_font("Georgia", 12.0),
+                color: RgbColor { r: 255, g: 0, b: 0 },
+                fitting_width: None,
+            },
+            text_frag("b", 10.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &dotted_stop_at(100.0),
+            Pt::new(14.0),
+            None,
+        );
+
+        match leader_command(&result) {
+            DrawCommand::Text {
+                font_family, color, ..
+            } => {
+                assert_eq!(
+                    &**font_family, "Georgia",
+                    "leader takes the run's family, not a hardcoded one"
+                );
+                assert_eq!(
+                    *color,
+                    RgbColor { r: 255, g: 0, b: 0 },
+                    "leader takes the run's colour, not black"
+                );
+            }
+            _ => unreachable!("leader_command returns a Text command"),
+        }
+    }
+
+    #[test]
+    fn tab_leader_scales_with_the_run_font_size() {
+        // The old code sized the leader from the paragraph line height and
+        // capped it at 12pt, so a large run drew undersized leaders.
+        let frags = vec![
+            text_frag("a", 10.0),
+            Fragment::Tab {
+                line_height: Pt::new(24.0),
+                font: leader_font("Georgia", 24.0),
+                color: RgbColor::BLACK,
+                fitting_width: None,
+            },
+            text_frag("b", 10.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &dotted_stop_at(100.0),
+            Pt::new(28.0),
+            None,
+        );
+
+        match leader_command(&result) {
+            DrawCommand::Text { font_size, .. } => assert_eq!(
+                font_size.raw(),
+                24.0,
+                "a 24pt run gets 24pt leader dots, not a 12pt cap"
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn ptab_leader_inherits_the_run_font_and_colour() {
+        // Same rule on the §17.3.1.30 position-tab arm, which carries its
+        // leader on the fragment rather than on a tab stop.
+        let frags = vec![
+            text_frag("L", 10.0),
+            Fragment::PTab {
+                align: PTabAlignment::Right,
+                relative_to: PTabRelativeTo::Margin,
+                leader: crate::model::TabLeader::Dot,
+                line_height: Pt::new(12.0),
+                font: leader_font("Georgia", 18.0),
+                color: RgbColor { r: 0, g: 128, b: 0 },
+            },
+            text_frag("R", 30.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+
+        match leader_command(&result) {
+            DrawCommand::Text {
+                font_family,
+                font_size,
+                color,
+                ..
+            } => {
+                assert_eq!(&**font_family, "Georgia");
+                assert_eq!(font_size.raw(), 18.0);
+                assert_eq!(*color, RgbColor { r: 0, g: 128, b: 0 });
+            }
+            _ => unreachable!(),
+        }
     }
 }

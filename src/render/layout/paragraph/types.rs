@@ -13,9 +13,9 @@ use crate::render::resolve::color::RgbColor;
 pub struct TabStopDef {
     /// Absolute position from paragraph left edge.
     pub position: Pt,
-    /// §17.18.81: tab alignment (left, center, right, decimal).
+    /// §17.18.85 `ST_TabJc`: tab alignment (left, center, right, decimal).
     pub alignment: crate::model::TabAlignment,
-    /// §17.18.82: leader character (dot, hyphen, underscore, etc.).
+    /// §17.18.86 `ST_TabTlc`: leader character (dot, hyphen, underscore, etc.).
     pub leader: crate::model::TabLeader,
 }
 

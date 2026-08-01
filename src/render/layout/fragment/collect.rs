@@ -627,6 +627,10 @@ where
                                 RunElement::Tab => {
                                     fragments.push(Fragment::Tab {
                                         line_height: font.size,
+                                        // §17.3.1.38: a leader on this tab is
+                                        // drawn in the tab run's own formatting.
+                                        font: Rc::new(font.clone()),
+                                        color: text_style.color,
                                         fitting_width: None,
                                     });
                                 }
@@ -636,6 +640,8 @@ where
                                         relative_to: ptab.relative_to,
                                         leader: ptab.leader.into(),
                                         line_height: font.size,
+                                        font: Rc::new(font.clone()),
+                                        color: text_style.color,
                                     });
                                 }
                                 RunElement::LineBreak(_) => {

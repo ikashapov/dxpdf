@@ -202,6 +202,13 @@ pub enum Fragment {
     },
     Tab {
         line_height: Pt,
+        /// §17.3.1.38: formatting of the run holding the `<w:tab/>`. A tab
+        /// leader carries no formatting of its own — it is drawn in the
+        /// formatting in effect at the tab — so the leader emitter reads its
+        /// family and size from here rather than substituting a default.
+        font: Rc<FontProps>,
+        /// §17.3.1.38: text colour of the tab's run, for the same reason.
+        color: RgbColor,
         /// Override minimum width for line fitting (default: MIN_TAB_WIDTH).
         fitting_width: Option<Pt>,
     },
@@ -214,6 +221,11 @@ pub enum Fragment {
         relative_to: PTabRelativeTo,
         leader: TabLeader,
         line_height: Pt,
+        /// §17.3.1.38: formatting of the run holding the `<w:ptab/>` — the
+        /// leader is drawn in it. See [`Fragment::Tab`].
+        font: Rc<FontProps>,
+        /// §17.3.1.38: text colour of the ptab's run.
+        color: RgbColor,
     },
     LineBreak {
         line_height: Pt,
