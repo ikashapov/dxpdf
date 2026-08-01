@@ -48,7 +48,7 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 
 5. **Subset** (`src/render/subset/`, default `subset-fonts` feature) — Between layout and paint: `collect.rs` walks draw commands recording **codepoint** usage per resolved typeface (keyed by `TypefaceId`, so substituted and direct requests for the same face merge), `apply.rs` subsets each typeface via `fontcull`, splices the original `name` table back in, validates that every kept codepoint still shapes to a non-`.notdef` glyph, and swaps the bytes into the `FontRegistry`. Every failure mode is an explicit `SubsetOutcome` variant; a typeface that can't be subsetted keeps its original bytes. See `docs/font-subsetting.md`.
 
-6. **Paint** (`src/render/painter.rs`) — Iterates draw commands and emits PDF bytes via `skia_safe::pdf`. This is the only f32/Skia boundary. `skia_conv.rs` handles Pt-to-Skia conversions. `emf.rs` handles EMF (Enhanced Metafile) image rendering. `emoji/` is a separate color-emoji pipeline (UAX #29 / UTS #51 cluster classification in `cluster.rs`, host-OS color-typeface resolution in `resolve.rs`, Skia raster rasterization with a per-render cache in `raster.rs`).
+6. **Paint** (`src/render/painter.rs`) — Iterates draw commands and emits PDF bytes via `skia_safe::pdf`. This is the only f32/Skia boundary. `skia_conv.rs` handles Pt-to-Skia conversions. `emf.rs` handles EMF (Enhanced Metafile) image rendering. `emoji/` is a separate color-emoji pipeline (UAX #29 / UTS #51 cluster classification in `cluster.rs`, host-OS color-typeface resolution in `resolve.rs`, GSUB shaping via Skia's HarfBuzz in `shape.rs`, Skia raster rasterization with a per-render cache in `raster.rs`).
 
 ### Key Design Patterns
 
@@ -66,14 +66,42 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 
 ## OOXML Reference
 
-`docs/README.md` is the index — start there. It is grouped into **Rendering Reference** (current behavior), **Implementation Plans** (designs with items outstanding), and **Branch Code Reviews** (historical snapshots of merged branches, *not* descriptions of current behavior). It also lists which subsystems have no doc yet.
+`docs/` captures WHY the current code makes the choices it does, which is generally not re-derivable from the source. Consult the relevant page before changing layout behavior. When you change behavior a doc describes, update the doc in the same change.
 
-Consult the relevant page before changing layout behavior — these capture WHY the current code makes the choices it does, which is generally not re-derivable from the source. When you change behavior a doc describes, update the doc in the same change.
+**Current behavior:**
+
+- [Style Cascade](docs/style-cascade.md) — §17.7.2 property resolution, doc defaults, table style interaction
+- [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
+- [Line Spacing](docs/line-spacing.md) — §17.3.1.33 line/lineRule, Auto/Exact/AtLeast modes
+- [Position Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab`, alignment derived at layout time
+- [Section Stacking](docs/section-stacking.md) — §17.6 block stacking, page/column breaks, keepNext chains, paragraph splitting, footnote reservation
+- [Keep-Lines & Paragraph Splitting](docs/keep-lines-plan.md) — §17.3.1.14/§17.3.1.44 across-page line splitting, widow/orphan control, cross-split borders/shading/drop-caps. Titled "plan"; the work is complete
+- [Table Layout](docs/table-layout.md) — §17.4 3-pass column sizing, border conflict resolution, row splitting across pages
+- [Floating Tables](docs/floating-tables.md) — §17.4.58 tblpPr positioning, vertical anchors
+- [Floating Images](docs/floating-images.md) — §20.4.2 anchor positioning, text wrapping, forward-scan
+- [Headers and Footers](docs/headers-footers.md) — §17.10.1 rendering, table support, per-page fields
+- [Fields](docs/fields.md) — §17.16.18 complex/simple fields, PAGE/NUMPAGES evaluation
+- [Font Resolution & Substitution](docs/font-substitution.md) — §17.8 the 5-step resolution chain, metric-compatible substitutes, per-render `FontRegistry` ownership
+- [Font Subsetting](docs/font-subsetting.md) — §17.8 / ISO 32000-1 §9.6 codepoint collection, `fontcull` subsetting, name-table splice, shapeability validation
+- [Shape Geometry](docs/shape-geometry.md) — §20.1.9 `prstGeom`/`custGeom` → paths, guide-formula evaluation, preset tiering
+- [Cross-Run Cluster Reassembly](docs/cross-run-cluster-reassembly.md) — §17.3.2.26 `w:rFonts` splitting grapheme clusters across runs, and how they are rejoined
+
+**Open work** — read the status line at the top of each before relying on it:
+
+- [Rendering Performance Analysis](docs/rendering-performance-analysis.md) — profiling of resolve → layout → subset → paint. Tiers 1–2 applied; Tier 3 (#11–#18) outstanding. Also the peak-memory investigation behind the move to Skia's HarfBuzz
+- [Position Tabs code review](docs/position-tab-code-review.md) — `w:ptab` branch review; findings #1–#5 and #8 still open
+
+**Historical records** — point-in-time, **not** descriptions of current behavior:
+
+- [Deep Review Findings](docs/deep-review-findings.md) — per-chunk findings from a full `src/` audit, each with its resolution
+- [Deferred Backlog](docs/deferred-backlog-plan.md) — cross-layer items deferred out of that review; all units complete
+
+**No doc yet** — start from the module docs at these entry points: color-emoji pipeline (`src/render/emoji/mod.rs`), parse/serde schemas (`src/docx/parse/`, the `XxxXml` → domain seam), text shaping & fragments (`src/render/layout/fragment/`), paint & PDF emission (`src/render/painter.rs`), EMF images (`src/render/emf.rs`), numbering & list labels (`src/docx/parse/numbering.rs`, `src/render/layout/build/list_label.rs`), VML fallback (`src/docx/parse/vml/`).
 
 ## Test Organization
 
 - **Unit tests**: `#[cfg(test)]` modules within source files.
-- **Integration tests** (`tests/`): `integration.rs` (in-memory DOCX build + parse), `parse_test_files.rs` (parse real DOCX files from `test-files/`), `render_integration.rs` (layout + rendering validation), `emoji_e2e.rs` (color-emoji pipeline end-to-end), `header_footer_selection.rs` and `header_part_rels.rs` (header/footer resolution), `serde_spike.rs` (mixed-content parsing).
+- **Integration tests** (`tests/`): `integration.rs` (in-memory DOCX build + parse), `parse_test_files.rs` (parse real DOCX files from `test-files/`), `render_integration.rs` (layout + rendering validation), `emoji_e2e.rs` (color-emoji pipeline end-to-end), `header_footer_selection.rs` and `header_part_rels.rs` (header/footer resolution), `serde_spike.rs` (mixed-content parsing), `table_border_conflict.rs` (§17.4.66 nil-vs-none, conflict resolution), `table_row_height.rs` (vMerge row heights), `table_style_whole_table.rs` (§17.7.6 `wholeTable` cascade), `floating_table_pagination.rs` (§17.4.58 anchor/spillover termination).
 - **Test helpers**: `make_docx()` and `simple_docx()` in `tests/integration.rs` build minimal in-memory DOCX archives.
 - **Visual diffing**: `scripts/compare_pdfs.py` diffs generated PDFs against references. `scripts/verify_wheel.py` checks that FreeType is embedded in built wheels (run by the CI wheel job).
 
