@@ -570,13 +570,10 @@ pub(super) fn emit_line_commands(
                         // here to the next tab (regular or position) or the
                         // line end, whichever comes first. §17.18.85 decides
                         // which point of that zone lands on the stop.
-                        let zone_end = fragments[frag_idx + 1..line.end]
-                            .iter()
-                            .position(is_tab_like)
-                            .map_or(line.end, |i| frag_idx + 1 + i);
-                        let zone = &fragments[frag_idx + 1..zone_end];
+                        let end = zone_end(fragments, frag_idx, line.end);
+                        let zone = &fragments[frag_idx + 1..end];
                         let offset = resolve_zone_anchor(ts.alignment, zone, measure_text)
-                            .offset(|| zone.iter().map(|f| f.width()).sum());
+                            .offset(|| zone_width(fragments, frag_idx + 1, end));
                         // Never move the pen backwards: a zone wider than the
                         // space before its stop overflows to the right rather
                         // than overprinting what precedes it.
@@ -615,14 +612,7 @@ pub(super) fn emit_line_commands(
                     // stop; its anchor is derived from `relative_to` and the
                     // width of the zone it positions (this tab to the next tab
                     // or the line end).
-                    let zone_end = fragments[frag_idx + 1..line.end]
-                        .iter()
-                        .position(is_tab_like)
-                        .map_or(line.end, |i| frag_idx + 1 + i);
-                    let zone_width: Pt = fragments[frag_idx + 1..zone_end]
-                        .iter()
-                        .map(|f| f.width())
-                        .sum();
+                    let end = zone_end(fragments, frag_idx, line.end);
                     let geometry = PTabGeometry {
                         max_width: params.max_width,
                         indent_left: style.indent_left,
@@ -631,7 +621,9 @@ pub(super) fn emit_line_commands(
                         float_left: lp.float_left,
                         float_right: lp.float_right,
                     };
-                    let new_x = match resolve_ptab(*align, *relative_to, geometry, x, zone_width) {
+                    let new_x = match resolve_ptab(*align, *relative_to, geometry, x, || {
+                        zone_width(fragments, frag_idx + 1, end)
+                    }) {
                         PTabPlacement::Placed(at) => at,
                         PTabPlacement::AdvancesToNextLine { anchor_x } => {
                             if frag_idx == line.start {
@@ -688,8 +680,30 @@ pub(super) fn emit_line_commands(
 /// True for fragments that place content by tab semantics — a regular tab
 /// stop (§17.3.1.37) or an absolute-position tab (§17.3.1.30). Both terminate
 /// a tab zone and suppress paragraph alignment for the line.
-pub(crate) fn is_tab_like(f: &Fragment) -> bool {
+fn is_tab_like(f: &Fragment) -> bool {
     matches!(f, Fragment::Tab { .. } | Fragment::PTab { .. })
+}
+
+/// Index at which the zone opened by a tab at `tab_idx` ends: the next
+/// tab-like fragment or line break, or `limit`.
+///
+/// §17.3.1.37/§17.3.1.30: a tab positions the content up to the next tab, so
+/// every tab arm — regular, position, and the fitter's look-ahead — needs this
+/// same boundary. Emission passes the line end as `limit`; fitting, which has
+/// no lines yet, passes the fragment count.
+pub(crate) fn zone_end(fragments: &[Fragment], tab_idx: usize, limit: usize) -> usize {
+    fragments[tab_idx + 1..limit]
+        .iter()
+        .position(|f| is_tab_like(f) || f.is_line_break())
+        .map_or(limit, |offset| tab_idx + 1 + offset)
+}
+
+/// Total width of `fragments[start..end]`.
+///
+/// Always call this behind a thunk: `left`-aligned tabs anchor at the span
+/// start and never need it, and this walk is on the per-line hot path.
+pub(crate) fn zone_width(fragments: &[Fragment], start: usize, end: usize) -> Pt {
+    fragments[start..end].iter().map(|f| f.width()).sum()
 }
 
 /// §17.3.1.37: find the next tab stop position greater than `current_x`.
@@ -767,14 +781,15 @@ pub enum PTabPlacement {
 
 /// §17.3.1.30: resolve a position tab against `pen_x` and its zone width.
 ///
-/// `zone_width` is the total width of the content this tab positions — from
-/// the tab to the next tab or the line end.
+/// `zone_width` yields the total width of the content this tab positions —
+/// from the tab to the next tab or the line end. It is a thunk because a
+/// `left` tab anchors at the span start and never needs it.
 pub fn resolve_ptab(
     align: crate::model::PTabAlignment,
     relative_to: crate::model::PTabRelativeTo,
     geometry: PTabGeometry,
     pen_x: Pt,
-    zone_width: Pt,
+    zone_width: impl FnOnce() -> Pt,
 ) -> PTabPlacement {
     use crate::model::{PTabAlignment, PTabRelativeTo};
 
@@ -803,8 +818,8 @@ pub fn resolve_ptab(
     };
     let anchor_x = match align {
         PTabAlignment::Left => anchor,
-        PTabAlignment::Center => anchor - zone_width * 0.5,
-        PTabAlignment::Right => anchor - zone_width,
+        PTabAlignment::Center => anchor - zone_width() * 0.5,
+        PTabAlignment::Right => anchor - zone_width(),
     };
 
     if anchor_x >= pen_x {
@@ -1025,7 +1040,10 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
 
 #[cfg(test)]
 mod tests {
-    use super::{find_next_tab_stop, resolve_zone_anchor, Fragment, ZoneAnchor};
+    use super::{
+        find_next_tab_stop, resolve_ptab, resolve_zone_anchor, Fragment, PTabGeometry,
+        PTabPlacement, ZoneAnchor,
+    };
     use crate::model;
     use crate::render::dimension::Pt;
     use crate::render::layout::paragraph::TabStopDef;
@@ -1188,5 +1206,61 @@ mod tests {
             ZoneAnchor::At(Pt::new(20.0)),
             "20pt of leading fragment + 0pt before the separator in the second"
         );
+    }
+
+    // ── resolve_ptab (§17.3.1.30) ─────────────────────────────────────────────
+
+    fn ptab_geometry() -> PTabGeometry {
+        PTabGeometry {
+            max_width: Pt::new(400.0),
+            indent_left: Pt::ZERO,
+            indent_first_line: Pt::ZERO,
+            content_width: Pt::new(400.0),
+            float_left: Pt::ZERO,
+            float_right: Pt::ZERO,
+        }
+    }
+
+    #[test]
+    fn a_left_ptab_never_sums_its_zone() {
+        // `left` anchors at the span start, which does not depend on the zone
+        // at all — so the O(zone) walk must not run. Same guarantee as
+        // `ZoneAnchor::Start`, and the reason the width arrives as a thunk.
+        let placement = resolve_ptab(
+            model::PTabAlignment::Left,
+            model::PTabRelativeTo::Margin,
+            ptab_geometry(),
+            Pt::ZERO,
+            || panic!("zone width computed for a left position tab"),
+        );
+        assert_eq!(placement, PTabPlacement::Placed(Pt::ZERO));
+    }
+
+    #[test]
+    fn right_and_centre_ptabs_measure_the_zone_once() {
+        // The counterpart: these do depend on the zone, and each must call the
+        // thunk exactly once — not per alignment branch.
+        for (align, expected) in [
+            (model::PTabAlignment::Right, 300.0),
+            (model::PTabAlignment::Center, 150.0),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let placement = resolve_ptab(
+                align,
+                model::PTabRelativeTo::Margin,
+                ptab_geometry(),
+                Pt::ZERO,
+                || {
+                    calls.set(calls.get() + 1);
+                    Pt::new(100.0)
+                },
+            );
+            assert_eq!(
+                placement,
+                PTabPlacement::Placed(Pt::new(expected)),
+                "{align:?}"
+            );
+            assert_eq!(calls.get(), 1, "{align:?} measures the zone once");
+        }
     }
 }

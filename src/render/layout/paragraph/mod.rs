@@ -8,8 +8,8 @@ mod line_emit;
 
 // §17.3.1.30: line fitting needs the same position-tab resolution emission
 // uses, so the two cannot disagree about where a tab puts content.
-pub(crate) use line_emit::is_tab_like;
 pub use line_emit::{resolve_ptab, PTabGeometry, PTabPlacement};
+pub(crate) use line_emit::{zone_end, zone_width};
 mod types;
 
 pub use types::*;

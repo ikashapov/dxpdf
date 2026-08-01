@@ -47,21 +47,10 @@ pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
 }
 
 /// Line fitting with separate first-line and remaining-line widths.
-/// Total width of the content a position tab at `ptab_idx` positions — from
-/// the tab to the next tab-like fragment, a line break, or the end.
 ///
-/// Fitting cannot bound this by the line end the way emission does, because
-/// the lines do not exist yet. Where the two disagree — a zone that fitting
-/// then splits for width — emission is authoritative for the final x; this
-/// value only decides whether the tab can be honoured on this line at all.
-fn ptab_zone_width(fragments: &[Fragment], ptab_idx: usize) -> Pt {
-    fragments[ptab_idx + 1..]
-        .iter()
-        .take_while(|f| !crate::render::layout::paragraph::is_tab_like(f) && !f.is_line_break())
-        .map(|f| f.width())
-        .sum()
-}
-
+/// `ptab_geometry` is the paragraph geometry §17.3.1.30 position tabs resolve
+/// against. Fitting needs it because a tab whose alignment point lies behind
+/// the pen advances to the next line, and only fitting can create one.
 pub fn fit_lines_with_first(
     fragments: &[Fragment],
     first_line_width: Pt,
@@ -137,13 +126,18 @@ pub fn fit_lines_with_first(
             align, relative_to, ..
         } = frag
         {
-            let zone_width = ptab_zone_width(fragments, i);
+            // Fitting cannot bound the zone by the line end the way emission
+            // does — the lines do not exist yet — so it scans to the end of the
+            // fragment list. Where the two disagree (a zone fitting then splits
+            // for width) emission is authoritative for the final x; this only
+            // decides whether the tab can be honoured on this line.
+            let end = crate::render::layout::paragraph::zone_end(fragments, i, fragments.len());
             let placement = crate::render::layout::paragraph::resolve_ptab(
                 *align,
                 *relative_to,
                 ptab_geometry,
                 pen_x,
-                zone_width,
+                || crate::render::layout::paragraph::zone_width(fragments, i + 1, end),
             );
             match placement {
                 crate::render::layout::paragraph::PTabPlacement::Placed(at) => {
