@@ -2,14 +2,13 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 use skia_safe::Font;
 
 use crate::render::dimension::Pt;
 use crate::render::emoji::resolve::{EmojiFamily, EmojiResolver, EmojiTypeface, RegistryLookup};
-use crate::render::emoji::shape::shape_text;
+use crate::render::emoji::shape::ClusterShaper;
 use crate::render::fonts::{self, FontRegistry, TypefaceEntry, TypefaceId};
 
 use super::fragment::{FontProps, TextMetrics};
@@ -40,16 +39,17 @@ pub struct TextMeasurer<'r> {
     /// Per-render dedup set so we warn at most once per cluster about a
     /// missing color emoji typeface.
     warned_emoji: RefCell<HashSet<String>>,
-    /// Per-render cache of extracted typeface bytes for emoji measurement,
-    /// keyed by typeface id. `to_font_data()` copies the whole typeface
-    /// (~190 MB for Apple Color Emoji), so — mirroring the raster pipeline's
-    /// `font_bytes_for` — we extract once per typeface instead of once per
-    /// cluster. `None` records a typeface that refuses to expose bytes so the
-    /// failed extraction isn't retried per cluster.
-    emoji_font_bytes: RefCell<HashMap<TypefaceId, Option<Rc<Vec<u8>>>>>,
+    /// GSUB-aware shaper, built once per render. `None` if this Skia build
+    /// exposes no HarfBuzz shaper, in which case emoji advances fall back to
+    /// the cmap-only `measure_str` path.
+    ///
+    /// Shaping through the typeface rather than extracted font bytes is what
+    /// keeps a ~183 MB emoji font off the heap — see
+    /// [`crate::render::emoji::shape`].
+    cluster_shaper: Option<ClusterShaper>,
     /// Per-render memo of GSUB-aware advances from `measure_with_typeface`,
     /// keyed by (typeface id, size in raw-f32 bits, cluster text). Skips
-    /// re-parsing a rustybuzz `Face` and re-shaping identical clusters.
+    /// re-shaping identical clusters.
     emoji_advance_cache: RefCell<HashMap<(TypefaceId, u32, String), Pt>>,
     /// Per-render text-measurement memo, indexed by the `FontCache` slot. Skips
     /// the Skia `measure_str` call (and per-call `font.metrics()`) for words
@@ -66,7 +66,7 @@ impl<'r> TextMeasurer<'r> {
             font_cache: RefCell::new(fonts::FontCache::new()),
             emoji_resolver: EmojiResolver::new(RegistryLookup { registry }),
             warned_emoji: RefCell::new(HashSet::new()),
-            emoji_font_bytes: RefCell::new(HashMap::new()),
+            cluster_shaper: ClusterShaper::new().ok(),
             emoji_advance_cache: RefCell::new(HashMap::new()),
             measure_cache: RefCell::new(FxHashMap::default()),
         }
@@ -191,7 +191,7 @@ impl<'r> TextMeasurer<'r> {
     /// which has already resolved the typeface and needs Skia raster metrics
     /// at the cluster's font size.
     ///
-    /// **Shapes via rustybuzz** (GSUB-aware) so multi-codepoint emoji
+    /// **Shapes via Skia's HarfBuzz** (GSUB-aware) so multi-codepoint emoji
     /// sequences measure to their *ligated* width, matching what the
     /// rasterizer produces at paint time. Without this, the layout would
     /// reserve `n × glyph_advance` for an `n`-codepoint sequence (cmap-
@@ -220,12 +220,9 @@ impl<'r> TextMeasurer<'r> {
     }
 
     /// GSUB-aware advance for `text` against `typeface` at `size`, memoized
-    /// per render. Both the extracted font bytes and the shaped advance are
-    /// cached: `to_font_data()` copies the whole typeface (~190 MB for Apple
-    /// Color Emoji) and `shape_text` re-parses it, so doing either once per
-    /// cluster dominated layout for emoji-heavy documents. Falls back to the
-    /// cmap-only `measure_str` advance when bytes can't be extracted or
-    /// shaping fails — the same best-effort policy the rasterizer uses.
+    /// per render so identical clusters are shaped once. Falls back to the
+    /// cmap-only `measure_str` advance when shaping is unavailable or fails —
+    /// the same best-effort policy the rasterizer uses.
     fn emoji_advance(&self, text: &str, typeface: &TypefaceEntry, size: Pt, font: &Font) -> Pt {
         let id = TypefaceId::from(&typeface.typeface);
         let key = (id, f32::from(size).to_bits(), text.to_owned());
@@ -234,26 +231,14 @@ impl<'r> TextMeasurer<'r> {
         }
 
         let advance = self
-            .emoji_font_bytes(id, typeface)
-            .and_then(|bytes| shape_text(&bytes, text, f32::from(size)).ok())
+            .cluster_shaper
+            .as_ref()
+            .and_then(|s| s.shape(&typeface.typeface, text, f32::from(size)).ok())
             .map(|run| run.total_advance)
             .unwrap_or_else(|| Pt::new(font.measure_str(text, None).0));
 
         self.emoji_advance_cache.borrow_mut().insert(key, advance);
         advance
-    }
-
-    /// Extracted bytes for `typeface`, cached by id — mirrors the raster
-    /// pipeline's `font_bytes_for` so a ~190 MB emoji typeface is serialized
-    /// via `to_font_data()` at most once per render. A cached `None` marks a
-    /// typeface that exposes no bytes, so the failed probe isn't repeated.
-    fn emoji_font_bytes(&self, id: TypefaceId, typeface: &TypefaceEntry) -> Option<Rc<Vec<u8>>> {
-        if let Some(cached) = self.emoji_font_bytes.borrow().get(&id) {
-            return cached.clone();
-        }
-        let bytes = typeface.typeface.to_font_data().map(|(b, _)| Rc::new(b));
-        self.emoji_font_bytes.borrow_mut().insert(id, bytes.clone());
-        bytes
     }
 
     /// Log a warning once per cluster when no color emoji typeface is
