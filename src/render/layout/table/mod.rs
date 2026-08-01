@@ -384,6 +384,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
     let outer_top_border = borders.and_then(|b| b.top);
 
     // Emit draw commands for each slice.
+    let last_slice_idx = slices.len().saturating_sub(1);
     slices
         .iter()
         .enumerate()
@@ -441,9 +442,19 @@ pub(crate) fn layout_table_paginated_with_page_heights(
             }
             commands.append(&mut content_commands);
             commands.append(&mut border_commands);
+            // §17.4.44: the trailing gap belongs to the table's bottom *edge*,
+            // so only the final slice gets it — an intermediate slice ends at a
+            // page cut, not at the table's edge. Without this a table that
+            // happens to paginate loses the bottom gap that the same table
+            // keeps when it fits on one page (see the monolithic path above).
+            let trailing_gap = if slice_idx == last_slice_idx {
+                cell_spacing
+            } else {
+                Pt::ZERO
+            };
             TableSlice {
                 commands,
-                size: PtSize::new(measured.table_width, cursor_y),
+                size: PtSize::new(measured.table_width, cursor_y + trailing_gap),
             }
         })
         .collect()
@@ -2171,6 +2182,65 @@ mod tests {
         assert!(
             counts.iter().all(|&c| c >= 2),
             "no single-line widow/orphan segment: {counts:?}"
+        );
+    }
+
+    /// §17.4.44: the bottom-edge gap belongs to the table, not to the page it
+    /// happens to land on. The monolithic path adds it (`cursor_y +
+    /// cell_spacing`); the paginated path did not, so the *same table* kept or
+    /// lost its bottom gap depending only on whether it fitted on one page.
+    ///
+    /// Asserted against absolute values and against the **monolithic** path,
+    /// which is a genuinely separate code path. Comparing one paginated layout
+    /// to another cannot see this: a mutation that drops the gap drops it from
+    /// both sides and the comparison still holds.
+    ///
+    /// Empty cells make the arithmetic exact — each row's whole height is its
+    /// own reserved leading gap (see
+    /// `measure::tests::cell_spacing_separates_rows_vertically`), so two rows
+    /// are `2 × spacing` of content plus one trailing gap.
+    #[test]
+    fn cell_spacing_bottom_edge_gap_survives_pagination() {
+        let spacing = Pt::new(6.0);
+        let rows = vec![one_cell_row(vec![]), one_cell_row(vec![])];
+        let widths = [Pt::new(94.0)];
+
+        let whole = layout_table(&rows, &widths, spacing, Pt::new(14.0), None, None, false);
+        assert_eq!(
+            whole.size.height,
+            spacing * 3.0,
+            "two leading gaps plus the table's own bottom edge"
+        );
+
+        let split = layout_table_paginated(
+            &rows,
+            &widths,
+            spacing,
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: spacing * 1.5,
+                page_height: spacing * 1.5,
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(split.len(), 2, "precondition: the table paginated");
+        assert_eq!(
+            split[0].size.height, spacing,
+            "an intermediate slice ends at a page cut, not at the table's edge"
+        );
+        assert_eq!(
+            split[1].size.height,
+            spacing * 2.0,
+            "the final slice owns the trailing gap"
+        );
+
+        let total: Pt = split.iter().map(|s| s.size.height).sum();
+        assert_eq!(
+            total, whole.size.height,
+            "a paginated table owns the same total height as the same table \
+             laid out whole"
         );
     }
 }
