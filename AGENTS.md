@@ -74,8 +74,7 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 - [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
 - [Line Spacing](docs/line-spacing.md) — §17.3.1.33 line/lineRule, Auto/Exact/AtLeast modes
 - [Position Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab`, alignment derived at layout time
-- [Section Stacking](docs/section-stacking.md) — §17.6 block stacking, page/column breaks, keepNext chains, paragraph splitting, footnote reservation
-- [Keep-Lines & Paragraph Splitting](docs/keep-lines-plan.md) — §17.3.1.14/§17.3.1.44 across-page line splitting, widow/orphan control, cross-split borders/shading/drop-caps. Titled "plan"; the work is complete
+- [Section Stacking](docs/section-stacking.md) — §17.6 block stacking, page/column breaks, keepNext chains, §17.3.1.14/§17.3.1.44 across-page paragraph splitting with widow/orphan control, footnote reservation
 - [Table Layout](docs/table-layout.md) — §17.4 3-pass column sizing, border conflict resolution, row splitting across pages
 - [Floating Tables](docs/floating-tables.md) — §17.4.58 tblpPr positioning, vertical anchors
 - [Floating Images](docs/floating-images.md) — §20.4.2 anchor positioning, text wrapping, forward-scan
