@@ -151,6 +151,50 @@ pub fn merge_table_properties(
     }
 }
 
+/// §17.7.6: overlay a `wholeTable` conditional layer onto a table style's own
+/// table properties. Every field the overlay specifies wins; the rest fall
+/// through to `base`.
+///
+/// This is the opposite direction from [`merge_table_properties`], which is
+/// *inheritance* (the target keeps what it has and the base fills gaps).
+/// `wholeTable` is conditional formatting layered on top of the style, so it
+/// overrides rather than backfills.
+///
+/// `style_id` is deliberately not overlaid: a `tblStylePr` carrying a
+/// `tblStyle` reference would point a style at another style from inside its
+/// own conditional formatting, which §17.7.6 does not define and which would
+/// invite a resolution loop.
+pub fn overlay_table_properties(
+    base: Option<TableProperties>,
+    overlay: &TableProperties,
+) -> TableProperties {
+    let mut out = base.unwrap_or_default();
+    // Listed field by field rather than by `..overlay.clone()` so that adding a
+    // field to `TableProperties` without deciding how it layers is a visible
+    // omission here, not a silent one. `table_properties_overlay_covers_every_field`
+    // pins it.
+    take(&mut out.alignment, overlay.alignment);
+    take(&mut out.width, overlay.width);
+    take(&mut out.layout, overlay.layout);
+    take(&mut out.indent, overlay.indent);
+    take(&mut out.borders, overlay.borders);
+    take(&mut out.cell_margins, overlay.cell_margins);
+    take(&mut out.cell_spacing, overlay.cell_spacing);
+    take(&mut out.look, overlay.look);
+    take(&mut out.style_row_band_size, overlay.style_row_band_size);
+    take(&mut out.style_col_band_size, overlay.style_col_band_size);
+    take(&mut out.positioning, overlay.positioning);
+    take(&mut out.overlap, overlay.overlap);
+    out
+}
+
+/// If `overlay` specifies a value, it replaces `target`.
+fn take<T>(target: &mut Option<T>, overlay: Option<T>) {
+    if overlay.is_some() {
+        *target = overlay;
+    }
+}
+
 /// If `target` is `None`, clone `base` into it.
 fn merge_opt<T: Clone>(target: &mut Option<T>, base: &Option<T>) {
     if target.is_none() {
@@ -614,5 +658,107 @@ mod tests {
         assert!(target.cnf_style.is_some());
         assert!(target.auto_space_de.is_some());
         assert!(target.auto_space_dn.is_some());
+    }
+
+    // ── wholeTable table-property overlay (§17.7.6) ──────────────────────
+
+    /// Every field must be listed in `overlay_table_properties`. If a field is
+    /// added to `TableProperties` and not to the overlay, a `wholeTable` style
+    /// setting it would be silently dropped — this fails instead.
+    #[test]
+    fn table_properties_overlay_covers_every_field() {
+        use crate::model::geometry::EdgeInsets;
+        let overlay = TableProperties {
+            style_id: Some(StyleId::new("Ignored")),
+            alignment: Some(Alignment::Center),
+            width: Some(TableMeasure::Auto),
+            layout: Some(TableLayout::Fixed),
+            indent: Some(TableMeasure::Twips(Dimension::new(120))),
+            borders: Some(TableBorders {
+                top: None,
+                bottom: None,
+                left: None,
+                right: None,
+                inside_h: None,
+                inside_v: None,
+            }),
+            cell_margins: Some(EdgeInsets {
+                top: Dimension::new(1),
+                right: Dimension::new(2),
+                bottom: Dimension::new(3),
+                left: Dimension::new(4),
+            }),
+            cell_spacing: Some(TableMeasure::Twips(Dimension::new(30))),
+            look: Some(TableLook {
+                first_row: Some(true),
+                last_row: None,
+                first_column: None,
+                last_column: None,
+                no_h_band: None,
+                no_v_band: None,
+            }),
+            style_row_band_size: Some(2),
+            style_col_band_size: Some(3),
+            positioning: Some(TablePositioning {
+                left_from_text: None,
+                right_from_text: None,
+                top_from_text: None,
+                bottom_from_text: None,
+                vert_anchor: None,
+                horz_anchor: None,
+                x_align: None,
+                y_align: None,
+                x: Some(Dimension::new(5)),
+                y: None,
+            }),
+            overlap: Some(TableOverlap::Never),
+        };
+        let out = overlay_table_properties(None, &overlay);
+
+        assert_eq!(out.alignment, overlay.alignment);
+        assert_eq!(out.width, overlay.width);
+        assert_eq!(out.layout, overlay.layout);
+        assert_eq!(out.indent, overlay.indent);
+        assert!(out.borders.is_some(), "borders overlaid"); // no PartialEq on TableBorders
+        assert_eq!(out.cell_margins, overlay.cell_margins);
+        assert_eq!(out.cell_spacing, overlay.cell_spacing);
+        assert!(out.look.is_some(), "look overlaid"); // no PartialEq on TableLook
+        assert_eq!(out.style_row_band_size, overlay.style_row_band_size);
+        assert_eq!(out.style_col_band_size, overlay.style_col_band_size);
+        assert_eq!(out.positioning, overlay.positioning);
+        assert_eq!(out.overlap, overlay.overlap);
+        // The one deliberate exclusion: a conditional layer must not re-point
+        // the style at another style.
+        assert_eq!(
+            out.style_id, None,
+            "style_id must not be overlaid — see overlay_table_properties"
+        );
+    }
+
+    /// The overlay direction is the opposite of `merge_table_properties`:
+    /// what the overlay specifies wins, and what it omits falls through.
+    #[test]
+    fn table_properties_overlay_wins_but_only_where_specified() {
+        use crate::model::geometry::EdgeInsets;
+        let base = TableProperties {
+            alignment: Some(Alignment::Start),
+            cell_margins: Some(EdgeInsets {
+                top: Dimension::new(9),
+                right: Dimension::new(9),
+                bottom: Dimension::new(9),
+                left: Dimension::new(9),
+            }),
+            ..Default::default()
+        };
+        let overlay = TableProperties {
+            alignment: Some(Alignment::Center),
+            ..Default::default()
+        };
+        let out = overlay_table_properties(Some(base.clone()), &overlay);
+        assert_eq!(out.alignment, Some(Alignment::Center), "overlay wins");
+        assert_eq!(
+            out.cell_margins, base.cell_margins,
+            "what the overlay omits falls through to the base"
+        );
     }
 }

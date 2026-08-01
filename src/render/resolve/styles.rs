@@ -88,7 +88,7 @@ fn resolve_one(
         // Break the cycle — resolve with just own properties + doc defaults.
         let mut para = style.paragraph_properties.clone().unwrap_or_default();
         let mut run = style.run_properties.clone().unwrap_or_default();
-        let table = style.table_properties.clone();
+        let table = fold_whole_table(style.table_properties.clone(), &style.table_style_overrides);
         merge_paragraph_properties(&mut para, &sheet.doc_defaults_paragraph);
         merge_run_properties(&mut run, &sheet.doc_defaults_run);
         let is_toc_entry = style.name.as_deref().is_some_and(is_toc_entry_name);
@@ -157,11 +157,38 @@ fn resolve_one(
         ResolvedStyle {
             paragraph: para,
             run,
-            table,
+            // §17.7.6: applied after the parent merge, so `wholeTable` overrides
+            // both this style's own `tblPr` and anything inherited.
+            table: fold_whole_table(table, &style.table_style_overrides),
             table_style_overrides: style.table_style_overrides.clone(),
             is_toc_entry,
         },
     );
+}
+
+/// §17.7.6: fold a table style's `wholeTable` conditional layer into its own
+/// table properties.
+///
+/// `wholeTable` sits above the style's own `tblPr` and below every positional
+/// override. Folding it here — rather than at the two places `build_table` reads
+/// `ResolvedStyle::table` — means the table-level cascade needs no second
+/// lookup, and a style that inherits from another sees the parent's already
+/// folded (the parent resolves first).
+///
+/// The cell-level half (`tcPr`/`rPr`/`pPr`) is seeded separately, in
+/// [`resolve_cell_conditional`](super::conditional::resolve_cell_conditional).
+fn fold_whole_table(
+    table: Option<crate::model::TableProperties>,
+    overrides: &[crate::model::TableStyleOverride],
+) -> Option<crate::model::TableProperties> {
+    let whole = overrides
+        .iter()
+        .find(|o| o.override_type == crate::model::TableStyleOverrideType::WholeTable)
+        .and_then(|o| o.table_properties.as_ref());
+    match whole {
+        Some(overlay) => Some(super::properties::overlay_table_properties(table, overlay)),
+        None => table,
+    }
 }
 
 #[cfg(test)]
