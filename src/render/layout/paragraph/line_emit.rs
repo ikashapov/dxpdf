@@ -25,6 +25,14 @@ pub(super) fn compute_line_placements(
     let drop_cap_indent = params.drop_cap_indent;
     let drop_cap_lines = params.drop_cap_lines;
     let default_line_height = params.default_line_height;
+    let ptab_geometry = PTabGeometry {
+        max_width: params.max_width,
+        indent_left: style.indent_left,
+        indent_first_line: style.indent_first_line,
+        content_width,
+        float_left: Pt::ZERO,
+        float_right: Pt::ZERO,
+    };
     if style.page_floats.is_empty() {
         // No floats — use standard line fitting.
         let first_line_width = (content_width - first_line_adjustment).max(Pt::ZERO);
@@ -37,6 +45,7 @@ pub(super) fn compute_line_placements(
             fragments,
             first_line_width,
             remaining_width,
+            ptab_geometry,
         )
         .into_iter()
         .map(|line| LinePlacement {
@@ -76,9 +85,26 @@ pub(super) fn compute_line_placements(
             (available - dc_adj).max(Pt::ZERO)
         };
 
-        // Fit one line at this width.
+        // Fit one line at this width. Each call fits exactly one line, so the
+        // geometry is *this* line's: its own float narrowing, and the
+        // first-line indent only when it really is the first.
         let remaining = &fragments[frag_idx..];
-        let fitted = super::super::line::fit_lines_with_first(remaining, line_width, line_width);
+        let line_geometry = PTabGeometry {
+            indent_first_line: if is_first {
+                ptab_geometry.indent_first_line
+            } else {
+                Pt::ZERO
+            },
+            float_left: fl,
+            float_right: fr,
+            ..ptab_geometry
+        };
+        let fitted = super::super::line::fit_lines_with_first(
+            remaining,
+            line_width,
+            line_width,
+            line_geometry,
+        );
         let fitted_line = if let Some(first) = fitted.into_iter().next() {
             super::super::line::FittedLine {
                 start: first.start + frag_idx,
@@ -544,13 +570,10 @@ pub(super) fn emit_line_commands(
                         // here to the next tab (regular or position) or the
                         // line end, whichever comes first. §17.18.85 decides
                         // which point of that zone lands on the stop.
-                        let zone_end = fragments[frag_idx + 1..line.end]
-                            .iter()
-                            .position(is_tab_like)
-                            .map_or(line.end, |i| frag_idx + 1 + i);
-                        let zone = &fragments[frag_idx + 1..zone_end];
+                        let end = zone_end(fragments, frag_idx, line.end);
+                        let zone = &fragments[frag_idx + 1..end];
                         let offset = resolve_zone_anchor(ts.alignment, zone, measure_text)
-                            .offset(|| zone.iter().map(|f| f.width()).sum());
+                            .offset(|| zone_width(fragments, frag_idx + 1, end));
                         // Never move the pen backwards: a zone wider than the
                         // space before its stop overflows to the right rather
                         // than overprinting what precedes it.
@@ -585,38 +608,43 @@ pub(super) fn emit_line_commands(
                     color: tab_color,
                     ..
                 } => {
-                    use crate::model::{PTabAlignment, PTabRelativeTo};
-                    // §17.3.1.30: an absolute-position tab has no explicit stop.
-                    // Its reference span is derived from `relative_to`. x=0 is
-                    // the constraint's left edge (the page/cell text margin);
-                    // `content_width` is already net of paragraph indents, so
-                    // the right indent edge sits at `indent_left + content_width`.
-                    let (span_start, span_end) = match relative_to {
-                        PTabRelativeTo::Margin => (Pt::ZERO, params.max_width),
-                        PTabRelativeTo::Indent => {
-                            (style.indent_left, style.indent_left + content_width)
+                    // §17.3.1.30: an absolute-position tab has no explicit
+                    // stop; its anchor is derived from `relative_to` and the
+                    // width of the zone it positions (this tab to the next tab
+                    // or the line end).
+                    let end = zone_end(fragments, frag_idx, line.end);
+                    let geometry = PTabGeometry {
+                        max_width: params.max_width,
+                        indent_left: style.indent_left,
+                        indent_first_line: style.indent_first_line,
+                        content_width,
+                        float_left: lp.float_left,
+                        float_right: lp.float_right,
+                    };
+                    let new_x = match resolve_ptab(*align, *relative_to, geometry, x, || {
+                        zone_width(fragments, frag_idx + 1, end)
+                    }) {
+                        PTabPlacement::Placed(at) => at,
+                        PTabPlacement::AdvancesToNextLine { anchor_x } => {
+                            if frag_idx == line.start {
+                                // Fitting breaks the line before any tab whose
+                                // anchor is behind the pen, so reaching here
+                                // means the tab is already first on its line.
+                                // Nothing has been drawn yet, so honouring the
+                                // anchor cannot overprint — including when it
+                                // sits left of `indent_left`, which is exactly
+                                // what `relativeTo="margin"` asks for. The
+                                // floor is the line's own left edge: a zone
+                                // wider than its anchor has nowhere better to
+                                // go, and advancing again would not move it.
+                                anchor_x.max(Pt::ZERO)
+                            } else {
+                                // Defensive: fitting should have broken before
+                                // this tab. If it did not, refusing to move
+                                // backwards is the only safe answer.
+                                anchor_x.max(x)
+                            }
                         }
-                    };
-                    // The alignment picks the anchor within that span.
-                    let anchor = match align {
-                        PTabAlignment::Left => span_start,
-                        PTabAlignment::Center => (span_start + span_end) * 0.5,
-                        PTabAlignment::Right => span_end,
-                    };
-                    // Align the zone (this ptab up to the next tab / line end)
-                    // to the anchor, mirroring the right/center tab-stop math.
-                    let zone_end = fragments[frag_idx + 1..line.end]
-                        .iter()
-                        .position(is_tab_like)
-                        .map_or(line.end, |i| frag_idx + 1 + i);
-                    let zone_width: Pt = fragments[frag_idx + 1..zone_end]
-                        .iter()
-                        .map(|f| f.width())
-                        .sum();
-                    let new_x = match align {
-                        PTabAlignment::Left => anchor.max(x),
-                        PTabAlignment::Center => (anchor - zone_width * 0.5).max(x),
-                        PTabAlignment::Right => (anchor - zone_width).max(x),
                     };
 
                     emit_tab_leader(
@@ -656,6 +684,28 @@ fn is_tab_like(f: &Fragment) -> bool {
     matches!(f, Fragment::Tab { .. } | Fragment::PTab { .. })
 }
 
+/// Index at which the zone opened by a tab at `tab_idx` ends: the next
+/// tab-like fragment or line break, or `limit`.
+///
+/// §17.3.1.37/§17.3.1.30: a tab positions the content up to the next tab, so
+/// every tab arm — regular, position, and the fitter's look-ahead — needs this
+/// same boundary. Emission passes the line end as `limit`; fitting, which has
+/// no lines yet, passes the fragment count.
+pub(crate) fn zone_end(fragments: &[Fragment], tab_idx: usize, limit: usize) -> usize {
+    fragments[tab_idx + 1..limit]
+        .iter()
+        .position(|f| is_tab_like(f) || f.is_line_break())
+        .map_or(limit, |offset| tab_idx + 1 + offset)
+}
+
+/// Total width of `fragments[start..end]`.
+///
+/// Always call this behind a thunk: `left`-aligned tabs anchor at the span
+/// start and never need it, and this walk is on the per-line hot path.
+pub(crate) fn zone_width(fragments: &[Fragment], start: usize, end: usize) -> Pt {
+    fragments[start..end].iter().map(|f| f.width()).sum()
+}
+
 /// §17.3.1.37: find the next tab stop position greater than `current_x`.
 /// Returns (position, optional tab stop definition).
 /// If no custom tab stop matches, falls back to the document's default tab-stop
@@ -682,6 +732,101 @@ pub(super) fn find_next_tab_stop(
     };
     let next = ((current_x.raw() / interval).floor() + 1.0) * interval;
     (Pt::new(next.min(line_width.raw())), None)
+}
+
+/// §17.3.1.30: the paragraph geometry a position tab resolves its anchor
+/// against.
+///
+/// Line *fitting* and line *emission* must agree about where a ptab puts
+/// content — fitting decides whether the tab can be honoured on this line,
+/// emission decides the exact x. Both derive it from this one struct through
+/// [`resolve_ptab`], so the two cannot drift apart.
+#[derive(Clone, Copy, Debug)]
+pub struct PTabGeometry {
+    /// Full constraint width, before paragraph indents. `relativeTo="margin"`
+    /// measures against this.
+    pub max_width: Pt,
+    /// Paragraph left indent. Line fitting seeds its pen here, matching where
+    /// emission starts a line — otherwise the two classify the same tab
+    /// differently and emission, unable to break, falls back to clamping.
+    pub indent_left: Pt,
+    /// §17.3.1.12 first-line indent, added to the seed on the first line only.
+    /// Callers that fit a single continuation line pass `Pt::ZERO`.
+    pub indent_first_line: Pt,
+    /// Constraint width net of indents. `relativeTo="indent"` measures against
+    /// `indent_left + content_width`, less the float narrowing below.
+    pub content_width: Pt,
+    /// §20.4.2: width stolen from this line's left by an overlapping float.
+    /// The indented region is narrower on such a line, so the tab's span must
+    /// follow it or the zone is positioned on top of the float.
+    pub float_left: Pt,
+    /// §20.4.2: width stolen from this line's right by an overlapping float.
+    pub float_right: Pt,
+}
+
+/// §17.3.1.30: outcome of resolving a position tab against the current pen.
+///
+/// The `AdvancesToNextLine` case is why this is an ADT rather than a `Pt`: it
+/// is a *line-breaking* outcome, not a coordinate, and collapsing it to
+/// `max(desired, pen)` is exactly the clamp that drew content off the page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PTabPlacement {
+    /// The alignment point is at or ahead of the pen; content starts here.
+    Placed(Pt),
+    /// The alignment point lies behind the pen. §17.3.1.30 advances the tab to
+    /// that location on the *next* line; `anchor_x` is where content will land
+    /// once it gets there.
+    AdvancesToNextLine { anchor_x: Pt },
+}
+
+/// §17.3.1.30: resolve a position tab against `pen_x` and its zone width.
+///
+/// `zone_width` yields the total width of the content this tab positions —
+/// from the tab to the next tab or the line end. It is a thunk because a
+/// `left` tab anchors at the span start and never needs it.
+pub fn resolve_ptab(
+    align: crate::model::PTabAlignment,
+    relative_to: crate::model::PTabRelativeTo,
+    geometry: PTabGeometry,
+    pen_x: Pt,
+    zone_width: impl FnOnce() -> Pt,
+) -> PTabPlacement {
+    use crate::model::{PTabAlignment, PTabRelativeTo};
+
+    // The reference span. x=0 is the constraint's left edge (the page/cell
+    // text margin); `content_width` is already net of paragraph indents, so
+    // the right indent edge sits at `indent_left + content_width`.
+    let (span_start, span_end) = match relative_to {
+        // `margin` names the page text margins, which a float does not move —
+        // the span is the same on every line of the paragraph.
+        PTabRelativeTo::Margin => (Pt::ZERO, geometry.max_width),
+        // `indent` names the indented region, which *is* narrower on a line an
+        // overlapping float steals width from. Exact Word behaviour here is
+        // unconfirmed; the line-local reading is chosen because it is the only
+        // one that cannot position a zone on top of the float.
+        PTabRelativeTo::Indent => (
+            geometry.indent_left + geometry.float_left,
+            geometry.indent_left + geometry.content_width - geometry.float_right,
+        ),
+    };
+    // The alignment picks the anchor within that span, and then which point of
+    // the zone lands on it — mirroring §17.18.85's tab-stop zone anchoring.
+    let anchor = match align {
+        PTabAlignment::Left => span_start,
+        PTabAlignment::Center => (span_start + span_end) * 0.5,
+        PTabAlignment::Right => span_end,
+    };
+    let anchor_x = match align {
+        PTabAlignment::Left => anchor,
+        PTabAlignment::Center => anchor - zone_width() * 0.5,
+        PTabAlignment::Right => anchor - zone_width(),
+    };
+
+    if anchor_x >= pen_x {
+        PTabPlacement::Placed(anchor_x)
+    } else {
+        PTabPlacement::AdvancesToNextLine { anchor_x }
+    }
 }
 
 /// §17.18.85 `decimal`: the character a decimal tab stop aligns on.
@@ -895,7 +1040,10 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
 
 #[cfg(test)]
 mod tests {
-    use super::{find_next_tab_stop, resolve_zone_anchor, Fragment, ZoneAnchor};
+    use super::{
+        find_next_tab_stop, resolve_ptab, resolve_zone_anchor, Fragment, PTabGeometry,
+        PTabPlacement, ZoneAnchor,
+    };
     use crate::model;
     use crate::render::dimension::Pt;
     use crate::render::layout::paragraph::TabStopDef;
@@ -1058,5 +1206,61 @@ mod tests {
             ZoneAnchor::At(Pt::new(20.0)),
             "20pt of leading fragment + 0pt before the separator in the second"
         );
+    }
+
+    // ── resolve_ptab (§17.3.1.30) ─────────────────────────────────────────────
+
+    fn ptab_geometry() -> PTabGeometry {
+        PTabGeometry {
+            max_width: Pt::new(400.0),
+            indent_left: Pt::ZERO,
+            indent_first_line: Pt::ZERO,
+            content_width: Pt::new(400.0),
+            float_left: Pt::ZERO,
+            float_right: Pt::ZERO,
+        }
+    }
+
+    #[test]
+    fn a_left_ptab_never_sums_its_zone() {
+        // `left` anchors at the span start, which does not depend on the zone
+        // at all — so the O(zone) walk must not run. Same guarantee as
+        // `ZoneAnchor::Start`, and the reason the width arrives as a thunk.
+        let placement = resolve_ptab(
+            model::PTabAlignment::Left,
+            model::PTabRelativeTo::Margin,
+            ptab_geometry(),
+            Pt::ZERO,
+            || panic!("zone width computed for a left position tab"),
+        );
+        assert_eq!(placement, PTabPlacement::Placed(Pt::ZERO));
+    }
+
+    #[test]
+    fn right_and_centre_ptabs_measure_the_zone_once() {
+        // The counterpart: these do depend on the zone, and each must call the
+        // thunk exactly once — not per alignment branch.
+        for (align, expected) in [
+            (model::PTabAlignment::Right, 300.0),
+            (model::PTabAlignment::Center, 150.0),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let placement = resolve_ptab(
+                align,
+                model::PTabRelativeTo::Margin,
+                ptab_geometry(),
+                Pt::ZERO,
+                || {
+                    calls.set(calls.get() + 1);
+                    Pt::new(100.0)
+                },
+            );
+            assert_eq!(
+                placement,
+                PTabPlacement::Placed(Pt::new(expected)),
+                "{align:?}"
+            );
+            assert_eq!(calls.get(), 1, "{align:?} measures the zone once");
+        }
     }
 }

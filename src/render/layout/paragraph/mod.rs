@@ -5,6 +5,11 @@
 
 mod borders;
 mod line_emit;
+
+// §17.3.1.30: line fitting needs the same position-tab resolution emission
+// uses, so the two cannot disagree about where a tab puts content.
+pub use line_emit::{resolve_ptab, PTabGeometry, PTabPlacement};
+pub(crate) use line_emit::{zone_end, zone_width};
 mod types;
 
 pub use types::*;
@@ -1722,6 +1727,330 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Return `(text, x, y)` for every emitted Text command, in order.
+    fn text_positions(result: &ParagraphLayout) -> Vec<(String, f32, f32)> {
+        result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { text, position, .. } => {
+                    Some((text.to_string(), position.x.raw(), position.y.raw()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ptab_whose_anchor_is_passed_advances_to_the_next_line() {
+        // §17.3.1.30: when the alignment point has already been passed, the
+        // tab advances to that location on the *next* line.
+        //
+        // Reproduction from the branch review: everything fits the 400pt line
+        // by width (10 + 200 + 180 = 390), but the right ptab's anchor sits at
+        // 400 - 180 = 220, behind the pen at 300. Clamping drew "C" at
+        // 300..480 — 80pt off the page.
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(PTabAlignment::Center, PTabRelativeTo::Margin),
+            text_frag("B", 200.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("C", 180.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 3, "no content dropped: {positions:?}");
+        let (_, c_x, c_y) = &positions[2];
+        let (_, _, a_y) = &positions[0];
+
+        assert!(
+            c_y > a_y,
+            "C advances to the next line rather than overflowing: {positions:?}"
+        );
+        assert_eq!(*c_x, 220.0, "and lands on its anchor: 400 - 180");
+        assert!(
+            c_x + 180.0 <= 400.0,
+            "C ends within the page: {}",
+            c_x + 180.0
+        );
+    }
+
+    #[test]
+    fn left_margin_ptab_pulls_back_to_the_margin_on_the_next_line() {
+        // §17.3.1.30: `left` + `relativeTo="margin"` anchors at the page
+        // margin (x=0). Reached from an indented paragraph the anchor is
+        // behind the pen, so — same rule — it advances to the next line
+        // rather than becoming the silent no-op `0.max(x)` produced.
+        let frags = vec![
+            text_frag("indented", 60.0),
+            ptab_frag(PTabAlignment::Left, PTabRelativeTo::Margin),
+            text_frag("at-margin", 40.0),
+        ];
+        let style = ParagraphStyle {
+            indent_left: Pt::new(100.0),
+            ..Default::default()
+        };
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        let (_, first_x, first_y) = &positions[0];
+        let (_, second_x, second_y) = &positions[1];
+
+        assert!(second_y > first_y, "advances to the next line");
+        assert_eq!(*second_x, 0.0, "and reaches the page margin");
+        assert!(*first_x >= 100.0, "the indented run is unaffected");
+    }
+
+    #[test]
+    fn a_ptab_at_the_line_start_places_rather_than_looping() {
+        // The progress guard: when the tab is already the first thing on its
+        // line, advancing to the next line cannot move the anchor any closer,
+        // so it places (clamped) and overflows instead. Acting on a condition
+        // the action cannot change is how the paginator bugs in this engine
+        // have historically become infinite loops.
+        // Three same-width runs, none individually oversized (so nothing is
+        // split), but a zone far wider than the centre anchor — the tab's
+        // desired x is negative and it is already at the line start.
+        let frags = vec![
+            ptab_frag(PTabAlignment::Center, PTabRelativeTo::Margin),
+            text_frag("one", 90.0),
+            text_frag("two", 90.0),
+            text_frag("three", 90.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(100.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(
+            positions.len(),
+            3,
+            "every run is emitted, none dropped: {positions:?}"
+        );
+        assert!(
+            positions.iter().all(|(_, x, _)| *x >= 0.0),
+            "nothing is placed left of the line start: {positions:?}"
+        );
+    }
+
+    #[test]
+    fn fitting_and_emission_agree_about_the_pen_on_an_indented_line() {
+        // Fitting decides whether a ptab can be honoured on this line;
+        // emission decides its x. Both must start the line at the same place,
+        // or an indented paragraph gets classified one way and drawn another.
+        //
+        // The fitter seeded its pen at 0 while emission seeds it at the
+        // indent, so the two could classify the same tab differently. Here the
+        // right-margin anchor for a 150pt zone is 250: ahead of the fitter's
+        // pen (200) but behind emission's (300). The fitter therefore saw no
+        // reason to break, and emission — unable to break — clamped to 300,
+        // running B out to 450, past the 400pt margin B1 was meant to protect.
+        let frags = vec![
+            text_frag("A", 200.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("B", 150.0),
+        ];
+        let style = ParagraphStyle {
+            indent_left: Pt::new(100.0),
+            ..Default::default()
+        };
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert!(
+            positions[1].2 > positions[0].2,
+            "B advances to the next line: {positions:?}"
+        );
+        assert_eq!(positions[1].1, 250.0, "and lands on its anchor: 400 - 150");
+        assert!(positions[1].1 + 150.0 <= 400.0, "B stays within the margin");
+    }
+
+    #[test]
+    fn a_margin_ptab_may_use_the_space_a_right_indent_excludes() {
+        // §17.3.1.30: `relativeTo="margin"` measures against the full text
+        // area, so its zone may occupy space the paragraph's own right indent
+        // excludes. Fitting bounds lines by `content_width` (net of indents),
+        // which wrapped such a line even though the content fits the margin
+        // region — leaving a stray leader on the short line.
+        //
+        // content_width = 400 - 100 (right indent) = 300, but A(50) + B(320)
+        // reaches only 400, exactly the margin.
+        let frags = vec![
+            text_frag("A", 50.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("B", 320.0),
+        ];
+        let style = ParagraphStyle {
+            indent_right: Pt::new(100.0),
+            ..Default::default()
+        };
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert_eq!(
+            positions[0].2, positions[1].2,
+            "the line fits the margin region and must not wrap: {positions:?}"
+        );
+        assert_eq!(
+            positions[1].1, 80.0,
+            "B right-aligned at the margin: 400 - 320"
+        );
+    }
+
+    #[test]
+    fn an_indent_ptab_respects_the_lines_own_float_narrowing() {
+        // §17.3.1.30 + §20.4.2: `relativeTo="indent"` measures against the
+        // indented region, but that region is narrower on a line a float
+        // overlaps. Using the paragraph-level width right-aligned the zone to
+        // the paragraph's edge — on top of the float.
+        //
+        // A 60pt float occupies x 140..200 of a 200pt line, so the line's own
+        // right edge is 140 and a 40pt zone must end there, at x=100.
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        let float = ActiveFloat {
+            page_x: Pt::new(140.0),
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        };
+        let style = ParagraphStyle {
+            page_floats: vec![float],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(200.0),
+            ..Default::default()
+        };
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Indent),
+            text_frag("B", 40.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert_eq!(
+            positions[1].1, 100.0,
+            "B right-aligns to the line's own edge (140), not the paragraph's (200)"
+        );
+        assert!(
+            positions[1].1 + 40.0 <= 140.0,
+            "and therefore clears the float at 140: {positions:?}"
+        );
+    }
+
+    /// A float occupying `x0..x0+60` of a 200pt line for y `0..30`.
+    fn float_at(x0: f32) -> crate::render::layout::float::ActiveFloat {
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        ActiveFloat {
+            page_x: Pt::new(x0),
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        }
+    }
+
+    fn style_with_float(x0: f32) -> ParagraphStyle {
+        ParagraphStyle {
+            page_floats: vec![float_at(x0)],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(200.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_indent_ptab_follows_a_left_float_too() {
+        // The mirror of the right-float case: a float on the left moves the
+        // indented region's *start*, so a left-aligned indent ptab must anchor
+        // clear of it rather than at the paragraph's own left edge.
+        let frags = vec![
+            ptab_frag(PTabAlignment::Left, PTabRelativeTo::Indent),
+            text_frag("B", 40.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &style_with_float(0.0),
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 1, "{positions:?}");
+        assert_eq!(
+            positions[0].1, 60.0,
+            "B anchors past the float, not at the paragraph's left edge"
+        );
+    }
+
+    #[test]
+    fn a_margin_ptab_is_deliberately_unaffected_by_floats() {
+        // `margin` names the page text margins, which a float does not move.
+        // Only `indent` follows the line's narrowed region — pinning the
+        // difference so the two do not get "unified" later.
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("B", 40.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &style_with_float(140.0),
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert_eq!(
+            positions[1].1, 160.0,
+            "right margin anchor stays at 200 — 200 - 40 — despite the float"
+        );
     }
 
     #[test]
