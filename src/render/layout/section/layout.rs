@@ -21,7 +21,8 @@ use super::helpers::{
     render_page_footnotes, split_at_column_breaks, split_at_page_breaks, table_x_offset,
 };
 use super::types::{
-    ContinuationState, FloatingImage, FloatingImageY, FloatingShape, LayoutBlock, WrapMode,
+    ContinuationState, FloatingImage, FloatingImageY, FloatingShape, LayoutBlock, PageParity,
+    WrapMode,
 };
 use super::FLOAT_DEDUP_EPSILON_PT;
 use super::FOOTNOTE_SEPARATOR_GAP;
@@ -58,6 +59,11 @@ struct PageLayoutState<'doc> {
     cursor_y: Pt,
     /// 0-based physical page index within the current section.
     page_index: usize,
+    /// §17.10.6: logical number of this section's first page, with
+    /// `w:pgNumType/@start` applied. With `page_index` it gives the current
+    /// page's logical number, and so the §20.4.3.1 parity an `inside`/
+    /// `outside` float mirrors on.
+    logical_page_base: usize,
     /// Effective top boundary for the selected header slot on this page.
     page_top: Pt,
     /// §17.6.4: current column index (0-based).
@@ -101,6 +107,7 @@ impl<'doc> PageLayoutState<'doc> {
         config: &PageConfig,
         continuation: Option<ContinuationState>,
         bounds: PageBodyBounds,
+        logical_page_base: usize,
     ) -> Self {
         let (current_page, cursor_y) = match continuation {
             Some(c) => (c.page, c.cursor_y),
@@ -113,6 +120,7 @@ impl<'doc> PageLayoutState<'doc> {
             current_page,
             cursor_y,
             page_index: 0,
+            logical_page_base,
             page_top: bounds.top,
             current_col: 0,
             bottom: bounds.bottom,
@@ -131,6 +139,11 @@ impl<'doc> PageLayoutState<'doc> {
     }
 
     /// Render accumulated footnotes onto the current page and clear the list.
+    /// §20.4.3.1: parity of the page currently being assembled.
+    fn parity(&self) -> PageParity {
+        PageParity::of_page(self.logical_page_base + self.page_index)
+    }
+
     fn flush_footnotes(&mut self, ctx: &LayoutCtx<'_>) {
         if !self.page_footnotes.is_empty() {
             render_page_footnotes(
@@ -188,6 +201,7 @@ impl<'doc> PageLayoutState<'doc> {
         space_before: Pt,
         col_width: Pt,
     ) -> Vec<float::ActiveFloat> {
+        let parity = self.parity();
         // Forward-scan absolute floats from upcoming paragraphs on the current
         // page. Only rescan when the page changes. The scan tracks inline
         // column/page boundaries (`scan_inline_page_boundary`) so a float past
@@ -229,7 +243,7 @@ impl<'doc> PageLayoutState<'doc> {
                             }
                             if let FloatingImageY::Absolute(img_y) = fi.y {
                                 self.current_page_abs_floats.push(float::ActiveFloat {
-                                    page_x: fi.x - fi.dist_left,
+                                    page_x: fi.x.resolve(parity) - fi.dist_left,
                                     page_y_start: img_y,
                                     page_y_end: img_y + fi.size.height,
                                     width: fi.size.width + fi.dist_left + fi.dist_right,
@@ -397,8 +411,9 @@ impl ParagraphFloatCheckpoint {
 /// emission (`section::stacker`) so body/page-anchored shapes render their text,
 /// not just the fill/stroke.
 fn emit_shape_text(state: &mut PageLayoutState<'_>, fs: &FloatingShape, shape_y: Pt) {
+    let parity = state.parity();
     for mut cmd in fs.text_commands.iter().cloned() {
-        cmd.shift(fs.x, shape_y);
+        cmd.shift(fs.x.resolve(parity), shape_y);
         state.current_page.commands.push(cmd);
     }
 }
@@ -409,6 +424,7 @@ fn register_paragraph_floats(
     floating_shapes: &[FloatingShape],
     content_top: Pt,
 ) {
+    let parity = state.parity();
     for fi in floating_images {
         let (y_start, y_end) = match fi.y {
             FloatingImageY::RelativeToParagraph(offset) => {
@@ -422,7 +438,7 @@ fn register_paragraph_floats(
                 FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
             };
             state.current_page.commands.push(DrawCommand::Image {
-                rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
+                rect: PtRect::from_xywh(fi.x.resolve(parity), img_y, fi.size.width, fi.size.height),
                 image_data: fi.image_data.clone(),
                 src_rect: fi.src_rect,
             });
@@ -431,7 +447,7 @@ fn register_paragraph_floats(
             }
         } else if fi.wrap_mode.registers_as_wrap_float() {
             let float_entry = float::ActiveFloat {
-                page_x: fi.x - fi.dist_left,
+                page_x: fi.x.resolve(parity) - fi.dist_left,
                 page_y_start: y_start,
                 page_y_end: y_end,
                 width: fi.size.width + fi.dist_left + fi.dist_right,
@@ -465,7 +481,7 @@ fn register_paragraph_floats(
                 FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
             };
             state.current_page.commands.push(DrawCommand::Path {
-                origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+                origin: crate::render::geometry::PtOffset::new(fs.x.resolve(parity), shape_y),
                 rotation: fs.rotation,
                 flip_h: fs.flip_h,
                 flip_v: fs.flip_v,
@@ -481,7 +497,7 @@ fn register_paragraph_floats(
             }
         } else {
             let float_entry = float::ActiveFloat {
-                page_x: fs.x - fs.dist_left,
+                page_x: fs.x.resolve(parity) - fs.dist_left,
                 page_y_start: y_start,
                 page_y_end: y_end,
                 width: fs.size.width + fs.dist_left + fs.dist_right,
@@ -1198,6 +1214,22 @@ fn prefix_adjusted_head(
     }
 }
 
+/// Where a section begins in the document's page sequence.
+///
+/// The three travel together because they answer one question — which page
+/// this section's first page *is*. `continuation` says whether it shares a
+/// page with the section before it, `clearance` how much of that page the
+/// header and footer take, and `logical_page_base` what §17.10.6 calls it.
+pub(crate) struct SectionStart<'a> {
+    /// §17.6.22: an in-progress page to continue on, for a `Continuous` break.
+    pub continuation: Option<ContinuationState>,
+    /// Header/footer clearances, selected per physical page in the section.
+    pub clearance: &'a HeaderFooterClearance,
+    /// §17.10.6: logical number of the section's first page, with
+    /// `w:pgNumType/@start` applied. Drives §20.4.3.1 float mirroring.
+    pub logical_page_base: usize,
+}
+
 /// Lay out a sequence of blocks into pages.
 ///
 /// If `continuation` is provided, the section starts on the given page at the
@@ -1217,8 +1249,13 @@ pub fn layout_section(
         measure_text,
         separator_indent,
         default_line_height,
-        continuation,
-        &clearance,
+        SectionStart {
+            continuation,
+            clearance: &clearance,
+            // A section laid out on its own starts at page 1 — the §17.10.6
+            // renumbering only exists across a document's section list.
+            logical_page_base: 1,
+        },
     )
 }
 
@@ -1230,9 +1267,13 @@ pub(crate) fn layout_section_with_clearance(
     measure_text: super::super::paragraph::MeasureTextFn<'_>,
     separator_indent: Pt,
     default_line_height: Pt,
-    continuation: Option<ContinuationState>,
-    clearance: &HeaderFooterClearance,
+    start: SectionStart<'_>,
 ) -> Vec<LayoutedPage> {
+    let SectionStart {
+        continuation,
+        clearance,
+        logical_page_base,
+    } = start;
     let content_width = config.content_width();
     let num_cols = config.num_columns();
 
@@ -1243,7 +1284,12 @@ pub(crate) fn layout_section_with_clearance(
         separator_indent,
         default_line_height,
     };
-    let mut state = PageLayoutState::new(config, continuation, clearance.for_page(0));
+    let mut state = PageLayoutState::new(
+        config,
+        continuation,
+        clearance.for_page(0),
+        logical_page_base,
+    );
 
     // Column-aware constraints and x-offset for the current column.
     let col_constraints = |col: usize, page_height: Pt| -> BoxConstraints {
@@ -1755,6 +1801,7 @@ pub(crate) fn layout_section_with_clearance(
 
                 // §20.4.2.3: emit non-wrapTopAndBottom floating images.
                 // (wrapTopAndBottom images were emitted immediately above.)
+                let parity = state.parity();
                 for fi in floating_images {
                     if fi.is_wrap_top_and_bottom() {
                         continue;
@@ -1766,7 +1813,12 @@ pub(crate) fn layout_section_with_clearance(
                         }
                     };
                     state.current_page.commands.push(DrawCommand::Image {
-                        rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
+                        rect: PtRect::from_xywh(
+                            fi.x.resolve(parity),
+                            img_y,
+                            fi.size.width,
+                            fi.size.height,
+                        ),
                         image_data: fi.image_data.clone(),
                         src_rect: fi.src_rect,
                     });
@@ -1787,7 +1839,10 @@ pub(crate) fn layout_section_with_clearance(
                         }
                     };
                     state.current_page.commands.push(DrawCommand::Path {
-                        origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+                        origin: crate::render::geometry::PtOffset::new(
+                            fs.x.resolve(parity),
+                            shape_y,
+                        ),
                         rotation: fs.rotation,
                         flip_h: fs.flip_h,
                         flip_v: fs.flip_v,

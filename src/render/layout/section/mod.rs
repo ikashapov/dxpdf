@@ -11,6 +11,7 @@ mod types;
 
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
+pub(crate) use layout::SectionStart;
 pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
 
@@ -148,7 +149,7 @@ mod tests {
             },
             size: PtSize::new(Pt::new(80.0), Pt::new(height)),
             src_rect: None,
-            x: Pt::new(10.0),
+            x: FloatingImageX::Absolute(Pt::new(10.0)),
             y: FloatingImageY::RelativeToParagraph(Pt::ZERO),
             wrap_mode,
             dist_left: Pt::ZERO,
@@ -221,6 +222,105 @@ mod tests {
                 width: Pt::new(180.0),
             }],
         }
+    }
+
+    /// A `TopAndBottom` float carrying both parity readings, so it emits an
+    /// `Image` command whose x is whatever the page resolved.
+    fn mirrored_floating_image(odd: f32, even: f32) -> FloatingImage {
+        FloatingImage {
+            x: FloatingImageX::PageParity {
+                odd: Pt::new(odd),
+                even: Pt::new(even),
+            },
+            ..floating_image(WrapMode::TopAndBottom, 10.0)
+        }
+    }
+
+    fn para_with_float(text: &str, float: FloatingImage, page_break_before: bool) -> LayoutBlock {
+        let LayoutBlock::Paragraph {
+            fragments,
+            style,
+            footnotes,
+            floating_shapes,
+            ..
+        } = para_block(text, 30.0)
+        else {
+            unreachable!("para_block builds a paragraph")
+        };
+        LayoutBlock::Paragraph {
+            fragments,
+            style,
+            page_break_before,
+            footnotes,
+            floating_shapes,
+            floating_images: vec![float],
+        }
+    }
+
+    fn image_xs(page: &crate::render::layout::draw_command::LayoutedPage) -> Vec<f32> {
+        page.commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Image { rect, .. } => Some(rect.origin.x.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// §20.4.3.1: the whole point of deferring x past build. The same anchor
+    /// on two consecutive pages must resolve to the two different readings —
+    /// which is only observable end to end, because `resolve_anchor_x` can be
+    /// perfectly correct while the stacker still ignores what it produced.
+    #[test]
+    fn a_mirrored_float_resolves_per_page() {
+        let blocks = vec![
+            para_with_float("p1", mirrored_floating_image(11.0, 99.0), false),
+            para_with_float("p2", mirrored_floating_image(11.0, 99.0), true),
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        assert_eq!(pages.len(), 2, "the page break splits them");
+        assert_eq!(image_xs(&pages[0]), vec![11.0], "page 1 is odd");
+        assert_eq!(image_xs(&pages[1]), vec![99.0], "page 2 is even");
+    }
+
+    /// The parity follows the *logical* page number, so a section that
+    /// `w:pgNumType/@start` begins on an even page mirrors from its first
+    /// page — the same key §17.10.6 uses to pick the even header.
+    #[test]
+    fn parity_follows_the_logical_page_number_not_the_position() {
+        let blocks = vec![para_with_float(
+            "p1",
+            mirrored_floating_image(11.0, 99.0),
+            false,
+        )];
+        let clearance =
+            crate::render::layout::header_footer::HeaderFooterClearance::uniform(&small_config());
+        let pages = super::layout::layout_section_with_clearance(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            super::layout::SectionStart {
+                continuation: None,
+                clearance: &clearance,
+                logical_page_base: 2,
+            },
+        );
+
+        assert_eq!(
+            image_xs(&pages[0]),
+            vec![99.0],
+            "a section starting at logical page 2 starts even"
+        );
     }
 
     #[test]
@@ -758,8 +858,11 @@ mod tests {
             None,
             Pt::ZERO,
             Pt::new(14.0),
-            None,
-            &clearance,
+            super::layout::SectionStart {
+                continuation: None,
+                clearance: &clearance,
+                logical_page_base: 1,
+            },
         );
 
         assert_eq!(pages.len(), 2, "page 2 must use the shorter default slots");
@@ -829,8 +932,11 @@ mod tests {
             None,
             Pt::ZERO,
             Pt::new(14.0),
-            None,
-            &clearance,
+            super::layout::SectionStart {
+                continuation: None,
+                clearance: &clearance,
+                logical_page_base: 1,
+            },
         );
 
         assert_eq!(pages.len(), 2);
@@ -901,8 +1007,11 @@ mod tests {
             None,
             Pt::ZERO,
             Pt::new(14.0),
-            None,
-            &clearance,
+            super::layout::SectionStart {
+                continuation: None,
+                clearance: &clearance,
+                logical_page_base: 1,
+            },
         );
 
         assert_eq!(pages.len(), 2);
@@ -1626,8 +1735,11 @@ mod tests {
             None,
             Pt::ZERO,
             Pt::new(14.0),
-            None,
-            &clearance,
+            super::layout::SectionStart {
+                continuation: None,
+                clearance: &clearance,
+                logical_page_base: 1,
+            },
         );
 
         assert_eq!(pages.len(), 2);
@@ -1695,8 +1807,11 @@ mod tests {
             None,
             Pt::ZERO,
             Pt::new(14.0),
-            None,
-            &clearance,
+            super::layout::SectionStart {
+                continuation: None,
+                clearance: &clearance,
+                logical_page_base: 1,
+            },
         );
         let separator_y = pages[0]
             .commands
@@ -3109,7 +3224,7 @@ mod tests {
                 },
                 size: PtSize::new(Pt::new(fw), Pt::new(fh)),
                 src_rect: None,
-                x: Pt::new(fx),
+                x: FloatingImageX::Absolute(Pt::new(fx)),
                 y: FloatingImageY::Absolute(Pt::new(fy)),
                 wrap_mode: WrapMode::Square(crate::model::WrapText::BothSides),
                 dist_left: Pt::ZERO,

@@ -97,8 +97,8 @@ pub struct FloatingImage {
     pub size: PtSize,
     /// §20.1.10.48 `a:srcRect` — fractional source crop in `[0, 1]`.
     pub src_rect: Option<crate::render::geometry::PtRect>,
-    /// Resolved absolute x position on the page.
-    pub x: Pt,
+    /// Horizontal position, possibly deferred to the page's parity.
+    pub x: FloatingImageX,
     /// Resolved absolute y position on the page (may be relative to paragraph).
     pub y: FloatingImageY,
     /// §20.4.2.14-18: text wrap mode (drives float registration + cursor advance).
@@ -127,6 +127,75 @@ pub enum FloatingImageY {
     RelativeToParagraph(Pt),
 }
 
+/// §20.4.3.1: which side of a two-sided document a page falls on.
+///
+/// Keyed on the **logical** page number — the one `w:pgNumType/@start` shifts,
+/// and the one §17.10.6 `evenAndOddHeaders` already selects headers by. Sharing
+/// the key keeps a document self-consistent: the page that gets the "even"
+/// header mirrors the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageParity {
+    Odd,
+    Even,
+}
+
+impl PageParity {
+    /// From a 1-based logical page number.
+    pub fn of_page(logical_page_number: usize) -> Self {
+        if logical_page_number.is_multiple_of(2) {
+            Self::Even
+        } else {
+            Self::Odd
+        }
+    }
+}
+
+/// Horizontal position for a floating object.
+///
+/// `Absolute` is settled during build. `PageParity` cannot be: §20.4.3.1
+/// `inside`/`outside` — both as an alignment and as the `insideMargin` /
+/// `outsideMargin` references — mirror according to the page the object lands
+/// on, and floats are extracted *before* pagination. So the position is carried
+/// as both readings and resolved when a page is assigned.
+///
+/// This mirrors [`FloatingImageY::RelativeToParagraph`], which exists for the
+/// same reason on the other axis: a coordinate the build phase cannot know is
+/// deferred, not guessed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FloatingImageX {
+    /// The same x on every page.
+    Absolute(Pt),
+    /// Mirrored — which reading applies depends on the page's [`PageParity`].
+    PageParity { odd: Pt, even: Pt },
+}
+
+impl FloatingImageX {
+    /// Build from the two per-parity readings, collapsing to `Absolute` when
+    /// they agree.
+    ///
+    /// They agree for every anchor that is not `inside`/`outside`, which is
+    /// nearly all of them — so a document with no mirrored anchor carries no
+    /// deferral at all, and the resolver below is a no-op on it.
+    pub fn from_pages(odd: Pt, even: Pt) -> Self {
+        if odd == even {
+            Self::Absolute(odd)
+        } else {
+            Self::PageParity { odd, even }
+        }
+    }
+
+    /// The x this object takes on a page of the given parity.
+    pub fn resolve(self, parity: PageParity) -> Pt {
+        match self {
+            Self::Absolute(x) => x,
+            Self::PageParity { odd, even } => match parity {
+                PageParity::Odd => odd,
+                PageParity::Even => even,
+            },
+        }
+    }
+}
+
 /// A floating (anchor) DrawingML shape to be positioned absolutely on the
 /// page. The geometry is already evaluated into path-local Pt subpaths; the
 /// painter applies origin + rotation + flip.
@@ -135,8 +204,9 @@ pub enum FloatingImageY {
 /// placement, differing only in the emitted `DrawCommand` variant.
 #[derive(Clone)]
 pub struct FloatingShape {
-    /// Resolved absolute x position on the page (top-left of the shape).
-    pub x: Pt,
+    /// Horizontal position of the shape's top-left, possibly deferred to the
+    /// page's parity.
+    pub x: FloatingImageX,
     /// Resolved absolute y position on the page.
     pub y: FloatingImageY,
     /// Shape bounding-box size in Pt.
