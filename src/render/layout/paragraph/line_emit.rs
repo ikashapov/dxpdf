@@ -5,7 +5,7 @@ use std::rc::Rc;
 use super::super::draw_command::DrawCommand;
 use super::super::fragment::{Fragment, LinkTarget};
 use super::types::{LineSpacingRule, MeasureTextFn, ParagraphStyle, TabStopDef};
-use super::{LineLayoutParams, LinePlacement, LEADER_CHAR_WIDTH_FALLBACK, LEADER_FONT_SIZE_CAP};
+use super::{LineLayoutParams, LinePlacement, LEADER_CHAR_WIDTH_FALLBACK};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtOffset;
 
@@ -528,7 +528,11 @@ pub(super) fn emit_line_commands(
                         + distribution_extra
                             * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
                 }
-                Fragment::Tab { .. } => {
+                Fragment::Tab {
+                    font: tab_font,
+                    color: tab_color,
+                    ..
+                } => {
                     // §17.3.1.37: resolve to the next tab stop.
                     // Tab stop positions are absolute from the paragraph's
                     // left edge, not relative to the text indent.
@@ -570,12 +574,15 @@ pub(super) fn emit_line_commands(
                     if let Some(ts) = tab_stop {
                         emit_tab_leader(
                             commands,
-                            ts.leader,
+                            LeaderStyle {
+                                leader: ts.leader,
+                                font: tab_font,
+                                color: *tab_color,
+                            },
                             x,
                             new_x,
                             *cursor_y + line.ascent,
                             measure_text,
-                            default_line_height,
                         );
                     }
 
@@ -585,6 +592,8 @@ pub(super) fn emit_line_commands(
                     align,
                     relative_to,
                     leader,
+                    font: tab_font,
+                    color: tab_color,
                     ..
                 } => {
                     use crate::model::{PTabAlignment, PTabRelativeTo};
@@ -623,12 +632,15 @@ pub(super) fn emit_line_commands(
 
                     emit_tab_leader(
                         commands,
-                        *leader,
+                        LeaderStyle {
+                            leader: *leader,
+                            font: tab_font,
+                            color: *tab_color,
+                        },
                         x,
                         new_x,
                         *cursor_y + line.ascent,
                         measure_text,
-                        default_line_height,
                     );
 
                     x = new_x;
@@ -683,18 +695,36 @@ pub(super) fn find_next_tab_stop(
     (Pt::new(next.min(line_width.raw())), None)
 }
 
+/// §17.3.1.38: how a tab leader is drawn.
+///
+/// A leader has no formatting of its own — it takes the formatting in effect
+/// at the tab, i.e. the `<w:rPr>` of the run carrying the `<w:tab/>` or
+/// `<w:ptab/>`. Bundling the three fields keeps them travelling together: the
+/// glyph, the font it is measured *and* drawn in, and its colour are one
+/// decision, and splitting them is how the hardcoded-Times-New-Roman default
+/// survived as long as it did.
+pub(super) struct LeaderStyle<'a> {
+    pub leader: crate::model::TabLeader,
+    pub font: &'a super::super::fragment::FontProps,
+    pub color: crate::render::resolve::color::RgbColor,
+}
+
 /// Emit leader characters (dots, hyphens, etc.) between tab start and end.
 pub(super) fn emit_tab_leader(
     commands: &mut Vec<DrawCommand>,
-    leader: crate::model::TabLeader,
+    style: LeaderStyle<'_>,
     x_start: Pt,
     x_end: Pt,
     baseline_y: Pt,
     measure_text: MeasureTextFn<'_>,
-    default_line_height: Pt,
 ) {
     use crate::model::TabLeader;
 
+    let LeaderStyle {
+        leader,
+        font,
+        color,
+    } = style;
     let leader_char = match leader {
         TabLeader::Dot => ".",
         TabLeader::Hyphen => "-",
@@ -709,18 +739,14 @@ pub(super) fn emit_tab_leader(
         return;
     }
 
-    // Build a string of leader characters that fills the gap.
-    // Use a small font to get the leader char width.
+    // Measure the leader glyph in the run's own font, so the repeat count
+    // matches the glyphs actually drawn below. Character spacing and text
+    // scaling are run-level effects on *text*, not on a fill pattern, so the
+    // measurement font drops them while keeping family/size/style.
     let leader_font = super::super::fragment::FontProps {
-        family: std::rc::Rc::from("Times New Roman"),
-        size: default_line_height.min(LEADER_FONT_SIZE_CAP),
-        bold: false,
-        italic: false,
-        underline: false,
         char_spacing: Pt::ZERO,
         text_scale: 1.0,
-        underline_position: Pt::ZERO,
-        underline_thickness: Pt::ZERO,
+        ..font.clone()
     };
 
     let char_width = if let Some(m) = measure_text {
@@ -750,9 +776,9 @@ pub(super) fn emit_tab_leader(
         font_family: leader_font.family,
         char_spacing: Pt::ZERO,
         font_size: leader_font.size,
-        bold: false,
-        italic: false,
-        color: crate::render::resolve::color::RgbColor::BLACK,
+        bold: leader_font.bold,
+        italic: leader_font.italic,
+        color,
         text_scale: 1.0,
     });
 }
