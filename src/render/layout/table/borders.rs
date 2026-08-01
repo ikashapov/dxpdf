@@ -9,21 +9,24 @@ use crate::render::layout::draw_command::DrawCommand;
 /// One cell edge during and after §17.4.38 resolution.
 ///
 /// Three states rather than `Option<TableBorderLine>`, because [MS-OI29500]
-/// §17.4.66 distinguishes "no border declared" from "declared as `nil`":
-/// the first yields to the opposing cell's border, the second suppresses it.
-/// Collapsing them is what made an explicit `<w:top w:val="nil"/>` lose to a
-/// neighbour that declared a border.
+/// §17.4.66 distinguishes "nothing said about this edge" from "declared
+/// `val="nil"`". The difference is entirely about **inheritance**: an omitted
+/// or `none` edge falls back to the table style, then `tblPrEx`, then
+/// `tblBorders`; `nil` declines that fallback and stays empty.
 ///
-/// The distinction matters *only during conflict resolution*. Once resolution
-/// is over, `Absent` and `Suppressed` are both "paint nothing" — which is what
-/// [`CellEdge::line`] expresses, and why nothing downstream of the resolver
-/// needs to know about suppression.
+/// It is *not* about outranking the facing cell. `nil` removes this cell's
+/// border and nothing else — see [`resolve_border_conflict`].
+///
+/// The distinction survives resolution for one downstream reader: the page-split
+/// top-border restore in `emit.rs` may revive an `Absent` top but must not
+/// revive a `Suppressed` one. For painting they are identical, which is what
+/// [`CellEdge::line`] expresses.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum CellEdge {
-    /// Nothing declared this edge — or it was declared `val="none"`, which
-    /// §17.4.66 treats identically. Yields to the opposing border.
+    /// Nothing said about this edge — or it was declared `val="none"`, which
+    /// §17.4.66 treats identically. Inherits, then yields.
     Absent,
-    /// Declared `val="nil"`. Wins the conflict, then paints nothing.
+    /// Declared `val="nil"`: no border here, and no inheritance either.
     Suppressed,
     /// A border to resolve against the opposing edge, and paint if it wins.
     Line(TableBorderLine),
@@ -36,6 +39,16 @@ impl CellEdge {
             Self::Line(l) => Some(l),
             Self::Absent | Self::Suppressed => None,
         }
+    }
+
+    /// Whether two *resolved* edges paint the same thing.
+    ///
+    /// Not `==`: by this point the `Absent`/`Suppressed` distinction is not
+    /// observable to the painter, and letting it in would split a run of columns
+    /// that paints one continuous line. Callers asking "can one cell draw this
+    /// whole span in a single stroke?" mean *this* question.
+    pub(super) fn paints_same(self, other: Self) -> bool {
+        self.line() == other.line()
     }
 }
 
@@ -141,15 +154,42 @@ pub(super) fn resolve_cell_effective_borders(
 /// The algorithm is **not in ISO/IEC 29500-1** — the standard only says a method
 /// exists. It is spelled out in [MS-OI29500] §17.4.66 (`tcBorders`, note a),
 /// which is the authority for every step below:
-///   0. A `nil` edge suppresses the shared border outright — *"If the conflicting
-///      table cell border is `nil`, then no border shall be displayed."*
-///   1. Absent yields to present. An edge declared `none` counts as absent, per
-///      the same sentence: *"If the conflicting table cell border is `none` (no
+///   1. An edge with no border yields to one that has it. `none` counts as
+///      no border, per *"If the conflicting table cell border is `none` (no
 ///      border), then the opposing border shall be displayed."*
 ///   2. Weight = width in eighths of a point × style number. Higher wins.
 ///   3. Equal weight: the style **earlier in the spec's precedence list** wins —
 ///      `Single` over `Double`. See `style_precedence_index`.
 ///   4. Equal style: darker colour wins (`R+B+2G`, then `B+2G`, then `G`).
+///
+/// **What `nil` does, and what it does not.** The note adds *"If the conflicting
+/// table cell border is `nil`, then no border shall be displayed"*, which reads
+/// as `nil` beating everything on the far side of the edge. It does not, and
+/// implementing it that way deleted borders Word draws. `nil` acts on **its own
+/// cell only**: it is how a cell declines the inheritance the note describes one
+/// step earlier (style → `tblPrEx` → `tblBorders`), which is the whole of its
+/// difference from `none`. The facing cell's border is untouched, so
+/// `Suppressed` yields here exactly like `Absent`.
+///
+/// Three independent facts in `IP 05 Trenches` fix the reading, and no evidence
+/// contradicts it:
+///
+/// * a cell declaring `<w:bottom w:val="single"/>` above one declaring
+///   `<w:top w:val="nil"/>` — Word draws the line, as does macOS's own DOCX
+///   renderer on the same markup;
+/// * a cell that *inherits* its bottom from `insideH`, faced by a `gridSpan=2`
+///   spacer cell whose `nil` was aimed at the neighbouring column — Word draws
+///   that line too, and it could not do otherwise: a cell paints one border
+///   across its whole width, so a wide cell's `nil` cannot punch a hole in the
+///   cell above it;
+/// * down the document's spacer columns the generator writes `nil` on **both**
+///   sides of every shared edge. Writing both is only necessary because one
+///   alone does not suppress.
+///
+/// `nil` is still not a no-op: with nothing facing it — a table's outer edge, or
+/// a facing cell that is also `nil` — declining inheritance is exactly what
+/// removes the border. Both halves are pinned by
+/// `tests/table_border_conflict.rs`.
 ///
 /// **The comparison is a total order, and that is the point.** The caller feeds
 /// this (upper row's bottom, lower row's top) and (left cell's right, right
@@ -161,22 +201,27 @@ pub(super) fn resolve_cell_effective_borders(
 /// one won half the time. `resolve_border_conflict(a, b)` now always equals
 /// `resolve_border_conflict(b, a)`.
 ///
-/// Step 0 is why the argument type is [`CellEdge`] and not
-/// `Option<TableBorderLine>`: suppression is a *third* state, and an `Option`
-/// can only say "absent", which is the state that loses. Returning `Suppressed`
-/// rather than `Absent` keeps the two distinguishable for the caller — a
-/// suppressed edge must not be revived by the page-split top-border restore in
-/// `emit.rs`, whereas an absent one should be.
+/// Suppression is still a *third* state, which is why the argument type is
+/// [`CellEdge`] and not `Option<TableBorderLine>`: when neither side paints,
+/// returning `Suppressed` rather than `Absent` keeps the two distinguishable for
+/// the caller — a suppressed edge must not be revived by the page-split
+/// top-border restore in `emit.rs`, whereas an absent one should be.
 pub(super) fn resolve_border_conflict(a: CellEdge, b: CellEdge) -> CellEdge {
     match (a, b) {
-        (CellEdge::Suppressed, _) | (_, CellEdge::Suppressed) => CellEdge::Suppressed,
-        (CellEdge::Absent, other) | (other, CellEdge::Absent) => other,
-        (CellEdge::Line(a), CellEdge::Line(b)) => {
-            CellEdge::Line(match border_precedence(&a).cmp(&border_precedence(&b)) {
+        (CellEdge::Line(la), CellEdge::Line(lb)) => {
+            match border_precedence(&la).cmp(&border_precedence(&lb)) {
                 std::cmp::Ordering::Less => b,
                 _ => a,
-            })
+            }
         }
+        // One side paints: it does so regardless of what the other side says.
+        // A facing `nil` removed *its* border, not this one.
+        (CellEdge::Line(_), _) => a,
+        (_, CellEdge::Line(_)) => b,
+        // Neither side paints. Carry suppression forward so the page-split
+        // restore cannot revive an edge the author explicitly emptied.
+        (CellEdge::Suppressed, _) | (_, CellEdge::Suppressed) => CellEdge::Suppressed,
+        (CellEdge::Absent, CellEdge::Absent) => CellEdge::Absent,
     }
 }
 
@@ -331,6 +376,8 @@ pub(super) fn border_width(b: CellEdge) -> Pt {
 fn resolve_override(ovr: &CellBorderOverride) -> CellEdge {
     match ovr {
         CellBorderOverride::Suppress => CellEdge::Suppressed,
+        // The cell's own `<w:tcBorders>` — the provenance that beats a facing
+        // `nil` in `resolve_border_conflict`.
         CellBorderOverride::Border(line) => CellEdge::Line(*line),
     }
 }
@@ -828,28 +875,57 @@ mod conflict_tests {
         );
     }
 
-    /// Step 0 — **`nil` suppresses the shared edge**, [MS-OI29500] §17.4.66:
+    /// **`nil` does not reach across the edge.** [MS-OI29500] §17.4.66 says
     /// *"If the conflicting table cell border is nil, then no border shall be
-    /// displayed."* It beats a present border from either side, and beats one
-    /// that is arbitrarily heavier — suppression is not a weight comparison.
+    /// displayed"*, and read literally that is wrong: `nil` empties its own
+    /// cell's edge and leaves the facing cell's border alone. It loses from
+    /// either side and at any weight — even a hairline survives it.
     ///
-    /// This is E5b#8. It was recorded as needing a Word reference render; the
-    /// answer was in the note already cited three lines above the resolver.
+    /// `IP 05 Trenches` is the reference. `<w:bottom w:val="single"/>` above
+    /// `<w:top w:val="nil"/>` draws in Word and in macOS's DOCX renderer; so
+    /// does an *inherited* bottom faced by a `gridSpan` spacer cell's `nil`, and
+    /// it must — a cell paints one border across its whole width, so a wide
+    /// cell's `nil` cannot punch a hole in the cell above it.
     #[test]
-    fn nil_suppresses_the_opposing_border() {
-        let heavy = line(6.0, TableBorderStyle::Double, BLACK);
+    fn nil_yields_to_the_facing_border() {
+        let hair = line(0.25, TableBorderStyle::Single, BLACK);
         for (a, b) in [
-            (CellEdge::Suppressed, CellEdge::Line(heavy)),
-            (CellEdge::Line(heavy), CellEdge::Suppressed),
+            (CellEdge::Suppressed, CellEdge::Line(hair)),
+            (CellEdge::Line(hair), CellEdge::Suppressed),
+        ] {
+            assert_eq!(
+                resolve_border_conflict(a, b).line(),
+                Some(hair),
+                "the facing border must survive the nil: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// …and yet `nil` is not a no-op, because it declined **inheritance**
+    /// upstream in `resolve_cell_effective_borders`. With nothing facing it —
+    /// another `nil`, or an edge nobody spoke for — nothing is painted, and the
+    /// result stays `Suppressed` rather than collapsing to `Absent`.
+    ///
+    /// That last part is load-bearing: `emit.rs` may revive an `Absent` top when
+    /// a row starts a page slice, and must not revive an emptied one.
+    #[test]
+    fn nil_stays_suppressed_when_nothing_faces_it() {
+        for (a, b) in [
             (CellEdge::Suppressed, CellEdge::Absent),
+            (CellEdge::Absent, CellEdge::Suppressed),
             (CellEdge::Suppressed, CellEdge::Suppressed),
         ] {
             assert_eq!(
                 resolve_border_conflict(a, b),
                 CellEdge::Suppressed,
-                "nil must suppress, not yield: {a:?} vs {b:?}"
+                "suppression must survive where nothing paints: {a:?} vs {b:?}"
             );
         }
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Absent, CellEdge::Absent),
+            CellEdge::Absent,
+            "…but two silent edges stay restorable"
+        );
     }
 
     /// The counterpart, and the half that is easy to get wrong when fixing the

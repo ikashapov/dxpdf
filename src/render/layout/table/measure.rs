@@ -164,7 +164,8 @@ pub(super) fn measure_table_rows(
                         .all(|(ci, &start)| {
                             let span = rows[row_idx].cells[ci].grid_span.max(1) as usize;
                             let end = (start + span).min(ncols);
-                            start >= end || (start..end).all(|gc| resolved[gc] == resolved[start])
+                            start >= end
+                                || (start..end).all(|gc| resolved[gc].paints_same(resolved[start]))
                         })
             };
 
@@ -196,7 +197,7 @@ pub(super) fn measure_table_rows(
                     if start >= end {
                         continue;
                     }
-                    if (start..end).all(|gc| resolved[gc] == resolved[start]) {
+                    if (start..end).all(|gc| resolved[gc].paints_same(resolved[start])) {
                         resolved_borders[upper][ci].bottom = resolved[start];
                         for c in covered.iter_mut().take(end).skip(start) {
                             *c = true;
@@ -215,7 +216,7 @@ pub(super) fn measure_table_rows(
                         // Any column already painted from above → defer the
                         // whole cell so a partly-covered span can't double up.
                         resolved_borders[lower][ci].top = CellEdge::Absent;
-                    } else if (start..end).all(|gc| resolved[gc] == resolved[start]) {
+                    } else if (start..end).all(|gc| resolved[gc].paints_same(resolved[start])) {
                         resolved_borders[lower][ci].top = resolved[start];
                     } else {
                         resolved_borders[lower][ci].top = CellEdge::Absent;
@@ -497,10 +498,12 @@ mod tests {
         );
     }
 
-    /// §17.4.66 step 0: a `nil` bottom on a wide upper cell suppresses the
-    /// shared edge for **every column it spans**, including one where the lower
-    /// cell declares a real border. Suppression is not a weight comparison — the
-    /// lower border is present and still loses.
+    /// §17.4.66 step 0 across a `gridSpan` mismatch: a `nil` bottom on a wide
+    /// upper cell suppresses the columns it spans that fall back to the table —
+    /// but **not** the column where the lower cell has a border of its own,
+    /// which survives and is drawn from below. One nil bottom therefore resolves to two different
+    /// answers along its own width, which is exactly the case that forces the
+    /// per-column resolution this pass does.
     ///
     /// This is the configuration `wide_upper_cell_draws_whole_edge_from_lower_row`
     /// used to carry, kept here for what it now demonstrates.
@@ -530,32 +533,107 @@ mod tests {
             false,
         );
 
+        // The nil bottom spans columns 0-1 and resolves differently on each:
+        // column 0 faces another nil and stays suppressed, column 1 faces
+        // Function's *declared* top and loses to it. A cell paints one border
+        // across its width, so that split hands the whole edge to the lower row.
+        for b in &m.rows[0].borders {
+            assert_eq!(
+                b.bottom,
+                CellEdge::Absent,
+                "upper bottoms cleared — the nil span is not uniform, so the edge is owned below"
+            );
+        }
         assert_eq!(
-            m.rows[0].borders[0].bottom,
+            m.rows[1].borders[0].top,
             CellEdge::Suppressed,
-            "the nil bottom suppresses its whole span, beating Function's declared top"
+            "column 0: nil against nil stays suppressed"
         );
         assert_eq!(
             m.rows[1].borders[1].top.line(),
-            None,
-            "Function's own single top is suppressed by the nil above it"
+            Some(s),
+            "column 1: Function has a top of its own, so the nil above does not erase it"
         );
-        // Columns outside the nil span are unaffected.
-        assert_eq!(m.rows[0].borders[1].bottom.line(), Some(s));
-        assert_eq!(m.rows[0].borders[2].bottom.line(), Some(s));
+        // Columns outside the nil span keep the inherited insideH, drawn from
+        // the same (lower) side so the line sits at one y.
+        assert_eq!(m.rows[1].borders[2].top.line(), Some(s));
     }
 
-    /// §17.4.66: a `nil` bottom among the cells above a wide `gridSpan` cell
-    /// **does** punch a gap through that cell's top border, because nil
-    /// suppresses the shared edge rather than yielding to the wide cell's
-    /// inherited `insideH`.
+    /// A cell can paint one border across its whole span when every column under
+    /// it *paints the same thing* — not when every column resolved to the same
+    /// `CellEdge`. `Absent` and `Suppressed` both paint nothing, so a run
+    /// mixing them is uniform; comparing with `==` would split it and hand the
+    /// edge to the other row for no visible reason.
     ///
-    /// This test previously asserted the opposite ("must not punch a gap"), and
-    /// the assertion was correct only under the pre-§17.4.66 reading where nil
-    /// collapsed to "absent" and lost every conflict. The gap is what the author
-    /// asked for by writing `<w:bottom w:val="nil"/>`.
+    /// Built so the two columns differ **only** in that: with no `insideH` to
+    /// inherit, column 0 resolves to `Suppressed` (the lower cell wrote `nil`)
+    /// and column 1 to `Absent` (nobody said anything). Neither paints.
+    ///
+    /// The upper cell must end up owning the edge, and carrying `Suppressed`
+    /// while doing so — `emit.rs` restores an `Absent` top at a page split and
+    /// must not restore an emptied one, so which of the two lands there is a
+    /// real distinction, not bookkeeping.
     #[test]
-    fn nil_spacer_above_wide_cell_punches_a_gap() {
+    fn a_uniform_run_is_not_split_by_absent_versus_suppressed() {
+        let hair = single(0.5);
+        let borders = TableBorderConfig {
+            top: Some(hair),
+            bottom: Some(hair),
+            left: Some(hair),
+            right: Some(hair),
+            // Nothing to inherit on the inter-row edge — so the only states in
+            // play there are `Absent` and `Suppressed`.
+            inside_h: None,
+            inside_v: Some(hair),
+        };
+        let rows = vec![
+            // One wide cell saying nothing about its bottom.
+            row(vec![cell(2, None)]),
+            // Column 0 writes `nil`; column 1 says nothing.
+            row(vec![
+                cell(1, Some(cb(Some(CellBorderOverride::Suppress), None))),
+                cell(1, None),
+            ]),
+        ];
+        let cols = vec![Pt::new(100.0), Pt::new(100.0)];
+        let m = measure_table_rows(
+            &rows,
+            &cols,
+            Pt::ZERO,
+            Pt::new(10.0),
+            Some(&borders),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            m.rows[0].borders[0].bottom,
+            CellEdge::Suppressed,
+            "the wide cell owns the whole edge, carrying the suppression"
+        );
+        assert_eq!(
+            m.rows[1].borders[0].top,
+            CellEdge::Absent,
+            "so the lower row's tops are cleared"
+        );
+        assert_eq!(m.rows[1].borders[1].top, CellEdge::Absent);
+    }
+
+    /// §17.4.66: a `nil` among the cells on one side of an edge **cannot** punch
+    /// a gap through a wide `gridSpan` cell facing it. The wide cell inherits
+    /// `insideH` for its whole width and paints one border across it; a
+    /// neighbour's `nil` empties only that neighbour's own edge.
+    ///
+    /// This is `IP 05 Trenches`' `Date/Time:` cell with the sides swapped — the
+    /// real document has the wide spacer cell *below*, its `nil` aimed at the
+    /// narrow spacer column, and the label cell above still draws the bottom it
+    /// inherited. The assertion here was inverted twice: once when `nil`
+    /// wrongly collapsed to "absent" (so it also wrongly *inherited*), and once
+    /// when `nil` was made to win the conflict outright. Declining inheritance
+    /// and overruling the neighbour are different powers; `nil` has only the
+    /// first.
+    #[test]
+    fn nil_spacer_cannot_punch_a_gap_through_a_wide_facing_cell() {
         let s = single(0.5);
         let rows = vec![
             // Row 0: [inherits single | nil spacer | inherits single].
@@ -578,19 +656,16 @@ mod tests {
             false,
         );
 
-        assert_eq!(m.rows[0].borders[0].bottom.line(), Some(s));
-        assert_eq!(
-            m.rows[0].borders[1].bottom,
-            CellEdge::Suppressed,
-            "the nil spacer suppresses its column instead of inheriting"
-        );
+        // Every column resolves to the same line, so the edge is uniform and one
+        // side paints it whole. The nil column is not a hole in it.
         assert_eq!(
             m.rows[0].borders[1].bottom.line(),
-            None,
-            "so nothing is painted there — the gap is deliberate"
+            Some(s),
+            "the wide cell below still supplies this column's border"
         );
+        assert_eq!(m.rows[0].borders[0].bottom.line(), Some(s));
         assert_eq!(m.rows[0].borders[2].bottom.line(), Some(s));
-        // The wide lower cell's top is still drawn once, from above.
+        // …and it is drawn exactly once, from the upper row.
         assert_eq!(m.rows[1].borders[0].top.line(), None);
     }
 
