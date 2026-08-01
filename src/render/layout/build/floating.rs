@@ -4,7 +4,9 @@
 use crate::model::{self, Paragraph};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
-use crate::render::layout::section::{FloatingImage, FloatingImageY, FloatingShape};
+use crate::render::layout::section::{
+    FloatingImage, FloatingImageX, FloatingImageY, FloatingShape, PageParity,
+};
 use crate::render::resolve::shape_geometry::build_geometry;
 use crate::render::resolve::shape_visuals::resolve_shape_visuals;
 
@@ -436,10 +438,11 @@ fn build_vml_floating_image(
     let image_data = ctx.resolved.media.get(rel_id).cloned()?;
 
     let (page_x, y) = vml_absolute_position(&common.style)?;
-    let x = match frame {
+    // VML has no `inside`/`outside` equivalent — `margin-left` is one number.
+    let x = FloatingImageX::Absolute(match frame {
         AnchorFrame::Page => page_x,
         AnchorFrame::Stack => page_x - state.page_config.margins.left,
-    };
+    });
 
     let width = common.style.width.and_then(vml_style_length_to_pt)?;
     let height = common.style.height.and_then(vml_style_length_to_pt)?;
@@ -577,10 +580,11 @@ fn build_vml_rect_shape(
     // it from `x` up front so the round-trip preserves the
     // page-relative offset.
     let (page_x, y) = vml_absolute_position(&common.style)?;
-    let x = match frame {
+    // VML has no `inside`/`outside` equivalent — `margin-left` is one number.
+    let x = FloatingImageX::Absolute(match frame {
         AnchorFrame::Page => page_x,
         AnchorFrame::Stack => page_x - state.page_config.margins.left,
-    };
+    });
 
     // Size via `style.width` / `style.height`. A rect with no extent
     // can't meaningfully render.
@@ -666,7 +670,7 @@ fn resolve_anchor_position(
     content_h: Pt,
     state: &BuildState,
     frame: AnchorFrame,
-) -> (Pt, FloatingImageY) {
+) -> (FloatingImageX, FloatingImageY) {
     let x = resolve_anchor_x(anchor, content_w, state, frame);
     let y = resolve_anchor_y(anchor, content_h, state, frame);
     (x, y)
@@ -692,25 +696,19 @@ enum HorizontalRegion {
     Fixed(AnchorSpan),
     /// §20.4.3.4 `insideMargin` / `outsideMargin`: "inside" is the left margin
     /// on an odd (recto) page and the right margin on an even one, so which
-    /// strip this names is a function of the page number. Floats are extracted
-    /// before pagination, so that number does not exist yet — the deferral is
-    /// modelled instead of guessed, and `assume_odd_page` is the single place
-    /// the guess gets made.
-    PageParity { odd: AnchorSpan, even: AnchorSpan },
+    /// strip this names is a function of the page number.
+    Mirrored { odd: AnchorSpan, even: AnchorSpan },
 }
 
 impl HorizontalRegion {
-    /// Tier-0: collapse a parity-dependent region onto its odd-page reading.
-    ///
-    /// Exact for a single-sided document, which is nearly all of them — there
-    /// is no mirroring to get wrong. Resolving it properly means deferring the
-    /// whole horizontal position past pagination, the shape `FloatingImageY`
-    /// already has on the vertical axis. That is open-findings item 1, and this
-    /// method is the one call site it has to replace.
-    fn assume_odd_page(self) -> AnchorSpan {
+    /// The strip this reference names on a page of the given parity.
+    fn on(self, parity: PageParity) -> AnchorSpan {
         match self {
             Self::Fixed(span) => span,
-            Self::PageParity { odd, .. } => odd,
+            Self::Mirrored { odd, even } => match parity {
+                PageParity::Odd => odd,
+                PageParity::Even => even,
+            },
         }
     }
 }
@@ -811,7 +809,7 @@ fn horizontal_region(
     geom: &FrameGeometry,
 ) -> HorizontalRegion {
     use crate::model::AnchorRelativeFrom as From;
-    use HorizontalRegion::{Fixed, PageParity};
+    use HorizontalRegion::{Fixed, Mirrored};
 
     match from {
         From::Page => Fixed(geom.page()),
@@ -821,11 +819,11 @@ fn horizontal_region(
         From::Margin | From::Column => Fixed(geom.container),
         From::LeftMargin => Fixed(geom.left_margin()),
         From::RightMargin => Fixed(geom.right_margin()),
-        From::InsideMargin => PageParity {
+        From::InsideMargin => Mirrored {
             odd: geom.left_margin(),
             even: geom.right_margin(),
         },
-        From::OutsideMargin => PageParity {
+        From::OutsideMargin => Mirrored {
             odd: geom.right_margin(),
             even: geom.left_margin(),
         },
@@ -857,42 +855,70 @@ fn horizontal_region(
 
 /// Horizontal axis of `resolve_anchor_position`. Split out so the two axes
 /// can be read independently.
+///
+/// Parity reaches the result through *two* channels — the region
+/// (`insideMargin`/`outsideMargin`) and the alignment (`inside`/`outside`) —
+/// so rather than thread it through the arithmetic, the whole position is
+/// evaluated once per parity and the two readings handed to
+/// [`FloatingImageX::from_pages`]. An anchor that uses neither channel produces
+/// two equal readings and collapses back to `Absolute`, which is why a
+/// single-sided document carries no deferral at all.
 fn resolve_anchor_x(
     anchor: &crate::model::AnchorProperties,
     content_w: Pt,
     state: &BuildState,
     frame: AnchorFrame,
-) -> Pt {
+) -> FloatingImageX {
     use crate::model::{AnchorAlignment, AnchorPosition};
 
     let geom = FrameGeometry::new(&state.page_config, frame);
-    let span = |from| horizontal_region(from, &geom).assume_odd_page();
 
-    match &anchor.horizontal_position {
-        // §20.4.2.12: an offset is measured from the region's own left edge.
-        AnchorPosition::Offset {
-            relative_from,
-            offset,
-        } => span(*relative_from).start + Pt::from(*offset),
-        // §20.4.3.1: an alignment places the object within the region.
-        AnchorPosition::Align {
-            relative_from,
-            alignment,
-        } => {
-            let span = span(*relative_from);
-            match alignment {
-                AnchorAlignment::Left => span.start,
-                AnchorAlignment::Right => span.start + span.extent - content_w,
-                AnchorAlignment::Center => span.start + (span.extent - content_w) * 0.5,
-                // §20.4.3.1 `inside`/`outside` are page-parity dependent, and
-                // `top`/`bottom` are §20.4.3.2 values on the wrong axis. Both
-                // are open-findings item 1 — deliberately left in a catch-all,
-                // because the parity that resolves them is the same one
-                // `HorizontalRegion::PageParity` defers just above.
-                _ => span.start,
+    let at = |parity: PageParity| -> Pt {
+        match &anchor.horizontal_position {
+            // §20.4.2.12: an offset is measured from the region's own left edge.
+            AnchorPosition::Offset {
+                relative_from,
+                offset,
+            } => horizontal_region(*relative_from, &geom).on(parity).start + Pt::from(*offset),
+            // §20.4.3.1: an alignment places the object within the region.
+            AnchorPosition::Align {
+                relative_from,
+                alignment,
+            } => {
+                let span = horizontal_region(*relative_from, &geom).on(parity);
+                let near = span.start;
+                let far = span.start + span.extent - content_w;
+                match alignment {
+                    AnchorAlignment::Left => near,
+                    AnchorAlignment::Right => far,
+                    AnchorAlignment::Center => span.start + (span.extent - content_w) * 0.5,
+                    // §20.4.3.1: "inside" is the binding edge — left on an odd
+                    // (recto) page, right on an even one — and "outside" is the
+                    // trimmed edge opposite it.
+                    AnchorAlignment::Inside => match parity {
+                        PageParity::Odd => near,
+                        PageParity::Even => far,
+                    },
+                    AnchorAlignment::Outside => match parity {
+                        PageParity::Odd => far,
+                        PageParity::Even => near,
+                    },
+                    // §20.4.3.2 vertical alignments on `wp:positionH`. One
+                    // `AnchorAlignment` serves both axes, so these are
+                    // reachable only from a malformed document.
+                    AnchorAlignment::Top | AnchorAlignment::Bottom => {
+                        log::warn!(
+                            "anchor: align={alignment:?} is not a horizontal alignment \
+                             (§20.4.3.1) — placing at the region's left edge instead"
+                        );
+                        near
+                    }
+                }
             }
         }
-    }
+    };
+
+    FloatingImageX::from_pages(at(PageParity::Odd), at(PageParity::Even))
 }
 
 /// Vertical axis of `resolve_anchor_position`. In `Stack` every offset is
@@ -1007,7 +1033,23 @@ fn resolve_anchor_y(
                 AnchorAlignment::Top => area_top,
                 AnchorAlignment::Bottom => area_top + area_height - content_h,
                 AnchorAlignment::Center => area_top + (area_height - content_h) * 0.5,
-                _ => area_top,
+                // §20.4.3.2 `inside`/`outside`. Deliberately *not* given the
+                // page-parity treatment the horizontal axis gets: a two-sided
+                // document mirrors left and right, not top and bottom, so
+                // there is no reading of a vertical "inside" that source can
+                // derive. Aligned to the region's top, the long-standing
+                // fallback; the open question is filed in open-findings §3
+                // alongside vertical `insideMargin`.
+                AnchorAlignment::Inside | AnchorAlignment::Outside => area_top,
+                // §20.4.3.1 horizontal alignments on `wp:positionV` —
+                // malformed, the same way round as the horizontal axis.
+                AnchorAlignment::Left | AnchorAlignment::Right => {
+                    log::warn!(
+                        "anchor: align={alignment:?} is not a vertical alignment \
+                         (§20.4.3.2) — aligning to the region's top instead"
+                    );
+                    area_top
+                }
             };
             FloatingImageY::Absolute(y_pos)
         }
@@ -1225,8 +1267,18 @@ pub(super) fn build_shape_text_commands(
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
     let line_height = super::default_line_height(ctx);
-    let result =
-        crate::render::layout::section::stack_blocks(&hf.blocks, content_width, line_height, None);
+    // Shape text is laid out at *build* time, before the shape is placed on a
+    // page, so a §20.4.3.1 `inside`/`outside` float nested inside a shape's
+    // text box has no parity to resolve against and takes the odd-page
+    // reading. The same structural limit as the table-cell path in
+    // `layout_cell`, and rarer still.
+    let result = crate::render::layout::section::stack_blocks(
+        &hf.blocks,
+        content_width,
+        line_height,
+        None,
+        PageParity::Odd,
+    );
 
     let mut commands = Vec::with_capacity(result.commands.len());
     for mut cmd in result.commands {
@@ -1360,6 +1412,7 @@ mod tests {
     use crate::render::dimension::Pt;
     use crate::render::layout::build::BuildState;
     use crate::render::layout::section::FloatingImageY;
+    use crate::render::layout::section::{FloatingImageX, PageParity};
 
     fn default_state() -> BuildState {
         BuildState {
@@ -1612,9 +1665,17 @@ mod tests {
         })
     }
 
-    /// `resolve_anchor_x` for a 100pt-wide object on the default page.
+    /// `resolve_anchor_x` for a 100pt-wide object on a page of `parity`.
+    fn x_on(anchor: &AnchorProperties, frame: AnchorFrame, parity: PageParity) -> f32 {
+        resolve_anchor_x(anchor, Pt::new(100.0), &default_state(), frame)
+            .resolve(parity)
+            .raw()
+    }
+
+    /// The odd-page reading — which is *the* reading for every anchor that is
+    /// not `inside`/`outside`.
     fn x_of(anchor: &AnchorProperties, frame: AnchorFrame) -> f32 {
-        resolve_anchor_x(anchor, Pt::new(100.0), &default_state(), frame).raw()
+        x_on(anchor, frame, PageParity::Odd)
     }
 
     fn assert_x(got: f32, expected: f32, what: &str) {
@@ -1799,15 +1860,15 @@ mod tests {
     /// being built wrong.
     #[test]
     fn inside_and_outside_margins_mirror_each_other() {
-        use super::{horizontal_region, FrameGeometry, HorizontalRegion::PageParity};
+        use super::{horizontal_region, FrameGeometry, HorizontalRegion::Mirrored};
 
         let geom = FrameGeometry::new(&default_state().page_config, AnchorFrame::Page);
         let (
-            PageParity {
+            Mirrored {
                 odd: inside_odd,
                 even: inside_even,
             },
-            PageParity {
+            Mirrored {
                 odd: outside_odd,
                 even: outside_even,
             },
@@ -1822,6 +1883,87 @@ mod tests {
         assert_eq!(inside_odd, outside_even, "inside on odd = outside on even");
         assert_eq!(inside_even, outside_odd, "inside on even = outside on odd");
         assert_ne!(inside_odd, inside_even, "the two pages differ");
+    }
+
+    /// §20.4.3.1: `inside` is the binding edge — left on an odd (recto) page,
+    /// right on an even one — and `outside` is the trimmed edge opposite it.
+    /// Both readings are carried, because the page is not known here.
+    #[test]
+    fn inside_and_outside_alignments_mirror_on_even_pages() {
+        let margin = AnchorRelativeFrom::Margin;
+        // Text area 72..540; a 100pt object is flush left at 72, flush right
+        // at 440.
+        for (alignment, odd, even) in [
+            (AnchorAlignment::Inside, 72.0, 440.0),
+            (AnchorAlignment::Outside, 440.0, 72.0),
+        ] {
+            let anchor = h_align(margin, alignment);
+            assert_x(
+                x_on(&anchor, AnchorFrame::Page, PageParity::Odd),
+                odd,
+                &format!("{alignment:?} on an odd page"),
+            );
+            assert_x(
+                x_on(&anchor, AnchorFrame::Page, PageParity::Even),
+                even,
+                &format!("{alignment:?} on an even page"),
+            );
+        }
+    }
+
+    /// The two parity channels compose: an `inside` alignment *within* an
+    /// `insideMargin` region mirrors through both at once, and must not
+    /// double-mirror back to the odd-page answer.
+    #[test]
+    fn a_mirrored_alignment_inside_a_mirrored_region_mirrors_once() {
+        let anchor = h_align(AnchorRelativeFrom::InsideMargin, AnchorAlignment::Inside);
+        // Odd: insideMargin = the 0..72 strip, inside-aligned = its left edge.
+        assert_x(
+            x_on(&anchor, AnchorFrame::Page, PageParity::Odd),
+            0.0,
+            "odd",
+        );
+        // Even: insideMargin = the 540..612 strip, inside-aligned = its
+        // *right* edge, less the object's width.
+        assert_x(
+            x_on(&anchor, AnchorFrame::Page, PageParity::Even),
+            540.0 + 72.0 - 100.0,
+            "even",
+        );
+    }
+
+    /// An anchor that uses neither parity channel collapses to `Absolute`, so
+    /// a single-sided document carries no deferral at all and every downstream
+    /// `resolve` is a no-op. This is what keeps the ADT from costing anything
+    /// on the documents that are nearly all of them.
+    #[test]
+    fn an_unmirrored_anchor_carries_no_deferral() {
+        for alignment in [
+            AnchorAlignment::Left,
+            AnchorAlignment::Center,
+            AnchorAlignment::Right,
+        ] {
+            let x = resolve_anchor_x(
+                &h_align(AnchorRelativeFrom::Margin, alignment),
+                Pt::new(100.0),
+                &default_state(),
+                AnchorFrame::Page,
+            );
+            assert!(
+                matches!(x, FloatingImageX::Absolute(_)),
+                "{alignment:?} is parity-independent, got {x:?}"
+            );
+        }
+        let mirrored = resolve_anchor_x(
+            &h_align(AnchorRelativeFrom::Margin, AnchorAlignment::Inside),
+            Pt::new(100.0),
+            &default_state(),
+            AnchorFrame::Page,
+        );
+        assert!(
+            matches!(mirrored, FloatingImageX::PageParity { .. }),
+            "inside is parity-dependent, got {mirrored:?}"
+        );
     }
 
     /// §20.4.3.4 `character` is the anchor's position in the text run, which
@@ -1997,7 +2139,7 @@ mod tests {
         .expect("a positioned, sized rect builds");
 
         assert_x(
-            shape.x.raw(),
+            shape.x.resolve(PageParity::Odd).raw(),
             30.0,
             "page-frame x is the style's margin-left",
         );
@@ -2026,7 +2168,11 @@ mod tests {
             AnchorFrame::Stack,
         )
         .expect("a positioned, sized rect builds");
-        assert_x(shape.x.raw(), 8.0, "80pt page x minus the 72pt margin");
+        assert_eq!(
+            shape.x,
+            FloatingImageX::Absolute(Pt::new(8.0)),
+            "80pt page x minus the 72pt margin"
+        );
     }
 
     /// Without `position:absolute` there is no position to honour, and a rect

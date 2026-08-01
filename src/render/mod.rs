@@ -292,8 +292,11 @@ pub fn layout_document(
             Some(&measure_fn),
             separator_indent,
             dlh,
-            continuation,
-            &clearance,
+            layout::section::SectionStart {
+                continuation,
+                clearance: &clearance,
+                logical_page_base,
+            },
         );
 
         last_config = config.clone();
@@ -463,11 +466,13 @@ fn measure_header_bottom(
     default_line_height: dimension::Pt,
 ) -> dimension::Pt {
     let hf = layout::build::build_header_footer_content(blocks, ctx, state);
+    // Height only — no float x is read here, so the parity is immaterial.
     let result = layout::section::stack_blocks(
         &hf.blocks,
         config.content_width(),
         default_line_height,
         None,
+        layout::section::PageParity::Odd,
     );
     let blocks_bottom = config.header_margin + result.height;
     let floats_bottom = hf
@@ -495,11 +500,13 @@ fn measure_footer_extent(
     default_line_height: dimension::Pt,
 ) -> dimension::Pt {
     let hf = layout::build::build_header_footer_content(blocks, ctx, state);
+    // Height only — no float x is read here, so the parity is immaterial.
     let result = layout::section::stack_blocks(
         &hf.blocks,
         config.content_width(),
         default_line_height,
         None,
+        layout::section::PageParity::Odd,
     );
     let blocks_extent = config.footer_margin + result.height;
     let floats_extent = hf

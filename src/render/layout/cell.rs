@@ -7,7 +7,7 @@
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtEdgeInsets;
 
-use super::section::{stack_blocks, CellLine, LayoutBlock};
+use super::section::{stack_blocks, CellLine, LayoutBlock, PageParity};
 
 /// Result of laying out a cell.
 #[derive(Debug)]
@@ -36,7 +36,20 @@ pub fn layout_cell(
 ) -> CellLayout {
     let content_width = (cell_width - margins.horizontal()).max(Pt::ZERO);
 
-    let result = stack_blocks(blocks, content_width, default_line_height, measure_text);
+    // §20.4.3.1: a cell is measured before its table is paginated — a row can
+    // split across pages, and the split is decided from these measurements —
+    // so the page this cell lands on, and its parity, do not exist yet. An
+    // `inside`/`outside` float inside a table therefore takes the odd-page
+    // reading. That is the Tier-0 the page and header paths no longer need;
+    // removing it here means making cell measurement page-aware, which is a
+    // far larger change than the anchor resolution itself.
+    let result = stack_blocks(
+        blocks,
+        content_width,
+        default_line_height,
+        measure_text,
+        PageParity::Odd,
+    );
 
     // Shift all commands by cell margins.
     let commands = result

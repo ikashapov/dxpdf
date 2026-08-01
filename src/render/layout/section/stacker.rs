@@ -5,7 +5,7 @@ use super::super::float;
 use super::super::paragraph::place_paragraph;
 use super::super::table::layout_table;
 use super::helpers::table_x_offset;
-use super::types::{FloatingImageY, LayoutBlock};
+use super::types::{FloatingImageY, LayoutBlock, PageParity};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtRect;
 
@@ -65,11 +65,18 @@ pub struct StackResult {
 ///
 /// It does NOT handle page breaks, column breaks, or footnote collection —
 /// those are page-level concerns managed by `layout_section`.
+///
+/// `parity` resolves §20.4.3.1 `inside`/`outside` float positions, which mirror
+/// on the page the object lands on. Callers that know their page pass its
+/// parity; the table-cell path cannot (see [`layout_cell`]).
+///
+/// [`layout_cell`]: crate::render::layout::cell::layout_cell
 pub fn stack_blocks(
     blocks: &[LayoutBlock],
     content_width: Pt,
     default_line_height: Pt,
     measure_text: super::super::paragraph::MeasureTextFn<'_>,
+    parity: PageParity,
 ) -> StackResult {
     let constraints = super::super::BoxConstraints::tight_width(content_width, Pt::INFINITY);
     let mut commands = Vec::new();
@@ -142,7 +149,12 @@ pub fn stack_blocks(
                             }
                         };
                         commands.push(DrawCommand::Image {
-                            rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
+                            rect: PtRect::from_xywh(
+                                fi.x.resolve(parity),
+                                img_y,
+                                fi.size.width,
+                                fi.size.height,
+                            ),
                             image_data: fi.image_data.clone(),
                             src_rect: fi.src_rect,
                         });
@@ -156,7 +168,7 @@ pub fn stack_blocks(
                         }
                     } else if fi.wrap_mode.registers_as_wrap_float() {
                         page_floats.push(float::ActiveFloat {
-                            page_x: fi.x - fi.dist_left,
+                            page_x: fi.x.resolve(parity) - fi.dist_left,
                             page_y_start: y_start,
                             page_y_end: y_end,
                             width: fi.size.width + fi.dist_left + fi.dist_right,
@@ -195,7 +207,10 @@ pub fn stack_blocks(
                             }
                         };
                         commands.push(DrawCommand::Path {
-                            origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+                            origin: crate::render::geometry::PtOffset::new(
+                                fs.x.resolve(parity),
+                                shape_y,
+                            ),
                             rotation: fs.rotation,
                             flip_h: fs.flip_h,
                             flip_v: fs.flip_v,
@@ -215,7 +230,7 @@ pub fn stack_blocks(
                         }
                     } else {
                         page_floats.push(float::ActiveFloat {
-                            page_x: fs.x - fs.dist_left,
+                            page_x: fs.x.resolve(parity) - fs.dist_left,
                             page_y_start: y_start,
                             page_y_end: y_end,
                             width: fs.size.width + fs.dist_left + fs.dist_right,
@@ -300,7 +315,12 @@ pub fn stack_blocks(
                         FloatingImageY::RelativeToParagraph(offset) => para_content_top + offset,
                     };
                     commands.push(DrawCommand::Image {
-                        rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
+                        rect: PtRect::from_xywh(
+                            fi.x.resolve(parity),
+                            img_y,
+                            fi.size.width,
+                            fi.size.height,
+                        ),
                         image_data: fi.image_data.clone(),
                         src_rect: fi.src_rect,
                     });
@@ -326,7 +346,10 @@ pub fn stack_blocks(
                         FloatingImageY::RelativeToParagraph(offset) => para_content_top + offset,
                     };
                     commands.push(DrawCommand::Path {
-                        origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+                        origin: crate::render::geometry::PtOffset::new(
+                            fs.x.resolve(parity),
+                            shape_y,
+                        ),
                         rotation: fs.rotation,
                         flip_h: fs.flip_h,
                         flip_v: fs.flip_v,
@@ -341,7 +364,7 @@ pub fn stack_blocks(
                     // command is in shape-local coords; shift by the shape's
                     // resolved page origin.
                     for mut cmd in fs.text_commands.iter().cloned() {
-                        cmd.shift(fs.x, shape_y);
+                        cmd.shift(fs.x.resolve(parity), shape_y);
                         commands.push(cmd);
                     }
                 }
@@ -409,7 +432,7 @@ mod tests {
     use crate::model::WrapText;
     use crate::render::geometry::PtSize;
     use crate::render::layout::paragraph::ParagraphStyle;
-    use crate::render::layout::section::{FloatingImage, WrapMode};
+    use crate::render::layout::section::{FloatingImage, FloatingImageX, WrapMode};
     use crate::render::resolve::images::MediaEntry;
     use std::rc::Rc;
 
@@ -423,7 +446,7 @@ mod tests {
             },
             size: PtSize::new(Pt::new(50.0), Pt::new(height)),
             src_rect: None,
-            x: Pt::ZERO,
+            x: FloatingImageX::Absolute(Pt::ZERO),
             y,
             wrap_mode: wrap,
             dist_left: Pt::ZERO,
@@ -505,7 +528,7 @@ mod tests {
     }
 
     fn stack(blocks: &[LayoutBlock]) -> StackResult {
-        stack_blocks(blocks, Pt::new(400.0), Pt::new(LINE), None)
+        stack_blocks(blocks, Pt::new(400.0), Pt::new(LINE), None, PageParity::Odd)
     }
 
     fn image_ys(result: &StackResult) -> Vec<f32> {

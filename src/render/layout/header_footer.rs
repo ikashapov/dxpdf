@@ -15,7 +15,7 @@ use crate::render::resolve::header_footer::{HeaderFooterKind, HeaderFooterSet};
 use super::build::{build_header_footer_content, BuildContext, BuildState, HeaderFooterContent};
 use super::draw_command::{DrawCommand, LayoutedPage};
 use super::page::PageConfig;
-use super::section::stack_blocks;
+use super::section::{stack_blocks, PageParity};
 
 /// Decide which slot of a `HeaderFooterSet` applies to a given page,
 /// per ECMA-376 §17.10.6 (`titlePg`) and §17.10.1
@@ -240,6 +240,9 @@ pub fn render_headers_footers(
         // Logical page number drives both PAGE-field rendering
         // (§17.16.4.1) and even/odd header selection (§17.10.1).
         let logical_page_number = page_range.logical_page_base + page_idx;
+        // §20.4.3.1: the same number that selects the even/odd header decides
+        // which way an `inside`/`outside` float mirrors.
+        let parity = PageParity::of_page(logical_page_number);
         let first_in_section = page_idx == 0;
 
         // §17.10.6 + §17.10.1: pick the slot that applies to this page.
@@ -268,7 +271,14 @@ pub fn render_headers_footers(
             };
 
             let hf = build_header_footer_content(blocks, ctx, state);
-            render_header(page, config, &hf, content_width, default_line_height);
+            render_header(
+                page,
+                config,
+                &hf,
+                content_width,
+                default_line_height,
+                parity,
+            );
         }
 
         if let Some(blocks) = footer_blocks {
@@ -278,7 +288,14 @@ pub fn render_headers_footers(
             };
 
             let hf = build_header_footer_content(blocks, ctx, state);
-            render_footer(page, config, &hf, content_width, default_line_height);
+            render_footer(
+                page,
+                config,
+                &hf,
+                content_width,
+                default_line_height,
+                parity,
+            );
         }
     }
 
@@ -293,6 +310,7 @@ fn render_header(
     hf: &HeaderFooterContent,
     content_width: Pt,
     default_line_height: Pt,
+    parity: PageParity,
 ) {
     if hf.blocks.is_empty() {
         return;
@@ -304,7 +322,7 @@ fn render_header(
         (config.margins.left, config.header_margin)
     };
 
-    let result = stack_blocks(&hf.blocks, content_width, default_line_height, None);
+    let result = stack_blocks(&hf.blocks, content_width, default_line_height, None, parity);
 
     let mut header_cmds: Vec<DrawCommand> = Vec::new();
 
@@ -316,7 +334,7 @@ fn render_header(
         };
         header_cmds.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
-                fi.x,
+                fi.x.resolve(parity),
                 img_y,
                 fi.size.width,
                 fi.size.height,
@@ -340,7 +358,7 @@ fn render_header(
         };
         header_cmds.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
-                fi.x,
+                fi.x.resolve(parity),
                 img_y,
                 fi.size.width,
                 fi.size.height,
@@ -353,7 +371,7 @@ fn render_header(
     // y depends on the host paragraph). Page-anchored shapes were resolved
     // in `Page` frame so their absolute y is authoritative — emit them here
     // without applying the header's offset shift.
-    emit_page_anchored_shapes(&hf.floating_shapes, &mut header_cmds);
+    emit_page_anchored_shapes(&hf.floating_shapes, parity, &mut header_cmds);
 
     // Prepend header commands before body content.
     header_cmds.append(&mut page.commands);
@@ -367,12 +385,13 @@ fn render_footer(
     hf: &HeaderFooterContent,
     content_width: Pt,
     default_line_height: Pt,
+    parity: PageParity,
 ) {
     if hf.blocks.is_empty() {
         return;
     }
 
-    let result = stack_blocks(&hf.blocks, content_width, default_line_height, None);
+    let result = stack_blocks(&hf.blocks, content_width, default_line_height, None, parity);
 
     let footer_y = config.page_size.height - config.footer_margin - result.height;
 
@@ -384,7 +403,7 @@ fn render_footer(
         };
         page.commands.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
-                fi.x,
+                fi.x.resolve(parity),
                 img_y,
                 fi.size.width,
                 fi.size.height,
@@ -407,7 +426,7 @@ fn render_footer(
         };
         page.commands.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
-                fi.x,
+                fi.x.resolve(parity),
                 img_y,
                 fi.size.width,
                 fi.size.height,
@@ -420,7 +439,7 @@ fn render_footer(
     // y depends on the host paragraph). Page-anchored shapes were resolved
     // in `Page` frame so their absolute y is authoritative — emit them here
     // without applying the footer's stack shift.
-    emit_page_anchored_shapes(&hf.floating_shapes, &mut page.commands);
+    emit_page_anchored_shapes(&hf.floating_shapes, parity, &mut page.commands);
 }
 
 /// Emit page-anchored floating shapes (§20.4.2.10 vertical anchor =
@@ -428,7 +447,11 @@ fn render_footer(
 /// page coordinates. Mirrors the in-stacker emission in `stacker.rs`,
 /// but skipped here for clarity:
 /// no spacing collapse / paragraph anchoring, just absolute placement.
-fn emit_page_anchored_shapes(shapes: &[super::section::FloatingShape], out: &mut Vec<DrawCommand>) {
+fn emit_page_anchored_shapes(
+    shapes: &[super::section::FloatingShape],
+    parity: PageParity,
+    out: &mut Vec<DrawCommand>,
+) {
     use super::section::FloatingImageY;
     for fs in shapes {
         let shape_y = match fs.y {
@@ -439,7 +462,7 @@ fn emit_page_anchored_shapes(shapes: &[super::section::FloatingShape], out: &mut
             FloatingImageY::RelativeToParagraph(_) => continue,
         };
         out.push(DrawCommand::Path {
-            origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
+            origin: crate::render::geometry::PtOffset::new(fs.x.resolve(parity), shape_y),
             rotation: fs.rotation,
             flip_h: fs.flip_h,
             flip_v: fs.flip_v,
@@ -450,7 +473,7 @@ fn emit_page_anchored_shapes(shapes: &[super::section::FloatingShape], out: &mut
             effects: fs.effects.clone(),
         });
         for mut cmd in fs.text_commands.iter().cloned() {
-            cmd.shift(fs.x, shape_y);
+            cmd.shift(fs.x.resolve(parity), shape_y);
             out.push(cmd);
         }
     }
@@ -560,6 +583,7 @@ mod tests {
             &hf,
             config.content_width(),
             Pt::new(14.0),
+            PageParity::Odd,
         );
         render_footer(
             &mut pages[0],
@@ -567,6 +591,7 @@ mod tests {
             &hf,
             config.content_width(),
             Pt::new(14.0),
+            PageParity::Odd,
         );
 
         assert_eq!(pages[0].commands.len(), 1, "no changes");
@@ -598,6 +623,7 @@ mod tests {
             &header,
             config.content_width(),
             Pt::new(14.0),
+            PageParity::Odd,
         );
 
         assert!(pages[0].commands.len() > 1);
@@ -622,6 +648,7 @@ mod tests {
             &footer,
             config.content_width(),
             Pt::new(14.0),
+            PageParity::Odd,
         );
 
         assert_eq!(pages[0].commands.len(), 1);
@@ -648,6 +675,7 @@ mod tests {
                 &header,
                 config.content_width(),
                 Pt::new(14.0),
+                PageParity::Odd,
             );
         }
 
@@ -671,6 +699,7 @@ mod tests {
             &header,
             config.content_width(),
             Pt::new(14.0),
+            PageParity::Odd,
         );
 
         if let DrawCommand::Text { position, .. } = &pages[0].commands[0] {
