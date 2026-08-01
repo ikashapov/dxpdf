@@ -240,8 +240,29 @@ fn canonical_weight_names(weight: i32) -> &'static [&'static str] {
     }
 }
 
+/// Combine the weight a face *name* carries with the weight the run requested.
+///
+/// The requested weight is not really a weight. `FontCache::get_indexed` builds
+/// it from a `bold: bool`, so it is only ever `NORMAL` or `BOLD`: `BOLD` means
+/// "this run is bold", and `NORMAL` means only "this run is not bold" — it
+/// carries no information about what weight the face should be.
+///
+/// So `NORMAL` must not participate. Taking `max` unconditionally let that
+/// content-free default overrule an explicit face name, promoting every face
+/// lighter than Regular: `"Calibri Light"` resolves through the alias index to
+/// `(Calibri, 342)` and came back out as plain Calibri at 400. Step 3 exists to
+/// honour documents that name a *face* rather than a family, and that is
+/// exactly the information it was discarding.
+///
+/// A bold request still raises a light face — `"Calibri Light"` with `<w:b/>`
+/// wants something bolder than Light, and `BOLD` is the closest this layer can
+/// express.
 fn merged_alias_weight(alias_weight: i32, requested_weight: i32) -> i32 {
-    alias_weight.max(requested_weight)
+    if requested_weight > *Weight::NORMAL {
+        alias_weight.max(requested_weight)
+    } else {
+        alias_weight
+    }
 }
 
 fn style_for_face_alias(alias: &FaceAlias, requested: FontStyle) -> FontStyle {
@@ -766,8 +787,10 @@ mod tests {
         assert!(index.resolve("Shared Alias").is_none());
     }
 
+    /// A bold run raises a lighter face, but never *lowers* an already-heavier
+    /// one — `<w:b/>` on an ExtraBold face must not flatten it to Bold.
     #[test]
-    fn requested_weight_never_downgrades_face_alias_weight() {
+    fn bold_request_raises_a_lighter_face_but_never_lowers_a_heavier_one() {
         assert_eq!(
             merged_alias_weight(*Weight::SEMI_BOLD, *Weight::BOLD),
             *Weight::BOLD
@@ -775,6 +798,58 @@ mod tests {
         assert_eq!(
             merged_alias_weight(*Weight::EXTRA_BOLD, *Weight::BOLD),
             *Weight::EXTRA_BOLD
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::LIGHT, *Weight::BOLD),
+            *Weight::BOLD
+        );
+    }
+
+    /// H2#1 regression. The two cases above are the *only* ones the suite used
+    /// to cover, and `max` is correct for both — every alias weight tested was
+    /// at or above Regular. Below it the rule inverted: a `NORMAL` request
+    /// means only "not bold", yet it overruled the face's own weight, so
+    /// `"Calibri Light"` (alias weight 342 on macOS) came back as plain
+    /// Calibri at 400.
+    #[test]
+    fn normal_request_leaves_a_light_face_at_its_own_weight() {
+        assert_eq!(merged_alias_weight(342, *Weight::NORMAL), 342);
+        assert_eq!(
+            merged_alias_weight(*Weight::LIGHT, *Weight::NORMAL),
+            *Weight::LIGHT
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::THIN, *Weight::NORMAL),
+            *Weight::THIN
+        );
+        // Unchanged where it already worked.
+        assert_eq!(
+            merged_alias_weight(*Weight::BOLD, *Weight::NORMAL),
+            *Weight::BOLD
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::NORMAL, *Weight::NORMAL),
+            *Weight::NORMAL
+        );
+    }
+
+    /// The same guarantee at the seam `resolve_uncached` actually calls, so a
+    /// future change that reintroduces the promotion one level up is caught.
+    #[test]
+    fn face_alias_style_keeps_a_light_face_light() {
+        let alias = test_alias("Calibri", 342);
+        let resolved = style_for_face_alias(&alias, FontStyle::normal());
+        assert_eq!(
+            *resolved.weight(),
+            342,
+            "a non-bold run must not thicken the face"
+        );
+
+        let bolded = style_for_face_alias(&alias, FontStyle::bold());
+        assert_eq!(
+            *bolded.weight(),
+            *Weight::BOLD,
+            "an explicit bold run still applies"
         );
     }
 
