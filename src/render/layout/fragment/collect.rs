@@ -106,7 +106,7 @@ pub(super) fn run_border_to_fragment(
 /// per-run path (`Discrete TextRun`) and the per-segment-piece path
 /// (cross-run cluster reassembly via `segment.rs`) call it — for cross-
 /// run clusters, the *base run*'s styling drives the entire piece per
-/// the design in `docs/cross-run-cluster-reassembly.md`.
+/// the design in `fragment/segment.rs`.
 #[allow(clippy::too_many_arguments)] // the cascade has many independent inputs by spec
 fn resolve_run_styling<F>(
     tr: &TextRun,
@@ -465,7 +465,6 @@ where
     // Pre-pass: join consecutive text-only TextRuns into segments so
     // UAX #29 grapheme clusters reassemble across `<w:rFonts>`-induced
     // run splits (keycap `1️⃣`, ZWJ family, modifier sequence, …).
-    // See `docs/cross-run-cluster-reassembly.md`.
     let units = build_inline_units(inlines);
     for unit in units {
         match unit {

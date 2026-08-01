@@ -49,7 +49,10 @@ pub enum DrawCommand {
     /// One emoji grapheme cluster placed at `rect`. The painter rasterizes
     /// the cluster against `typeface` (Skia raster backend honours the color
     /// glyph tables that the PDF backend strips) and embeds the result as
-    /// an inline image. See `docs/emoji-rendering.md`.
+    /// an inline image. Produced from [`Fragment::Emoji`]; painted by the
+    /// `EmojiCluster` arm in `painter.rs`.
+    ///
+    /// [`Fragment::Emoji`]: crate::render::layout::fragment::Fragment::Emoji
     EmojiCluster {
         /// Page-coordinate rectangle at which to draw the rasterized image.
         rect: PtRect,

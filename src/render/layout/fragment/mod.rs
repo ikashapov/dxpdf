@@ -161,7 +161,9 @@ pub enum Fragment {
     },
     /// One emoji grapheme cluster (UAX #29) classified as an emoji sequence
     /// (UTS #51), to be rasterized at paint time via Skia's raster backend
-    /// and embedded as an inline PDF image. See `docs/emoji-rendering.md`.
+    /// and embedded as an inline PDF image, because Skia's PDF backend strips
+    /// the color glyph tables its raster backend honours. Classified by
+    /// `render::emoji::cluster`; becomes a `DrawCommand::EmojiCluster`.
     Emoji {
         /// Cluster text exactly as classified — one grapheme cluster, possibly
         /// multi-codepoint (ZWJ, modifier, RIS, tag, keycap sequences).

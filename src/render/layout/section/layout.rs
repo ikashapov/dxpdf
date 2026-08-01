@@ -1611,8 +1611,8 @@ pub(crate) fn layout_section_with_clearance(
                         // branch below. Footnotes are reserved per segment, but
                         // only for a single, unbroken chunk — with explicit
                         // page/column breaks their reference→segment mapping is
-                        // ambiguous, so those keep the atomic reservation. (See
-                        // docs/keep-lines-plan.md.) §17.6.4: splitting re-fits the
+                        // ambiguous, so those keep the atomic reservation.
+                        // §17.6.4: splitting re-fits the
                         // remainder against each column's own width
                         // (`emit_split_paragraph`), so unequal-width columns split
                         // correctly — no equal-width gate.

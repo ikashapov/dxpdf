@@ -9,7 +9,7 @@
 //! - Paragraph 2: `Emojis: 👋 1️⃣ 👍🏿` — three color emoji clusters
 //!   that must reach the rasterizer. The keycap `1️⃣` is split across
 //!   three runs in the source docx (Word's §17.3.2.26 `<w:rFonts>` slot
-//!   routing) and reassembles via `docs/cross-run-cluster-reassembly.md`;
+//!   routing) and reassembles via `fragment/segment.rs`;
 //!   the modifier sequence `👍🏿` is similarly cross-run.
 
 use std::path::Path;
@@ -27,7 +27,7 @@ fn parse_fixture() -> dxpdf::model::Document {
 
 /// True when this host actually resolves a color emoji typeface. Tests that
 /// assert the emoji-rasterization branch only fire on hosts that have one
-/// (per the no-bundle policy in `docs/emoji-rendering.md`).
+/// (the converter bundles no emoji fonts — it uses the host's or none).
 fn host_has_color_emoji() -> bool {
     use dxpdf::render::emoji::resolve::{resolve, EmojiTypeface, RegistryLookup};
     use dxpdf::render::fonts::FontRegistry;
@@ -100,7 +100,7 @@ fn e1_digits_are_not_rasterized() {
 /// E2 — `Emojis: 👋 1️⃣ 👍🏿` produces three EmojiCluster commands
 /// (the wave, the keycap, and the thumbs-up + skin-tone modifier
 /// sequence). The keycap reassembly across runs is implemented per
-/// `docs/cross-run-cluster-reassembly.md`; previously this asserted
+/// `fragment/segment.rs`; previously this asserted
 /// `>= 2` and the keycap was missing.
 #[test]
 fn e2_real_emojis_reach_rasterizer() {
@@ -279,7 +279,7 @@ fn underline_explicit_none_emits_no_underline_commands() {
 /// E_keycap_1 — the keycap `1️⃣` in `sample-emoji.docx` is split across
 /// three runs by Word's §17.3.2.26 `<w:rFonts>` slot routing (digit `1`
 /// in ASCII slot, VS-16 + U+20E3 in hAnsi slot). After the cross-run
-/// reassembly per `docs/cross-run-cluster-reassembly.md`, the cluster
+/// reassembly per `fragment/segment.rs`, the cluster
 /// reaches the painter as one `DrawCommand::EmojiCluster`.
 #[test]
 fn e_keycap_1_reassembles_into_one_emoji_command() {
