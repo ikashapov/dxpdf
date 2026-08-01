@@ -40,6 +40,8 @@ pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
             indent_left: Pt::ZERO,
             indent_first_line: Pt::ZERO,
             content_width: max_width,
+            float_left: Pt::ZERO,
+            float_right: Pt::ZERO,
         },
     )
 }
@@ -587,6 +589,8 @@ mod tests {
                 indent_left: Pt::ZERO,
                 indent_first_line: Pt::ZERO,
                 content_width: Pt::new(100.0),
+                float_left: Pt::ZERO,
+                float_right: Pt::ZERO,
             },
         );
         assert_eq!(lines.len(), 2);

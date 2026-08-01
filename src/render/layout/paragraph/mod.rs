@@ -1932,6 +1932,128 @@ mod tests {
     }
 
     #[test]
+    fn an_indent_ptab_respects_the_lines_own_float_narrowing() {
+        // §17.3.1.30 + §20.4.2: `relativeTo="indent"` measures against the
+        // indented region, but that region is narrower on a line a float
+        // overlaps. Using the paragraph-level width right-aligned the zone to
+        // the paragraph's edge — on top of the float.
+        //
+        // A 60pt float occupies x 140..200 of a 200pt line, so the line's own
+        // right edge is 140 and a 40pt zone must end there, at x=100.
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        let float = ActiveFloat {
+            page_x: Pt::new(140.0),
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        };
+        let style = ParagraphStyle {
+            page_floats: vec![float],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(200.0),
+            ..Default::default()
+        };
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Indent),
+            text_frag("B", 40.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert_eq!(
+            positions[1].1, 100.0,
+            "B right-aligns to the line's own edge (140), not the paragraph's (200)"
+        );
+        assert!(
+            positions[1].1 + 40.0 <= 140.0,
+            "and therefore clears the float at 140: {positions:?}"
+        );
+    }
+
+    /// A float occupying `x0..x0+60` of a 200pt line for y `0..30`.
+    fn float_at(x0: f32) -> crate::render::layout::float::ActiveFloat {
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        ActiveFloat {
+            page_x: Pt::new(x0),
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        }
+    }
+
+    fn style_with_float(x0: f32) -> ParagraphStyle {
+        ParagraphStyle {
+            page_floats: vec![float_at(x0)],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(200.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_indent_ptab_follows_a_left_float_too() {
+        // The mirror of the right-float case: a float on the left moves the
+        // indented region's *start*, so a left-aligned indent ptab must anchor
+        // clear of it rather than at the paragraph's own left edge.
+        let frags = vec![
+            ptab_frag(PTabAlignment::Left, PTabRelativeTo::Indent),
+            text_frag("B", 40.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &style_with_float(0.0),
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 1, "{positions:?}");
+        assert_eq!(
+            positions[0].1, 60.0,
+            "B anchors past the float, not at the paragraph's left edge"
+        );
+    }
+
+    #[test]
+    fn a_margin_ptab_is_deliberately_unaffected_by_floats() {
+        // `margin` names the page text margins, which a float does not move.
+        // Only `indent` follows the line's narrowed region — pinning the
+        // difference so the two do not get "unified" later.
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("B", 40.0),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(200.0),
+            &style_with_float(140.0),
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert_eq!(
+            positions[1].1, 160.0,
+            "right margin anchor stays at 200 — 200 - 40 — despite the float"
+        );
+    }
+
+    #[test]
     fn ptab_three_region_header() {
         // The canonical Word header: left ⟶ ptab(center) ⟶ center ⟶
         // ptab(right) ⟶ right, all relative to the page margins.

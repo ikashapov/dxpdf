@@ -30,6 +30,8 @@ pub(super) fn compute_line_placements(
         indent_left: style.indent_left,
         indent_first_line: style.indent_first_line,
         content_width,
+        float_left: Pt::ZERO,
+        float_right: Pt::ZERO,
     };
     if style.page_floats.is_empty() {
         // No floats — use standard line fitting.
@@ -83,13 +85,25 @@ pub(super) fn compute_line_placements(
             (available - dc_adj).max(Pt::ZERO)
         };
 
-        // Fit one line at this width.
+        // Fit one line at this width. Each call fits exactly one line, so the
+        // geometry is *this* line's: its own float narrowing, and the
+        // first-line indent only when it really is the first.
         let remaining = &fragments[frag_idx..];
+        let line_geometry = PTabGeometry {
+            indent_first_line: if is_first {
+                ptab_geometry.indent_first_line
+            } else {
+                Pt::ZERO
+            },
+            float_left: fl,
+            float_right: fr,
+            ..ptab_geometry
+        };
         let fitted = super::super::line::fit_lines_with_first(
             remaining,
             line_width,
             line_width,
-            ptab_geometry,
+            line_geometry,
         );
         let fitted_line = if let Some(first) = fitted.into_iter().next() {
             super::super::line::FittedLine {
@@ -614,6 +628,8 @@ pub(super) fn emit_line_commands(
                         indent_left: style.indent_left,
                         indent_first_line: style.indent_first_line,
                         content_width,
+                        float_left: lp.float_left,
+                        float_right: lp.float_right,
                     };
                     let new_x = match resolve_ptab(*align, *relative_to, geometry, x, zone_width) {
                         PTabPlacement::Placed(at) => at,
@@ -724,8 +740,14 @@ pub struct PTabGeometry {
     /// Callers that fit a single continuation line pass `Pt::ZERO`.
     pub indent_first_line: Pt,
     /// Constraint width net of indents. `relativeTo="indent"` measures against
-    /// `indent_left + content_width`.
+    /// `indent_left + content_width`, less the float narrowing below.
     pub content_width: Pt,
+    /// §20.4.2: width stolen from this line's left by an overlapping float.
+    /// The indented region is narrower on such a line, so the tab's span must
+    /// follow it or the zone is positioned on top of the float.
+    pub float_left: Pt,
+    /// §20.4.2: width stolen from this line's right by an overlapping float.
+    pub float_right: Pt,
 }
 
 /// §17.3.1.30: outcome of resolving a position tab against the current pen.
@@ -760,10 +782,16 @@ pub fn resolve_ptab(
     // text margin); `content_width` is already net of paragraph indents, so
     // the right indent edge sits at `indent_left + content_width`.
     let (span_start, span_end) = match relative_to {
+        // `margin` names the page text margins, which a float does not move —
+        // the span is the same on every line of the paragraph.
         PTabRelativeTo::Margin => (Pt::ZERO, geometry.max_width),
+        // `indent` names the indented region, which *is* narrower on a line an
+        // overlapping float steals width from. Exact Word behaviour here is
+        // unconfirmed; the line-local reading is chosen because it is the only
+        // one that cannot position a zone on top of the float.
         PTabRelativeTo::Indent => (
-            geometry.indent_left,
-            geometry.indent_left + geometry.content_width,
+            geometry.indent_left + geometry.float_left,
+            geometry.indent_left + geometry.content_width - geometry.float_right,
         ),
     };
     // The alignment picks the anchor within that span, and then which point of
