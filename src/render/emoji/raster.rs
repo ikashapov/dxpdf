@@ -11,14 +11,13 @@
 //! identical inputs yield a single rasterization shared across the document.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use skia_safe::{surfaces, Color, Font, Image, Paint, PaintStyle, Point};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::EmojiCluster;
-use crate::render::emoji::shape::shape_text;
+use crate::render::emoji::shape::ClusterShaper;
 use crate::render::fonts::{TypefaceEntry, TypefaceId};
 use crate::render::geometry::PtSize;
 
@@ -192,16 +191,18 @@ pub struct EmojiImage {
 
 // ─── Rasterizer ──────────────────────────────────────────────────────────────
 
-/// Per-render rasterizer that owns the cache. Lifetime equals the painter's.
+/// Per-render rasterizer that owns the image cache. Lifetime equals the
+/// painter's.
 ///
-/// Maintains two caches:
-/// 1. `cache` — the rasterized image keyed by [`EmojiKey`].
-/// 2. `font_bytes` — typeface bytes by id, so a 190 MB Apple Color Emoji
-///    typeface isn't re-extracted via `to_font_data` for every cluster.
+/// It also owns the [`ClusterShaper`], built once per render. Shaping goes
+/// through the typeface rather than extracted font bytes, which is what keeps
+/// a ~183 MB emoji font off the heap — see [`crate::render::emoji::shape`].
 pub struct EmojiRasterizer {
     config: RasterConfig,
     cache: HashMap<EmojiKey, EmojiImage>,
-    font_bytes: HashMap<TypefaceId, Rc<Vec<u8>>>,
+    /// `None` if this Skia build exposes no HarfBuzz shaper; rasterization
+    /// then takes the cmap-only `draw_str` fallback.
+    shaper: Option<ClusterShaper>,
 }
 
 impl Default for EmojiRasterizer {
@@ -215,7 +216,7 @@ impl EmojiRasterizer {
         Self {
             config,
             cache: HashMap::new(),
-            font_bytes: HashMap::new(),
+            shaper: ClusterShaper::new().ok(),
         }
     }
 
@@ -238,7 +239,7 @@ impl EmojiRasterizer {
     /// here, the painter's image-to-rect scaling becomes uniform and
     /// the emoji's visual content is preserved.
     ///
-    /// Internally shapes via `rustybuzz` (GSUB-aware) so multi-codepoint
+    /// Internally shapes via Skia's HarfBuzz (GSUB-aware) so multi-codepoint
     /// emoji sequences (keycap, modifier, ZWJ, RIS) render as their
     /// ligated single glyph — `canvas.draw_str` would have rendered each
     /// codepoint separately. See `shape.rs` for the shaper.
@@ -262,33 +263,17 @@ impl EmojiRasterizer {
         let scale = self.config.super_sample;
         let key = EmojiKey::new(cluster.text, typeface, size, scale, target);
         if !self.cache.contains_key(&key) {
-            let bytes = self.font_bytes_for(typeface);
             let image = rasterize_uncached(
                 cluster.text,
                 typeface,
                 size,
                 scale,
                 target,
-                bytes.as_deref().map(|v| v.as_slice()),
+                self.shaper.as_ref(),
             )?;
             self.cache.insert(key.clone(), image);
         }
         self.cache.get(&key)
-    }
-
-    /// Per-render typeface byte cache. Apple Color Emoji is ~190 MB on
-    /// macOS, so we extract once per typeface and reuse for every
-    /// rasterization. Returns `None` (not `Err`) if the typeface refuses
-    /// to expose bytes — the rasterizer falls back to the cmap-only
-    /// `draw_str` path.
-    fn font_bytes_for(&mut self, typeface: &TypefaceEntry) -> Option<Rc<Vec<u8>>> {
-        let id = TypefaceId::from(&typeface.typeface);
-        if let Some(bytes) = self.font_bytes.get(&id) {
-            return Some(bytes.clone());
-        }
-        let bytes = typeface.typeface.to_font_data().map(|(b, _)| Rc::new(b))?;
-        self.font_bytes.insert(id, bytes.clone());
-        Some(bytes)
     }
 }
 
@@ -298,7 +283,7 @@ fn rasterize_uncached(
     size: Pt,
     scale: SuperSample,
     target: PtSize,
-    font_bytes: Option<&[u8]>,
+    shaper: Option<&ClusterShaper>,
 ) -> Option<EmojiImage> {
     // Everything below scales from this one factor — glyph size, surface
     // dimensions, and the in-surface baseline — so a clamped surface stays
@@ -330,11 +315,10 @@ fn rasterize_uncached(
     let (_, original_metrics) = original_font.metrics();
     let baseline_y_px = -original_metrics.ascent * factor;
 
-    // Try the GSUB-aware shaping path. On any shaping failure (font bytes
-    // unavailable, parse error, glyph id out of range), fall through to
-    // the cmap-only `draw_str` path so the rasterizer still produces
-    // output.
-    let shaped = font_bytes.and_then(|b| shape_text(b, text, scaled_size).ok());
+    // Try the GSUB-aware shaping path. On any shaping failure (no shaper in
+    // this build, or no glyphs produced), fall through to the cmap-only
+    // `draw_str` path so the rasterizer still produces output.
+    let shaped = shaper.and_then(|s| s.shape(&typeface.typeface, text, scaled_size).ok());
 
     // `None` here means Skia refused the allocation — a degenerate aspect that
     // slipped past the area budget, or genuine memory pressure. Neither is a
@@ -359,22 +343,17 @@ fn rasterize_uncached(
 
     match shaped {
         Some(run) => {
-            // Walk shaped glyphs, accumulating positions. Baseline at
-            // `baseline_y_px` (= layout's ascent at original size, scaled
-            // by `factor`) from the top; each glyph's HarfBuzz y-offset
-            // is positive-up, so we negate for Skia's y-down.
-            let mut ids = Vec::with_capacity(run.glyphs.len());
-            let mut positions = Vec::with_capacity(run.glyphs.len());
-            let mut pen_x = 0.0f32;
-            for g in &run.glyphs {
-                ids.push(g.id);
-                positions.push(Point::new(
-                    pen_x + g.x_offset.raw(),
-                    baseline_y_px - g.y_offset.raw(),
-                ));
-                pen_x += g.advance.raw();
-            }
-            canvas.draw_glyphs_at(&ids, &*positions, (0.0, 0.0), &font, &paint);
+            // Shaped positions are absolute offsets from the run origin, already
+            // in Skia's y-down space, so they pass straight through; the origin
+            // carries the baseline (= layout's ascent at the original size,
+            // scaled by `factor`).
+            let ids: Vec<_> = run.glyphs.iter().map(|g| g.id).collect();
+            let positions: Vec<_> = run
+                .glyphs
+                .iter()
+                .map(|g| Point::new(g.x.raw(), g.y.raw()))
+                .collect();
+            canvas.draw_glyphs_at(&ids, &*positions, (0.0, baseline_y_px), &font, &paint);
         }
         None => {
             // Fallback: cmap-level draw_str, no GSUB, so a multi-codepoint
@@ -383,8 +362,8 @@ fn rasterize_uncached(
             // baseline origin, so this is the single-run equivalent of the
             // shaped branch above. Landing the glyph by its own ink bounds
             // instead would put identical input at a different height
-            // depending only on whether `to_font_data()` yielded bytes,
-            // and would discard the original-size-ascent correction that
+            // depending only on whether shaping succeeded, and would discard
+            // the original-size-ascent correction that
             // non-linear emoji metrics need.
             canvas.draw_str(text, (0.0, baseline_y_px), &font, &paint);
         }
@@ -696,23 +675,28 @@ mod tests {
         })
     }
 
-    /// The cmap-only fallback (reached when `to_font_data()` yields nothing)
-    /// must place the glyph on the same baseline as the shaped path. It
-    /// previously translated by the glyph's own ink bounds, so identical
-    /// input landed at a different height depending only on whether font
-    /// bytes happened to be available.
+    /// The cmap-only fallback (reached when shaping is unavailable) must place
+    /// the glyph on the same baseline as the shaped path. It previously
+    /// translated by the glyph's own ink bounds, so identical input landed at a
+    /// different height depending only on whether shaping happened to succeed.
     #[test]
     fn draw_str_fallback_lands_on_the_same_baseline_as_shaping() {
         let tf = any_typeface();
-        let Some((bytes, _)) = tf.typeface.to_font_data() else {
-            eprintln!("skipping: host typeface exposes no font data");
+        let Some(shaper) = ClusterShaper::new().ok() else {
+            eprintln!("skipping: no harfbuzz shaper in this build");
             return;
         };
         let size = Pt::new(48.0);
         let target = PtSize::new(Pt::new(48.0), Pt::new(64.0));
-        let shaped =
-            rasterize_uncached("A", &tf, size, SuperSample::FourPerPt, target, Some(&bytes))
-                .expect("shaped path must rasterize");
+        let shaped = rasterize_uncached(
+            "A",
+            &tf,
+            size,
+            SuperSample::FourPerPt,
+            target,
+            Some(&shaper),
+        )
+        .expect("shaped path must rasterize");
         let fallback = rasterize_uncached("A", &tf, size, SuperSample::FourPerPt, target, None)
             .expect("fallback path must rasterize");
 
@@ -758,8 +742,8 @@ mod tests {
                 return;
             }
         };
-        let Some((bytes, _)) = entry.typeface.to_font_data() else {
-            eprintln!("skipping: emoji typeface exposes no font data");
+        let Some(shaper) = ClusterShaper::new().ok() else {
+            eprintln!("skipping: no harfbuzz shaper in this build");
             return;
         };
         // 12pt: inside the non-linear part of the metric curve.
@@ -771,7 +755,7 @@ mod tests {
             size,
             SuperSample::FourPerPt,
             target,
-            Some(&bytes),
+            Some(&shaper),
         )
         .expect("shaped path must rasterize");
         let fallback = rasterize_uncached(
