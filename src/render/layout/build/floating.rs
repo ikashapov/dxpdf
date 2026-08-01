@@ -604,6 +604,189 @@ fn resolve_anchor_position(
     (x, y)
 }
 
+/// §20.4.3.4 `ST_RelFromH`: a horizontal strip of the sheet, expressed in the
+/// coordinates of the [`AnchorFrame`] that produced it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AnchorSpan {
+    /// x of the strip's left edge.
+    start: Pt,
+    /// Its width. Zero is legal and meaningful: a page with no left margin has
+    /// an empty `leftMargin` strip, and in [`AnchorFrame::Stack`] the
+    /// container's extent is simply not known here.
+    extent: Pt,
+}
+
+/// The region an anchor measures against — or, for the two references whose
+/// region depends on which page the object lands on, the pair it chooses from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HorizontalRegion {
+    /// The same strip on every page.
+    Fixed(AnchorSpan),
+    /// §20.4.3.4 `insideMargin` / `outsideMargin`: "inside" is the left margin
+    /// on an odd (recto) page and the right margin on an even one, so which
+    /// strip this names is a function of the page number. Floats are extracted
+    /// before pagination, so that number does not exist yet — the deferral is
+    /// modelled instead of guessed, and `assume_odd_page` is the single place
+    /// the guess gets made.
+    PageParity { odd: AnchorSpan, even: AnchorSpan },
+}
+
+impl HorizontalRegion {
+    /// Tier-0: collapse a parity-dependent region onto its odd-page reading.
+    ///
+    /// Exact for a single-sided document, which is nearly all of them — there
+    /// is no mirroring to get wrong. Resolving it properly means deferring the
+    /// whole horizontal position past pagination, the shape `FloatingImageY`
+    /// already has on the vertical axis. That is open-findings item 1, and this
+    /// method is the one call site it has to replace.
+    fn assume_odd_page(self) -> AnchorSpan {
+        match self {
+            Self::Fixed(span) => span,
+            Self::PageParity { odd, .. } => odd,
+        }
+    }
+}
+
+/// The page as an [`AnchorFrame`] measures it — the input to
+/// [`horizontal_region`].
+///
+/// §20.4.3.4's references split in two, and that split is what makes `Stack`
+/// tractable:
+///
+/// * **Page-derived** — `page` and the four margin strips are pure functions of
+///   the sheet and its margins, so they are knowable in either frame;
+///   `page_left` is what carries them into frame coordinates.
+/// * **Container-derived** — `margin` and `column` name the area the object's
+///   *container* gives it. In `Page` that is the sheet's text area. In `Stack`
+///   the container is a table cell or a header whose extent never reaches this
+///   function, so the region collapses onto the frame origin. That collapse is
+///   pre-existing and deliberate (see [`AnchorFrame`]); giving it a real extent
+///   would move every header float.
+#[derive(Clone, Copy, Debug)]
+struct FrameGeometry {
+    /// x of the sheet's left edge. Zero in `Page`; `-margins.left` in `Stack`,
+    /// where the frame origin is the body's left margin and the caller adds
+    /// that margin back on the way into page coordinates.
+    page_left: Pt,
+    /// The sheet's own width, always real — the page exists in either frame.
+    page_width: Pt,
+    /// The sheet's own margins, likewise always real.
+    margin_left: Pt,
+    margin_right: Pt,
+    /// The container region, already in frame coordinates.
+    container: AnchorSpan,
+}
+
+impl FrameGeometry {
+    fn new(pc: &crate::render::layout::page::PageConfig, frame: AnchorFrame) -> Self {
+        let (margin_left, margin_right) = (pc.margins.left, pc.margins.right);
+        let page_width = pc.page_size.width;
+        let (page_left, container) = match frame {
+            AnchorFrame::Page => (
+                Pt::ZERO,
+                AnchorSpan {
+                    start: margin_left,
+                    extent: (page_width - margin_left - margin_right).max(Pt::ZERO),
+                },
+            ),
+            AnchorFrame::Stack => (
+                -margin_left,
+                AnchorSpan {
+                    start: Pt::ZERO,
+                    extent: Pt::ZERO,
+                },
+            ),
+        };
+        Self {
+            page_left,
+            page_width,
+            margin_left,
+            margin_right,
+            container,
+        }
+    }
+
+    /// §20.4.3.4 `page` — the whole sheet, margins included.
+    fn page(&self) -> AnchorSpan {
+        AnchorSpan {
+            start: self.page_left,
+            extent: self.page_width,
+        }
+    }
+
+    /// §20.4.3.4 `leftMargin` — the strip from the sheet's left edge to the
+    /// left margin edge. The margin *itself*, not the text area beside it.
+    fn left_margin(&self) -> AnchorSpan {
+        AnchorSpan {
+            start: self.page_left,
+            extent: self.margin_left,
+        }
+    }
+
+    /// §20.4.3.4 `rightMargin` — the mirror strip at the other edge.
+    fn right_margin(&self) -> AnchorSpan {
+        AnchorSpan {
+            start: self.page_left + self.page_width - self.margin_right,
+            extent: self.margin_right,
+        }
+    }
+}
+
+/// §20.4.3.4 `ST_RelFromH`: the region `from` names.
+///
+/// Total over `AnchorRelativeFrom` on purpose — there is deliberately no
+/// catch-all, so a new spec variant becomes a build error rather than another
+/// silent landing in the text area, which is how four distinct margin strips
+/// came to share one arm in the first place.
+fn horizontal_region(
+    from: crate::model::AnchorRelativeFrom,
+    geom: &FrameGeometry,
+) -> HorizontalRegion {
+    use crate::model::AnchorRelativeFrom as From;
+    use HorizontalRegion::{Fixed, PageParity};
+
+    match from {
+        From::Page => Fixed(geom.page()),
+        // §20.4.3.4 `column` is the text column. With one column that is the
+        // text area; a multi-column section anchors its floats per column, and
+        // no float takes that path today.
+        From::Margin | From::Column => Fixed(geom.container),
+        From::LeftMargin => Fixed(geom.left_margin()),
+        From::RightMargin => Fixed(geom.right_margin()),
+        From::InsideMargin => PageParity {
+            odd: geom.left_margin(),
+            even: geom.right_margin(),
+        },
+        From::OutsideMargin => PageParity {
+            odd: geom.right_margin(),
+            even: geom.left_margin(),
+        },
+        // §20.4.3.4 `character` is not a region at all: it is the anchor's own
+        // position within the text run. Floats are extracted before that run is
+        // laid out, so the position does not exist here. Fall back to the text
+        // area — and say so, because a silent fallback is how this went
+        // unnoticed while sharing an arm with `margin`.
+        From::Character => {
+            log::warn!(
+                "anchor: relativeFrom=\"character\" needs the anchor's position in \
+                 the run, which float extraction runs before — positioning \
+                 against the text area instead"
+            );
+            Fixed(geom.container)
+        }
+        // §20.4.3.5-only values. One `AnchorRelativeFrom` serves both axes, so
+        // these are reachable only from a document that put a vertical
+        // reference on `wp:positionH`.
+        From::Paragraph | From::Line | From::TopMargin | From::BottomMargin => {
+            log::warn!(
+                "anchor: relativeFrom={from:?} is not a horizontal reference \
+                 (§20.4.3.4) — positioning against the text area instead"
+            );
+            Fixed(geom.container)
+        }
+    }
+}
+
 /// Horizontal axis of `resolve_anchor_position`. Split out so the two axes
 /// can be read independently.
 fn resolve_anchor_x(
@@ -612,59 +795,33 @@ fn resolve_anchor_x(
     state: &BuildState,
     frame: AnchorFrame,
 ) -> Pt {
-    use crate::model::{AnchorAlignment, AnchorPosition, AnchorRelativeFrom};
+    use crate::model::{AnchorAlignment, AnchorPosition};
 
-    let pc = &state.page_config;
-    // The "frame-zeroed" margins are used when the anchor is
-    // margin-relative: in `Stack` we treat the body left margin as
-    // origin (margin_left = 0) so the result is stack-relative;
-    // `render_header`/`render_footer` re-adds the real margin later.
-    //
-    // Page-relative anchors (`AnchorRelativeFrom::Page`) need a
-    // different convention: the spec puts the offset in *page*
-    // coordinates, but downstream still adds `margins.left` back, so
-    // we subtract the real margin here to keep the round-trip honest.
-    let (page_width, margin_left, margin_right) = match frame {
-        AnchorFrame::Page => (pc.page_size.width, pc.margins.left, pc.margins.right),
-        AnchorFrame::Stack => (Pt::ZERO, Pt::ZERO, Pt::ZERO),
-    };
-    let content_width = (page_width - margin_left - margin_right).max(Pt::ZERO);
-
-    // The compensation we apply for Page-relative anchors so the
-    // post-shift value lands on the actual page coordinate. Zero for
-    // `AnchorFrame::Page` (no shift happens) and `-pc.margins.left`
-    // for `AnchorFrame::Stack`.
-    let page_anchor_offset = match frame {
-        AnchorFrame::Page => Pt::ZERO,
-        AnchorFrame::Stack => -pc.margins.left,
-    };
+    let geom = FrameGeometry::new(&state.page_config, frame);
+    let span = |from| horizontal_region(from, &geom).assume_odd_page();
 
     match &anchor.horizontal_position {
+        // §20.4.2.12: an offset is measured from the region's own left edge.
         AnchorPosition::Offset {
             relative_from,
             offset,
-        } => match relative_from {
-            AnchorRelativeFrom::Page => page_anchor_offset + Pt::from(*offset),
-            _ => margin_left + Pt::from(*offset),
-        },
+        } => span(*relative_from).start + Pt::from(*offset),
+        // §20.4.3.1: an alignment places the object within the region.
         AnchorPosition::Align {
             relative_from,
             alignment,
         } => {
-            let (area_left, area_width) = match relative_from {
-                AnchorRelativeFrom::Page => {
-                    (page_anchor_offset, page_width.max(pc.page_size.width))
-                }
-                AnchorRelativeFrom::Margin | AnchorRelativeFrom::Column => {
-                    (margin_left, content_width)
-                }
-                _ => (margin_left, content_width),
-            };
+            let span = span(*relative_from);
             match alignment {
-                AnchorAlignment::Left => area_left,
-                AnchorAlignment::Right => area_left + area_width - content_w,
-                AnchorAlignment::Center => area_left + (area_width - content_w) * 0.5,
-                _ => area_left,
+                AnchorAlignment::Left => span.start,
+                AnchorAlignment::Right => span.start + span.extent - content_w,
+                AnchorAlignment::Center => span.start + (span.extent - content_w) * 0.5,
+                // §20.4.3.1 `inside`/`outside` are page-parity dependent, and
+                // `top`/`bottom` are §20.4.3.2 values on the wrong axis. Both
+                // are open-findings item 1 — deliberately left in a catch-all,
+                // because the parity that resolves them is the same one
+                // `HorizontalRegion::PageParity` defers just above.
+                _ => span.start,
             }
         }
     }
@@ -703,7 +860,26 @@ fn resolve_anchor_y(
                 AnchorRelativeFrom::Paragraph | AnchorRelativeFrom::Line => {
                     FloatingImageY::RelativeToParagraph(Pt::from(*offset))
                 }
-                _ => FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset)),
+                // §20.4.3.5 `insideMargin`/`outsideMargin`. The spec names them
+                // on the vertical axis without saying which strips they are —
+                // Word mirrors *left/right* for two-sided documents, not
+                // top/bottom — so no reading is derivable from source alone.
+                // Treated as `margin`, the long-standing fallback; the open
+                // question is filed in open-findings §3.
+                AnchorRelativeFrom::InsideMargin | AnchorRelativeFrom::OutsideMargin => {
+                    FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
+                }
+                // §20.4.3.4-only values on `wp:positionV` — malformed.
+                AnchorRelativeFrom::Column
+                | AnchorRelativeFrom::Character
+                | AnchorRelativeFrom::LeftMargin
+                | AnchorRelativeFrom::RightMargin => {
+                    log::warn!(
+                        "anchor: relativeFrom={relative_from:?} is not a vertical \
+                         reference (§20.4.3.5) — positioning against the margin box"
+                    );
+                    FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
+                }
             },
         },
         AnchorPosition::Align {
@@ -733,10 +909,31 @@ fn resolve_anchor_y(
                 AnchorRelativeFrom::TopMargin => (Pt::ZERO, margin_top),
                 // §20.4.2.11: bottomMargin = area from bottom margin edge to page bottom.
                 AnchorRelativeFrom::BottomMargin => (page_height - margin_bottom, margin_bottom),
-                _ => (
+                // §20.4.3.5 `insideMargin`/`outsideMargin` — see the `Offset`
+                // arm above; treated as `margin` pending a Word reference.
+                // `paragraph`/`line` cannot align within an area the stacker
+                // has not placed yet, so they collapse onto it too.
+                AnchorRelativeFrom::InsideMargin
+                | AnchorRelativeFrom::OutsideMargin
+                | AnchorRelativeFrom::Paragraph
+                | AnchorRelativeFrom::Line => (
                     margin_top,
                     (page_height - margin_top - margin_bottom).max(Pt::ZERO),
                 ),
+                // §20.4.3.4-only values on `wp:positionV` — malformed.
+                AnchorRelativeFrom::Column
+                | AnchorRelativeFrom::Character
+                | AnchorRelativeFrom::LeftMargin
+                | AnchorRelativeFrom::RightMargin => {
+                    log::warn!(
+                        "anchor: relativeFrom={relative_from:?} is not a vertical \
+                         reference (§20.4.3.5) — aligning within the margin box"
+                    );
+                    (
+                        margin_top,
+                        (page_height - margin_top - margin_bottom).max(Pt::ZERO),
+                    )
+                }
             };
             let y_pos = match alignment {
                 AnchorAlignment::Top => area_top,
@@ -1186,6 +1383,496 @@ mod tests {
                 (got.raw() - expected).abs() < 1e-3,
                 "{alignment:?}: expected {expected}, got {}",
                 got.raw()
+            );
+        }
+    }
+
+    // ── §20.4.3.4 horizontal anchor resolution ───────────────────────────
+    //
+    // The default page is US Letter with 1in margins: 612 x 792pt, text area
+    // 72..540. Every expectation below is written against those numbers.
+
+    use super::resolve_anchor_x;
+
+    /// One inch in EMU — the unit `wp:posOffset` is expressed in.
+    const INCH: i64 = 914400;
+
+    fn anchor_with_h(horizontal_position: AnchorPosition) -> AnchorProperties {
+        let ImagePlacement::Anchor(mut a) = anchored_wps_image().placement else {
+            unreachable!("fixture is anchored")
+        };
+        a.horizontal_position = horizontal_position;
+        a
+    }
+
+    fn h_offset(relative_from: AnchorRelativeFrom, offset: i64) -> AnchorProperties {
+        anchor_with_h(AnchorPosition::Offset {
+            relative_from,
+            offset: Dimension::new(offset),
+        })
+    }
+
+    fn h_align(relative_from: AnchorRelativeFrom, alignment: AnchorAlignment) -> AnchorProperties {
+        anchor_with_h(AnchorPosition::Align {
+            relative_from,
+            alignment,
+        })
+    }
+
+    /// `resolve_anchor_x` for a 100pt-wide object on the default page.
+    fn x_of(anchor: &AnchorProperties, frame: AnchorFrame) -> f32 {
+        resolve_anchor_x(anchor, Pt::new(100.0), &default_state(), frame).raw()
+    }
+
+    fn assert_x(got: f32, expected: f32, what: &str) {
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "{what}: expected {expected}, got {got}"
+        );
+    }
+
+    /// §20.4.2.12: a `page`-relative offset is a page coordinate, so in the
+    /// page frame it passes through untouched.
+    #[test]
+    fn page_frame_page_relative_offset_is_a_page_coordinate() {
+        assert_x(
+            x_of(&h_offset(AnchorRelativeFrom::Page, INCH), AnchorFrame::Page),
+            72.0,
+            "1in from the page's left edge",
+        );
+    }
+
+    /// A `margin`-relative offset is measured from the text area's left edge.
+    #[test]
+    fn page_frame_margin_relative_offset_starts_at_the_margin() {
+        assert_x(
+            x_of(
+                &h_offset(AnchorRelativeFrom::Margin, INCH),
+                AnchorFrame::Page,
+            ),
+            144.0,
+            "1in past the 1in left margin",
+        );
+    }
+
+    /// In `Stack` the caller adds the body's left margin back, so a page
+    /// coordinate has to be pre-compensated or the round-trip double-counts.
+    #[test]
+    fn stack_frame_page_relative_offset_backs_out_the_left_margin() {
+        assert_x(
+            x_of(
+                &h_offset(AnchorRelativeFrom::Page, INCH),
+                AnchorFrame::Stack,
+            ),
+            0.0,
+            "72pt page coordinate minus the 72pt margin the caller re-adds",
+        );
+    }
+
+    /// A margin-relative offset needs no compensation: the frame origin
+    /// already *is* the left margin.
+    #[test]
+    fn stack_frame_margin_relative_offset_is_frame_relative() {
+        assert_x(
+            x_of(
+                &h_offset(AnchorRelativeFrom::Margin, INCH),
+                AnchorFrame::Stack,
+            ),
+            72.0,
+            "1in from the frame origin",
+        );
+    }
+
+    /// §20.4.3.1: `left`/`center`/`right` place the object inside the region
+    /// named by `relativeFrom` — here the 72..540 text area.
+    #[test]
+    fn page_frame_align_resolves_against_the_text_area() {
+        for (alignment, expected) in [
+            (AnchorAlignment::Left, 72.0),
+            (AnchorAlignment::Center, 72.0 + (468.0 - 100.0) * 0.5),
+            (AnchorAlignment::Right, 72.0 + 468.0 - 100.0),
+        ] {
+            let got = x_of(
+                &h_align(AnchorRelativeFrom::Margin, alignment),
+                AnchorFrame::Page,
+            );
+            assert_x(
+                got,
+                expected,
+                &format!("{alignment:?} within the text area"),
+            );
+        }
+    }
+
+    /// `page` aligns against the whole sheet, margins included.
+    #[test]
+    fn page_frame_page_align_resolves_against_the_whole_page() {
+        for (alignment, expected) in [
+            (AnchorAlignment::Left, 0.0),
+            (AnchorAlignment::Center, (612.0 - 100.0) * 0.5),
+            (AnchorAlignment::Right, 612.0 - 100.0),
+        ] {
+            let got = x_of(
+                &h_align(AnchorRelativeFrom::Page, alignment),
+                AnchorFrame::Page,
+            );
+            assert_x(got, expected, &format!("{alignment:?} within the page"));
+        }
+    }
+
+    /// `Stack` has no container extent at extraction time, so a margin-relative
+    /// alignment has nothing to align *within* and collapses onto the frame
+    /// origin. `Right`/`Center` therefore run negative by the object's own
+    /// width. Pinned because every new region has to keep respecting it —
+    /// giving one of them a real extent here would shift header floats.
+    #[test]
+    fn stack_frame_align_collapses_to_the_frame_origin() {
+        for (alignment, expected) in [
+            (AnchorAlignment::Left, 0.0),
+            (AnchorAlignment::Center, -50.0),
+            (AnchorAlignment::Right, -100.0),
+        ] {
+            let got = x_of(
+                &h_align(AnchorRelativeFrom::Margin, alignment),
+                AnchorFrame::Stack,
+            );
+            assert_x(got, expected, &format!("{alignment:?} in a stack frame"));
+        }
+    }
+
+    /// §20.4.3.4 `leftMargin` — the 0..72 strip, *not* the text area beside
+    /// it. A `left`-aligned object in it sits flush with the sheet's edge, and
+    /// an offset counts from that edge.
+    #[test]
+    fn left_margin_is_the_strip_from_the_page_edge_to_the_margin() {
+        let from = AnchorRelativeFrom::LeftMargin;
+        assert_x(
+            x_of(&h_offset(from, INCH), AnchorFrame::Page),
+            72.0,
+            "1in from the sheet's left edge",
+        );
+        assert_x(
+            x_of(&h_align(from, AnchorAlignment::Left), AnchorFrame::Page),
+            0.0,
+            "flush with the sheet's left edge",
+        );
+        // A 100pt object is wider than the 72pt strip, so right-aligning it
+        // hangs it past the margin edge — which is what Word draws.
+        assert_x(
+            x_of(&h_align(from, AnchorAlignment::Right), AnchorFrame::Page),
+            -28.0,
+            "right edge on the margin edge",
+        );
+    }
+
+    /// §20.4.3.4 `rightMargin` — the mirror strip, 540..612.
+    #[test]
+    fn right_margin_is_the_strip_from_the_margin_to_the_page_edge() {
+        let from = AnchorRelativeFrom::RightMargin;
+        assert_x(
+            x_of(&h_offset(from, INCH), AnchorFrame::Page),
+            612.0,
+            "1in past the right margin edge, i.e. the sheet's right edge",
+        );
+        assert_x(
+            x_of(&h_align(from, AnchorAlignment::Left), AnchorFrame::Page),
+            540.0,
+            "flush with the right margin edge",
+        );
+    }
+
+    /// §20.4.3.4 `insideMargin`/`outsideMargin` are page-parity dependent, and
+    /// the page a float lands on is not known at extraction time. The odd-page
+    /// reading — inside = left, outside = right — is the Tier-0 collapse, and
+    /// it is exact for the single-sided documents that are nearly all of them.
+    #[test]
+    fn parity_margins_take_their_odd_page_reading() {
+        let inside = x_of(
+            &h_align(AnchorRelativeFrom::InsideMargin, AnchorAlignment::Left),
+            AnchorFrame::Page,
+        );
+        let outside = x_of(
+            &h_align(AnchorRelativeFrom::OutsideMargin, AnchorAlignment::Left),
+            AnchorFrame::Page,
+        );
+        assert_x(inside, 0.0, "inside = the left margin on an odd page");
+        assert_x(outside, 540.0, "outside = the right margin on an odd page");
+    }
+
+    /// The deferred pair is a genuine mirror — whichever page the object lands
+    /// on, `inside` and `outside` name opposite strips. Worth pinning because
+    /// `assume_odd_page` reads only one half of it; the other half exists for
+    /// the parity resolution that replaces it, and nothing else would catch it
+    /// being built wrong.
+    #[test]
+    fn inside_and_outside_margins_mirror_each_other() {
+        use super::{horizontal_region, FrameGeometry, HorizontalRegion::PageParity};
+
+        let geom = FrameGeometry::new(&default_state().page_config, AnchorFrame::Page);
+        let (
+            PageParity {
+                odd: inside_odd,
+                even: inside_even,
+            },
+            PageParity {
+                odd: outside_odd,
+                even: outside_even,
+            },
+        ) = (
+            horizontal_region(AnchorRelativeFrom::InsideMargin, &geom),
+            horizontal_region(AnchorRelativeFrom::OutsideMargin, &geom),
+        )
+        else {
+            panic!("both references are parity-dependent");
+        };
+
+        assert_eq!(inside_odd, outside_even, "inside on odd = outside on even");
+        assert_eq!(inside_even, outside_odd, "inside on even = outside on odd");
+        assert_ne!(inside_odd, inside_even, "the two pages differ");
+    }
+
+    /// §20.4.3.4 `character` is the anchor's position in the text run, which
+    /// float extraction runs before. It falls back to the text area — the
+    /// behaviour it had while sharing a catch-all with `margin`, now reached by
+    /// a named arm that logs.
+    #[test]
+    fn character_relative_falls_back_to_the_text_area() {
+        let from = AnchorRelativeFrom::Character;
+        assert_x(
+            x_of(&h_offset(from, INCH), AnchorFrame::Page),
+            144.0,
+            "offset",
+        );
+        assert_x(
+            x_of(&h_align(from, AnchorAlignment::Left), AnchorFrame::Page),
+            72.0,
+            "align",
+        );
+    }
+
+    /// The margin strips are page-derived, so a header float can reach them:
+    /// `Stack` expresses them relative to the frame origin, and the caller's
+    /// `+ margins.left` shift lands them on the page coordinate they name.
+    #[test]
+    fn stack_frame_margin_strips_survive_the_round_trip_into_page_space() {
+        const BODY_MARGIN: f32 = 72.0;
+        for (from, page_x) in [
+            (AnchorRelativeFrom::LeftMargin, 0.0),
+            (AnchorRelativeFrom::RightMargin, 540.0),
+        ] {
+            let got = x_of(&h_align(from, AnchorAlignment::Left), AnchorFrame::Stack);
+            assert_x(
+                got + BODY_MARGIN,
+                page_x,
+                &format!("{from:?} after the caller's shift"),
+            );
+        }
+    }
+
+    // ── §14.1.2.5 VML fill resolution ────────────────────────────────────
+
+    use super::{build_vml_rect_shape, model, resolve_vml_solid_fill};
+    use crate::model::{VmlColor, VmlFill, VmlFillType, VmlLength, VmlLengthUnit, VmlNamedColor};
+    use crate::render::layout::draw_command::ResolvedFill;
+
+    fn solid_rgb(fill: &ResolvedFill) -> (f32, f32, f32) {
+        let ResolvedFill::Solid(c) = fill else {
+            panic!("expected a solid fill, got {fill:?}");
+        };
+        (c.r, c.g, c.b)
+    }
+
+    /// §14.1.2.5: the `<v:fill>` child element wins over `@fillcolor`.
+    #[test]
+    fn vml_fill_child_overrides_the_fillcolor_attribute() {
+        let common = model::VmlCommonAttrs {
+            fill_color: Some(VmlColor::Rgb(255, 0, 0)),
+            fill: Some(VmlFill {
+                fill_type: VmlFillType::Solid,
+                color: Some(VmlColor::Rgb(0, 255, 0)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(solid_rgb(&resolve_vml_solid_fill(&common)), (0.0, 1.0, 0.0));
+    }
+
+    /// With no child element the attribute is the whole story.
+    #[test]
+    fn vml_fillcolor_attribute_applies_without_a_fill_child() {
+        let common = model::VmlCommonAttrs {
+            fill_color: Some(VmlColor::Rgb(0, 0, 255)),
+            ..Default::default()
+        };
+        assert_eq!(solid_rgb(&resolve_vml_solid_fill(&common)), (0.0, 0.0, 1.0));
+    }
+
+    /// A `<v:fill type="solid"/>` carrying no `@color` is not an override —
+    /// it falls through to the attribute rather than blanking the shape.
+    #[test]
+    fn vml_solid_fill_without_a_color_falls_back_to_the_attribute() {
+        let common = model::VmlCommonAttrs {
+            fill_color: Some(VmlColor::Rgb(255, 0, 0)),
+            fill: Some(VmlFill {
+                fill_type: VmlFillType::Solid,
+                color: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(solid_rgb(&resolve_vml_solid_fill(&common)), (1.0, 0.0, 0.0));
+    }
+
+    /// A non-solid fill degrades to no-fill and — deliberately — does *not*
+    /// fall back to `@fillcolor`: the attribute is the gradient's own start
+    /// colour, so painting the shape flat in it would be worse than leaving
+    /// the outline and text to carry the shape.
+    #[test]
+    fn vml_non_solid_fills_degrade_to_no_fill_without_falling_back() {
+        for fill_type in [
+            VmlFillType::Gradient,
+            VmlFillType::GradientRadial,
+            VmlFillType::Tile,
+            VmlFillType::Frame,
+            VmlFillType::Pattern,
+        ] {
+            let common = model::VmlCommonAttrs {
+                fill_color: Some(VmlColor::Rgb(255, 0, 0)),
+                fill: Some(VmlFill {
+                    fill_type,
+                    color: Some(VmlColor::Rgb(0, 255, 0)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                matches!(resolve_vml_solid_fill(&common), ResolvedFill::None),
+                "{fill_type:?} must not paint",
+            );
+        }
+    }
+
+    /// Named colours are parsed but not yet resolved to RGB, so they leave the
+    /// shape unfilled rather than guessing.
+    #[test]
+    fn vml_named_colors_are_not_resolved_yet() {
+        let common = model::VmlCommonAttrs {
+            fill_color: Some(VmlColor::Named(VmlNamedColor::Black)),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_vml_solid_fill(&common),
+            ResolvedFill::None
+        ));
+    }
+
+    // ── §14.1.2.19 VML rect construction ─────────────────────────────────
+
+    fn vml_pt(value: f64) -> VmlLength {
+        VmlLength {
+            value,
+            unit: VmlLengthUnit::Pt,
+        }
+    }
+
+    /// A `position:absolute` rect at `(x, y)` sized `w x h`, all in points.
+    fn vml_rect(x: f64, y: f64, w: f64, h: f64) -> model::VmlCommonAttrs {
+        model::VmlCommonAttrs {
+            style: model::VmlStyle {
+                position: Some(crate::model::CssPosition::Absolute),
+                margin_left: Some(vml_pt(x)),
+                margin_top: Some(vml_pt(y)),
+                width: Some(vml_pt(w)),
+                height: Some(vml_pt(h)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The path is a closed rectangle in *shape-local* points — the painter
+    /// applies `(x, y)`, so baking the position into the path would double it.
+    #[test]
+    fn vml_rect_is_a_closed_rectangle_in_shape_local_points() {
+        use crate::render::resolve::shape_geometry::PathVerb;
+
+        let shape = build_vml_rect_shape(
+            &vml_rect(30.0, 40.0, 200.0, 10.0),
+            &default_state(),
+            AnchorFrame::Page,
+        )
+        .expect("a positioned, sized rect builds");
+
+        assert_x(
+            shape.x.raw(),
+            30.0,
+            "page-frame x is the style's margin-left",
+        );
+        let FloatingImageY::RelativeToParagraph(y) = shape.y else {
+            panic!("VML rects anchor to the host paragraph");
+        };
+        assert_x(y.raw(), 40.0, "y is the style's margin-top");
+        assert_x(shape.size.width.raw(), 200.0, "width");
+        assert_x(shape.size.height.raw(), 10.0, "height");
+
+        let [sub] = &shape.paths[..] else {
+            panic!("one sub-path, got {}", shape.paths.len());
+        };
+        assert_eq!(sub.verbs.len(), 5, "4 corners + close");
+        assert!(matches!(sub.verbs[0], PathVerb::MoveTo(o) if o.x == Pt::ZERO && o.y == Pt::ZERO));
+        assert!(matches!(sub.verbs[4], PathVerb::Close));
+    }
+
+    /// Same round-trip as the DrawingML path: the stack emitter shifts by the
+    /// body's left margin, so the page-relative x is pre-compensated.
+    #[test]
+    fn stack_frame_vml_rect_backs_out_the_left_margin() {
+        let shape = build_vml_rect_shape(
+            &vml_rect(80.0, 0.0, 10.0, 10.0),
+            &default_state(),
+            AnchorFrame::Stack,
+        )
+        .expect("a positioned, sized rect builds");
+        assert_x(shape.x.raw(), 8.0, "80pt page x minus the 72pt margin");
+    }
+
+    /// Without `position:absolute` there is no position to honour, and a rect
+    /// with no extent cannot render — both drop out rather than emitting a
+    /// degenerate shape at the origin.
+    #[test]
+    fn vml_rect_needs_absolute_positioning_and_a_positive_extent() {
+        let mut unpositioned = vml_rect(30.0, 40.0, 200.0, 10.0);
+        unpositioned.style.position = None;
+        assert!(
+            build_vml_rect_shape(&unpositioned, &default_state(), AnchorFrame::Page).is_none(),
+            "no position:absolute"
+        );
+
+        for (w, h) in [(0.0, 10.0), (200.0, 0.0), (-5.0, 10.0)] {
+            assert!(
+                build_vml_rect_shape(
+                    &vml_rect(30.0, 40.0, w, h),
+                    &default_state(),
+                    AnchorFrame::Page
+                )
+                .is_none(),
+                "{w} x {h} has no drawable area"
+            );
+        }
+    }
+
+    /// `@stroked` reaches the sub-path so the painter knows whether to outline.
+    #[test]
+    fn vml_rect_carries_the_stroked_flag_onto_its_path() {
+        for stroked in [None, Some(false), Some(true)] {
+            let mut common = vml_rect(0.0, 0.0, 10.0, 10.0);
+            common.stroked = stroked;
+            let shape =
+                build_vml_rect_shape(&common, &default_state(), AnchorFrame::Page).expect("builds");
+            assert_eq!(
+                shape.paths[0].stroked,
+                stroked == Some(true),
+                "stroked={stroked:?}"
             );
         }
     }
