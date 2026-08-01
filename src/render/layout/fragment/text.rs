@@ -232,8 +232,9 @@ pub(super) fn emit_text_words<F>(
 /// Resolve a host color emoji typeface for an emoji cluster and emit a
 /// [`Fragment::Emoji`]. On `Unavailable`, log a one-time warning and route
 /// the cluster through the text path so its codepoints still appear in the
-/// PDF text stream (per the no-bundle / no-silent-degradation policy in
-/// `docs/emoji-rendering.md`).
+/// PDF text stream. The converter never ships emoji font bytes and never
+/// degrades silently: it consumes whatever color typeface the host provides,
+/// and logs when there is none so an operator can install one.
 pub(super) fn emit_emoji_or_fallback<F>(
     cluster: &EmojiCluster<'_>,
     font: &FontProps,

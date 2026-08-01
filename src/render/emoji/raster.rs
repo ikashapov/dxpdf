@@ -382,7 +382,12 @@ fn rasterize_uncached(
     })
 }
 
-// ─── Tests (X1–X6 from docs/emoji-rendering.md) ──────────────────────────────
+// ─── Tests ───────────────────────────────────────────────────────────────────
+//
+// `xN_` names are the cache cases this module was built against: repeat
+// rasterization of one cluster hitting a single entry, distinct clusters and
+// distinct sizes taking distinct entries, non-degenerate image dimensions,
+// non-empty pixel data, and canonically-equivalent (NFC) inputs sharing a slot.
 
 #[cfg(test)]
 mod tests {

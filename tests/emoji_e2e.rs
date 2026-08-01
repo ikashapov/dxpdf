@@ -27,7 +27,7 @@ fn parse_fixture() -> dxpdf::model::Document {
 
 /// True when this host actually resolves a color emoji typeface. Tests that
 /// assert the emoji-rasterization branch only fire on hosts that have one
-/// (per the no-bundle policy in `docs/emoji-rendering.md`).
+/// (the converter bundles no emoji fonts — it uses the host's or none).
 fn host_has_color_emoji() -> bool {
     use dxpdf::render::emoji::resolve::{resolve, EmojiTypeface, RegistryLookup};
     use dxpdf::render::fonts::FontRegistry;

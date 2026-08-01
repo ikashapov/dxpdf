@@ -284,7 +284,13 @@ fn skin_tone_for(c: char) -> Option<SkinTone> {
     }
 }
 
-// ─── Tests (C1–C13 from docs/emoji-rendering.md) ─────────────────────────────
+// ─── Tests ───────────────────────────────────────────────────────────────────
+//
+// `cN_` names are the classification cases this module was built against:
+// plain text, emoji between text, default-text presentation, VS-16/VS-15
+// promotion and demotion, modifier / ZWJ / regional-flag / subdivision-flag /
+// keycap sequences, adjacent emoji, the empty string, and a combining mark
+// adjacent to an emoji.
 
 #[cfg(test)]
 mod tests {

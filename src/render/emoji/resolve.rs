@@ -208,7 +208,13 @@ impl<L: EmojiTypefaceLookup> EmojiResolver<L> {
     }
 }
 
-// ─── Tests (R1–R8 from docs/emoji-rendering.md) ──────────────────────────────
+// ─── Tests ───────────────────────────────────────────────────────────────────
+//
+// `rN_` names are the resolution cases this module was built against: host
+// default with no request, a request the host lacks (falls through), a host
+// with the Linux default installed, a host with no emoji font at all
+// (`Unavailable` carrying the full attempted list), lookup caching, and
+// `from_name_ci` accepting/rejecting family names case-insensitively.
 
 #[cfg(test)]
 mod tests {
