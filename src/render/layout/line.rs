@@ -31,14 +31,39 @@ pub struct FittedLine {
 /// `first_line_width`: if provided, the first line uses this narrower width
 /// (e.g., to account for first-line indent). Subsequent lines use `max_width`.
 pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
-    fit_lines_with_first(fragments, max_width, max_width)
+    fit_lines_with_first(
+        fragments,
+        max_width,
+        max_width,
+        crate::render::layout::paragraph::PTabGeometry {
+            max_width,
+            indent_left: Pt::ZERO,
+            content_width: max_width,
+        },
+    )
 }
 
 /// Line fitting with separate first-line and remaining-line widths.
+/// Total width of the content a position tab at `ptab_idx` positions — from
+/// the tab to the next tab-like fragment, a line break, or the end.
+///
+/// Fitting cannot bound this by the line end the way emission does, because
+/// the lines do not exist yet. Where the two disagree — a zone that fitting
+/// then splits for width — emission is authoritative for the final x; this
+/// value only decides whether the tab can be honoured on this line at all.
+fn ptab_zone_width(fragments: &[Fragment], ptab_idx: usize) -> Pt {
+    fragments[ptab_idx + 1..]
+        .iter()
+        .take_while(|f| !crate::render::layout::paragraph::is_tab_like(f) && !f.is_line_break())
+        .map(|f| f.width())
+        .sum()
+}
+
 pub fn fit_lines_with_first(
     fragments: &[Fragment],
     first_line_width: Pt,
     remaining_width: Pt,
+    ptab_geometry: crate::render::layout::paragraph::PTabGeometry,
 ) -> Vec<FittedLine> {
     if fragments.is_empty() {
         return Vec::new();
@@ -47,6 +72,12 @@ pub fn fit_lines_with_first(
     let mut lines = Vec::new();
     let mut line_start = 0;
     let mut line_width = Pt::ZERO;
+    // §17.3.1.30: where the pen actually *is*, as opposed to how much width
+    // the line has accumulated. The two differ only across a position tab,
+    // which jumps the pen to its anchor while contributing a nominal width.
+    // Tracking it separately keeps `line_width` — and therefore every
+    // non-ptab paragraph's fitting — bit-for-bit unchanged.
+    let mut pen_x = Pt::ZERO;
     let mut line_height = Pt::ZERO;
     let mut line_text_height = Pt::ZERO;
     let mut line_ascent = Pt::ZERO;
@@ -72,12 +103,64 @@ pub fn fit_lines_with_first(
             });
             line_start = i + 1;
             line_width = Pt::ZERO;
+            pen_x = Pt::ZERO;
             line_height = Pt::ZERO;
             line_text_height = Pt::ZERO;
             line_ascent = Pt::ZERO;
             last_break_point = None;
             i += 1;
             continue;
+        }
+
+        // §17.3.1.30: a position tab whose alignment point lies behind the
+        // pen advances to that point on the *next* line. Decided here rather
+        // than at emission because it is a line break, and emission cannot
+        // create one.
+        if let Fragment::PTab {
+            align, relative_to, ..
+        } = frag
+        {
+            let zone_width = ptab_zone_width(fragments, i);
+            let placement = crate::render::layout::paragraph::resolve_ptab(
+                *align,
+                *relative_to,
+                ptab_geometry,
+                pen_x,
+                zone_width,
+            );
+            match placement {
+                crate::render::layout::paragraph::PTabPlacement::Placed(at) => pen_x = at,
+                crate::render::layout::paragraph::PTabPlacement::AdvancesToNextLine { .. } => {
+                    // Only break when doing so can help. A tab already first
+                    // on its line would find the same anchor behind the same
+                    // pen on the next one — acting on a condition the action
+                    // cannot change is how this engine's pagination loops have
+                    // historically become infinite.
+                    if line_start < i {
+                        let m = measure_range(fragments, line_start, i);
+                        lines.push(FittedLine {
+                            start: line_start,
+                            end: i,
+                            width: m.width,
+                            height: m.height,
+                            text_height: m.text_height,
+                            ascent: m.ascent,
+                            has_break: false,
+                        });
+                        line_start = i;
+                        line_width = Pt::ZERO;
+                        pen_x = Pt::ZERO;
+                        line_height = Pt::ZERO;
+                        line_text_height = Pt::ZERO;
+                        line_ascent = Pt::ZERO;
+                        last_break_point = None;
+                        // Re-evaluate this tab against the fresh line.
+                        continue;
+                    }
+                }
+            }
+        } else {
+            pen_x += frag.width();
         }
 
         let frag_width = frag.width();
@@ -111,6 +194,7 @@ pub fn fit_lines_with_first(
             });
             line_start = break_at;
             line_width = Pt::ZERO;
+            pen_x = Pt::ZERO;
             line_height = Pt::ZERO;
             line_text_height = Pt::ZERO;
             line_ascent = Pt::ZERO;
@@ -462,7 +546,16 @@ mod tests {
             text_frag("b ", 40.0),
             text_frag("c", 40.0),
         ];
-        let lines = fit_lines_with_first(&frags, Pt::new(60.0), Pt::new(100.0));
+        let lines = fit_lines_with_first(
+            &frags,
+            Pt::new(60.0),
+            Pt::new(100.0),
+            crate::render::layout::paragraph::PTabGeometry {
+                max_width: Pt::new(100.0),
+                indent_left: Pt::ZERO,
+                content_width: Pt::new(100.0),
+            },
+        );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].end, 1, "only 'a ' fits the narrow first line");
         assert_eq!(lines[1].start, 1);

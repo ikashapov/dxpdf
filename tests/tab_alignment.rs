@@ -133,3 +133,72 @@ fn decimal_stop_right_aligns_an_entry_with_no_separator() {
          left-aligned instead"
     );
 }
+
+// ── §17.3.1.30 position tabs ─────────────────────────────────────────────────
+
+/// `lead`, a centre margin ptab, `mid`, a right margin ptab, then `trail`.
+///
+/// Two tabs are required to reproduce the defect: a single right ptab can only
+/// have its anchor behind the pen when the content already exceeds the line, in
+/// which case the fitter breaks for width first. It is the *centre* tab jumping
+/// the pen forward — past where the right tab wants to start — that creates the
+/// case the clamp mishandled.
+fn two_ptab_document(lead: &str, mid: &str, trail: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r><w:t xml:space="preserve">{lead}</w:t></w:r>
+      <w:r><w:ptab w:relativeTo="margin" w:alignment="center" w:leader="none"/></w:r>
+      <w:r><w:t xml:space="preserve">{mid}</w:t></w:r>
+      <w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/></w:r>
+      <w:r><w:t xml:space="preserve">{trail}</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>"#
+    )
+}
+
+#[test]
+fn a_ptab_anchor_behind_the_pen_advances_to_the_next_line() {
+    // §17.3.1.30: the centre tab leaves the pen right of where the right tab
+    // anchors its zone, so the right tab must advance to the next line rather
+    // than clamping — which drew the trailing run past the right margin.
+    let bytes = make_docx(&two_ptab_document("L", &"m".repeat(34), &"m".repeat(19)));
+    let doc = dxpdf::docx::parse(&bytes).expect("fixture parses");
+    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+
+    let placed: Vec<(String, f32, f32)> = pages
+        .iter()
+        .flat_map(|p| p.commands.iter())
+        .filter_map(|c| match c {
+            DrawCommand::Text { text, position, .. } => {
+                Some((text.to_string(), position.x.raw(), position.y.raw()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mid = placed
+        .iter()
+        .find(|(t, _, _)| t.starts_with('m'))
+        .expect("middle run emitted");
+    let trail = placed
+        .iter()
+        .rev()
+        .find(|(t, _, _)| t.starts_with('m'))
+        .expect("trailing run emitted — not dropped");
+
+    assert!(
+        trail.2 > mid.2,
+        "the trailing run advances to the next line: {placed:?}"
+    );
+    // Letter, 1in margins → the text area ends at 540pt. The clamp put the
+    // trailing run at the pen, running past that edge.
+    assert!(
+        trail.1 < 540.0,
+        "the trailing run starts inside the text area, at {}",
+        trail.1
+    );
+}
