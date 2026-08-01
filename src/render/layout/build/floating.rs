@@ -62,37 +62,102 @@ pub(super) enum ShapeAnchorClass {
 ///
 /// Positions are resolved in the coordinate system implied by `frame`
 /// (see [`AnchorFrame`]).
+/// MCE §M.1.2: the branch of an `<mc:AlternateContent>` this renderer selects.
+///
+/// Exactly one branch is live. A consumer takes the first `<mc:Choice>` whose
+/// requirements it can meet and otherwise the `<mc:Fallback>`; it never takes
+/// both, because both describe the *same* object — the Choice in DrawingML,
+/// the Fallback in VML for clients that predate it.
+enum McBranch<'a> {
+    /// The `<mc:Choice>` elements, in document order.
+    Choices(&'a [crate::model::McChoice]),
+    /// The `<mc:Fallback>`, reached only when no Choice carries anything we
+    /// can draw.
+    Fallback(&'a [crate::model::Inline]),
+    /// Choices we cannot draw, and no Fallback to fall back to.
+    Neither,
+}
+
+/// Pick the live branch of `ac`.
+///
+/// The test is **content-based**, not a `Requires` namespace check: a Choice
+/// may declare a namespace we nominally support and still hold nothing this
+/// renderer turns into geometry, and the honest question is whether we will
+/// actually draw it. `choices_render_wps_shape` asks a narrower version of the
+/// same question for the fallback-suppression decisions in `fragment::collect`
+/// and `find_vml_absolute_position`; here the anchor is what matters, whether
+/// its graphic is a shape or a picture.
+///
+/// Both DrawingML anchor walkers go through this. They are two halves of one
+/// extraction split by graphic type, so a branch selected by one and not the
+/// other means the paragraph contains different objects depending on which you
+/// ask — which is how a Choice's shape and a Fallback's picture both ended up
+/// on the page.
+fn live_mc_branch(ac: &crate::model::AlternateContent) -> McBranch<'_> {
+    use crate::model::{ImagePlacement, Inline};
+
+    fn draws_an_anchor(inlines: &[Inline]) -> bool {
+        inlines.iter().any(|inline| match inline {
+            Inline::Image(img) => matches!(img.placement, ImagePlacement::Anchor(_)),
+            Inline::Hyperlink(link) => draws_an_anchor(&link.content),
+            Inline::Field(f) => draws_an_anchor(&f.content),
+            Inline::AlternateContent(inner) => {
+                matches!(live_mc_branch(inner), McBranch::Choices(_))
+            }
+            _ => false,
+        })
+    }
+
+    if ac.choices.iter().any(|c| draws_an_anchor(&c.content)) {
+        McBranch::Choices(&ac.choices)
+    } else {
+        match ac.fallback {
+            Some(ref fallback) => McBranch::Fallback(fallback),
+            None => McBranch::Neither,
+        }
+    }
+}
+
+fn find_anchor_images<'a>(
+    inlines: &'a [crate::model::Inline],
+    out: &mut Vec<&'a crate::model::Image>,
+) {
+    use crate::model::{GraphicContent, ImagePlacement, Inline};
+
+    for inline in inlines {
+        match inline {
+            // Images with a WordProcessingShape graphic are handled by
+            // `extract_floating_shapes`; skip them here so the shape
+            // branch owns their layout path end-to-end.
+            Inline::Image(img)
+                if matches!(img.placement, ImagePlacement::Anchor(_))
+                    && !matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_))) =>
+            {
+                out.push(img);
+            }
+            Inline::Hyperlink(link) => find_anchor_images(&link.content, out),
+            Inline::Field(f) => find_anchor_images(&f.content, out),
+            Inline::AlternateContent(ac) => match live_mc_branch(ac) {
+                McBranch::Choices(choices) => {
+                    for choice in choices {
+                        find_anchor_images(&choice.content, out);
+                    }
+                }
+                McBranch::Fallback(fallback) => find_anchor_images(fallback, out),
+                McBranch::Neither => {}
+            },
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn extract_floating_images(
     para: &Paragraph,
     ctx: &BuildContext,
     state: &BuildState,
     frame: AnchorFrame,
 ) -> Vec<FloatingImage> {
-    use crate::model::{GraphicContent, ImagePlacement, Inline};
-
-    fn find_anchor_images<'a>(inlines: &'a [Inline], out: &mut Vec<&'a crate::model::Image>) {
-        for inline in inlines {
-            match inline {
-                // Images with a WordProcessingShape graphic are handled by
-                // `extract_floating_shapes`; skip them here so the shape
-                // branch owns their layout path end-to-end.
-                Inline::Image(img)
-                    if matches!(img.placement, ImagePlacement::Anchor(_))
-                        && !matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_))) =>
-                {
-                    out.push(img);
-                }
-                Inline::Hyperlink(link) => find_anchor_images(&link.content, out),
-                Inline::Field(f) => find_anchor_images(&f.content, out),
-                Inline::AlternateContent(ac) => {
-                    if let Some(ref fb) = ac.fallback {
-                        find_anchor_images(fb, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    use crate::model::ImagePlacement;
 
     let mut anchor_imgs = Vec::new();
     find_anchor_images(&para.content, &mut anchor_imgs);
@@ -145,6 +210,41 @@ pub(super) fn extract_floating_images(
 /// resolve their geometry + visuals, and compute their positions in the
 /// coordinate frame implied by `frame`. Pure: takes immutable references to
 /// `ctx` / `state`.
+fn find_anchor_shapes<'a>(
+    inlines: &'a [crate::model::Inline],
+    out: &mut Vec<&'a crate::model::Image>,
+) {
+    use crate::model::{GraphicContent, ImagePlacement, Inline};
+
+    for inline in inlines {
+        match inline {
+            Inline::Image(img)
+                if matches!(img.placement, ImagePlacement::Anchor(_))
+                    && matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_))) =>
+            {
+                out.push(img);
+            }
+            Inline::Hyperlink(link) => find_anchor_shapes(&link.content, out),
+            Inline::Field(f) => find_anchor_shapes(&f.content, out),
+            // MCE §M.1.2: shapes live inside the `<mc:Choice Requires="wps">`
+            // branch and the `<mc:Fallback>` carries the VML equivalent. The
+            // branch is chosen by `live_mc_branch`, the same call the image
+            // walker makes, so the two cannot disagree about which one the
+            // paragraph contains.
+            Inline::AlternateContent(ac) => match live_mc_branch(ac) {
+                McBranch::Choices(choices) => {
+                    for choice in choices {
+                        find_anchor_shapes(&choice.content, out);
+                    }
+                }
+                McBranch::Fallback(fallback) => find_anchor_shapes(fallback, out),
+                McBranch::Neither => {}
+            },
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn extract_floating_shapes(
     para: &Paragraph,
     ctx: &BuildContext,
@@ -152,39 +252,7 @@ pub(super) fn extract_floating_shapes(
     frame: AnchorFrame,
     restrict: ShapeAnchorClass,
 ) -> Vec<FloatingShape> {
-    use crate::model::{GraphicContent, ImagePlacement, Inline};
-
-    fn find_anchor_shapes<'a>(inlines: &'a [Inline], out: &mut Vec<&'a crate::model::Image>) {
-        for inline in inlines {
-            match inline {
-                Inline::Image(img)
-                    if matches!(img.placement, ImagePlacement::Anchor(_))
-                        && matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_))) =>
-                {
-                    out.push(img);
-                }
-                Inline::Hyperlink(link) => find_anchor_shapes(&link.content, out),
-                Inline::Field(f) => find_anchor_shapes(&f.content, out),
-                // MCE §M.1.2: shapes live inside the `<mc:Choice Requires="wps">`
-                // branch; the `<mc:Fallback>` carries the VML equivalent. We
-                // scan both: the first choice that yields a shape wins, else
-                // we try the fallback (which will be ignored at build time
-                // anyway because VML has no `WordProcessingShape` graphic).
-                Inline::AlternateContent(ac) => {
-                    let before = out.len();
-                    for choice in &ac.choices {
-                        find_anchor_shapes(&choice.content, out);
-                    }
-                    if out.len() == before {
-                        if let Some(ref fb) = ac.fallback {
-                            find_anchor_shapes(fb, out);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    use crate::model::{GraphicContent, ImagePlacement};
 
     let mut shape_imgs = Vec::new();
     find_anchor_shapes(&para.content, &mut shape_imgs);
@@ -1385,6 +1453,131 @@ mod tests {
                 got.raw()
             );
         }
+    }
+
+    // ── MCE §M.1.2 branch selection ──────────────────────────────────────
+
+    use super::{find_anchor_images, find_anchor_shapes};
+    use crate::model::{Blip, BlipFill, BlipFillKind, NvPicProperties, Picture, RelId};
+
+    /// An anchored DrawingML *picture* — the other half of what an anchor can
+    /// hold, and the half `find_anchor_images` owns.
+    fn anchored_picture() -> Image {
+        let mut img = anchored_wps_image();
+        img.graphic = Some(GraphicContent::Picture(Picture {
+            nv_pic_pr: NvPicProperties {
+                cnv_pr: DocProperties {
+                    id: 2,
+                    name: "picture".into(),
+                    description: None,
+                    hidden: None,
+                    title: None,
+                },
+                cnv_pic_pr: None,
+            },
+            blip_fill: BlipFill {
+                rotate_with_shape: None,
+                dpi: None,
+                blip: Some(Blip {
+                    embed: Some(RelId::new("rId7")),
+                    link: None,
+                    compression: None,
+                }),
+                src_rect: None,
+                fill_kind: BlipFillKind::Unspecified,
+            },
+            shape_properties: None,
+        }));
+        img
+    }
+
+    /// `<mc:AlternateContent>` whose Choice holds `choice` and whose Fallback
+    /// holds `fallback`.
+    fn ac_of(choice: Vec<Inline>, fallback: Vec<Inline>) -> Inline {
+        Inline::AlternateContent(AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wpg],
+                content: choice,
+            }],
+            fallback: Some(fallback),
+        })
+    }
+
+    /// MCE §M.1.2 selects exactly one branch, so the two walkers — two halves
+    /// of one DrawingML extraction, split by graphic type — have to select the
+    /// same one. Here the Choice holds a picture and the Fallback a shape: ask
+    /// the image walker and the paragraph contains nothing, ask the shape
+    /// walker and it contains a shape from the *other* branch.
+    #[test]
+    fn both_anchor_walkers_read_the_same_alternate_content_branch() {
+        let content = vec![ac_of(
+            vec![Inline::Image(Box::new(anchored_picture()))],
+            vec![Inline::Image(Box::new(anchored_wps_image()))],
+        )];
+
+        let mut images = Vec::new();
+        find_anchor_images(&content, &mut images);
+        let mut shapes = Vec::new();
+        find_anchor_shapes(&content, &mut shapes);
+
+        assert_eq!(images.len(), 1, "the Choice's picture is live");
+        assert_eq!(
+            shapes.len(),
+            0,
+            "the Fallback's shape is not — the Choice was selected"
+        );
+    }
+
+    /// The dominant shape of the element in the wild: a DrawingML Choice and a
+    /// VML Fallback. The Choice's picture must render; today the image walker
+    /// only ever looks in the Fallback, and the VML walkers skip
+    /// `AlternateContent` outright, so the picture reaches neither and the
+    /// anchor draws nothing at all.
+    #[test]
+    fn an_anchored_picture_in_a_choice_is_found() {
+        let content = vec![ac_of(
+            vec![Inline::Image(Box::new(anchored_picture()))],
+            vec![Inline::InstrText(String::new())],
+        )];
+
+        let mut images = Vec::new();
+        find_anchor_images(&content, &mut images);
+        assert_eq!(images.len(), 1, "the Choice's anchored picture is rendered");
+    }
+
+    /// With no renderable Choice the Fallback is live, for both walkers. This
+    /// is the branch the image walker used to take unconditionally, and it has
+    /// to keep working — a legacy VML-only anchor has nowhere else to come
+    /// from.
+    #[test]
+    fn an_unrenderable_choice_hands_the_document_to_the_fallback() {
+        let content = vec![ac_of(
+            vec![Inline::InstrText(String::new())],
+            vec![Inline::Image(Box::new(anchored_picture()))],
+        )];
+
+        let mut images = Vec::new();
+        find_anchor_images(&content, &mut images);
+        assert_eq!(images.len(), 1, "the Fallback's picture is live");
+    }
+
+    /// Regression guard for the case the shape walker already handled: a wps
+    /// Choice wins and its VML Fallback stays inert, so the same rectangle is
+    /// not drawn twice.
+    #[test]
+    fn a_wps_choice_still_suppresses_its_vml_fallback() {
+        let content = vec![ac_of(
+            vec![Inline::Image(Box::new(anchored_wps_image()))],
+            vec![Inline::Image(Box::new(anchored_picture()))],
+        )];
+
+        let mut images = Vec::new();
+        find_anchor_images(&content, &mut images);
+        let mut shapes = Vec::new();
+        find_anchor_shapes(&content, &mut shapes);
+
+        assert_eq!(shapes.len(), 1, "the Choice's shape renders");
+        assert_eq!(images.len(), 0, "the Fallback's picture does not");
     }
 
     // ── §20.4.3.4 horizontal anchor resolution ───────────────────────────
