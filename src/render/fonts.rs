@@ -351,7 +351,23 @@ impl FontRegistry {
 
     /// Build a registry, registering all embedded fonts and preloading the
     /// requested family/style combinations.
-    pub fn build(font_mgr: FontMgr, embedded: &[EmbeddedFont], families: &[String]) -> Self {
+    ///
+    /// Fails with [`crate::render::error::RenderError::NoFontsAvailable`] when the host exposes no
+    /// typeface at all. Checking here rather than at the point of use is what
+    /// lets [`Self::resolve`] return a `TypefaceEntry` rather than an
+    /// `Option`: the last-resort arm of `resolve_uncached` is unreachable for
+    /// any registry this constructor returns.
+    pub fn build(
+        font_mgr: FontMgr,
+        embedded: &[EmbeddedFont],
+        families: &[String],
+    ) -> Result<Self, crate::render::error::RenderError> {
+        if font_mgr
+            .legacy_make_typeface(None::<&str>, FontStyle::normal())
+            .is_none()
+        {
+            return Err(crate::render::error::RenderError::NoFontsAvailable);
+        }
         let mut reg = Self::new(font_mgr);
         for ef in embedded {
             if let Err(err) = reg.register_embedded(&ef.family, ef.variant, ef.data.clone()) {
@@ -359,7 +375,7 @@ impl FontRegistry {
             }
         }
         reg.preload(families);
-        reg
+        Ok(reg)
     }
 
     pub fn font_mgr(&self) -> &FontMgr {
@@ -492,10 +508,15 @@ impl FontRegistry {
             }
         }
 
+        // Unreachable for a registry from `FontRegistry::build`, which rejects
+        // a font-less `FontMgr` up front so this arm always has something to
+        // return. A registry made with `FontRegistry::new` carries no such
+        // guarantee — that constructor is for tests, which supply a real
+        // `FontMgr`.
         let tf = self
             .font_mgr
             .legacy_make_typeface(None::<&str>, style)
-            .expect("no fallback typeface available");
+            .expect("FontRegistry::build guarantees a last-resort typeface");
         log::debug!(
             "[font] '{}' {:?} → system default '{}'",
             family,

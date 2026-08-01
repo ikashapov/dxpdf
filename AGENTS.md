@@ -17,6 +17,7 @@ cargo test --all               # Run all tests
 cargo test <test_name>         # Run a single test by name
 cargo bench                    # Run Criterion benchmarks
 cargo clippy --all-targets -- -D warnings   # Lint (CI enforces zero warnings)
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps   # Doc links (CI enforces zero warnings)
 cargo fmt --all -- --check     # Format check
 cargo fmt --all                # Auto-format
 ```
@@ -117,6 +118,12 @@ For any paint or subset change, pixel-diff before vs after — a passing test su
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings   # CI enforces zero warnings
 cargo test --all
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps   # CI enforces zero doc warnings
+cargo build --no-default-features           # `subset-fonts` off still compiles
 ```
+
+The doc check catches dangling `[`links`]`, links from public docs to private
+items, and prose rustdoc reads as HTML (`Vec<Thing>` outside backticks). Link to
+a private item with a plain code span, not `[`brackets`]`.
 
 **Logging**: `RUST_LOG=debug` gives per-phase timing plus the font-resolution decision for every requested family; `RUST_LOG=warn` surfaces unsupported-feature warnings from parse and layout.

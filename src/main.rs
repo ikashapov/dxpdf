@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
 use dxpdf::{RenderOptions, DEFAULT_IMAGE_DPI};
@@ -31,6 +32,13 @@ const MAX_CLI_IMAGE_DPI: f32 = 2400.0;
 /// Parse and range-check `--image-dpi`, rejecting non-numeric, non-finite, and
 /// out-of-range values instead of silently clamping them — so a typo like
 /// `--image-dpi -300` surfaces as a CLI error rather than unreadable output.
+///
+/// This deliberately differs from the library and Python APIs, which *clamp*
+/// the same input to `MIN_IMAGE_DPI` (see `RenderOptions::with_image_dpi`). A
+/// programmatic caller passing an out-of-range value has usually computed it and
+/// wants a usable render; a human typing one has usually made a typo and wants
+/// to be told. The divergence is stated in both places so neither reads as an
+/// oversight.
 fn parse_image_dpi(s: &str) -> Result<f32, String> {
     let dpi: f32 = s
         .parse()
@@ -43,9 +51,24 @@ fn parse_image_dpi(s: &str) -> Result<f32, String> {
     Ok(dpi)
 }
 
-fn main() -> Result<(), dxpdf::Error> {
+/// Returning `Result` from `main` would report failures through `Termination`,
+/// which formats with **`Debug`** — so a missing input printed
+/// `Error: Io(Os { code: 2, kind: NotFound, .. })` and every `Display` message
+/// the crate defines went unseen. Printing it here is the only way the CLI gets
+/// the same message the library and the Python bindings already produce.
+fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), dxpdf::Error> {
     let cli = Cli::parse();
 
     let output = cli
