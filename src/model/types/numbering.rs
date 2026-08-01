@@ -34,6 +34,19 @@ pub struct AbstractNumbering {
     pub levels: Vec<NumberingLevelDefinition>,
 }
 
+/// §17.18.53 ST_LevelSuffix — the character between a list label and the
+/// paragraph text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LevelSuffix {
+    /// A tab (the spec default).
+    #[default]
+    Tab,
+    /// A single space.
+    Space,
+    /// Nothing — the text follows the label directly.
+    Nothing,
+}
+
 /// A single level within an abstract numbering definition.
 #[derive(Clone, Debug)]
 pub struct NumberingLevelDefinition {
@@ -47,11 +60,26 @@ pub struct NumberingLevelDefinition {
     pub run_properties: Option<RunProperties>,
     /// §17.9.10: reference to a picture bullet definition.
     pub lvl_pic_bullet_id: Option<NumPicBulletId>,
+    /// §17.9.29: separator between the number and the paragraph text.
+    pub suffix: LevelSuffix,
+    /// §17.9.8: render all level numbers as decimal (legal numbering).
+    pub is_legal: bool,
+}
+
+/// §17.9.9: a per-instance override of one abstract numbering level.
+#[derive(Clone, Debug)]
+pub struct LevelOverride {
+    /// §17.9.9 @ilvl: the level this override applies to.
+    pub level: u8,
+    /// §17.9.28 startOverride: restart this level's counter at the given value.
+    pub start_override: Option<u32>,
+    /// §17.9.9: the replacement level definition, if the override supplies one.
+    pub definition: Option<NumberingLevelDefinition>,
 }
 
 /// A numbering instance — maps to an abstract numbering, with optional level overrides.
 #[derive(Clone, Debug)]
 pub struct NumberingInstance {
     pub abstract_num_id: AbstractNumId,
-    pub level_overrides: Vec<NumberingLevelDefinition>,
+    pub level_overrides: Vec<LevelOverride>,
 }

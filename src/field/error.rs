@@ -55,3 +55,39 @@ impl fmt::Display for FieldParseError {
 }
 
 impl std::error::Error for FieldParseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_includes_the_salient_detail() {
+        assert_eq!(
+            FieldParseError::Empty.to_string(),
+            "empty field instruction"
+        );
+        assert_eq!(
+            FieldParseError::MissingSwitchValue {
+                switch: "\\o".into()
+            }
+            .to_string(),
+            "switch '\\o' requires a value"
+        );
+        assert_eq!(
+            FieldParseError::MissingArgument {
+                field_type: "REF".into(),
+                argument: "bookmark".into(),
+            }
+            .to_string(),
+            "REF field missing required argument: bookmark"
+        );
+        assert_eq!(
+            FieldParseError::UnterminatedString { position: 7 }.to_string(),
+            "unterminated string at position 7"
+        );
+        assert_eq!(
+            FieldParseError::InvalidOperator { found: "=?".into() }.to_string(),
+            "invalid comparison operator: '=?'"
+        );
+    }
+}

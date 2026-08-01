@@ -123,8 +123,8 @@ fn find_first_hyperlink_url(blocks: &[Block]) -> Option<String> {
         if let Block::Paragraph(p) = block {
             for inline in &p.content {
                 if let Inline::Hyperlink(h) = inline {
-                    if let HyperlinkTarget::External(url) = &h.target {
-                        return Some(url.as_str().to_string());
+                    if let HyperlinkTarget::ExternalUrl(url) = &h.target {
+                        return Some(url.clone());
                     }
                 }
             }

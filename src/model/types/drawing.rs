@@ -49,13 +49,23 @@ impl ImageFormat {
 
     /// Magic-byte detection for the most common raster formats.
     fn detect_by_magic(data: &[u8]) -> Self {
+        // EMF (MS-EMF §2.3.4.2 ENHMETAHEADER): `iType` == 1 at offset 0 and the
+        // `dSignature` value 0x464D4520 (" EMF", stored little-endian) at
+        // offset 40 — *not* near the start, so it can't be expressed as a
+        // leading slice pattern.
+        if data.len() >= 44
+            && data[0..4] == [0x01, 0x00, 0x00, 0x00]
+            && data[40..44] == [0x20, 0x45, 0x4D, 0x46]
+        {
+            return Self::Emf;
+        }
         match data {
             [0x89, b'P', b'N', b'G', ..] => Self::Png,
             [0xFF, 0xD8, 0xFF, ..] => Self::Jpeg,
             [b'G', b'I', b'F', b'8', ..] => Self::Gif,
             [b'B', b'M', ..] => Self::Bmp,
-            // EMF header: RecordType=0x00000001 followed by size, then EMF signature 0x464D4520
-            [0x01, 0x00, 0x00, 0x00, _, _, _, _, 0x20, 0x45, 0x4D, 0x46, ..] => Self::Emf,
+            // TIFF: little-endian "II*\0" or big-endian "MM\0*" (MS-TIFF).
+            [0x49, 0x49, 0x2A, 0x00, ..] | [0x4D, 0x4D, 0x00, 0x2A, ..] => Self::Tiff,
             [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Self::WebP,
             [b'<', ..] => Self::Svg,
             _ => Self::Unknown,
@@ -143,10 +153,36 @@ pub struct WordProcessingShape {
     /// on spPr as inheritance from this reference, so resolve consults it
     /// when the direct effect list is absent or empty.
     pub style_effect_ref: Option<StyleMatrixRef>,
+    /// §20.1.2.2.45 wps:style / §20.1.4.1.13 a:fillRef — reference to a theme
+    /// fill style. When the shape has no direct `spPr` fill, the referenced
+    /// theme fill (recolored by the ref's `phClr`) supplies the fill.
+    pub style_fill_ref: Option<StyleMatrixRef>,
+    /// §20.1.2.2.45 wps:style / §20.1.4.1.17 a:fontRef — the shape's default
+    /// text color and theme font collection for text inside `<wps:txbx>`.
+    pub style_font_ref: Option<FontReference>,
     /// §20.1.2.1.1: body properties (text layout within the shape).
     pub body_pr: Option<BodyProperties>,
     /// §17.17.1: text content inside the shape.
     pub txbx_content: Vec<Block>,
+}
+
+/// §20.1.4.1.17 CT_FontReference — `wps:style/fontRef`: selects the theme font
+/// collection (major/minor) and the shape's default text color.
+#[derive(Clone, Debug)]
+pub struct FontReference {
+    pub collection: FontCollectionIndex,
+    /// Default text color for the shape's text (often a scheme color such as
+    /// `lt1` for light text on a dark fill). `None` leaves the normal cascade.
+    pub color: Option<DrawingColor>,
+}
+
+/// §20.1.8.30 ST_FontCollectionIndex — which theme font collection a
+/// `fontRef` selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontCollectionIndex {
+    Major,
+    Minor,
+    None,
 }
 
 /// §20.1.4.2.19 CT_StyleMatrixReference — a 1-based index into one of the
@@ -839,8 +875,9 @@ pub enum TileFlipMode {
 /// §20.1.8.47 CT_PatternFillProperties.
 #[derive(Clone, Debug)]
 pub struct PatternFill {
-    /// §20.1.10.50 @prst — preset pattern.
-    pub preset: PresetPatternVal,
+    /// §20.1.10.50 @prst — preset pattern. Optional per spec; `None` when the
+    /// `<a:pattFill>` omits `@prst` (an unspecified pattern).
+    pub preset: Option<PresetPatternVal>,
     /// §20.1.8.30 fgClr — foreground color.
     pub fg_color: Option<DrawingColor>,
     /// §20.1.8.10 bgClr — background color.
@@ -1318,4 +1355,106 @@ pub enum BlendMode {
     Screen,
     Darken,
     Lighten,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_by_extension_case_insensitive() {
+        // §M.1.1: extension wins when recognised.
+        assert_eq!(
+            ImageFormat::detect("media/image1.png", &[]),
+            ImageFormat::Png
+        );
+        assert_eq!(ImageFormat::detect("a.JPG", &[]), ImageFormat::Jpeg);
+        assert_eq!(ImageFormat::detect("a.jpeg", &[]), ImageFormat::Jpeg);
+        assert_eq!(ImageFormat::detect("a.GIF", &[]), ImageFormat::Gif);
+        assert_eq!(ImageFormat::detect("a.tif", &[]), ImageFormat::Tiff);
+        assert_eq!(ImageFormat::detect("a.tiff", &[]), ImageFormat::Tiff);
+        assert_eq!(ImageFormat::detect("a.emf", &[]), ImageFormat::Emf);
+        assert_eq!(ImageFormat::detect("a.wmf", &[]), ImageFormat::Wmf);
+        assert_eq!(ImageFormat::detect("a.svg", &[]), ImageFormat::Svg);
+        assert_eq!(ImageFormat::detect("a.svgz", &[]), ImageFormat::Svg);
+        assert_eq!(ImageFormat::detect("a.webp", &[]), ImageFormat::WebP);
+    }
+
+    #[test]
+    fn extension_takes_precedence_over_contradicting_bytes() {
+        // A `.png` target with JPEG bytes is still reported as PNG (the OOXML
+        // relationship target is authoritative).
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert_eq!(ImageFormat::detect("a.png", &jpeg), ImageFormat::Png);
+    }
+
+    #[test]
+    fn unknown_extension_falls_back_to_magic() {
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(ImageFormat::detect("a.dat", &png), ImageFormat::Png);
+        // No extension at all also routes through magic.
+        assert_eq!(ImageFormat::detect("blob", &png), ImageFormat::Png);
+    }
+
+    #[test]
+    fn magic_raster_signatures() {
+        assert_eq!(
+            ImageFormat::detect_by_magic(&[0x89, b'P', b'N', b'G', 0x0D]),
+            ImageFormat::Png
+        );
+        assert_eq!(
+            ImageFormat::detect_by_magic(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            ImageFormat::Jpeg
+        );
+        assert_eq!(ImageFormat::detect_by_magic(b"GIF89a"), ImageFormat::Gif);
+        assert_eq!(ImageFormat::detect_by_magic(b"BM___"), ImageFormat::Bmp);
+    }
+
+    #[test]
+    fn magic_tiff_both_byte_orders() {
+        assert_eq!(
+            ImageFormat::detect_by_magic(&[0x49, 0x49, 0x2A, 0x00]),
+            ImageFormat::Tiff
+        );
+        assert_eq!(
+            ImageFormat::detect_by_magic(&[0x4D, 0x4D, 0x00, 0x2A]),
+            ImageFormat::Tiff
+        );
+    }
+
+    #[test]
+    fn magic_webp_riff_container() {
+        assert_eq!(
+            ImageFormat::detect_by_magic(b"RIFF\0\0\0\0WEBPVP8 "),
+            ImageFormat::WebP
+        );
+    }
+
+    #[test]
+    fn magic_emf_signature_at_offset_40() {
+        // ENHMETAHEADER: iType=1 at 0, " EMF" at offset 40.
+        let mut emf = vec![0u8; 44];
+        emf[0] = 0x01;
+        emf[40..44].copy_from_slice(&[0x20, 0x45, 0x4D, 0x46]);
+        assert_eq!(ImageFormat::detect_by_magic(&emf), ImageFormat::Emf);
+        // The signature bytes appearing at the wrong (old) offset 8 must NOT
+        // be mistaken for EMF.
+        let mut not_emf = vec![0u8; 44];
+        not_emf[0] = 0x01;
+        not_emf[8..12].copy_from_slice(&[0x20, 0x45, 0x4D, 0x46]);
+        assert_ne!(ImageFormat::detect_by_magic(&not_emf), ImageFormat::Emf);
+    }
+
+    #[test]
+    fn magic_svg_and_unknown() {
+        assert_eq!(
+            ImageFormat::detect_by_magic(b"<svg xmlns"),
+            ImageFormat::Svg
+        );
+        assert_eq!(
+            ImageFormat::detect_by_magic(&[0x00, 0x01, 0x02]),
+            ImageFormat::Unknown
+        );
+        assert_eq!(ImageFormat::detect_by_magic(&[]), ImageFormat::Unknown);
+    }
 }

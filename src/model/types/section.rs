@@ -102,7 +102,15 @@ pub struct Columns {
     pub count: Option<u32>,
     pub space: Option<Dimension<Twips>>,
     pub equal_width: Option<bool>,
-    /// §17.6.3: individual column definitions. Empty when `equal_width` is true/absent.
+    /// §17.6.4 `w:sep`: draw a vertical rule between columns.
+    ///
+    /// Parsed and carried so the document is mirrored faithfully; **not drawn**
+    /// — see `render::layout::page::compute_columns`, which records it as a
+    /// Tier-0 gap. Column positions are unaffected; only the divider is absent.
+    pub separator: Option<bool>,
+    /// §17.6.3: individual column definitions. Consulted only when
+    /// `equal_width` is explicitly `Some(false)` — §17.6.4 defaults the
+    /// attribute to `true`, so an absent value means equal widths.
     pub columns: Vec<ColumnDefinition>,
 }
 

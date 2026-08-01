@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use skia_safe::{
     canvas::SrcRectConstraint, path_effect::PathEffect, pdf, BlurStyle, Color4f, Data, MaskFilter,
     Paint, Path, PathBuilder, PathFillType, TextBlob,
@@ -122,6 +122,11 @@ struct PaintState {
     /// rebuilds this run on every call; reusing a `TextBlob` skips that remap for
     /// words repeated across the document.
     blob_cache: FxHashMap<usize, FxHashMap<Box<str>, TextBlob>>,
+    /// Tier-0 features already reported, so an unsupported fill in a header
+    /// warns once per render rather than once per page. Per-render, like
+    /// `warned_emoji` in `layout::measurer` and `warned_border_styles` in
+    /// `layout::build::convert` — never process-wide.
+    warned: FxHashSet<&'static str>,
 }
 
 impl PaintState {
@@ -131,6 +136,7 @@ impl PaintState {
             image_cache: HashMap::new(),
             emoji_rasterizer: EmojiRasterizer::default(),
             blob_cache: FxHashMap::default(),
+            warned: FxHashSet::default(),
         }
     }
 }
@@ -149,6 +155,7 @@ fn render_page(
         image_cache,
         emoji_rasterizer,
         blob_cache,
+        warned,
     } = state;
     let image_dpi = options.image_dpi();
 
@@ -361,19 +368,24 @@ fn render_page(
                 // Pass `rect.size` so the rasterizer allocates an image
                 // whose aspect matches the rect → uniform scaling at
                 // `draw_image_rect`, no anisotropic distortion.
-                let img = emoji_rasterizer.rasterize(&cluster, typeface, *size, rect.size);
-                // Mitchell cubic resampling — same filter we use for
-                // photographic image downsampling. Without explicit
-                // sampling, Skia defaults to nearest/bilinear which makes
-                // the emoji look blurry/pixelated at typical PDF zoom.
-                let sampling = SamplingOptions::from(CubicResampler::mitchell());
-                canvas.draw_image_rect_with_sampling_options(
-                    &img.image,
-                    None,
-                    to_rect(*rect),
-                    sampling,
-                    &default_paint,
-                );
+                // `None` means the offscreen surface could not be allocated;
+                // the rasterizer has already logged why. Leave the cluster
+                // blank, as an undecodable image is left blank above.
+                if let Some(img) = emoji_rasterizer.rasterize(&cluster, typeface, *size, rect.size)
+                {
+                    // Mitchell cubic resampling — same filter we use for
+                    // photographic image downsampling. Without explicit
+                    // sampling, Skia defaults to nearest/bilinear which makes
+                    // the emoji look blurry/pixelated at typical PDF zoom.
+                    let sampling = SamplingOptions::from(CubicResampler::mitchell());
+                    canvas.draw_image_rect_with_sampling_options(
+                        &img.image,
+                        None,
+                        to_rect(*rect),
+                        sampling,
+                        &default_paint,
+                    );
+                }
             }
             DrawCommand::Rect { rect, color } => {
                 rect_paint.set_color4f(to_color4f(*color), None);
@@ -427,7 +439,7 @@ fn render_page(
                     }
                     canvas.translate((-cx, -cy));
                 }
-                let skia_path = build_skia_path(paths);
+                let skia_path = build_skia_path(paths, warned);
                 let strokable = build_skia_path_stroked_only(paths);
                 // §20.1.8 effects render beneath the shape itself, in the
                 // order they appear in the effect list.
@@ -441,7 +453,7 @@ fn render_page(
                         &strokable,
                     );
                 }
-                if let Some(paint) = fill_to_paint(fill) {
+                if let Some(paint) = fill_to_paint(fill, warned) {
                     canvas.draw_path(&skia_path, &paint);
                 }
                 if let Some(stroke) = stroke.as_ref() {
@@ -457,12 +469,38 @@ fn render_page(
 
 // ── Shape path helpers ──────────────────────────────────────────────────────
 
-/// Build a Skia path from all subpaths, regardless of stroke flag. Used for
-/// fill painting — OOXML fills every subpath's interior per its fill mode.
-fn build_skia_path(paths: &[SubPath]) -> Path {
+/// Build a Skia path from the subpaths OOXML actually fills, regardless of
+/// stroke flag. Used both for fill painting and for the shadow silhouette, so
+/// the two agree on what has an interior.
+///
+/// §20.1.10.45 `ST_PathFillMode`: a subpath with `fill="none"` contributes no
+/// interior — it is outline-only, and filling it anyway paints the shape's
+/// fill colour over whatever sits behind it. The `lighten`/`lightenLess`/
+/// `darken`/`darkenLess` variants ask for a shaded version of the shape fill;
+/// Tier-0 paints them as `norm` and warns once per render.
+fn build_skia_path(paths: &[SubPath], warned: &mut FxHashSet<&'static str>) -> Path {
+    use crate::model::PathFillMode;
     let mut builder = PathBuilder::new();
     builder.set_fill_type(PathFillType::Winding);
     for sub in paths {
+        match sub.fill_mode {
+            PathFillMode::None => continue,
+            PathFillMode::Norm => {}
+            shaded => {
+                let name = match shaded {
+                    PathFillMode::Lighten => "fillMode:lighten",
+                    PathFillMode::LightenLess => "fillMode:lightenLess",
+                    PathFillMode::Darken => "fillMode:darken",
+                    _ => "fillMode:darkenLess",
+                };
+                if warned.insert(name) {
+                    log::warn!(
+                        "paint: §20.1.10.45 path fill mode {name:?} not shaded (Tier 0) — \
+                         painting it as 'norm'"
+                    );
+                }
+            }
+        }
         emit_subpath(&mut builder, sub);
     }
     builder.snapshot()
@@ -533,7 +571,17 @@ fn emit_subpath(builder: &mut PathBuilder, sub: &SubPath) {
     }
 }
 
-fn fill_to_paint(fill: &ResolvedFill) -> Option<Paint> {
+/// The paint for a shape's fill, or `None` when nothing should be filled.
+///
+/// Unsupported fill kinds warn **once per render** via `warned` — a
+/// gradient-filled shape in a header would otherwise report on every page.
+fn fill_to_paint(fill: &ResolvedFill, warned: &mut FxHashSet<&'static str>) -> Option<Paint> {
+    let mut warn_once = |key: &'static str, tier: &str| {
+        if warned.insert(key) {
+            log::warn!("paint: {key} fill not yet rendered ({tier})");
+        }
+        None
+    };
     match fill {
         ResolvedFill::None => None,
         ResolvedFill::Solid(color) => {
@@ -543,18 +591,9 @@ fn fill_to_paint(fill: &ResolvedFill) -> Option<Paint> {
             paint.set_color4f(rgba_to_color4f(*color), None);
             Some(paint)
         }
-        ResolvedFill::Gradient(_) => {
-            log::warn!("paint: gradient fill not yet rendered (Tier 2)");
-            None
-        }
-        ResolvedFill::Blip(_) => {
-            log::warn!("paint: blip fill not yet rendered (Tier 2)");
-            None
-        }
-        ResolvedFill::Pattern(_) => {
-            log::warn!("paint: pattern fill not yet rendered (Tier 3)");
-            None
-        }
+        ResolvedFill::Gradient(_) => warn_once("gradient", "Tier 2"),
+        ResolvedFill::Blip(_) => warn_once("blip", "Tier 2"),
+        ResolvedFill::Pattern(_) => warn_once("pattern", "Tier 3"),
     }
 }
 
@@ -1281,5 +1320,120 @@ mod tests {
         let dst = rect(100.0, 100.0);
         let src = xywh(1.5, 0.0, 0.3, 1.0);
         assert!(resolve_src_padding(dst, &src).is_none());
+    }
+
+    // ─── Path fill mode (H1#3) and Tier-0 warn dedup (H1#5) ───────────────
+
+    fn square_at(x: f32, mode: crate::model::PathFillMode) -> SubPath {
+        SubPath {
+            verbs: vec![
+                PathVerb::MoveTo(PtOffset::new(Pt::new(x), Pt::ZERO)),
+                PathVerb::LineTo(PtOffset::new(Pt::new(x + 10.0), Pt::ZERO)),
+                PathVerb::LineTo(PtOffset::new(Pt::new(x + 10.0), Pt::new(10.0))),
+                PathVerb::Close,
+            ],
+            fill_mode: mode,
+            stroked: true,
+        }
+    }
+
+    /// §20.1.10.45: `fill="none"` means the subpath has no interior. Filling
+    /// it anyway paints the shape's fill colour over whatever sits behind the
+    /// outline — the value was resolved end-to-end and then ignored here.
+    #[test]
+    fn build_skia_path_skips_fill_none_subpaths() {
+        use crate::model::PathFillMode;
+        let mut warned = FxHashSet::default();
+        let only_none = build_skia_path(&[square_at(0.0, PathFillMode::None)], &mut warned);
+        assert!(
+            only_none.is_empty(),
+            "a fill=none subpath must contribute no fillable geometry"
+        );
+
+        let mixed = build_skia_path(
+            &[
+                square_at(0.0, PathFillMode::Norm),
+                square_at(100.0, PathFillMode::None),
+            ],
+            &mut warned,
+        );
+        assert!(
+            mixed.bounds().right() <= 11.0,
+            "only the fill=norm subpath may contribute; bounds reached {}              (the fill=none square sits at x=100)",
+            mixed.bounds().right()
+        );
+    }
+
+    /// The asymmetry is deliberate, not an oversight: `fill="none"` with
+    /// `stroke="true"` is the ordinary outline-only subpath, so the stroke
+    /// path must still carry it.
+    #[test]
+    fn stroked_path_still_includes_fill_none_subpaths() {
+        use crate::model::PathFillMode;
+        let stroked = build_skia_path_stroked_only(&[square_at(0.0, PathFillMode::None)]);
+        assert!(
+            !stroked.is_empty(),
+            "fill=none is about the interior, not the outline"
+        );
+    }
+
+    /// The shading variants are Tier-0: painted as `norm`, but reported —
+    /// once per render, not once per shape.
+    ///
+    /// This pins the *report key*: that repeated shapes register one entry and
+    /// that the key does not collide with another feature's. That the
+    /// `log::warn!` itself sits inside the guard is structural — verifying it
+    /// would need a process-global capturing logger, which parallel tests
+    /// cannot share cleanly.
+    #[test]
+    fn shaded_fill_modes_are_filled_and_warned_once() {
+        use crate::model::PathFillMode;
+        let mut warned = FxHashSet::default();
+        for _ in 0..3 {
+            let p = build_skia_path(&[square_at(0.0, PathFillMode::Darken)], &mut warned);
+            assert!(!p.is_empty(), "a shaded fill still fills at Tier 0");
+        }
+        assert_eq!(
+            warned.iter().collect::<Vec<_>>(),
+            vec![&"fillMode:darken"],
+            "three shapes with the same mode must report once"
+        );
+    }
+
+    /// A gradient-filled shape repeated in a header would otherwise warn on
+    /// every page. Distinct kinds still each get their own report — a single
+    /// shared key would silence two of the three. Same caveat as above: the
+    /// key registry is what is pinned, not the macro's placement.
+    #[test]
+    fn unsupported_fills_warn_once_per_kind_per_render() {
+        use crate::render::layout::draw_command::{
+            ResolvedGradient, ResolvedGradientKind, ResolvedPattern,
+        };
+        let mut warned = FxHashSet::default();
+        let gradient = ResolvedFill::Gradient(ResolvedGradient {
+            stops: Vec::new(),
+            kind: ResolvedGradientKind::Linear { angle_deg: 0.0 },
+        });
+        for _ in 0..4 {
+            assert!(fill_to_paint(&gradient, &mut warned).is_none());
+        }
+        assert_eq!(warned.len(), 1, "one kind, one warning");
+        let pattern = ResolvedFill::Pattern(ResolvedPattern {
+            preset: crate::model::PresetPatternVal::Pct5,
+            fg: Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            bg: Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        });
+        assert!(fill_to_paint(&pattern, &mut warned).is_none());
+        assert_eq!(warned.len(), 2, "a different kind is worth its own warning");
     }
 }

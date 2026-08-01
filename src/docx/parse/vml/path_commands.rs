@@ -19,7 +19,9 @@ pub(super) fn parse_path_commands(s: Option<String>) -> Vec<VmlPathCommand> {
         if rest.is_empty() {
             break;
         }
-        // Check for multi-char commands first.
+        // Check for the two-letter commands first (§14.2.1.6): the angle-arc
+        // pair (`wa`/`wr`/`at`/`ar`), elliptical quadrants (`qx`/`qy`), and the
+        // fill/stroke toggles (`nf`/`ns`).
         let cmd_len = if rest.starts_with("wa")
             || rest.starts_with("wr")
             || rest.starts_with("at")
@@ -28,8 +30,6 @@ pub(super) fn parse_path_commands(s: Option<String>) -> Vec<VmlPathCommand> {
             || rest.starts_with("qy")
             || rest.starts_with("nf")
             || rest.starts_with("ns")
-            || rest.starts_with("hа")
-        // ha..hh variants
         {
             2
         } else if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
@@ -231,4 +231,178 @@ pub(super) fn parse_vector2d(s: Option<String>) -> Option<VmlVector2D> {
     let x = x_str.trim().parse::<i64>().ok()?;
     let y = y_str.trim().parse::<i64>().ok()?;
     Some(VmlVector2D { x, y })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lit(v: i64) -> VmlPathCoord {
+        VmlPathCoord::Literal(v)
+    }
+
+    #[test]
+    fn none_yields_empty() {
+        assert!(parse_path_commands(None).is_empty());
+    }
+
+    #[test]
+    fn move_line_close_end() {
+        let cmds = parse_path_commands(Some("m 0,0 l 100,100 x e".into()));
+        assert_eq!(
+            cmds,
+            vec![
+                VmlPathCommand::MoveTo {
+                    x: lit(0),
+                    y: lit(0)
+                },
+                VmlPathCommand::LineTo {
+                    x: lit(100),
+                    y: lit(100)
+                },
+                VmlPathCommand::Close,
+                VmlPathCommand::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn curveto_takes_six_coords() {
+        let cmds = parse_path_commands(Some("c 1 2 3 4 5 6".into()));
+        assert_eq!(
+            cmds,
+            vec![VmlPathCommand::CurveTo {
+                x1: lit(1),
+                y1: lit(2),
+                x2: lit(3),
+                y2: lit(4),
+                x: lit(5),
+                y: lit(6),
+            }]
+        );
+    }
+
+    #[test]
+    fn relative_commands() {
+        let cmds = parse_path_commands(Some("t 5,5 r 10,0".into()));
+        assert_eq!(
+            cmds,
+            vec![
+                VmlPathCommand::RMoveTo {
+                    dx: lit(5),
+                    dy: lit(5)
+                },
+                VmlPathCommand::RLineTo {
+                    dx: lit(10),
+                    dy: lit(0)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn two_letter_commands_tokenize_correctly() {
+        // Guards the tokenizer's two-letter set (`nf`/`ns`/`qx`/`qy`/arcs). The
+        // adjacent `nfns` must split into two toggles, not one bogus token.
+        let cmds = parse_path_commands(Some("qx 1,1 nfns".into()));
+        assert_eq!(
+            cmds,
+            vec![
+                VmlPathCommand::QuadrantX {
+                    x: lit(1),
+                    y: lit(1)
+                },
+                VmlPathCommand::NoFill,
+                VmlPathCommand::NoStroke,
+            ]
+        );
+    }
+
+    #[test]
+    fn arc_takes_eight_coords_with_kind() {
+        let cmds = parse_path_commands(Some("at 0 0 100 100 0 50 50 0".into()));
+        assert_eq!(cmds.len(), 1);
+        match cmds[0] {
+            VmlPathCommand::Arc {
+                kind,
+                bounding_x1,
+                end_y,
+                ..
+            } => {
+                assert_eq!(kind, VmlArcKind::AT);
+                assert_eq!(bounding_x1, lit(0));
+                assert_eq!(end_y, lit(0));
+            }
+            other => panic!("expected Arc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formula_reference_as_coordinate() {
+        let cmds = parse_path_commands(Some("m @0,@1".into()));
+        assert_eq!(
+            cmds,
+            vec![VmlPathCommand::MoveTo {
+                x: VmlPathCoord::FormulaRef(0),
+                y: VmlPathCoord::FormulaRef(1),
+            }]
+        );
+    }
+
+    #[test]
+    fn bare_coordinates_are_implicit_lineto() {
+        // §14.2.1.6: coordinates in command position imply a lineto.
+        let cmds = parse_path_commands(Some("m 0,0 10,20".into()));
+        assert_eq!(
+            cmds,
+            vec![
+                VmlPathCommand::MoveTo {
+                    x: lit(0),
+                    y: lit(0)
+                },
+                VmlPathCommand::LineTo {
+                    x: lit(10),
+                    y: lit(20)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_letter_command_is_dropped() {
+        // A stray non-command letter (e.g. 'h', which is not a VML path
+        // command) is dropped; well-formed neighbours survive.
+        let cmds = parse_path_commands(Some("m 0,0 h l 5,5".into()));
+        assert_eq!(
+            cmds,
+            vec![
+                VmlPathCommand::MoveTo {
+                    x: lit(0),
+                    y: lit(0)
+                },
+                VmlPathCommand::LineTo {
+                    x: lit(5),
+                    y: lit(5)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_adj_filters_non_integers() {
+        assert_eq!(parse_adj(Some("1,2,3".into())), vec![1, 2, 3]);
+        assert_eq!(parse_adj(Some("1, 2 , x".into())), vec![1, 2]);
+        assert!(parse_adj(None).is_empty());
+    }
+
+    #[test]
+    fn parse_vector2d_pairs() {
+        assert_eq!(
+            parse_vector2d(Some("10,20".into())),
+            Some(VmlVector2D { x: 10, y: 20 })
+        );
+        assert_eq!(parse_vector2d(Some("21600,21600".into())).unwrap().x, 21600);
+        assert!(parse_vector2d(None).is_none());
+        assert!(parse_vector2d(Some("bad".into())).is_none());
+    }
 }

@@ -107,6 +107,20 @@ pub fn stack_blocks(
 
                 // Register floating images.
                 let content_top = cursor_y + effective_style.space_before;
+                // Where the paragraph would start with no `TopAndBottom` band,
+                // so the band's effect on the cursor can be told apart from it.
+                let pre_band_cursor = cursor_y;
+                // §20.4.2.18: `wrapTopAndBottom` floats occupy a band of their
+                // own above the paragraph and **stack** — each sits below the
+                // one before it, and the paragraph starts below the whole band.
+                // Tracks the band's running bottom so successive floats don't
+                // all resolve to `content_top` and draw on top of each other.
+                // Shared with the shape loop below, so a `TopAndBottom` image
+                // and shape on the same paragraph stack against each other too.
+                // `None` until the first one is placed, so a single float — and
+                // any negative `wp:posOffset` on it — is positioned exactly as
+                // before.
+                let mut band_bottom: Option<Pt> = None;
                 for fi in floating_images.iter() {
                     let (y_start, y_end) = match fi.y {
                         FloatingImageY::RelativeToParagraph(offset) => {
@@ -116,18 +130,31 @@ pub fn stack_blocks(
                     };
                     if fi.is_wrap_top_and_bottom() {
                         let img_y = match fi.y {
+                            // Page-absolute floats are positioned by the anchor,
+                            // not by the band.
                             FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
+                            FloatingImageY::RelativeToParagraph(offset) => {
+                                let natural = content_top + offset;
+                                match band_bottom {
+                                    Some(bottom) => natural.max(bottom),
+                                    None => natural,
+                                }
+                            }
                         };
                         commands.push(DrawCommand::Image {
                             rect: PtRect::from_xywh(fi.x, img_y, fi.size.width, fi.size.height),
                             image_data: fi.image_data.clone(),
                             src_rect: fi.src_rect,
                         });
-                        if y_end > cursor_y {
-                            cursor_y = y_end;
+                        let bottom = img_y + fi.size.height;
+                        band_bottom = Some(match band_bottom {
+                            Some(prev) => prev.max(bottom),
+                            None => bottom,
+                        });
+                        if bottom > cursor_y {
+                            cursor_y = bottom;
                         }
-                    } else {
+                    } else if fi.wrap_mode.registers_as_wrap_float() {
                         page_floats.push(float::ActiveFloat {
                             page_x: fi.x - fi.dist_left,
                             page_y_start: y_start,
@@ -156,9 +183,16 @@ pub fn stack_blocks(
                         FloatingImageY::Absolute(y) => (y, y + fs.size.height),
                     };
                     if fs.is_wrap_top_and_bottom() {
+                        // Same band as the images above — see `band_bottom`.
                         let shape_y = match fs.y {
                             FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
+                            FloatingImageY::RelativeToParagraph(offset) => {
+                                let natural = content_top + offset;
+                                match band_bottom {
+                                    Some(bottom) => natural.max(bottom),
+                                    None => natural,
+                                }
+                            }
                         };
                         commands.push(DrawCommand::Path {
                             origin: crate::render::geometry::PtOffset::new(fs.x, shape_y),
@@ -171,8 +205,13 @@ pub fn stack_blocks(
                             stroke: fs.stroke.clone(),
                             effects: fs.effects.clone(),
                         });
-                        if y_end > cursor_y {
-                            cursor_y = y_end;
+                        let bottom = shape_y + fs.size.height;
+                        band_bottom = Some(match band_bottom {
+                            Some(prev) => prev.max(bottom),
+                            None => bottom,
+                        });
+                        if bottom > cursor_y {
+                            cursor_y = bottom;
                         }
                     } else {
                         page_floats.push(float::ActiveFloat {
@@ -184,6 +223,21 @@ pub fn stack_blocks(
                             wrap_text: fs.wrap_mode.wrap_text().into(),
                         });
                     }
+                }
+
+                // §20.4.2.18: the band was placed from `content_top`, which
+                // already includes `space_before`, and the cursor now sits at
+                // the band's bottom. `place_paragraph` applies `space_before`
+                // again inside the paragraph box, so without this the text is
+                // pushed a second `space_before` below the band it is supposed
+                // to sit directly beneath — contradicting the band comment
+                // above ("the paragraph starts below the whole band").
+                //
+                // Only when the band actually moved the cursor: a float with a
+                // negative `wp:posOffset` that resolves above the paragraph
+                // leaves the cursor alone and needs no correction.
+                if cursor_y > pre_band_cursor {
+                    cursor_y -= effective_style.space_before;
                 }
 
                 float::prune_floats(&mut page_floats, cursor_y);
@@ -298,6 +352,7 @@ pub fn stack_blocks(
             LayoutBlock::Table {
                 rows,
                 col_widths,
+                cell_spacing,
                 border_config,
                 indent,
                 alignment,
@@ -312,7 +367,7 @@ pub fn stack_blocks(
                 let table = layout_table(
                     rows,
                     col_widths,
-                    &constraints,
+                    *cell_spacing,
                     default_line_height,
                     border_config.as_ref(),
                     measure_text,
@@ -344,5 +399,479 @@ pub fn stack_blocks(
         commands,
         height: cursor_y,
         lines: if splittable { cell_lines } else { Vec::new() },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ImageFormat;
+    use crate::model::WrapText;
+    use crate::render::geometry::PtSize;
+    use crate::render::layout::paragraph::ParagraphStyle;
+    use crate::render::layout::section::{FloatingImage, WrapMode};
+    use crate::render::resolve::images::MediaEntry;
+    use std::rc::Rc;
+
+    const LINE: f32 = 14.0;
+
+    fn image(height: f32, wrap: WrapMode, y: FloatingImageY) -> FloatingImage {
+        FloatingImage {
+            image_data: MediaEntry {
+                data: Rc::from(&b""[..]),
+                format: ImageFormat::Png,
+            },
+            size: PtSize::new(Pt::new(50.0), Pt::new(height)),
+            src_rect: None,
+            x: Pt::ZERO,
+            y,
+            wrap_mode: wrap,
+            dist_left: Pt::ZERO,
+            dist_right: Pt::ZERO,
+            behind_doc: false,
+        }
+    }
+
+    fn top_bottom(height: f32) -> FloatingImage {
+        image(
+            height,
+            WrapMode::TopAndBottom,
+            FloatingImageY::RelativeToParagraph(Pt::ZERO),
+        )
+    }
+
+    /// A one-word text fragment, so the paragraph produces a fitted line.
+    fn text_fragment() -> crate::render::layout::fragment::Fragment {
+        use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
+        Fragment::Text {
+            text: Rc::from("word"),
+            font: Rc::new(FontProps {
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: false,
+                italic: false,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            width: Pt::new(40.0),
+            trimmed_width: Pt::new(40.0),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+            hyperlink_url: None,
+            shading: None,
+            border: None,
+            baseline_offset: Pt::ZERO,
+            text_offset: Pt::ZERO,
+            is_footnote_ref: false,
+        }
+    }
+
+    fn text_para(style: ParagraphStyle) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style,
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    fn para(style: ParagraphStyle, images: Vec<FloatingImage>) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: vec![],
+            style,
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: images,
+            floating_shapes: vec![],
+        }
+    }
+
+    fn styled(space_before: f32, space_after: f32, style_id: Option<&str>) -> ParagraphStyle {
+        ParagraphStyle {
+            space_before: Pt::new(space_before),
+            space_after: Pt::new(space_after),
+            style_id: style_id.map(crate::model::StyleId::new),
+            ..Default::default()
+        }
+    }
+
+    fn stack(blocks: &[LayoutBlock]) -> StackResult {
+        stack_blocks(blocks, Pt::new(400.0), Pt::new(LINE), None)
+    }
+
+    fn image_ys(result: &StackResult) -> Vec<f32> {
+        result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Image { rect, .. } => Some(rect.origin.y.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_ys(result: &StackResult) -> Vec<f32> {
+        result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.y.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ── §20.4.2.18 wrapTopAndBottom ──────────────────────────────────────
+
+    /// Regression: the float anchor was computed once before the loop, so every
+    /// `wrapTopAndBottom` float on a paragraph resolved to the same y — two of
+    /// them drew on top of each other and the cursor advanced only to the
+    /// tallest. They occupy a band and must stack.
+    #[test]
+    fn multiple_top_and_bottom_floats_stack_instead_of_overlapping() {
+        let result = stack(&[para(
+            ParagraphStyle::default(),
+            vec![top_bottom(30.0), top_bottom(40.0)],
+        )]);
+        assert_eq!(
+            image_ys(&result),
+            vec![0.0, 30.0],
+            "the second float sits below the first"
+        );
+        assert!(
+            (result.height.raw() - (70.0 + LINE)).abs() < 1e-4,
+            "the cursor clears the whole band (30+40) plus the paragraph line, got {}",
+            result.height.raw()
+        );
+    }
+
+    /// A single float is positioned exactly as before the stacking fix.
+    #[test]
+    fn a_single_top_and_bottom_float_is_unchanged() {
+        let result = stack(&[para(ParagraphStyle::default(), vec![top_bottom(30.0)])]);
+        assert_eq!(image_ys(&result), vec![0.0]);
+        assert!((result.height.raw() - (30.0 + LINE)).abs() < 1e-4);
+    }
+
+    /// Page-absolute floats are placed by their anchor, not by the band.
+    #[test]
+    fn absolute_top_and_bottom_floats_are_not_stacked() {
+        let result = stack(&[para(
+            ParagraphStyle::default(),
+            vec![
+                image(
+                    20.0,
+                    WrapMode::TopAndBottom,
+                    FloatingImageY::Absolute(Pt::new(100.0)),
+                ),
+                image(
+                    20.0,
+                    WrapMode::TopAndBottom,
+                    FloatingImageY::Absolute(Pt::new(200.0)),
+                ),
+            ],
+        )]);
+        assert_eq!(image_ys(&result), vec![100.0, 200.0], "anchors are honored");
+    }
+
+    /// Wrap-mode floats don't occupy a band above the paragraph — they overlay
+    /// it and the text narrows around them — but the stacked height still grows
+    /// to contain the image, so a table cell expands rather than clipping it.
+    #[test]
+    fn wrapping_floats_extend_the_height_to_contain_the_image() {
+        let result = stack(&[para(
+            ParagraphStyle::default(),
+            vec![image(
+                60.0,
+                WrapMode::Square(WrapText::BothSides),
+                FloatingImageY::RelativeToParagraph(Pt::ZERO),
+            )],
+        )]);
+        assert!(
+            (result.height.raw() - 60.0).abs() < 1e-4,
+            "height reaches the image bottom, got {}",
+            result.height.raw()
+        );
+        assert_eq!(image_ys(&result), vec![0.0], "anchored at the content top");
+    }
+
+    // ── §17.3.1.9 spacing collapse ───────────────────────────────────────
+
+    /// Adjacent paragraphs collapse to `min(prev_after, before)`, not the sum.
+    #[test]
+    fn adjacent_paragraph_spacing_collapses_to_the_minimum() {
+        let blocks = vec![
+            para(styled(0.0, 10.0, None), vec![]),
+            para(styled(6.0, 0.0, None), vec![]),
+        ];
+        // Two lines + both paragraphs' spacing, less the min(10, 6) = 6 overlap.
+        let expected = LINE + 10.0 + 6.0 + LINE - 6.0;
+        assert!(
+            (stack(&blocks).height.raw() - expected).abs() < 1e-4,
+            "expected {expected}, got {}",
+            stack(&blocks).height.raw()
+        );
+    }
+
+    /// §17.3.1.9: with `contextualSpacing` and a matching style id, the whole
+    /// `prev_after + before` gap is removed rather than collapsed.
+    #[test]
+    fn contextual_spacing_removes_the_gap_between_same_styled_paragraphs() {
+        let mut first = styled(0.0, 10.0, Some("ListParagraph"));
+        first.contextual_spacing = true;
+        let mut second = styled(6.0, 0.0, Some("ListParagraph"));
+        second.contextual_spacing = true;
+
+        let blocks = vec![para(first, vec![]), para(second, vec![])];
+        let expected = LINE + 10.0 + 6.0 + LINE - (10.0 + 6.0);
+        assert!(
+            (stack(&blocks).height.raw() - expected).abs() < 1e-4,
+            "expected {expected}, got {}",
+            stack(&blocks).height.raw()
+        );
+    }
+
+    /// A differing style id makes `contextualSpacing` inapplicable, so the
+    /// ordinary collapse applies instead.
+    #[test]
+    fn contextual_spacing_needs_a_matching_style_id() {
+        let mut first = styled(0.0, 10.0, Some("ListParagraph"));
+        first.contextual_spacing = true;
+        let mut second = styled(6.0, 0.0, Some("Other"));
+        second.contextual_spacing = true;
+
+        let blocks = vec![para(first, vec![]), para(second, vec![])];
+        let expected = LINE + 10.0 + 6.0 + LINE - 6.0;
+        assert!(
+            (stack(&blocks).height.raw() - expected).abs() < 1e-4,
+            "ordinary collapse, expected {expected}, got {}",
+            stack(&blocks).height.raw()
+        );
+    }
+
+    // ── §17.4.1 CellLine cut model ───────────────────────────────────────
+
+    /// One entry per fitted line, tagged with its owning block index.
+    #[test]
+    fn cell_lines_are_recorded_per_paragraph() {
+        let result = stack(&[
+            text_para(ParagraphStyle::default()),
+            text_para(ParagraphStyle::default()),
+        ]);
+        assert_eq!(result.lines.len(), 2, "one fitted line per paragraph");
+        assert_eq!(
+            result.lines.iter().map(|l| l.para).collect::<Vec<_>>(),
+            vec![0, 1],
+            "tagged with the owning block index"
+        );
+    }
+
+    /// A floating object anchored anywhere in the content makes the whole cell
+    /// unsafe to bisect — the cut model is withheld so the row moves whole.
+    #[test]
+    fn a_floating_object_withholds_the_cut_model() {
+        let result = stack(&[
+            text_para(ParagraphStyle::default()),
+            para(ParagraphStyle::default(), vec![top_bottom(20.0)]),
+        ]);
+        assert!(
+            result.lines.is_empty(),
+            "lines are withheld even though the first paragraph was safe"
+        );
+    }
+
+    /// §17.3.1.14 / §17.3.1.24: keepLines and bordered paragraphs may move
+    /// whole but never be divided internally.
+    #[test]
+    fn keep_lines_and_borders_mark_a_paragraph_interior_atomic() {
+        let keep = ParagraphStyle {
+            keep_lines: true,
+            ..Default::default()
+        };
+        let result = stack(&[text_para(ParagraphStyle::default()), text_para(keep)]);
+        assert_eq!(
+            result
+                .lines
+                .iter()
+                .map(|l| l.interior_atomic)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+    }
+
+    // ── §20.4.2.15 wrapNone ──────────────────────────────────────────────
+
+    fn text_xs(result: &StackResult) -> Vec<f32> {
+        result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.x.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wide_para(images: Vec<FloatingImage>) -> LayoutBlock {
+        LayoutBlock::Paragraph {
+            fragments: vec![text_fragment(), text_fragment(), text_fragment()],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: images,
+            floating_shapes: vec![],
+        }
+    }
+
+    fn sized_image(width: f32, wrap: WrapMode) -> FloatingImage {
+        let mut i = image(60.0, wrap, FloatingImageY::RelativeToParagraph(Pt::ZERO));
+        i.size = crate::render::geometry::PtSize::new(Pt::new(width), Pt::new(60.0));
+        i
+    }
+
+    /// Regression: a `wrapNone` image was registered as an active wrap float,
+    /// so text narrowed around a drawing that §20.4.2.15 says "shall not cause
+    /// text to wrap — it shall be displayed either in front of or behind the
+    /// text". A 200pt-wide float pushed the text from x=0 to x=200.
+    #[test]
+    fn wrap_none_image_does_not_reflow_text() {
+        let baseline = stack(&[wide_para(vec![])]);
+        let overlaid = stack(&[wide_para(vec![sized_image(200.0, WrapMode::None)])]);
+        assert_eq!(
+            text_xs(&overlaid),
+            text_xs(&baseline),
+            "a wrapNone image overlays the text and must not move it"
+        );
+    }
+
+    /// ...but it is still *drawn*, and still expands the stacked height so a
+    /// table cell contains it. Only the wrap registration was wrong.
+    #[test]
+    fn wrap_none_image_is_still_emitted() {
+        let result = stack(&[wide_para(vec![sized_image(200.0, WrapMode::None)])]);
+        assert_eq!(image_ys(&result), vec![0.0], "the image is painted");
+        assert!(
+            (result.height.raw() - 60.0).abs() < 1e-4,
+            "height still reaches the image bottom, got {}",
+            result.height.raw()
+        );
+    }
+
+    /// The wrap-enabled modes are unaffected — they still narrow the text.
+    #[test]
+    fn wrapping_modes_still_reflow_text() {
+        let baseline = stack(&[wide_para(vec![])]);
+        for wrap in [
+            WrapMode::Square(WrapText::BothSides),
+            WrapMode::Tight(WrapText::BothSides),
+            WrapMode::Through(WrapText::BothSides),
+        ] {
+            let wrapped = stack(&[wide_para(vec![sized_image(200.0, wrap)])]);
+            assert_ne!(
+                text_xs(&wrapped),
+                text_xs(&baseline),
+                "{wrap:?} must still narrow the line"
+            );
+        }
+    }
+
+    /// §20.4.2.18: the paragraph sits **directly** below the band.
+    ///
+    /// The band starts at `content_top` (`cursor_y + space_before`), so the
+    /// spacing is already spent by the time the float is placed;
+    /// `place_paragraph` then applies `space_before` again inside the paragraph
+    /// box. Text landed a second `space_before` below the band — 60.0 for a
+    /// 10pt space and a 30pt float, where the band ends at 40 and the baseline
+    /// belongs at 50.
+    #[test]
+    fn space_before_is_not_applied_twice_around_a_top_and_bottom_band() {
+        const SPACE: f32 = 10.0;
+        const FLOAT_H: f32 = 30.0;
+        const ASCENT: f32 = 10.0;
+
+        let block = LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style: styled(SPACE, 0.0, None),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![top_bottom(FLOAT_H)],
+            floating_shapes: vec![],
+        };
+        let result = stack(&[block]);
+
+        assert_eq!(
+            image_ys(&result),
+            vec![SPACE],
+            "the band still starts after space_before"
+        );
+        assert_eq!(
+            text_ys(&result),
+            vec![SPACE + FLOAT_H + ASCENT],
+            "the first line sits directly below the band, not a second space below it"
+        );
+    }
+
+    /// The control: with no band, `space_before` is applied exactly once, so
+    /// the fix must not have removed it outright.
+    #[test]
+    fn space_before_still_applies_without_a_band() {
+        const SPACE: f32 = 10.0;
+        const ASCENT: f32 = 10.0;
+        let result = stack(&[text_para(styled(SPACE, 0.0, None))]);
+        assert_eq!(text_ys(&result), vec![SPACE + ASCENT]);
+    }
+
+    /// A non-`TopAndBottom` float leaves the cursor alone, so it must not
+    /// trigger the correction either.
+    #[test]
+    fn a_square_wrap_float_does_not_change_paragraph_spacing() {
+        const SPACE: f32 = 10.0;
+        const ASCENT: f32 = 10.0;
+        let block = LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style: styled(SPACE, 0.0, None),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![image(
+                30.0,
+                WrapMode::Square(WrapText::BothSides),
+                FloatingImageY::RelativeToParagraph(Pt::ZERO),
+            )],
+            floating_shapes: vec![],
+        };
+        let result = stack(&[block]);
+        assert_eq!(text_ys(&result), vec![SPACE + ASCENT]);
+    }
+
+    /// Two stacked floats consume the space once between them, not once per
+    /// float — the correction is applied after the whole band, not per float.
+    #[test]
+    fn stacked_band_consumes_space_before_only_once() {
+        const SPACE: f32 = 10.0;
+        const ASCENT: f32 = 10.0;
+        let block = LayoutBlock::Paragraph {
+            fragments: vec![text_fragment()],
+            style: styled(SPACE, 0.0, None),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![top_bottom(30.0), top_bottom(40.0)],
+            floating_shapes: vec![],
+        };
+        let result = stack(&[block]);
+        assert_eq!(image_ys(&result), vec![SPACE, SPACE + 30.0]);
+        assert_eq!(
+            text_ys(&result),
+            vec![SPACE + 70.0 + ASCENT],
+            "text sits below the 70pt band, with space_before counted once"
+        );
     }
 }

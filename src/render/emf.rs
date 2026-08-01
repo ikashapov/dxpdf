@@ -52,10 +52,15 @@ const BI_BITFIELDS: u32 = 3;
 pub fn decode_emf_bitmap(emf_data: &[u8]) -> Option<Image> {
     validate_emf_header(emf_data)?;
     let (width, height, rgba) = extract_bitmap(emf_data)?;
+    // `Opaque`, not `Premul`: every decoder below writes `0xFF` alpha, because
+    // no DIB format this module accepts carries an alpha channel (see
+    // `decode_32bpp`). Declaring `Premul` over straight DIB bytes was a lie
+    // that happened to be harmless only while alpha was uniformly `0xFF`.
+    // Adding a format that *does* carry alpha means revisiting this line.
     let info = ImageInfo::new(
         (width as i32, height as i32),
         ColorType::RGBA8888,
-        AlphaType::Premul,
+        AlphaType::Opaque,
         None,
     );
     images::raster_from_data(&info, Data::new_copy(&rgba), width as usize * 4)
@@ -270,7 +275,14 @@ fn decode_dib(bmi: &[u8], bits: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     }
 }
 
-/// Decode a 32-bpp bottom-up-or-top-down DIB (BGRA or BGRX) to top-down RGBA.
+/// Decode a 32-bpp bottom-up-or-top-down DIB (BGRX) to top-down **opaque** RGBA.
+///
+/// The fourth byte of each pixel is *not* an alpha channel. For `BI_RGB` it is
+/// `rgbReserved`, which MS-WMF §2.2.2.3 requires to be zero and ignored; for
+/// `BI_BITFIELDS` the compression's masks cover red, green and blue only
+/// (MS-WMF §2.1.1.7 — no member of the Compression enumeration this decoder
+/// accepts declares an alpha mask). Copying that byte into alpha made every
+/// conformant 32-bpp bitmap fully transparent, i.e. invisible.
 fn decode_32bpp(
     bits: &[u8],
     width: u32,
@@ -297,7 +309,7 @@ fn decode_32bpp(
             dst[x * 4] = src[x * 4 + 2]; // R
             dst[x * 4 + 1] = src[x * 4 + 1]; // G
             dst[x * 4 + 2] = src[x * 4]; // B
-            dst[x * 4 + 3] = src[x * 4 + 3]; // A (may be 0xFF for BGRX)
+            dst[x * 4 + 3] = 0xFF; // reserved byte — not alpha; see above
         }
     }
     Some((width, height, rgba))
@@ -365,51 +377,57 @@ fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
 mod tests {
     use super::*;
 
-    /// Build a minimal valid EMF containing one EMR_STRETCHDIBITS with a 2×2
-    /// 32-bpp bottom-up DIB.
-    fn make_test_emf_32bpp() -> Vec<u8> {
-        // Pixel data: 2×2, BGRA, bottom-up → rows ordered: row1, row0.
-        // Row 1 (top in DIB order = bottom logical): [B0,G0,R0,A0, B1,G1,R1,A1]
-        // Row 0 (bottom in DIB order = top logical): [B2,G2,R2,A2, B3,G3,R3,A3]
-        // Bottom-up DIB: physical row 0 (stored first) = bottom of image;
-        // physical row 1 (stored second) = top of image.
-        #[rustfmt::skip]
-        let pixels: Vec<u8> = vec![
-            // Physical row 0 = bottom of image (BGRA)
-            0x10, 0x20, 0x30, 0xFF,  // B=0x10 G=0x20 R=0x30 → RGBA 0x30,0x20,0x10,0xFF
-            0x40, 0x50, 0x60, 0xFF,
-            // Physical row 1 = top of image (BGRA)
-            0x70, 0x80, 0x90, 0xFF,  // B=0x70 G=0x80 R=0x90 → RGBA 0x90,0x80,0x70,0xFF
-            0xA0, 0xB0, 0xC0, 0xFF,
-        ];
+    /// Parameters for a synthetic single-bitmap EMF.
+    struct DibSpec {
+        /// Negative height means a top-down DIB (rows already in visual order).
+        height: i32,
+        width: i32,
+        bpp: u16,
+        compression: u32,
+        /// Raw DIB pixel bytes, including any 4-byte row padding.
+        pixels: Vec<u8>,
+    }
 
+    /// Build a minimal valid EMF wrapping one bitmap record of `record_type`
+    /// (`EMR_STRETCHDIBITS` or `EMR_BITBLT`). Both records carry the same
+    /// BITMAPINFOHEADER and pixel payload — only the fixed-field layout in
+    /// front of them differs, which is exactly what the offsets encode.
+    fn make_emf(record_type: u32, dib: &DibSpec) -> Vec<u8> {
         let bmi: Vec<u8> = {
             let mut v = vec![0u8; 40];
             v[0..4].copy_from_slice(&40u32.to_le_bytes()); // biSize
-            v[4..8].copy_from_slice(&2i32.to_le_bytes()); // biWidth
-            v[8..12].copy_from_slice(&2i32.to_le_bytes()); // biHeight (positive = bottom-up)
+            v[4..8].copy_from_slice(&dib.width.to_le_bytes());
+            v[8..12].copy_from_slice(&dib.height.to_le_bytes());
             v[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes
-            v[14..16].copy_from_slice(&32u16.to_le_bytes()); // biBitCount
-                                                             // biCompression, biSizeImage, etc. = 0 (BI_RGB)
+            v[14..16].copy_from_slice(&dib.bpp.to_le_bytes());
+            v[16..20].copy_from_slice(&dib.compression.to_le_bytes());
             v
         };
 
-        // EMR_STRETCHDIBITS: 80-byte fixed header (offsets 0–79 per MS-EMF §2.3.1.7),
-        // followed immediately by bmi at offset 80 and bits at offset 120.
-        let mut record = vec![0u8; 80];
-        record[0..4].copy_from_slice(&EMR_STRETCHDIBITS.to_le_bytes()); // type
-        record[4..8].copy_from_slice(&(80u32 + 40 + 16).to_le_bytes()); // size
-                                                                        // Bounds: 0,0,2,2
-                                                                        // xDest=0, yDest=0, xSrc=0, ySrc=0, cxSrc=2, cySrc=2
-        record[48..52].copy_from_slice(&80u32.to_le_bytes()); // offBmiSrc
-        record[52..56].copy_from_slice(&40u32.to_le_bytes()); // cbBmiSrc
-        record[56..60].copy_from_slice(&120u32.to_le_bytes()); // offBitsSrc
-        record[60..64].copy_from_slice(&16u32.to_le_bytes()); // cbBitsSrc
-        record[64..68].copy_from_slice(&DIB_RGB_COLORS.to_le_bytes()); // iUsageSrc
-        record[68..72].copy_from_slice(&SRCCOPY.to_le_bytes()); // dwRop
-
+        // Fixed-field size of each record, per MS-EMF §2.3.1.7 / §2.3.1.2.
+        let fixed: usize = if record_type == EMR_BITBLT { 92 } else { 80 };
+        let off_bmi = fixed as u32;
+        let off_bits = off_bmi + 40;
+        let mut record = vec![0u8; fixed];
+        record[0..4].copy_from_slice(&record_type.to_le_bytes());
+        record[4..8].copy_from_slice(&(fixed as u32 + 40 + dib.pixels.len() as u32).to_le_bytes());
+        if record_type == EMR_BITBLT {
+            record[40..44].copy_from_slice(&SRCCOPY.to_le_bytes()); // dwRop
+            record[72..76].copy_from_slice(&DIB_RGB_COLORS.to_le_bytes()); // iUsageSrc
+            record[76..80].copy_from_slice(&off_bmi.to_le_bytes());
+            record[80..84].copy_from_slice(&40u32.to_le_bytes());
+            record[84..88].copy_from_slice(&off_bits.to_le_bytes());
+            record[88..92].copy_from_slice(&(dib.pixels.len() as u32).to_le_bytes());
+        } else {
+            record[48..52].copy_from_slice(&off_bmi.to_le_bytes());
+            record[52..56].copy_from_slice(&40u32.to_le_bytes());
+            record[56..60].copy_from_slice(&off_bits.to_le_bytes());
+            record[60..64].copy_from_slice(&(dib.pixels.len() as u32).to_le_bytes());
+            record[64..68].copy_from_slice(&DIB_RGB_COLORS.to_le_bytes()); // iUsageSrc
+            record[68..72].copy_from_slice(&SRCCOPY.to_le_bytes()); // dwRop
+        }
         record.extend_from_slice(&bmi);
-        record.extend_from_slice(&pixels);
+        record.extend_from_slice(&dib.pixels);
 
         // EMR_HEADER (88 bytes, signature at byte 40).
         let mut header_rec = vec![0u8; 88];
@@ -427,6 +445,39 @@ mod tests {
         emf.extend_from_slice(&record);
         emf.extend_from_slice(&eof_rec);
         emf
+    }
+
+    /// 2×2 32-bpp bottom-up pixel payload.
+    ///
+    /// The 4th byte is `rgbReserved` and MS-WMF §2.2.2.3 requires it to be
+    /// **zero**. It is written as zero here deliberately: the fixture used to
+    /// carry 0xFF, which is what let a decoder that mistook it for alpha pass
+    /// its own tests while rendering conformant files invisible.
+    #[rustfmt::skip]
+    fn pixels_32bpp_2x2() -> Vec<u8> {
+        vec![
+            // Physical row 0 = bottom of image (BGRX)
+            0x10, 0x20, 0x30, 0x00,  // B=0x10 G=0x20 R=0x30 → RGBA 0x30,0x20,0x10,0xFF
+            0x40, 0x50, 0x60, 0x00,
+            // Physical row 1 = top of image (BGRX)
+            0x70, 0x80, 0x90, 0x00,  // B=0x70 G=0x80 R=0x90 → RGBA 0x90,0x80,0x70,0xFF
+            0xA0, 0xB0, 0xC0, 0x00,
+        ]
+    }
+
+    /// Minimal valid EMF containing one EMR_STRETCHDIBITS with a 2×2 32-bpp
+    /// bottom-up DIB.
+    fn make_test_emf_32bpp() -> Vec<u8> {
+        make_emf(
+            EMR_STRETCHDIBITS,
+            &DibSpec {
+                width: 2,
+                height: 2, // positive = bottom-up
+                bpp: 32,
+                compression: BI_RGB,
+                pixels: pixels_32bpp_2x2(),
+            },
+        )
     }
 
     #[test]
@@ -463,5 +514,120 @@ mod tests {
         let img = image.unwrap();
         assert_eq!(img.width(), 2);
         assert_eq!(img.height(), 2);
+    }
+
+    /// H1#1 regression. MS-WMF §2.2.2.3: for a 32-bpp `BI_RGB` DIB the 4th
+    /// byte is `rgbReserved`, required to be zero and ignored — it is not an
+    /// alpha channel, and no compression this decoder accepts declares one
+    /// (§2.1.1.7). Copying it into alpha made every conformant bitmap fully
+    /// transparent, i.e. silently invisible, while a producer that wrote 0xFF
+    /// there — as both corpus EMFs and the old fixture did — looked fine.
+    #[test]
+    fn reserved_byte_is_forced_opaque_not_read_as_alpha() {
+        let (_, _, rgba) = extract_bitmap(&make_test_emf_32bpp()).expect("extract");
+        assert!(
+            rgba.chunks(4).all(|p| p[3] == 0xFF),
+            "every pixel must be opaque; the source reserved bytes are all 0x00"
+        );
+        // Colour must survive the change untouched.
+        assert_eq!(&rgba[0..4], &[0x90, 0x80, 0x70, 0xFF]);
+    }
+
+    /// The same guarantee restated at the boundary: the `ImageInfo` handed to
+    /// Skia must declare what the decoders actually produce.
+    #[test]
+    fn decoded_image_declares_opaque_alpha() {
+        let img = decode_emf_bitmap(&make_test_emf_32bpp()).expect("image");
+        assert_eq!(img.alpha_type(), AlphaType::Opaque);
+    }
+
+    /// A negative `biHeight` means the rows are already in visual order and
+    /// must **not** be flipped (MS-WMF §2.2.2.3).
+    #[test]
+    fn top_down_dib_is_not_flipped() {
+        let emf = make_emf(
+            EMR_STRETCHDIBITS,
+            &DibSpec {
+                width: 2,
+                height: -2, // negative = top-down
+                bpp: 32,
+                compression: BI_RGB,
+                pixels: pixels_32bpp_2x2(),
+            },
+        );
+        let (w, h, rgba) = extract_bitmap(&emf).expect("extract");
+        assert_eq!((w, h), (2, 2), "height is the absolute value");
+        // Physical row 0 stays the top row, the opposite of the bottom-up case.
+        assert_eq!(&rgba[0..4], &[0x30, 0x20, 0x10, 0xFF]);
+    }
+
+    /// `parse_bitblt`'s six field offsets are transcribed constants that
+    /// nothing checked. Feeding the identical DIB through both record types
+    /// must yield the identical bitmap — any offset that is wrong by even four
+    /// bytes reads a neighbouring field and the record is rejected.
+    #[test]
+    fn bitblt_yields_the_same_bitmap_as_stretchdibits() {
+        let spec = || DibSpec {
+            width: 2,
+            height: 2,
+            bpp: 32,
+            compression: BI_RGB,
+            pixels: pixels_32bpp_2x2(),
+        };
+        let via_stretch = extract_bitmap(&make_emf(EMR_STRETCHDIBITS, &spec()));
+        let via_bitblt = extract_bitmap(&make_emf(EMR_BITBLT, &spec()));
+        assert!(via_bitblt.is_some(), "EMR_BITBLT must be parsed at all");
+        assert_eq!(via_stretch, via_bitblt);
+    }
+
+    /// 24-bpp rows are padded to a 4-byte boundary, so a width of 3 stores
+    /// 9 bytes of pixels plus 3 bytes of padding per row. The padding must be
+    /// skipped, not consumed as pixel data — otherwise every row after the
+    /// first is shifted by its predecessors' padding.
+    #[test]
+    fn decodes_24bpp_skipping_row_padding() {
+        #[rustfmt::skip]
+        let pixels: Vec<u8> = vec![
+            // Physical row 0 = bottom (BGR ×3, then 3 padding bytes)
+            0x10, 0x20, 0x30,  0x40, 0x50, 0x60,  0x70, 0x80, 0x90,  0xEE, 0xEE, 0xEE,
+            // Physical row 1 = top
+            0x11, 0x22, 0x33,  0x44, 0x55, 0x66,  0x77, 0x88, 0x99,  0xEE, 0xEE, 0xEE,
+        ];
+        let emf = make_emf(
+            EMR_STRETCHDIBITS,
+            &DibSpec {
+                width: 3,
+                height: 2,
+                bpp: 24,
+                compression: BI_RGB,
+                pixels,
+            },
+        );
+        let (w, h, rgba) = extract_bitmap(&emf).expect("extract 24bpp");
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(rgba.len(), 3 * 2 * 4);
+        // Top row = physical row 1, BGR → RGBA, always opaque.
+        assert_eq!(&rgba[0..4], &[0x33, 0x22, 0x11, 0xFF]);
+        assert_eq!(&rgba[8..12], &[0x99, 0x88, 0x77, 0xFF]);
+        // Bottom row = physical row 0. If the 0xEE padding were consumed this
+        // would start at 0xEE rather than the real first pixel.
+        assert_eq!(&rgba[12..16], &[0x30, 0x20, 0x10, 0xFF]);
+    }
+
+    /// Bit depths the module does not handle must decline rather than produce
+    /// garbage — 8-bpp is palette-indexed and needs the colour table.
+    #[test]
+    fn unsupported_bit_depth_is_declined() {
+        let emf = make_emf(
+            EMR_STRETCHDIBITS,
+            &DibSpec {
+                width: 2,
+                height: 2,
+                bpp: 8,
+                compression: BI_RGB,
+                pixels: vec![0u8; 16],
+            },
+        );
+        assert!(extract_bitmap(&emf).is_none());
     }
 }

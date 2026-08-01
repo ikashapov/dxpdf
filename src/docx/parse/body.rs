@@ -143,27 +143,7 @@ fn convert_paragraph(p: ParaXml, ctx: &mut ConvertCtx) -> (Paragraph, Option<Sec
         None => (None, ParagraphProperties::default(), None, None),
     };
 
-    let mut content = Vec::new();
-    for child in p.content {
-        match child {
-            ParaChildXml::Run(r) => extend_from_run(r, &mut content, ctx),
-            ParaChildXml::Hyperlink(h) => {
-                content.push(Inline::Hyperlink(convert_hyperlink(h, ctx)));
-            }
-            ParaChildXml::FldSimple(f) => {
-                content.push(Inline::Field(convert_fld_simple(f, ctx)));
-            }
-            ParaChildXml::BookmarkStart(b) => content.push(Inline::BookmarkStart {
-                id: BookmarkId::new(b.id),
-                name: b.name,
-            }),
-            ParaChildXml::BookmarkEnd(b) => {
-                content.push(Inline::BookmarkEnd(BookmarkId::new(b.id)));
-            }
-            ParaChildXml::PPr(_) => {} // already captured above
-            ParaChildXml::Other => {}
-        }
-    }
+    let content = convert_para_children(p.content, ctx);
 
     (
         Paragraph {
@@ -228,7 +208,10 @@ fn extend_from_run(r: RunXml, out: &mut Vec<Inline>, ctx: &mut ConvertCtx) {
             }
             RunChildXml::Sym(s) => {
                 flush(&mut acc, out);
-                let char_code = u16::from_str_radix(&s.char, 16).unwrap_or(0);
+                let char_code = u16::from_str_radix(&s.char, 16).unwrap_or_else(|_| {
+                    log::warn!("sym: invalid hex char code {:?}; using 0", s.char);
+                    0
+                });
                 out.push(Inline::Symbol(Symbol {
                     font: s.font,
                     char_code,
@@ -296,20 +279,32 @@ fn run_break(br: BrXml) -> RunElement {
     }
 }
 
-fn convert_hyperlink(h: HyperlinkXml, ctx: &mut ConvertCtx) -> Hyperlink {
-    let target = if let Some(id) = h.r_id {
-        HyperlinkTarget::External(RelId::new(id))
-    } else {
-        HyperlinkTarget::Internal {
-            anchor: h.anchor.unwrap_or_default(),
-        }
-    };
+/// Convert a sequence of paragraph-level children (`EG_PContent`) into inline
+/// content. Shared by `<w:p>`, `<w:hyperlink>`, and `<w:fldSimple>`, and used
+/// recursively to flatten revision/structural wrappers.
+///
+/// Revision handling is the "accept all changes" (final) view: insert-side
+/// wrappers (`<w:ins>`, `<w:moveTo>`) and structural wrappers (`<w:smartTag>`,
+/// `<w:customXml>`) are flattened in place and rendered; delete-side wrappers
+/// (`<w:del>`, `<w:moveFrom>`) are dropped along with their content. Nested
+/// wrappers re-apply the same rules — e.g. a `<w:del>` inside a `<w:ins>` is
+/// still dropped.
+fn convert_para_children(children: Vec<ParaChildXml>, ctx: &mut ConvertCtx) -> Vec<Inline> {
     let mut content = Vec::new();
-    for child in h.content {
+    append_para_children(children, &mut content, ctx);
+    content
+}
+
+fn append_para_children(
+    children: Vec<ParaChildXml>,
+    content: &mut Vec<Inline>,
+    ctx: &mut ConvertCtx,
+) {
+    for child in children {
         match child {
-            ParaChildXml::Run(r) => extend_from_run(r, &mut content, ctx),
-            ParaChildXml::Hyperlink(nested) => {
-                content.push(Inline::Hyperlink(convert_hyperlink(nested, ctx)));
+            ParaChildXml::Run(r) => extend_from_run(r, content, ctx),
+            ParaChildXml::Hyperlink(h) => {
+                content.push(Inline::Hyperlink(convert_hyperlink(h, ctx)));
             }
             ParaChildXml::FldSimple(f) => {
                 content.push(Inline::Field(convert_fld_simple(f, ctx)));
@@ -321,10 +316,28 @@ fn convert_hyperlink(h: HyperlinkXml, ctx: &mut ConvertCtx) -> Hyperlink {
             ParaChildXml::BookmarkEnd(b) => {
                 content.push(Inline::BookmarkEnd(BookmarkId::new(b.id)));
             }
-            ParaChildXml::PPr(_) => {}
+            // Insert-side revision + structural wrappers: flatten and render.
+            ParaChildXml::Ins(w)
+            | ParaChildXml::MoveTo(w)
+            | ParaChildXml::SmartTag(w)
+            | ParaChildXml::CustomXml(w) => append_para_children(w.content, content, ctx),
+            // Delete-side revision wrappers: content is deleted — drop it.
+            ParaChildXml::Del(_) | ParaChildXml::MoveFrom(_) => {}
+            ParaChildXml::PPr(_) => {} // already captured on the parent
             ParaChildXml::Other => {}
         }
     }
+}
+
+fn convert_hyperlink(h: HyperlinkXml, ctx: &mut ConvertCtx) -> Hyperlink {
+    let target = if let Some(id) = h.r_id {
+        HyperlinkTarget::ExternalRel(RelId::new(id))
+    } else {
+        HyperlinkTarget::Internal {
+            anchor: h.anchor.unwrap_or_default(),
+        }
+    };
+    let content = convert_para_children(h.content, ctx);
     Hyperlink { target, content }
 }
 
@@ -339,27 +352,7 @@ fn convert_fld_simple(f: FldSimpleXml, ctx: &mut ConvertCtx) -> Field {
             }
         }
     };
-    let mut content = Vec::new();
-    for child in f.content {
-        match child {
-            ParaChildXml::Run(r) => extend_from_run(r, &mut content, ctx),
-            ParaChildXml::Hyperlink(h) => {
-                content.push(Inline::Hyperlink(convert_hyperlink(h, ctx)));
-            }
-            ParaChildXml::FldSimple(inner) => {
-                content.push(Inline::Field(convert_fld_simple(inner, ctx)));
-            }
-            ParaChildXml::BookmarkStart(b) => content.push(Inline::BookmarkStart {
-                id: BookmarkId::new(b.id),
-                name: b.name,
-            }),
-            ParaChildXml::BookmarkEnd(b) => {
-                content.push(Inline::BookmarkEnd(BookmarkId::new(b.id)));
-            }
-            ParaChildXml::PPr(_) => {}
-            ParaChildXml::Other => {}
-        }
-    }
+    let content = convert_para_children(f.content, ctx);
     Field {
         instruction,
         content,
@@ -371,7 +364,15 @@ fn convert_alt_content(a: AltContentXml, ctx: &mut ConvertCtx) -> AlternateConte
         .choices
         .into_iter()
         .filter_map(|c| {
-            let requires = mc_requires(&c.requires)?;
+            // §M.2.2: @Requires is a space-separated list of namespace prefixes;
+            // the choice is usable only if we understand *all* of them. A single
+            // unknown token drops the whole choice (falling through to the next
+            // choice or the fallback).
+            let requires: Vec<McRequires> = c
+                .requires
+                .split_whitespace()
+                .map(mc_requires)
+                .collect::<Option<_>>()?;
             let content = convert_mc_content(c.content, ctx);
             Some(McChoice { requires, content })
         })
@@ -561,6 +562,222 @@ fn hex_rsid(s: Option<&str>) -> Option<RevisionSaveId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Collect all rendered text from a converted inline sequence, recursing
+    /// into hyperlinks and fields.
+    fn collect_text(inlines: &[Inline]) -> String {
+        let mut s = String::new();
+        for inl in inlines {
+            match inl {
+                Inline::TextRun(r) => {
+                    for el in &r.content {
+                        if let RunElement::Text(t) = el {
+                            s.push_str(t);
+                        }
+                    }
+                }
+                Inline::Hyperlink(h) => s.push_str(&collect_text(&h.content)),
+                Inline::Field(f) => s.push_str(&collect_text(&f.content)),
+                _ => {}
+            }
+        }
+        s
+    }
+
+    /// Parse a `<w:p>` and return the concatenated rendered text.
+    fn para_text(xml: &str) -> String {
+        let p: ParaXml = quick_xml::de::from_str(xml).unwrap();
+        let mut ctx = ConvertCtx::new();
+        let (para, _) = convert_paragraph(p, &mut ctx);
+        collect_text(&para.content)
+    }
+
+    /// Parse a `<w:p>` and return the run-elements of its first `TextRun`.
+    fn first_run_elements(xml: &str) -> Vec<RunElement> {
+        let p: ParaXml = quick_xml::de::from_str(xml).unwrap();
+        let mut ctx = ConvertCtx::new();
+        let (para, _) = convert_paragraph(p, &mut ctx);
+        para.content
+            .into_iter()
+            .find_map(|i| match i {
+                Inline::TextRun(r) => Some(r.content),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    // ── Revision & structural wrappers (accept-all-changes / final view) ──
+
+    #[test]
+    fn ins_content_is_rendered() {
+        // Tracked insertions are part of the final document — their runs must
+        // survive (previously `<w:ins>` hit the `Other` catch-all and vanished).
+        assert_eq!(
+            para_text(r#"<w:p xmlns:w="x"><w:ins><w:r><w:t>kept</w:t></w:r></w:ins></w:p>"#),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn del_content_is_dropped() {
+        // Tracked deletions are not in the final document — drop them.
+        assert_eq!(
+            para_text(
+                r#"<w:p xmlns:w="x"><w:del><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>"#
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn del_nested_in_ins_is_still_dropped() {
+        // Nested wrappers re-apply the rules: text inserted then deleted is
+        // deleted; the surrounding insertion is kept.
+        assert_eq!(
+            para_text(
+                r#"<w:p xmlns:w="x"><w:ins>
+                     <w:r><w:t>A</w:t></w:r>
+                     <w:del><w:r><w:delText>B</w:delText></w:r></w:del>
+                     <w:r><w:t>C</w:t></w:r>
+                   </w:ins></w:p>"#
+            ),
+            "AC"
+        );
+    }
+
+    #[test]
+    fn move_to_rendered_move_from_dropped() {
+        assert_eq!(
+            para_text(r#"<w:p xmlns:w="x"><w:moveTo><w:r><w:t>here</w:t></w:r></w:moveTo></w:p>"#),
+            "here"
+        );
+        assert_eq!(
+            para_text(
+                r#"<w:p xmlns:w="x"><w:moveFrom><w:r><w:t>away</w:t></w:r></w:moveFrom></w:p>"#
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn smart_tag_and_inline_custom_xml_are_flattened() {
+        assert_eq!(
+            para_text(
+                r#"<w:p xmlns:w="x"><w:smartTag><w:r><w:t>date</w:t></w:r></w:smartTag></w:p>"#
+            ),
+            "date"
+        );
+        assert_eq!(
+            para_text(
+                r#"<w:p xmlns:w="x"><w:customXml><w:r><w:t>tagged</w:t></w:r></w:customXml></w:p>"#
+            ),
+            "tagged"
+        );
+    }
+
+    #[test]
+    fn ins_wrapping_a_hyperlink_keeps_the_link_text() {
+        assert_eq!(
+            para_text(
+                r#"<w:p xmlns:w="x"><w:ins>
+                     <w:hyperlink w:anchor="a"><w:r><w:t>link</w:t></w:r></w:hyperlink>
+                   </w:ins></w:p>"#
+            ),
+            "link"
+        );
+    }
+
+    // ── run_break ────────────────────────────────────────────────────────
+
+    #[test]
+    fn br_type_page_and_column() {
+        assert!(matches!(
+            first_run_elements(r#"<w:p xmlns:w="x"><w:r><w:br type="page"/></w:r></w:p>"#)
+                .as_slice(),
+            [RunElement::PageBreak]
+        ));
+        assert!(matches!(
+            first_run_elements(r#"<w:p xmlns:w="x"><w:r><w:br type="column"/></w:r></w:p>"#)
+                .as_slice(),
+            [RunElement::ColumnBreak]
+        ));
+    }
+
+    #[test]
+    fn br_plain_is_text_wrapping_line_break() {
+        assert!(matches!(
+            first_run_elements(r#"<w:p xmlns:w="x"><w:r><w:br/></w:r></w:p>"#).as_slice(),
+            [RunElement::LineBreak(BreakKind::TextWrapping)]
+        ));
+    }
+
+    #[test]
+    fn br_clear_all_is_clearing_line_break() {
+        assert!(matches!(
+            first_run_elements(r#"<w:p xmlns:w="x"><w:r><w:br clear="all"/></w:r></w:p>"#)
+                .as_slice(),
+            [RunElement::LineBreak(BreakKind::Clear(BreakClear::All))]
+        ));
+    }
+
+    // ── mc:Choice Requires ───────────────────────────────────────────────
+
+    #[test]
+    fn mc_requires_known_and_unknown() {
+        assert_eq!(mc_requires("wps"), Some(McRequires::Wps));
+        assert_eq!(mc_requires("w14"), Some(McRequires::W14));
+        // Unknown / unsupported token → None (choice is dropped, fallback used).
+        assert_eq!(mc_requires("nope"), None);
+        // `mc_requires` maps a *single* token; a space-separated list is split by
+        // `convert_alt_content` (see `alt_content_requires_*` below), so a raw
+        // multi-token string is not a valid single token.
+        assert_eq!(mc_requires("wps w14"), None);
+    }
+
+    #[test]
+    fn alt_content_multi_token_requires_is_kept_when_all_known() {
+        // §M.2.2: a space-separated Requires with every token understood keeps
+        // the choice (previously the whole choice was dropped).
+        let xml = r#"<w:r xmlns:w="x" xmlns:mc="m">
+              <mc:AlternateContent>
+                <mc:Choice Requires="wps w14"><w:drawing/></mc:Choice>
+                <mc:Fallback/>
+              </mc:AlternateContent>
+            </w:r>"#;
+        let r: RunXml = quick_xml::de::from_str(xml).unwrap();
+        let mut out = Vec::new();
+        let mut ctx = ConvertCtx::new();
+        extend_from_run(r, &mut out, &mut ctx);
+        let Some(Inline::AlternateContent(ac)) = out.into_iter().next() else {
+            panic!("expected AlternateContent");
+        };
+        assert_eq!(ac.choices.len(), 1, "multi-token choice kept");
+        assert_eq!(
+            ac.choices[0].requires,
+            vec![McRequires::Wps, McRequires::W14]
+        );
+    }
+
+    #[test]
+    fn alt_content_choice_with_unknown_token_is_dropped() {
+        let xml = r#"<w:r xmlns:w="x" xmlns:mc="m">
+              <mc:AlternateContent>
+                <mc:Choice Requires="wps nope"><w:drawing/></mc:Choice>
+                <mc:Fallback/>
+              </mc:AlternateContent>
+            </w:r>"#;
+        let r: RunXml = quick_xml::de::from_str(xml).unwrap();
+        let mut out = Vec::new();
+        let mut ctx = ConvertCtx::new();
+        extend_from_run(r, &mut out, &mut ctx);
+        let Some(Inline::AlternateContent(ac)) = out.into_iter().next() else {
+            panic!("expected AlternateContent");
+        };
+        assert!(
+            ac.choices.is_empty(),
+            "choice with an unknown token dropped"
+        );
+    }
 
     /// Regression: a `<w:tr>` whose `<w:tc>` cells are interleaved with
     /// cell-level `<w:sdt>` (CT_SdtCell) wrappers must (a) parse — the old

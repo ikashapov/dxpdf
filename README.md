@@ -399,10 +399,7 @@ dxpdf runs on macOS, Linux, and Windows. On Linux, you need `libfontconfig1-dev`
 
 Contributions are welcome. Please open an issue before submitting large PRs.
 
-Implementation notes for the rendering engine — organized by OOXML spec section,
-covering the style cascade, pagination, table layout, fonts and emoji — live in
-[`docs/`](docs/README.md). Build commands and project conventions are in
-[`AGENTS.md`](AGENTS.md).
+Build commands and project conventions are in [`AGENTS.md`](AGENTS.md).
 
 Before opening a PR, run what CI runs:
 

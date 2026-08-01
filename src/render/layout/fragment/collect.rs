@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use crate::model::{
-    Block, BorderStyle, FieldCharType, Inline, RunElement, RunProperties, TextRun, VerticalAlign,
+    Block, FieldCharType, Inline, NoteId, RunElement, RunProperties, TextRun, VerticalAlign,
 };
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::EmojiCluster;
@@ -14,25 +14,78 @@ use super::text::{
     TextRunStyle,
 };
 use super::{
-    font_props_from_run, to_roman_lower, FontProps, Fragment, FragmentBorder, TextMetrics,
-    SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO, SUPERSCRIPT_FONT_SIZE_RATIO,
+    font_props_from_run, to_roman_lower, FontProps, Fragment, FragmentBorder, LinkTarget,
+    TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
+    SUPERSCRIPT_FONT_SIZE_RATIO,
 };
 
-/// §17.3.2.4: convert a run-level [`crate::model::Border`] into a render-side
-/// [`FragmentBorder`], filtering out the spec's "no border" sentinel
-/// ([`BorderStyle::None`]).
+/// §17.11.12: a footnote reference recorded while walking a paragraph's inlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordedFootnote {
+    /// The referenced note.
+    pub id: NoteId,
+    /// The sequential display number emitted as this reference's superscript.
+    pub display: u32,
+}
+
+/// §17.11.12: footnote numbering state threaded through fragment collection.
 ///
-/// `<w:bdr w:val="nil"/>` and `<w:bdr w:val="none"/>` (§17.18.2 ST_Border)
-/// both signal "no border"; the parser collapses them to `BorderStyle::None`
-/// in a `Some(Border { ... })`. The model preserves the explicit `Some` so
-/// it can override an inherited border in the §17.7.2 cascade — but at the
-/// render boundary we drop the variant, otherwise the painter would draw
-/// a hairline box around every word.
+/// The display counter and the record of *which* notes were referenced advance
+/// at a single site (the private `record` method), so the footnote body a
+/// caller renders can never disagree with the superscript mark this walk
+/// emitted.
+///
+/// This replaced a design where the counter was advanced by this **recursive**
+/// walk (which descends into hyperlinks, non-substituted fields, MCE
+/// fallbacks, and VML text boxes) while callers re-derived the reference list
+/// from a **flat** scan of the paragraph's top-level inlines. The two walkers
+/// disagreed for any nested reference: its body was never emitted, and when it
+/// preceded a top-level reference the body's number no longer matched the mark.
+#[derive(Default, Debug)]
+pub struct FootnoteTracker {
+    /// Display number of the most recently emitted reference.
+    last_display: u32,
+    /// References recorded since the last [`FootnoteTracker::take_pending`].
+    pending: Vec<RecordedFootnote>,
+}
+
+impl FootnoteTracker {
+    /// Assign the next display number to `id`, record it, and return the number.
+    fn record(&mut self, id: NoteId) -> u32 {
+        self.last_display += 1;
+        self.pending.push(RecordedFootnote {
+            id,
+            display: self.last_display,
+        });
+        self.last_display
+    }
+
+    /// Take the references recorded since the last call, in encounter order.
+    ///
+    /// Every caller of [`collect_fragments`] must drain — including those that
+    /// don't render footnote bodies (headers/footers, footnote bodies
+    /// themselves). Otherwise their references leak into the next paragraph's
+    /// batch and are rendered against the wrong host.
+    pub fn take_pending(&mut self) -> Vec<RecordedFootnote> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+/// §17.3.2.4: convert a run-level [`crate::model::Border`] into a render-side
+/// [`FragmentBorder`], filtering out the spec's "no border" styles.
+///
+/// `<w:bdr w:val="nil"/>` and `<w:bdr w:val="none"/>` (§17.18.2 ST_Border) are
+/// kept apart by the model, because table border conflict resolution needs the
+/// difference — but a run border has no adjacent edge to conflict with, so here
+/// they are genuinely equivalent and `draws_nothing` covers both. The model
+/// preserves the explicit `Some` so it can override an inherited border in the
+/// §17.7.2 cascade; at the render boundary we drop it, otherwise the painter
+/// would draw a hairline box around every word.
 pub(super) fn run_border_to_fragment(
     border: Option<&crate::model::Border>,
 ) -> Option<FragmentBorder> {
     let b = border?;
-    if b.style == BorderStyle::None {
+    if b.style.draws_nothing() {
         return None;
     }
     Some(FragmentBorder {
@@ -134,7 +187,7 @@ where
         baseline_offset += Pt::from(pos);
     }
 
-    // §17.3.2.4: run-level border (filtered to drop BorderStyle::None).
+    // §17.3.2.4: run-level border (filtered to drop the no-border styles).
     let border = run_border_to_fragment(effective_props.border.as_ref());
 
     let text_style = TextRunStyle {
@@ -251,7 +304,7 @@ fn emit_field_substitution<F>(
     >,
     paragraph_run_defaults: Option<&RunProperties>,
     theme: Option<&crate::model::Theme>,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     measurer: Option<&crate::render::layout::measurer::TextMeasurer<'_>>,
     fragments: &mut Vec<Fragment>,
@@ -368,9 +421,9 @@ pub struct FragmentCtx<'a> {
 pub fn collect_fragments<F>(
     inlines: &[Inline],
     ctx: &FragmentCtx<'_>,
-    hyperlink_url: Option<&str>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
-    footnote_counter: &mut u32,
+    footnotes: &mut FootnoteTracker,
     endnote_counter: &mut u32,
     field_ctx: FieldContext,
 ) -> Vec<Fragment>
@@ -623,16 +676,25 @@ where
                     }
                 }
                 Inline::Hyperlink(link) => {
-                    let url: Option<&str> = match &link.target {
-                        crate::model::HyperlinkTarget::External(rel_id) => Some(rel_id.as_str()),
-                        crate::model::HyperlinkTarget::Internal { anchor } => Some(anchor.as_str()),
+                    // Preserve the external/internal kind as a closed ADT so
+                    // the emitter routes external→URI and internal→GoTo without
+                    // guessing from the string (§17.16.22).
+                    let target: Option<LinkTarget> = match &link.target {
+                        crate::model::HyperlinkTarget::ExternalUrl(url) => {
+                            Some(LinkTarget::External(url.clone()))
+                        }
+                        crate::model::HyperlinkTarget::Internal { anchor } => {
+                            Some(LinkTarget::Internal(anchor.clone()))
+                        }
+                        // An unresolved rId (no matching relationship) has no link.
+                        crate::model::HyperlinkTarget::ExternalRel(_) => None,
                     };
                     let mut sub = collect_fragments(
                         &link.content,
                         ctx,
-                        url,
+                        target.as_ref(),
                         measure_text,
-                        footnote_counter,
+                        footnotes,
                         endnote_counter,
                         field_ctx,
                     );
@@ -655,7 +717,7 @@ where
                             ctx,
                             hyperlink_url,
                             measure_text,
-                            footnote_counter,
+                            footnotes,
                             endnote_counter,
                             field_ctx,
                         );
@@ -741,7 +803,7 @@ where
                                 ctx,
                                 hyperlink_url,
                                 measure_text,
-                                footnote_counter,
+                                footnotes,
                                 endnote_counter,
                                 field_ctx,
                             );
@@ -773,7 +835,7 @@ where
                         width: w,
                         trimmed_width: w,
                         metrics: m,
-                        hyperlink_url: hyperlink_url.map(String::from),
+                        hyperlink_url: hyperlink_url.cloned(),
                         baseline_offset: Pt::ZERO,
                         text_offset: Pt::ZERO,
                         is_footnote_ref: false,
@@ -790,11 +852,10 @@ where
                 | Inline::FootnoteRefMark
                 | Inline::EndnoteRefMark => {}
                 // §17.11.12: footnote reference — render as superscript number.
-                Inline::FootnoteRef(_note_id) => {
-                    *footnote_counter += 1;
-                    let num_text = format!("{}", *footnote_counter);
-                    // §17.11.12: footnote reference uses superscript at 58% size.
-                    let ref_size = default_size * 0.58;
+                Inline::FootnoteRef(note_id) => {
+                    let num_text = format!("{}", footnotes.record(*note_id));
+                    // §17.11.12: footnote reference uses superscript sizing.
+                    let ref_size = default_size * super::SUPERSCRIPT_FONT_SIZE_RATIO;
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
@@ -807,8 +868,8 @@ where
                         underline_thickness: Pt::ZERO,
                     };
                     let (w, m) = measure_text(&num_text, &ref_font);
-                    // Superscript baseline offset: raise by ~40% of the full-size ascent.
-                    let baseline_offset = -(default_size * 0.4);
+                    // Raise the mark clear of the baseline (see the constant).
+                    let baseline_offset = -(default_size * super::NOTE_REF_BASELINE_OFFSET_RATIO);
                     fragments.push(Fragment::Text {
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),
@@ -830,7 +891,7 @@ where
                 Inline::EndnoteRef(_note_id) => {
                     *endnote_counter += 1;
                     let num_text = to_roman_lower(*endnote_counter);
-                    let ref_size = default_size * 0.58;
+                    let ref_size = default_size * super::SUPERSCRIPT_FONT_SIZE_RATIO;
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
@@ -843,7 +904,7 @@ where
                         underline_thickness: Pt::ZERO,
                     };
                     let (w, m) = measure_text(&num_text, &ref_font);
-                    let baseline_offset = -(default_size * 0.4);
+                    let baseline_offset = -(default_size * super::NOTE_REF_BASELINE_OFFSET_RATIO);
                     fragments.push(Fragment::Text {
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),
@@ -891,7 +952,7 @@ where
                                         &pict_ctx,
                                         hyperlink_url,
                                         measure_text,
-                                        footnote_counter,
+                                        footnotes,
                                         endnote_counter,
                                         field_ctx,
                                     );
@@ -942,7 +1003,7 @@ mod tests {
     //
     // The cascade may carry a child run whose `<w:bdr w:val="nil"/>`
     // (or "none") explicitly turns off an inherited border. The model
-    // preserves this as `Some(Border { style: BorderStyle::None, .. })`
+    // preserves this as `Some(Border { style: nil-or-none, .. })`
     // so the §17.7.2 merge can distinguish "explicit no border" from
     // "field absent → inherit". At the render boundary we must drop the
     // sentinel; otherwise the painter draws a hairline box around every
@@ -1015,7 +1076,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1034,7 +1095,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1061,7 +1122,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1089,7 +1150,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1120,7 +1181,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1132,7 +1193,7 @@ mod tests {
     #[test]
     fn hyperlink_recurses_into_content() {
         let inlines = vec![Inline::Hyperlink(Hyperlink {
-            target: HyperlinkTarget::External(RelId::new("rId1")),
+            target: HyperlinkTarget::ExternalUrl("https://example.com".into()),
             content: vec![text_run("click me")],
         })];
         let ctx = default_ctx(12.0);
@@ -1141,7 +1202,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1154,7 +1215,10 @@ mod tests {
         } = &frags[0]
         {
             assert_eq!(&**text, "click ");
-            assert_eq!(hyperlink_url.as_deref(), Some("rId1"));
+            assert_eq!(
+                hyperlink_url,
+                &Some(LinkTarget::External("https://example.com".into()))
+            );
         } else {
             panic!("expected Text fragment");
         }
@@ -1188,7 +1252,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1221,7 +1285,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1240,7 +1304,7 @@ mod tests {
     fn alternate_content_uses_fallback() {
         let inlines = vec![Inline::AlternateContent(AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![text_run("choice")],
             }],
             fallback: Some(vec![text_run("fallback")]),
@@ -1251,7 +1315,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1276,7 +1340,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1295,7 +1359,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1321,7 +1385,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1341,7 +1405,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext::default(),
         );
@@ -1570,7 +1634,7 @@ mod tests {
             &ctx,
             None,
             &dummy_measure,
-            &mut 0,
+            &mut FootnoteTracker::default(),
             &mut 0,
             FieldContext {
                 page_number: Some(7),

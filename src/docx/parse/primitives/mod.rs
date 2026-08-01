@@ -11,4 +11,5 @@ pub mod toggles;
 pub mod units;
 
 pub use colors::{HexColor, RgbHexU32};
+pub(crate) use toggles::last_toggle;
 pub use toggles::{AttrBool, OnOff};

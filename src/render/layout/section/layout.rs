@@ -87,7 +87,7 @@ struct PageLayoutState<'doc> {
     abs_floats_dirty: bool,
     /// Index of the first block on the current page (for forward scanning).
     page_start_block: usize,
-    /// §17.4.59: y-start of the most recent paragraph (floating-table anchor).
+    /// §17.4.58: y-start of the most recent paragraph (floating-table anchor).
     last_para_start_y: Pt,
     /// §17.4.38: style_id of the previous table for adjacent border collapse.
     prev_table_style_id: Option<StyleId>,
@@ -220,8 +220,12 @@ impl<'doc> PageLayoutState<'doc> {
                     let boundary = scan_inline_page_boundary(fragments, &mut scan_col, num_cols);
                     if boundary != ForwardScanBoundary::BeforeParagraphFloat {
                         for fi in fi_list {
-                            if fi.is_wrap_top_and_bottom() {
-                                continue; // handled as block spacers, not floats
+                            // §20.4.2.15/.18: only wrap-enabled modes narrow
+                            // text. `TopAndBottom` is a block spacer and
+                            // `None` is a pure overlay — matches the gate in
+                            // `has_absolute_wrap_float` below.
+                            if !fi.wrap_mode.registers_as_wrap_float() {
+                                continue;
                             }
                             if let FloatingImageY::Absolute(img_y) = fi.y {
                                 self.current_page_abs_floats.push(float::ActiveFloat {
@@ -387,6 +391,18 @@ impl ParagraphFloatCheckpoint {
     }
 }
 
+/// §17.17.1 / §20.1.2.1.1: emit a floating shape's `wps:txbx` text over its
+/// fill. Each command is in shape-local coordinates; shift by the shape's
+/// resolved page origin `(fs.x, shape_y)`. Mirrors the stacker's shape-text
+/// emission (`section::stacker`) so body/page-anchored shapes render their text,
+/// not just the fill/stroke.
+fn emit_shape_text(state: &mut PageLayoutState<'_>, fs: &FloatingShape, shape_y: Pt) {
+    for mut cmd in fs.text_commands.iter().cloned() {
+        cmd.shift(fs.x, shape_y);
+        state.current_page.commands.push(cmd);
+    }
+}
+
 fn register_paragraph_floats(
     state: &mut PageLayoutState<'_>,
     floating_images: &[FloatingImage],
@@ -413,7 +429,7 @@ fn register_paragraph_floats(
             if y_end > state.cursor_y {
                 state.cursor_y = y_end;
             }
-        } else {
+        } else if fi.wrap_mode.registers_as_wrap_float() {
             let float_entry = float::ActiveFloat {
                 page_x: fi.x - fi.dist_left,
                 page_y_start: y_start,
@@ -459,6 +475,7 @@ fn register_paragraph_floats(
                 stroke: fs.stroke.clone(),
                 effects: fs.effects.clone(),
             });
+            emit_shape_text(state, fs, shape_y);
             if y_end > state.cursor_y {
                 state.cursor_y = y_end;
             }
@@ -729,9 +746,10 @@ fn measure_keep_next_group(
 /// strictly smaller, so it still fits there and no keepNext boundary is broken.
 ///
 /// True only for a body paragraph that can actually split — no keepLines
-/// (§17.3.1.14), no floating objects (they anchor to one page), and enough
-/// lines to leave `>= 2` on each side under §17.3.1.44 widow control. A `false`
-/// result keeps the conservative whole-group move.
+/// (§17.3.1.14), no floating objects (they anchor to one page), footnotes only
+/// on an unbroken chunk, and enough lines to leave `>= 2` on each side under
+/// §17.3.1.44 widow control. A `false` result keeps the conservative
+/// whole-group move.
 fn leading_keep_next_paragraph_splittable(
     block: &LayoutBlock,
     constraints: &BoxConstraints,
@@ -741,6 +759,7 @@ fn leading_keep_next_paragraph_splittable(
     let LayoutBlock::Paragraph {
         fragments,
         style,
+        footnotes,
         floating_images,
         floating_shapes,
         ..
@@ -749,7 +768,20 @@ fn leading_keep_next_paragraph_splittable(
         return false;
     };
     let effective = style.clone_for_layout();
-    if effective.keep_lines || !floating_images.is_empty() || !floating_shapes.is_empty() {
+    // `single_chunk` is a whole-paragraph property, so it can be derived here
+    // exactly as the placement gate derives it from its loop state: both
+    // splitters are pure functions of the fragment list, and when the paragraph
+    // has more than one page chunk the flag is false regardless of column
+    // chunking.
+    let single_chunk =
+        split_at_page_breaks(fragments).len() == 1 && split_at_column_breaks(fragments).len() == 1;
+    if !paragraph_breakable(
+        &effective,
+        footnotes,
+        floating_images,
+        floating_shapes,
+        single_chunk,
+    ) {
         return false;
     }
     let placed = place_paragraph(
@@ -760,9 +792,44 @@ fn leading_keep_next_paragraph_splittable(
         measure_text,
     );
     // Widow control (§17.3.1.44) needs `>= 2` lines on each side of the break;
-    // without it a single-line head is legal.
+    // without it a single-line head is legal. Deliberately stricter than the
+    // placement gate's flat `>= 2`: this predicts whether a split would yield a
+    // *useful* head, and under-predicting only costs a conservative move.
     let min_lines = if effective.widow_control { 4 } else { 2 };
     placed.line_count() >= min_lines
+}
+
+/// §17.3.1.14 / §17.3.1.15: the conditions under which a paragraph may be
+/// broken across a page or column boundary, shared by the placement gate
+/// (`can_split`) and the keepNext predictor above.
+///
+/// Extracted because the two disagreed: the predictor omitted the footnote
+/// condition, so a keepNext-chain head carrying footnotes across several
+/// page/column chunks was reported splittable, the whole-group move was
+/// skipped, and the placement path then refused to split it and fell back to
+/// atomic — legal output on an under-filled page, but not the pagination either
+/// side intended.
+///
+/// Line counts are **not** included. The gate needs `>= 2`; the predictor needs
+/// enough to leave a legal head *and* tail. Folding them together would either
+/// weaken the predictor or tighten the gate, so each keeps its own.
+fn paragraph_breakable(
+    style: &crate::render::layout::paragraph::ParagraphStyle,
+    footnotes: &[(
+        Vec<Fragment>,
+        crate::render::layout::paragraph::ParagraphStyle,
+    )],
+    floating_images: &[FloatingImage],
+    floating_shapes: &[FloatingShape],
+    single_chunk: bool,
+) -> bool {
+    if style.keep_lines || !floating_images.is_empty() || !floating_shapes.is_empty() {
+        return false;
+    }
+    // Footnotes are reserved per segment, but only for a single unbroken chunk:
+    // with explicit page/column breaks a reference's segment is ambiguous, so
+    // those paragraphs keep the atomic reservation.
+    footnotes.is_empty() || single_chunk
 }
 
 /// §17.3.1.14 / §17.3.1.44: how to break a paragraph across a page boundary.
@@ -834,14 +901,25 @@ fn decide_paragraph_split(
 
 /// Place a splittable paragraph, breaking its lines across pages as needed.
 ///
-/// The caller guarantees the paragraph is splittable (single column, no
-/// keepLines, no borders/shading/drop cap/floats/footnotes/floating objects,
-/// `>= 2` lines). Each iteration fits as many remaining lines as the current
-/// page holds, applies §17.3.1.44 widow/orphan control via
-/// [`decide_paragraph_split`], emits that segment, and page-breaks to continue.
-/// `line_start` advances by `>= 1` on every emitted segment and a `MoveWhole`
-/// always lands on a fresh page where progress is forced, so the loop
-/// terminates.
+/// The caller establishes splittability — see the `can_split` gate at the call
+/// site, which is the authority. It requires: no §17.3.1.14 `keepLines`, no
+/// floating images or shapes (those anchor to one page), `>= 2` fitted lines,
+/// and footnotes only within a single unbroken chunk (with explicit
+/// page/column breaks a reference→segment mapping is ambiguous, so those keep
+/// the atomic reservation).
+///
+/// Deliberately *not* required — each was allowed by a later change and this
+/// list is the historical trip hazard:
+/// - **Borders, shading and drop caps** split fine; they are drawn per segment
+///   (`emit_segment_borders_and_shading`).
+/// - **Multiple columns** split fine; §17.6.4 unequal-width columns work
+///   because each segment re-fits against its own column's width.
+///
+/// Each iteration fits as many remaining lines as the current page holds,
+/// applies §17.3.1.44 widow/orphan control via [`decide_paragraph_split`],
+/// emits that segment, and page-breaks to continue. `line_start` advances by
+/// `>= 1` on every emitted segment and a `MoveWhole` always lands on a fresh
+/// page where progress is forced, so the loop terminates.
 /// §17.11.23: reserve `footnotes` on the current page — measure each, subtract
 /// its height (and the separator gap for the first footnote on the page) from
 /// the available bottom, and queue it for rendering. Shared by the atomic
@@ -1256,6 +1334,7 @@ pub(crate) fn layout_section_with_clearance(
                             Some(LayoutBlock::Table {
                                 rows,
                                 col_widths,
+                                cell_spacing,
                                 border_config,
                                 ..
                             }) if !rows.is_empty() => {
@@ -1266,6 +1345,7 @@ pub(crate) fn layout_section_with_clearance(
                                 let leading_group_height = measure_leading_table_group_height(
                                     rows,
                                     col_widths,
+                                    *cell_spacing,
                                     ctx.default_line_height,
                                     border_config.as_ref(),
                                     ctx.measure_text,
@@ -1537,11 +1617,13 @@ pub(crate) fn layout_section_with_clearance(
                         // (`emit_split_paragraph`), so unequal-width columns split
                         // correctly — no equal-width gate.
                         let single_chunk = page_chunks.len() == 1 && col_chunks.len() == 1;
-                        let can_split = !effective_style.keep_lines
-                            && (footnotes.is_empty() || single_chunk)
-                            && floating_images.is_empty()
-                            && floating_shapes.is_empty()
-                            && placed.line_count() >= 2;
+                        let can_split = paragraph_breakable(
+                            &effective_style,
+                            footnotes,
+                            floating_images,
+                            floating_shapes,
+                            single_chunk,
+                        ) && placed.line_count() >= 2;
 
                         if can_split {
                             if !footnotes.is_empty() {
@@ -1715,6 +1797,7 @@ pub(crate) fn layout_section_with_clearance(
                         stroke: fs.stroke.clone(),
                         effects: fs.effects.clone(),
                     });
+                    emit_shape_text(&mut state, fs, shape_y);
                 }
 
                 // Collect footnotes for this page and reduce the available
@@ -1727,6 +1810,7 @@ pub(crate) fn layout_section_with_clearance(
             LayoutBlock::Table {
                 rows,
                 col_widths,
+                cell_spacing,
                 border_config,
                 indent,
                 alignment,
@@ -1739,16 +1823,13 @@ pub(crate) fn layout_section_with_clearance(
                 if let Some(fi) = float_info {
                     // Run an un-paginated layout once to get the table's
                     // width (for x positioning + alignment overrides) and
-                    // total height (for the §17.4.59 page-push heuristic).
+                    // total height (for the §17.4.58 page-push heuristic).
                     // The actual emission uses `layout_table_paginated`
                     // below so rows that overflow split across pages.
                     let table = layout_table(
                         rows,
                         col_widths,
-                        &col_constraints(
-                            state.current_col,
-                            (state.bottom - state.page_top).max(Pt::ZERO),
-                        ),
+                        *cell_spacing,
                         ctx.default_line_height,
                         border_config.as_ref(),
                         ctx.measure_text,
@@ -1774,7 +1855,7 @@ pub(crate) fn layout_section_with_clearance(
                         _ => table_x,
                     };
 
-                    // §17.4.59: anchor-page heuristic — if the cursor isn't
+                    // §17.4.58: anchor-page heuristic — if the cursor isn't
                     // already at top of page and the table won't fit below
                     // it, push the table to the next page before resolving
                     // the anchor. This matches Word's "don't anchor on a
@@ -1786,10 +1867,17 @@ pub(crate) fn layout_section_with_clearance(
                         state.prev_space_after = Pt::ZERO;
                     }
 
-                    // §17.4.59: resolve `tblpY` on the (possibly new)
-                    // current page, then §17.4.39 resolve collisions with
+                    // §17.4.58: resolve `tblpY` on the (possibly new)
+                    // current page, then §17.4.57 resolve collisions with
                     // prior floats. On `Spillover`, push to next page and
                     // re-resolve with the new (empty) float list.
+                    //
+                    // This loop terminates because `Spillover` requires a
+                    // collision-induced shift and `push_new_page` clears
+                    // `page_floats`: the retry has no floats to collide
+                    // with, so it cannot spill again. A table too tall for
+                    // the body comes back as `OnCurrentPage` and is sliced
+                    // by the pagination call below, never re-resolved.
                     let float_y_start = loop {
                         let requested_y = if fi.y_offset > Pt::ZERO {
                             let anchor_y = match fi.vert_anchor {
@@ -1835,7 +1923,7 @@ pub(crate) fn layout_section_with_clearance(
                     // Floating table breaks the adjacent table chain.
                     state.prev_table_style_id = None;
 
-                    // §17.4.59: paginate at row boundaries when the table
+                    // §17.4.58: paginate at row boundaries when the table
                     // would overflow. First slice gets the anchor page's
                     // remaining height (`bottom - float_y_start`);
                     // continuation slices get the selected body height for
@@ -1845,10 +1933,7 @@ pub(crate) fn layout_section_with_clearance(
                     let slices = layout_table_paginated_with_page_heights(
                         rows,
                         col_widths,
-                        &col_constraints(
-                            state.current_col,
-                            (state.bottom - state.page_top).max(Pt::ZERO),
-                        ),
+                        *cell_spacing,
                         ctx.default_line_height,
                         border_config.as_ref(),
                         ctx.measure_text,
@@ -1861,7 +1946,7 @@ pub(crate) fn layout_section_with_clearance(
                         },
                     );
 
-                    // §17.4.59: anchor only the first slice; continuation
+                    // §17.4.58: anchor only the first slice; continuation
                     // slices flow at the top of subsequent pages. Encoded
                     // by the `Anchor` / `Continuation` enum variants in
                     // the placement plan.
@@ -1894,12 +1979,12 @@ pub(crate) fn layout_section_with_clearance(
                             state.current_page.commands.push(cmd);
                         }
 
-                        // §17.4.56 / §17.4.39: register every slice as a
+                        // §17.4.56 / §17.4.57: register every slice as a
                         // float on its respective page. The anchor slice
                         // drives text wrapping for body paragraphs that
                         // follow; continuation slices are registered so
                         // subsequent floating tables can see them during
-                        // collision resolution (§17.4.39 `tblOverlap`).
+                        // collision resolution (§17.4.57 `tblOverlap`).
                         log::debug!(
                             "[layout]   register table float ({}): x={:.1} y={:.1}-{:.1} w={:.1} block_idx={block_idx}",
                             if is_anchor { "anchor" } else { "continuation" },
@@ -1941,10 +2026,7 @@ pub(crate) fn layout_section_with_clearance(
                 let slices = layout_table_paginated_with_page_heights(
                     rows,
                     col_widths,
-                    &col_constraints(
-                        state.current_col,
-                        (state.bottom - state.page_top).max(Pt::ZERO),
-                    ),
+                    *cell_spacing,
                     ctx.default_line_height,
                     border_config.as_ref(),
                     ctx.measure_text,
@@ -2017,6 +2099,185 @@ mod keep_next_chain_tests {
         let blocks = [paragraph(true, false), paragraph(true, true)];
 
         assert!(starts_keep_next_chain(&blocks, 1));
+    }
+}
+
+/// §17.3.1.14 / §17.3.1.15 — `paragraph_breakable`, the predicate shared by the
+/// placement gate and the keepNext predictor. Extracted precisely because the
+/// two had drifted apart on the footnote condition (E4a#3).
+#[cfg(test)]
+mod paragraph_breakable_tests {
+    use super::*;
+    use crate::render::layout::paragraph::ParagraphStyle;
+
+    fn footnote() -> (Vec<Fragment>, ParagraphStyle) {
+        (Vec::new(), ParagraphStyle::default())
+    }
+
+    fn plain() -> ParagraphStyle {
+        ParagraphStyle::default()
+    }
+
+    #[test]
+    fn a_plain_paragraph_is_breakable() {
+        assert!(paragraph_breakable(&plain(), &[], &[], &[], true));
+        assert!(paragraph_breakable(&plain(), &[], &[], &[], false));
+    }
+
+    #[test]
+    fn keep_lines_forbids_breaking() {
+        let style = ParagraphStyle {
+            keep_lines: true,
+            ..Default::default()
+        };
+        assert!(!paragraph_breakable(&style, &[], &[], &[], true));
+    }
+
+    /// **The condition the keepNext predictor was missing.** Footnotes are
+    /// reserved per segment, but only for a single unbroken chunk — with
+    /// explicit page/column breaks a reference's segment is ambiguous.
+    ///
+    /// Both directions matter: footnotes on one chunk stay breakable (or every
+    /// footnote-bearing paragraph would become atomic), and footnotes across
+    /// several chunks do not.
+    #[test]
+    fn footnotes_are_breakable_only_on_a_single_chunk() {
+        let notes = [footnote()];
+        assert!(
+            paragraph_breakable(&plain(), &notes, &[], &[], true),
+            "footnotes on one unbroken chunk may still split"
+        );
+        assert!(
+            !paragraph_breakable(&plain(), &notes, &[], &[], false),
+            "footnotes spanning page/column chunks keep the atomic reservation"
+        );
+    }
+
+    /// `single_chunk` is irrelevant without footnotes — it must not become a
+    /// blanket restriction on multi-chunk paragraphs.
+    #[test]
+    fn single_chunk_only_matters_when_footnotes_are_present() {
+        assert!(paragraph_breakable(&plain(), &[], &[], &[], false));
+    }
+
+    // ── The predictor's own derivation of `single_chunk` ─────────────────
+
+    use crate::render::geometry::PtSize;
+    use crate::render::layout::fragment::{FontProps, TextMetrics};
+    use crate::render::resolve::color::RgbColor;
+    use std::rc::Rc;
+
+    fn text_frag(text: &str) -> Fragment {
+        Fragment::Text {
+            text: text.into(),
+            font: Rc::new(FontProps {
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: false,
+                italic: false,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            color: RgbColor::BLACK,
+            width: Pt::new(30.0),
+            trimmed_width: Pt::new(30.0),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+            hyperlink_url: None,
+            shading: None,
+            border: None,
+            baseline_offset: Pt::ZERO,
+            text_offset: Pt::ZERO,
+            is_footnote_ref: false,
+        }
+    }
+
+    fn page_break() -> Fragment {
+        Fragment::PageBreak {
+            line_height: Pt::new(14.0),
+        }
+    }
+
+    /// Six wrapping lines, optionally interrupted by `brk`, optionally carrying
+    /// a footnote.
+    fn keep_next_head(brk: Option<Fragment>, with_footnote: bool) -> LayoutBlock {
+        let mut fragments: Vec<Fragment> = (0..3).map(|i| text_frag(&format!("L{i} "))).collect();
+        if let Some(b) = brk {
+            fragments.push(b);
+        }
+        fragments.extend((3..6).map(|i| text_frag(&format!("L{i} "))));
+        LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                keep_next: true,
+                ..Default::default()
+            },
+            page_break_before: false,
+            footnotes: if with_footnote {
+                vec![footnote()]
+            } else {
+                Vec::new()
+            },
+            floating_images: Vec::new(),
+            floating_shapes: Vec::new(),
+        }
+    }
+
+    fn splittable(block: &LayoutBlock) -> bool {
+        // Width 40 against 30pt fragments → one line each.
+        let constraints = BoxConstraints::loose(PtSize::new(Pt::new(40.0), Pt::new(1000.0)));
+        leading_keep_next_paragraph_splittable(block, &constraints, Pt::new(14.0), None)
+    }
+
+    /// The predictor must derive `single_chunk` itself, not assume it.
+    ///
+    /// A keepNext-chain head carrying footnotes **across a page break** is not
+    /// splittable: the placement gate will refuse it, so reporting it splittable
+    /// skips the whole-group move and then falls back to atomic anyway — an
+    /// under-filled page. Hard-coding `single_chunk = true` here is precisely
+    /// the bug this closes, and only this test sees it.
+    #[test]
+    fn footnote_bearing_head_with_an_internal_break_is_not_splittable() {
+        // §17.3.3.1 page break and §17.6.3 column break both end a chunk, so
+        // both must be consulted — the derivation is an `&&` of two splitters
+        // and testing only one leaves half of it unverified.
+        for (label, brk) in [
+            ("page break", page_break()),
+            ("column break", Fragment::ColumnBreak),
+        ] {
+            assert!(
+                !splittable(&keep_next_head(Some(brk), true)),
+                "footnotes + an internal {label} → atomic"
+            );
+        }
+    }
+
+    /// The controls, so the test above can't pass for the wrong reason: each
+    /// ingredient alone still permits a split.
+    #[test]
+    fn a_break_or_a_footnote_alone_still_permits_a_split() {
+        assert!(
+            splittable(&keep_next_head(None, true)),
+            "footnotes on a single chunk are fine"
+        );
+        assert!(
+            splittable(&keep_next_head(Some(page_break()), false)),
+            "a page break without footnotes is fine"
+        );
+        assert!(
+            splittable(&keep_next_head(Some(Fragment::ColumnBreak), false)),
+            "a column break without footnotes is fine"
+        );
+        assert!(
+            splittable(&keep_next_head(None, false)),
+            "plain multi-line head is splittable"
+        );
     }
 }
 

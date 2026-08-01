@@ -44,10 +44,21 @@ struct ThemeElementsXml {
 
 #[derive(Deserialize, Default)]
 struct FmtSchemeXml {
+    #[serde(rename = "fillStyleLst", default)]
+    fill_style_lst: Option<FillStyleLstXml>,
     #[serde(rename = "lnStyleLst", default)]
     ln_style_lst: Option<LnStyleLstXml>,
     #[serde(rename = "effectStyleLst", default)]
     effect_style_lst: Option<EffectStyleLstXml>,
+}
+
+/// §20.1.4.1.13 CT_FillStyleList — theme fill styles (spec requires ≥3). Each
+/// child is one of the DrawingML fill choices, routed through the shared
+/// `DrawingFillXml` parser.
+#[derive(Deserialize, Default)]
+struct FillStyleLstXml {
+    #[serde(rename = "$value", default)]
+    fills: Vec<crate::docx::parse::drawing::schema::fill::DrawingFillXml>,
 }
 
 /// §20.1.4.1.21 CT_LineStyleList — exactly 3 `<a:ln>` entries per spec.
@@ -184,6 +195,9 @@ impl From<ThemeXml> for Theme {
                 }
             }
             if let Some(fmt) = elements.fmt_scheme {
+                if let Some(list) = fmt.fill_style_lst {
+                    theme.fill_styles = list.fills.into_iter().map(Into::into).collect();
+                }
                 if let Some(list) = fmt.ln_style_lst {
                     theme.line_styles = list.lines.into_iter().map(Outline::from).collect();
                 }
@@ -323,6 +337,34 @@ mod tests {
         </a:clrScheme></a:themeElements></a:theme>"#;
         let theme = parse_theme(xml.as_bytes()).unwrap();
         assert_eq!(theme.color_scheme.accent1, 0xDEADBE);
+    }
+
+    #[test]
+    fn fill_style_lst_parsed_into_fill_styles() {
+        let xml = r#"<a:theme xmlns:a="urn:a"><a:themeElements><a:fmtScheme>
+            <a:fillStyleLst>
+                <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+                <a:gradFill><a:gsLst>
+                    <a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>
+                    <a:gs pos="100000"><a:schemeClr val="phClr"/></a:gs>
+                </a:gsLst><a:lin ang="5400000"/></a:gradFill>
+                <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+            </a:fillStyleLst>
+        </a:fmtScheme></a:themeElements></a:theme>"#;
+        let theme = parse_theme(xml.as_bytes()).unwrap();
+        assert_eq!(theme.fill_styles.len(), 3);
+        assert!(matches!(
+            &theme.fill_styles[0],
+            crate::docx::model::DrawingFill::Solid(_)
+        ));
+        assert!(matches!(
+            &theme.fill_styles[1],
+            crate::docx::model::DrawingFill::Gradient(_)
+        ));
+        assert!(matches!(
+            &theme.fill_styles[2],
+            crate::docx::model::DrawingFill::Solid(_)
+        ));
     }
 
     #[test]

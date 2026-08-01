@@ -10,7 +10,7 @@
 //!
 //! * **RGB-direct**: `red`/`green`/`blue` and their `Off`/`Mod` siblings
 //!   act directly on sRGB channels. Absolute forms overwrite the channel;
-//!   offsets add a signed percentage; multipliers scale (clamped to [0,1]).
+//!   offsets add a signed percentage; multipliers scale (clamped to `[0,1]`).
 //! * **HSL-space**: `hue`/`sat`/`lum` and their siblings convert the color
 //!   to HSL, modify the named component, and convert back.
 //!
@@ -86,6 +86,10 @@ pub enum BgTxConvention {
 pub struct DrawingColorContext<'a> {
     pub theme: Option<&'a Theme>,
     pub bg_tx_convention: BgTxConvention,
+    /// §20.1.2.3.29: the value substituted for `phClr` when resolving a theme
+    /// style-matrix fill referenced via `<a:fillRef>`. `None` outside that
+    /// context (body `phClr` has no concrete color and falls back to black).
+    pub placeholder: Option<Rgba>,
 }
 
 impl<'a> DrawingColorContext<'a> {
@@ -93,6 +97,15 @@ impl<'a> DrawingColorContext<'a> {
         Self {
             theme,
             bg_tx_convention: BgTxConvention::LightBackground,
+            placeholder: None,
+        }
+    }
+
+    /// Return a copy of this context with a `phClr` substitute installed.
+    pub fn with_placeholder(self, color: Rgba) -> Self {
+        Self {
+            placeholder: Some(color),
+            ..self
         }
     }
 }
@@ -126,6 +139,12 @@ fn resolve_base(color: &DrawingColor, ctx: &DrawingColorContext<'_>) -> Rgba {
 }
 
 fn resolve_scheme(name: SchemeColorVal, ctx: &DrawingColorContext<'_>) -> Rgba {
+    // §20.1.2.3.29: phClr is the theme style-matrix placeholder. When resolving
+    // a `<a:fillRef>` theme fill, it is substituted by the ref's own color;
+    // elsewhere (body content) it has no concrete value and falls back to black.
+    if matches!(name, SchemeColorVal::PhClr) {
+        return ctx.placeholder.unwrap_or(Rgba::BLACK);
+    }
     let theme = match ctx.theme {
         Some(t) => t,
         None => return Rgba::BLACK,
@@ -424,6 +443,7 @@ mod tests {
         DrawingColorContext {
             theme: None,
             bg_tx_convention: BgTxConvention::LightBackground,
+            placeholder: None,
         }
     }
 
@@ -431,6 +451,7 @@ mod tests {
         DrawingColorContext {
             theme: Some(theme),
             bg_tx_convention: BgTxConvention::LightBackground,
+            placeholder: None,
         }
     }
 
@@ -452,6 +473,7 @@ mod tests {
             },
             major_font: ThemeFontScheme::default(),
             minor_font: ThemeFontScheme::default(),
+            fill_styles: vec![],
             line_styles: vec![],
             effect_styles: vec![],
         }
@@ -508,6 +530,7 @@ mod tests {
         let ctx = DrawingColorContext {
             theme: Some(&theme),
             bg_tx_convention: BgTxConvention::DarkBackground,
+            placeholder: None,
         };
         let c = DrawingColor::Scheme {
             name: SchemeColorVal::Tx1,

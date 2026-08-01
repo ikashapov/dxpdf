@@ -27,10 +27,15 @@ pub struct TableRowInput {
     pub cant_split: Option<bool>,
     /// §17.4.17: number of grid columns to skip at the row's start. The first
     /// cell's leftmost grid column is `grid_before`, not 0.
+    ///
+    /// There is deliberately no `grid_after` counterpart. §17.4.16 `gridAfter`
+    /// is *derivable* — the row's right edge is `grid_before` plus the sum of
+    /// its cells' `grid_span`s — and every consumer here works from that
+    /// running grid column already, including the border resolution that
+    /// decides whether the last cell sits at the table edge (`insideV`) or not.
+    /// The model keeps `gridAfter` as parsed (`model::TableRowProperties`);
+    /// carrying it into layout added a field nothing read.
     pub grid_before: u32,
-    /// §17.4.16: number of grid columns to skip after the row's last cell.
-    /// The last cell's rightmost grid column is `num_grid_cols - grid_after - 1`.
-    pub grid_after: u32,
     /// §17.4.61 `<w:tblPrEx><w:tblBorders/></w:tblPrEx>` — per-row
     /// override of the table-level `tblBorders`. When set, each side
     /// independently replaces the corresponding side of the table's
@@ -77,11 +82,18 @@ pub enum VerticalMergeState {
     Continue,
 }
 
-/// §17.7.6: a conditional border override for a single cell edge.
+/// §17.7.6: a border override for a single cell edge.
+///
+/// There is deliberately **no variant for `val="none"`**. Per [MS-OI29500]
+/// §17.4.66 an explicit `none` is indistinguishable from an omitted edge — both
+/// inherit and both yield — so `convert_cell_border_override` maps it to
+/// `Option::None` and it never reaches here. Only `nil`, which suppresses,
+/// needs to be represented.
 #[derive(Clone, Copy, Debug)]
 pub enum CellBorderOverride {
-    /// §17.4.38 val="nil": explicitly no border on this edge.
-    Nil,
+    /// §17.18.2 `val="nil"`: draw nothing on this edge *and* win the conflict
+    /// against whatever the adjacent cell declares.
+    Suppress,
     /// A specific border line on this edge.
     Border(TableBorderLine),
 }
@@ -137,7 +149,12 @@ pub struct TableLayout {
 pub(super) struct MeasuredRow {
     pub(super) entries: Vec<CellLayoutEntry>,
     pub(super) borders: Vec<super::borders::CellBorders>,
+    /// Total vertical space the row owns, **including** `leading_gap`.
     pub(super) height: Pt,
+    /// §17.4.44: cell spacing reserved above this row's content, so the gap to
+    /// the row above is exactly one `tblCellSpacing`. Zero without spacing,
+    /// which is every table that does not set it.
+    pub(super) leading_gap: Pt,
     /// §17.4.38: maximum bottom border width for gap between this row and the next.
     pub(super) border_gap_below: Pt,
 }

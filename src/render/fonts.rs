@@ -225,6 +225,60 @@ fn face_name_key(name: &str) -> String {
         .to_lowercase()
 }
 
+/// Strip a trailing weight word from a face-qualified family name, yielding the
+/// base family: `"Segoe UI Light"` → `"Segoe UI"`. `None` when the name does not
+/// end in a recognised weight word.
+///
+/// [`FONT_SUBSTITUTIONS`] is keyed by family, so a document naming a *face*
+/// otherwise walks straight past step 4 to the system default — `"Segoe UI"` is
+/// in the table but `"Segoe UI Light"` was not reachable from it. When step 3
+/// also declines the name as `Ambiguous` (as it does for `"Segoe UI Light"` on
+/// macOS) there was no path at all from a face name to its family's
+/// metric-compatible substitutes.
+///
+/// The longest matching suffix wins, so `"Foo Extra Light"` yields `"Foo"`
+/// rather than `"Foo Extra"`. A weight word must be a separate trailing word:
+/// `"Highlight"` ends in `"light"` but is not face-qualified.
+fn strip_weight_suffix(name: &str) -> Option<&str> {
+    let trimmed = name.trim_end();
+    let mut best: Option<&str> = None;
+    for weight in (100..=900).step_by(100) {
+        for suffix in canonical_weight_names(weight) {
+            let Some(cut) = trimmed.len().checked_sub(suffix.len()) else {
+                continue;
+            };
+            if cut == 0 || !trimmed.is_char_boundary(cut) {
+                continue;
+            }
+            if !trimmed[cut..].eq_ignore_ascii_case(suffix) {
+                continue;
+            }
+            let base = trimmed[..cut].trim_end();
+            // The suffix has to be its own word, and something must precede it.
+            if base.len() == cut || base.is_empty() {
+                continue;
+            }
+            if best.is_none_or(|b| base.len() < b.len()) {
+                best = Some(base);
+            }
+        }
+    }
+    best
+}
+
+/// Metric-compatible substitutes for `family`, falling back to its base family
+/// when the name is face-qualified. Returns the matched key alongside the list
+/// so the caller can log which one fired.
+fn substitutes_for(family: &str) -> Option<(&'static str, &'static [&'static str])> {
+    let lookup = |name: &str| {
+        FONT_SUBSTITUTIONS
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(key, subs)| (*key, *subs))
+    };
+    lookup(family).or_else(|| lookup(strip_weight_suffix(family)?))
+}
+
 fn canonical_weight_names(weight: i32) -> &'static [&'static str] {
     match weight {
         100 => &["Thin", "Hairline"],
@@ -240,8 +294,29 @@ fn canonical_weight_names(weight: i32) -> &'static [&'static str] {
     }
 }
 
+/// Combine the weight a face *name* carries with the weight the run requested.
+///
+/// The requested weight is not really a weight. `FontCache::get_indexed` builds
+/// it from a `bold: bool`, so it is only ever `NORMAL` or `BOLD`: `BOLD` means
+/// "this run is bold", and `NORMAL` means only "this run is not bold" — it
+/// carries no information about what weight the face should be.
+///
+/// So `NORMAL` must not participate. Taking `max` unconditionally let that
+/// content-free default overrule an explicit face name, promoting every face
+/// lighter than Regular: `"Calibri Light"` resolves through the alias index to
+/// `(Calibri, 342)` and came back out as plain Calibri at 400. Step 3 exists to
+/// honour documents that name a *face* rather than a family, and that is
+/// exactly the information it was discarding.
+///
+/// A bold request still raises a light face — `"Calibri Light"` with `<w:b/>`
+/// wants something bolder than Light, and `BOLD` is the closest this layer can
+/// express.
 fn merged_alias_weight(alias_weight: i32, requested_weight: i32) -> i32 {
-    alias_weight.max(requested_weight)
+    if requested_weight > *Weight::NORMAL {
+        alias_weight.max(requested_weight)
+    } else {
+        alias_weight
+    }
 }
 
 fn style_for_face_alias(alias: &FaceAlias, requested: FontStyle) -> FontStyle {
@@ -276,7 +351,23 @@ impl FontRegistry {
 
     /// Build a registry, registering all embedded fonts and preloading the
     /// requested family/style combinations.
-    pub fn build(font_mgr: FontMgr, embedded: &[EmbeddedFont], families: &[String]) -> Self {
+    ///
+    /// Fails with [`crate::render::error::RenderError::NoFontsAvailable`] when the host exposes no
+    /// typeface at all. Checking here rather than at the point of use is what
+    /// lets [`Self::resolve`] return a `TypefaceEntry` rather than an
+    /// `Option`: the last-resort arm of `resolve_uncached` is unreachable for
+    /// any registry this constructor returns.
+    pub fn build(
+        font_mgr: FontMgr,
+        embedded: &[EmbeddedFont],
+        families: &[String],
+    ) -> Result<Self, crate::render::error::RenderError> {
+        if font_mgr
+            .legacy_make_typeface(None::<&str>, FontStyle::normal())
+            .is_none()
+        {
+            return Err(crate::render::error::RenderError::NoFontsAvailable);
+        }
         let mut reg = Self::new(font_mgr);
         for ef in embedded {
             if let Err(err) = reg.register_embedded(&ef.family, ef.variant, ef.data.clone()) {
@@ -284,7 +375,7 @@ impl FontRegistry {
             }
         }
         reg.preload(families);
-        reg
+        Ok(reg)
     }
 
     pub fn font_mgr(&self) -> &FontMgr {
@@ -402,22 +493,30 @@ impl FontRegistry {
             }
         }
 
-        if let Some((_, subs)) = FONT_SUBSTITUTIONS
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(family))
-        {
-            for sub in *subs {
+        if let Some((matched, subs)) = substitutes_for(family) {
+            for sub in subs {
                 if let Some(tf) = match_exact(&self.font_mgr, sub, style) {
-                    log::debug!("[font] '{}' {:?} → substitute '{}'", family, style, sub);
+                    log::debug!(
+                        "[font] '{}' {:?} → substitute '{}' (via '{}')",
+                        family,
+                        style,
+                        sub,
+                        matched
+                    );
                     return system_entry(tf);
                 }
             }
         }
 
+        // Unreachable for a registry from `FontRegistry::build`, which rejects
+        // a font-less `FontMgr` up front so this arm always has something to
+        // return. A registry made with `FontRegistry::new` carries no such
+        // guarantee — that constructor is for tests, which supply a real
+        // `FontMgr`.
         let tf = self
             .font_mgr
             .legacy_make_typeface(None::<&str>, style)
-            .expect("no fallback typeface available");
+            .expect("FontRegistry::build guarantees a last-resort typeface");
         log::debug!(
             "[font] '{}' {:?} → system default '{}'",
             family,
@@ -431,7 +530,7 @@ impl FontRegistry {
     /// family is neither registered as an embedded font nor present in the
     /// host's font system.
     ///
-    /// Unlike [`resolve`], this does not fall back to substitutes or to the
+    /// Unlike [`Self::resolve`], this does not fall back to substitutes or to the
     /// system default — necessary for the emoji pipeline, where substituting
     /// a non-emoji typeface for a missing color emoji font is never correct.
     pub fn resolve_exact(&self, family: &str, style: FontStyle) -> Option<TypefaceEntry> {
@@ -534,13 +633,27 @@ fn variant_for_style(style: FontStyle) -> EmbeddedFontVariant {
     }
 }
 
+/// Does `tf` actually carry the family that was asked for?
+///
+/// `FontMgr::match_family_style` is permitted to answer with a *substitute*
+/// rather than declining, and whether it does is platform-dependent:
+/// fontconfig routinely falls back, while CoreText returns `None` for a family
+/// it does not have (measured — every unknown name tried on macOS, including
+/// the CSS generics `sans-serif`/`serif`/`monospace`, yields `None`). So this
+/// guard is inert on macOS and load-bearing on Linux, where without it every
+/// miss would be swallowed as a hit and steps 3–5 would be unreachable.
+///
+/// Split out from [`match_exact`] so it can be tested directly: on a host whose
+/// matcher never substitutes there is no way to reach the rejection path
+/// through `match_exact` itself.
+fn is_exact_family(tf: &Typeface, requested: &str) -> bool {
+    tf.family_name().eq_ignore_ascii_case(requested)
+}
+
 fn match_exact(font_mgr: &FontMgr, family: &str, style: FontStyle) -> Option<Typeface> {
-    let tf = font_mgr.match_family_style(family, style)?;
-    if tf.family_name().eq_ignore_ascii_case(family) {
-        Some(tf)
-    } else {
-        None
-    }
+    font_mgr
+        .match_family_style(family, style)
+        .filter(|tf| is_exact_family(tf, family))
 }
 
 fn system_entry(tf: Typeface) -> TypefaceEntry {
@@ -578,7 +691,7 @@ struct LastCall {
 /// `FontRegistry::resolve` lookups and `Font::from_typeface` construction.
 ///
 /// `fonts` owns the resolved `Font`s (append-only, so slot indices stay
-/// stable); `index` maps a case-folded [`FontKey`] to a slot; `last` is a
+/// stable); `index` maps a case-folded `FontKey` to a slot; `last` is a
 /// one-entry fast path keyed on the raw inputs of the previous call, so the
 /// common per-word case costs no allocation and no hashing.
 ///
@@ -766,8 +879,10 @@ mod tests {
         assert!(index.resolve("Shared Alias").is_none());
     }
 
+    /// A bold run raises a lighter face, but never *lowers* an already-heavier
+    /// one — `<w:b/>` on an ExtraBold face must not flatten it to Bold.
     #[test]
-    fn requested_weight_never_downgrades_face_alias_weight() {
+    fn bold_request_raises_a_lighter_face_but_never_lowers_a_heavier_one() {
         assert_eq!(
             merged_alias_weight(*Weight::SEMI_BOLD, *Weight::BOLD),
             *Weight::BOLD
@@ -775,6 +890,58 @@ mod tests {
         assert_eq!(
             merged_alias_weight(*Weight::EXTRA_BOLD, *Weight::BOLD),
             *Weight::EXTRA_BOLD
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::LIGHT, *Weight::BOLD),
+            *Weight::BOLD
+        );
+    }
+
+    /// H2#1 regression. The two cases above are the *only* ones the suite used
+    /// to cover, and `max` is correct for both — every alias weight tested was
+    /// at or above Regular. Below it the rule inverted: a `NORMAL` request
+    /// means only "not bold", yet it overruled the face's own weight, so
+    /// `"Calibri Light"` (alias weight 342 on macOS) came back as plain
+    /// Calibri at 400.
+    #[test]
+    fn normal_request_leaves_a_light_face_at_its_own_weight() {
+        assert_eq!(merged_alias_weight(342, *Weight::NORMAL), 342);
+        assert_eq!(
+            merged_alias_weight(*Weight::LIGHT, *Weight::NORMAL),
+            *Weight::LIGHT
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::THIN, *Weight::NORMAL),
+            *Weight::THIN
+        );
+        // Unchanged where it already worked.
+        assert_eq!(
+            merged_alias_weight(*Weight::BOLD, *Weight::NORMAL),
+            *Weight::BOLD
+        );
+        assert_eq!(
+            merged_alias_weight(*Weight::NORMAL, *Weight::NORMAL),
+            *Weight::NORMAL
+        );
+    }
+
+    /// The same guarantee at the seam `resolve_uncached` actually calls, so a
+    /// future change that reintroduces the promotion one level up is caught.
+    #[test]
+    fn face_alias_style_keeps_a_light_face_light() {
+        let alias = test_alias("Calibri", 342);
+        let resolved = style_for_face_alias(&alias, FontStyle::normal());
+        assert_eq!(
+            *resolved.weight(),
+            342,
+            "a non-bold run must not thicken the face"
+        );
+
+        let bolded = style_for_face_alias(&alias, FontStyle::bold());
+        assert_eq!(
+            *bolded.weight(),
+            *Weight::BOLD,
+            "an explicit bold run still applies"
         );
     }
 
@@ -1033,6 +1200,120 @@ mod tests {
                 .is_none(),
             "resolve_system_only must skip embedded fonts so emoji resolution \
              can fall through to the host's color emoji typeface"
+        );
+    }
+
+    // ─── Face-qualified substitution (H2#4) ───────────────────────────────
+
+    #[test]
+    fn strips_a_trailing_weight_word_to_the_base_family() {
+        assert_eq!(strip_weight_suffix("Segoe UI Light"), Some("Segoe UI"));
+        assert_eq!(strip_weight_suffix("Calibri Light"), Some("Calibri"));
+        assert_eq!(strip_weight_suffix("Segoe UI Semibold"), Some("Segoe UI"));
+        assert_eq!(strip_weight_suffix("Arial Black"), Some("Arial"));
+        // Case-insensitive, and tolerant of the spacing variants the alias
+        // index already accepts.
+        assert_eq!(strip_weight_suffix("Calibri LIGHT"), Some("Calibri"));
+        assert_eq!(strip_weight_suffix("Foo Extra Bold"), Some("Foo"));
+    }
+
+    /// The longest suffix wins, so a two-word weight name is not left half
+    /// attached.
+    #[test]
+    fn longest_weight_suffix_wins() {
+        assert_eq!(strip_weight_suffix("Foo Extra Light"), Some("Foo"));
+        assert_eq!(strip_weight_suffix("Foo Ultra Bold"), Some("Foo"));
+    }
+
+    /// A weight word must be a separate trailing word — otherwise every family
+    /// ending in those letters would be silently truncated.
+    #[test]
+    fn weight_word_must_be_its_own_word() {
+        assert_eq!(strip_weight_suffix("Highlight"), None);
+        assert_eq!(strip_weight_suffix("Blackadder"), None);
+        assert_eq!(strip_weight_suffix("Light"), None, "nothing precedes it");
+        assert_eq!(strip_weight_suffix("Times New Roman"), None);
+    }
+
+    /// H2#4 regression: `"Segoe UI"` is in the table, so a face-qualified name
+    /// built on it must reach the same substitutes. Before this, the lookup
+    /// was an exact whole-name match and face names fell straight through to
+    /// the system default.
+    #[test]
+    fn substitutes_reach_face_qualified_names_through_the_base_family() {
+        let (matched, subs) = substitutes_for("Segoe UI").expect("base family is in the table");
+        assert_eq!(matched, "Segoe UI");
+
+        let (via, face_subs) =
+            substitutes_for("Segoe UI Light").expect("face-qualified name must reach the family");
+        assert_eq!(via, "Segoe UI", "resolved through the base family");
+        assert_eq!(face_subs, subs, "and gets the same substitutes");
+
+        assert_eq!(
+            substitutes_for("Calibri Light").map(|(k, _)| k),
+            Some("Calibri")
+        );
+        // A family that is not in the table stays absent, stripped or not.
+        assert!(substitutes_for("Wingdings").is_none());
+        assert!(substitutes_for("Wingdings Light").is_none());
+    }
+
+    // ─── Chain guards (H2#6) ──────────────────────────────────────────────
+
+    /// `match_exact` is the guard that makes steps 3–5 reachable at all.
+    /// Skia's matcher returns *something* for any request, so without the
+    /// family-name check every miss would be swallowed as a hit and the
+    /// substitution chain would be dead code.
+    /// The guard that makes steps 3–5 reachable: a matcher that substitutes
+    /// (fontconfig does; CoreText does not) would otherwise report every miss
+    /// as a hit. Tested on the predicate rather than through `match_exact`,
+    /// because on a non-substituting host the rejection path is unreachable
+    /// from there — the test would pass without the guard existing.
+    #[test]
+    fn exact_family_guard_rejects_a_substituted_face() {
+        let mgr = fmgr();
+        let tf = mgr
+            .legacy_make_typeface(None::<&str>, FontStyle::normal())
+            .expect("system default typeface");
+        let name = tf.family_name();
+
+        assert!(is_exact_family(&tf, &name), "its own family must match");
+        assert!(
+            is_exact_family(&tf, &name.to_uppercase()),
+            "the comparison is case-insensitive"
+        );
+        assert!(
+            !is_exact_family(&tf, "No Such Family 8f3a1c"),
+            "a face carrying a different family must be refused — this is the \
+             whole reason the substitution chain is reachable"
+        );
+        // And the wiring: a real family still resolves through `match_exact`.
+        assert!(match_exact(&mgr, &name, FontStyle::normal()).is_some());
+    }
+
+    /// The embedded-variant bucket is chosen by weight threshold, not by an
+    /// exact 400/700 match — a run at Medium or Semibold must still find the
+    /// embedded Bold face rather than falling through to the system.
+    #[test]
+    fn variant_for_style_buckets_at_semi_bold() {
+        use EmbeddedFontVariant::*;
+        let at = |w: Weight, s: Slant| variant_for_style(FontStyle::new(w, Width::NORMAL, s));
+        assert_eq!(at(Weight::NORMAL, Slant::Upright), Regular);
+        assert_eq!(
+            at(Weight::MEDIUM, Slant::Upright),
+            Regular,
+            "500 is not bold"
+        );
+        assert_eq!(
+            at(Weight::SEMI_BOLD, Slant::Upright),
+            Bold,
+            "600 is the cutoff"
+        );
+        assert_eq!(at(Weight::BOLD, Slant::Italic), BoldItalic);
+        assert_eq!(
+            at(Weight::LIGHT, Slant::Oblique),
+            Italic,
+            "oblique counts as italic"
         );
     }
 }

@@ -126,6 +126,9 @@ pub(crate) struct ColsXml {
     space: Option<Dimension<Twips>>,
     #[serde(rename = "@equalWidth", default)]
     equal_width: Option<OnOffFromAttr>,
+    /// §17.6.4 `w:sep` — draw a vertical rule between columns.
+    #[serde(rename = "@sep", default)]
+    sep: Option<OnOffFromAttr>,
     #[serde(rename = "col", default)]
     cols: Vec<ColXml>,
 }
@@ -264,6 +267,7 @@ impl From<ColsXml> for Columns {
             count: x.num,
             space: x.space,
             equal_width: x.equal_width.map(|v| v.0),
+            separator: x.sep.map(|v| v.0),
             columns: x.cols.into_iter().map(Into::into).collect(),
         }
     }

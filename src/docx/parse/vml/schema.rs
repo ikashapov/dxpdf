@@ -177,8 +177,8 @@ impl From<FillXml> for crate::docx::model::VmlFill {
         };
         VmlFill {
             fill_type,
-            color: x.color.as_deref().and_then(|s| parse_color(s).ok()),
-            color2: x.color2.as_deref().and_then(|s| parse_color(s).ok()),
+            color: x.color.as_deref().and_then(parse_color),
+            color2: x.color2.as_deref().and_then(parse_color),
             opacity: x.opacity.as_deref().and_then(|s| {
                 // VML opacity admits "0.5" or "32768f" (fixed-point fraction
                 // of 65536). For phase C we accept the float form.
@@ -195,7 +195,7 @@ impl CommonAttrsXml {
         VmlCommonAttrs {
             id: self.id.map(VmlShapeId::new),
             style: parse_style(self.style),
-            fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+            fill_color: self.fillcolor.as_deref().and_then(parse_color),
             stroked: self.stroked.map(|b| b.0),
             stroke: self.stroke.map(Into::into),
             text_box: self.textbox.map(|t| t.into_model(ctx)),
@@ -297,7 +297,7 @@ impl ShapeXml {
             common: crate::model::VmlCommonAttrs {
                 id: self.id.map(VmlShapeId::new),
                 style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+                fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
                 stroke: self.stroke.map(Into::into),
                 text_box: self.textbox.map(|t| t.into_model(ctx)),
@@ -355,7 +355,7 @@ impl RectXml {
             common: VmlCommonAttrs {
                 id: self.id.map(VmlShapeId::new),
                 style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+                fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
                 stroke: self.stroke.map(Into::into),
                 text_box: self.textbox.map(|t| t.into_model(ctx)),
@@ -549,7 +549,7 @@ impl GroupXml {
             common: VmlCommonAttrs {
                 id: self.id.map(VmlShapeId::new),
                 style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(|s| parse_color(s).ok()),
+                fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
                 ..VmlCommonAttrs::default()
             },
@@ -602,18 +602,12 @@ fn parse_vml_points(s: &str) -> Vec<VmlPoint> {
 /// the typed `VmlLength` for shape geometry but points/curves are
 /// scalar enough that a flat `f32` suffices.
 fn pt_value(len: &crate::docx::model::VmlLength) -> f32 {
-    use crate::docx::model::VmlLengthUnit;
-    let v = len.value as f32;
-    match len.unit {
-        VmlLengthUnit::Pt => v,
-        VmlLengthUnit::In => v * 72.0,
-        VmlLengthUnit::Cm => v * 28.3465,
-        VmlLengthUnit::Mm => v * 2.83465,
-        VmlLengthUnit::Px => v * 0.75,
-        // Em / Ex / Pc / Percent / Unitless: degrade to the raw value
-        // — these aren't expected on primitive coordinate attributes.
-        _ => v,
-    }
+    // Absolute units come from the shared table on `VmlLength`. The units it
+    // leaves unresolved (`%`, `em`, and a bare number) degrade to the raw
+    // value here: on a primitive's coordinate attributes a bare number is in
+    // the shape's *local* coordinate system, not EMU as it would be in a
+    // `style` measurement, and the relative units aren't expected at all.
+    len.to_absolute_points().unwrap_or(len.value as f32)
 }
 
 // ── textbox ───────────────────────────────────────────────────────────────

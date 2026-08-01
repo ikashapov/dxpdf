@@ -13,22 +13,79 @@ use crate::render::resolve::conditional::{
 use crate::render::resolve::styles::ResolvedStyle;
 
 use super::block::build_paragraph_block;
+use crate::render::layout::fragment::split_oversized_fragments;
+
 use super::convert::{
     convert_cell_border_override, convert_table_border_config, merge_table_borders,
-    split_oversized_fragments,
 };
 use super::{BuildContext, BuildState};
 
 /// Result of building a table from the model.
 pub(super) struct BuiltTable {
     pub(super) rows: Vec<TableRowInput>,
+    /// Grid slots, already shrunk by `cell_spacing`.
     pub(super) col_widths: Vec<Pt>,
+    /// §17.4.44 `tblCellSpacing` in points; zero when unset.
+    pub(super) cell_spacing: Pt,
     pub(super) border_config: Option<crate::render::layout::table::TableBorderConfig>,
     /// §17.4.51: table indentation from left margin.
     pub(super) indent: Pt,
     /// §17.4.28: table horizontal alignment (left/center/right).
     pub(super) alignment: Option<model::Alignment>,
     pub(super) float_info: Option<super::super::section::TableFloatInfo>,
+}
+
+/// §17.4.81: turn a parsed `trHeight` into a layout constraint.
+///
+/// `exact` pins the height, `atLeast` is a minimum, and `auto` **ignores `val`**
+/// — the row sizes to its content and carries no constraint at all, hence the
+/// `None`.
+///
+/// An omitted `hRule` never reaches here as `Auto`: the parse seam defaults it
+/// to `AtLeast`, matching Word ([MS-OI29500] §17.4.80(a)) rather than the
+/// standard's `auto`. That default is what makes returning `None` for `auto`
+/// safe — otherwise every Word row with a `trHeight` would lose its minimum.
+fn row_height_rule(
+    h: model::TableRowHeight,
+) -> Option<crate::render::layout::table::RowHeightRule> {
+    use crate::model::HeightRule;
+    use crate::render::layout::table::RowHeightRule;
+    match h.rule {
+        HeightRule::Exact => Some(RowHeightRule::Exact(Pt::from(h.value))),
+        HeightRule::AtLeast => Some(RowHeightRule::AtLeast(Pt::from(h.value))),
+        HeightRule::Auto => None,
+    }
+}
+
+/// §17.4.44: resolve `tblCellSpacing` to points.
+///
+/// `CT_TblWidth` allows `pct` and `auto`, and the spec says both **are ignored**
+/// for this element — only `dxa` carries a usable value. `nil` and an omitted
+/// element are zero, which is every table in the test corpora.
+fn resolve_cell_spacing(m: Option<model::TableMeasure>) -> Pt {
+    match m {
+        Some(model::TableMeasure::Twips(tw)) => Pt::from(tw).max(Pt::ZERO),
+        // Auto / Pct / Nil / absent.
+        _ => Pt::ZERO,
+    }
+}
+
+/// Carve one `cell_spacing` out of the grid so the slots plus one spacing add
+/// up to the table's own width, scaling the columns proportionally.
+///
+/// Clamped: a spacing at least as large as the table would leave nothing to
+/// scale, so the columns collapse to zero rather than going negative. Word
+/// caps the usable spacing well below that, but the file format does not.
+fn reserve_cell_spacing(col_widths: Vec<Pt>, cell_spacing: Pt) -> Vec<Pt> {
+    if cell_spacing <= Pt::ZERO || col_widths.is_empty() {
+        return col_widths;
+    }
+    let total: Pt = col_widths.iter().copied().sum();
+    if total <= cell_spacing {
+        return vec![Pt::ZERO; col_widths.len()];
+    }
+    let scale = (total - cell_spacing).raw() / total.raw();
+    col_widths.into_iter().map(|w| w * scale).collect()
 }
 
 /// Recursively build a table: resolve styles, conditional formatting, and
@@ -135,6 +192,13 @@ pub(super) fn build_table(
     } else {
         compute_column_widths(&grid_cols, num_cols, target_width)
     };
+    // §17.4.44: cell spacing is carved out of the table's own width rather than
+    // added to it — the spec calls it "the minimum amount of space which shall
+    // be left between all cells", not extra width. Reserving one spacing here
+    // and offsetting each cell by one in `measure_table_rows` yields exactly
+    // `cell_spacing` between adjacent cells *and* at both table edges.
+    let cell_spacing = resolve_cell_spacing(t.properties.cell_spacing);
+    let col_widths = reserve_cell_spacing(col_widths, cell_spacing);
     let style_overrides = raw_table_style
         .map(|s| s.table_style_overrides.as_slice())
         .unwrap_or(&[]);
@@ -156,7 +220,9 @@ pub(super) fn build_table(
         (None, Some(style)) => Some(*style),
         (None, None) => None,
     };
-    let border_config = tbl_borders.as_ref().map(convert_table_border_config);
+    let border_config = tbl_borders
+        .as_ref()
+        .map(|b| convert_table_border_config(b, state));
 
     // Build rows by iterating cells and recursing into their content.
     let rows: Vec<TableRowInput> = t
@@ -191,6 +257,12 @@ pub(super) fn build_table(
                     for ci in 0..col_idx {
                         grid_start += row.cells[ci].properties.grid_span.unwrap_or(1) as usize;
                     }
+                    // A row may address more grid columns than `tblGrid` declares —
+                    // a `gridBefore` past the end, or simply more `<w:tc>` than
+                    // `<w:gridCol>`. Both occur in real producer output and Word
+                    // recovers from them. Clamp *both* ends: clamping only the end
+                    // inverts the range and panics on the slice.
+                    let grid_start = grid_start.min(col_widths.len());
                     let grid_end = (grid_start + span).min(col_widths.len());
                     let cell_width: Pt = col_widths[grid_start..grid_end].iter().copied().sum();
                     // Per-side cascade against the table default (see
@@ -223,20 +295,41 @@ pub(super) fn build_table(
             let mut cells = cells;
             normalize_row_uniform_vertical_insets(&mut cells);
 
+            // §17.4.41 / §17.4.42: a row (or its `tblPrEx`) may override the
+            // table's `tblCellSpacing`. Layout applies spacing per *table* —
+            // the grid slots are shrunk once, up front — so a per-row value
+            // cannot be honoured without a per-row grid. Report it rather than
+            // dropping it silently; the parsed value stays on the model.
+            let row_spacing = row.properties.cell_spacing.or_else(|| {
+                row.property_exceptions
+                    .as_ref()
+                    .and_then(|e| e.cell_spacing)
+            });
+            if let Some(rs) = row_spacing {
+                if resolve_cell_spacing(Some(rs)) != cell_spacing && !state.warned_row_cell_spacing
+                {
+                    state.warned_row_cell_spacing = true;
+                    log::warn!(
+                        "§17.4.41/§17.4.42: row-level tblCellSpacing overrides are not applied; \
+                         using the table-level value ({cell_spacing:?})"
+                    );
+                }
+            }
+
             TableRowInput {
                 cells,
-                height_rule: row.properties.height.map(|h| {
-                    use crate::model::HeightRule;
-                    use crate::render::layout::table::RowHeightRule;
-                    match h.rule {
-                        HeightRule::Exact => RowHeightRule::Exact(Pt::from(h.value)),
-                        _ => RowHeightRule::AtLeast(Pt::from(h.value)),
-                    }
-                }),
+                // §17.4.81: `exact` pins the height, `atLeast` is a minimum,
+                // and `auto` **ignores `val`** — the row sizes to its content,
+                // so it carries no constraint at all. An omitted `hRule`
+                // arrives as `AtLeast` (Word's default, set at the parse seam),
+                // which is why folding `auto` in with it used to be invisible:
+                // [MS-OE376] §2.4.77(c) notes Word requires `val = 0` whenever
+                // `hRule="auto"`, making `AtLeast(0)` a no-op on Word output.
+                // Other producers are not bound by that.
+                height_rule: row.properties.height.and_then(row_height_rule),
                 is_header: row.properties.is_header,
                 cant_split: row.properties.cant_split,
                 grid_before: row.properties.grid_before,
-                grid_after: row.properties.grid_after,
                 // §17.4.61: row-level tblPrEx.tblBorders — per-side
                 // override of the table's effective borders. We merge
                 // *at the model layer* (Option<Border> with style=None
@@ -252,7 +345,7 @@ pub(super) fn build_table(
                             Some(table) => merge_table_borders(over, table),
                             None => *over,
                         };
-                        convert_table_border_config(&merged)
+                        convert_table_border_config(&merged, state)
                     }),
             }
         })
@@ -264,11 +357,11 @@ pub(super) fn build_table(
             right_gap: pos.right_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             bottom_gap: pos.bottom_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             x_align: pos.x_align,
-            // §17.4.59: tblpY — absolute Y offset from the vertical anchor.
+            // §17.4.58: tblpY — absolute Y offset from the vertical anchor.
             y_offset: pos.y.map(Pt::from).unwrap_or(Pt::ZERO),
             // §17.4.58: default vertical anchor is "text".
             vert_anchor: pos.vert_anchor.unwrap_or(crate::model::TableAnchor::Text),
-            // §17.4.39: tblOverlap controls collision behavior with
+            // §17.4.57: tblOverlap controls collision behavior with
             // other floats on the same page.
             overlap: t.properties.overlap,
         }
@@ -296,6 +389,7 @@ pub(super) fn build_table(
     BuiltTable {
         rows,
         col_widths,
+        cell_spacing,
         border_config,
         indent,
         alignment: t.properties.alignment,
@@ -418,23 +512,25 @@ fn build_table_cell(
             // Direct cell borders: highest priority.  Fall through to
             // conditional for edges not specified directly.
             Some(CellBorderConfig {
-                top: convert_cell_border_override(&db.top)
-                    .or_else(|| cond_borders.and_then(|cb| convert_cell_border_override(&cb.top))),
-                bottom: convert_cell_border_override(&db.bottom).or_else(|| {
-                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.bottom))
+                top: convert_cell_border_override(&db.top, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.top, state))
                 }),
-                left: convert_cell_border_override(&db.left)
-                    .or_else(|| cond_borders.and_then(|cb| convert_cell_border_override(&cb.left))),
-                right: convert_cell_border_override(&db.right).or_else(|| {
-                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.right))
+                bottom: convert_cell_border_override(&db.bottom, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.bottom, state))
+                }),
+                left: convert_cell_border_override(&db.left, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.left, state))
+                }),
+                right: convert_cell_border_override(&db.right, state).or_else(|| {
+                    cond_borders.and_then(|cb| convert_cell_border_override(&cb.right, state))
                 }),
             })
         }
         (None, Some(cb)) => Some(CellBorderConfig {
-            top: convert_cell_border_override(&cb.top),
-            bottom: convert_cell_border_override(&cb.bottom),
-            left: convert_cell_border_override(&cb.left),
-            right: convert_cell_border_override(&cb.right),
+            top: convert_cell_border_override(&cb.top, state),
+            bottom: convert_cell_border_override(&cb.bottom, state),
+            left: convert_cell_border_override(&cb.left, state),
+            right: convert_cell_border_override(&cb.right, state),
         }),
         (None, None) => None,
     };
@@ -541,7 +637,13 @@ fn build_cell_blocks(
                         floating_shapes,
                     } = lb
                     {
-                        let fragments = split_oversized_fragments(fragments, inner_width, ctx);
+                        // Keep the owned vector when no split is needed.
+                        let measure = |t: &str, f: &crate::render::layout::fragment::FontProps| {
+                            ctx.measurer.measure(t, f)
+                        };
+                        let fragments =
+                            split_oversized_fragments(&fragments, inner_width, Some(&measure))
+                                .unwrap_or(fragments);
                         LayoutBlock::Paragraph {
                             fragments,
                             style,
@@ -561,6 +663,7 @@ fn build_cell_blocks(
                 blocks.push(LayoutBlock::Table {
                     rows: built.rows,
                     col_widths: built.col_widths,
+                    cell_spacing: built.cell_spacing,
                     border_config: built.border_config,
                     indent: built.indent,
                     alignment: built.alignment,
@@ -667,5 +770,91 @@ mod tests {
         normalize_row_uniform_vertical_insets(&mut cells);
         // No panic, no work done.
         assert!(cells.is_empty());
+    }
+
+    /// §17.4.44: `CT_TblWidth` permits `pct` and `auto`, and the spec says both
+    /// are **ignored** for this element — only `dxa` carries a usable value.
+    /// Honouring a percentage here would scale the gap with the table width,
+    /// which is exactly what the spec rules out.
+    #[test]
+    fn cell_spacing_only_honours_dxa() {
+        use crate::model::dimension::Dimension;
+        assert_eq!(
+            resolve_cell_spacing(Some(model::TableMeasure::Twips(Dimension::new(240)))),
+            Pt::new(12.0),
+            "240 twips = 12pt"
+        );
+        for ignored in [
+            Some(model::TableMeasure::Pct(Dimension::new(2500))),
+            Some(model::TableMeasure::Auto),
+            Some(model::TableMeasure::Nil),
+            None,
+        ] {
+            assert_eq!(resolve_cell_spacing(ignored), Pt::ZERO, "{ignored:?}");
+        }
+    }
+
+    /// The spacing is carved *out of* the table, so the slots shrink by exactly
+    /// one spacing in total and keep their proportions.
+    #[test]
+    fn reserving_spacing_shrinks_the_grid_by_exactly_one_spacing() {
+        let widths = vec![Pt::new(60.0), Pt::new(40.0)];
+        let out = reserve_cell_spacing(widths, Pt::new(10.0));
+        let total: Pt = out.iter().copied().sum();
+        assert_eq!(total, Pt::new(90.0), "one spacing removed in total");
+        // Proportions preserved: 60:40 becomes 54:36.
+        assert_eq!(out[0], Pt::new(54.0));
+        assert_eq!(out[1], Pt::new(36.0));
+    }
+
+    /// Zero spacing must be a byte-for-byte no-op — every table that does not
+    /// set `tblCellSpacing` goes through this path.
+    #[test]
+    fn reserving_zero_spacing_leaves_the_grid_untouched() {
+        let widths = vec![Pt::new(60.0), Pt::new(40.0)];
+        assert_eq!(reserve_cell_spacing(widths.clone(), Pt::ZERO), widths);
+    }
+
+    /// A spacing at least as wide as the table leaves nothing to distribute.
+    /// Word caps the value long before this, but the file format does not, and
+    /// scaling by a negative factor would put cells at negative widths.
+    #[test]
+    fn spacing_wider_than_the_table_collapses_columns_rather_than_going_negative() {
+        let widths = vec![Pt::new(30.0), Pt::new(30.0)];
+        let out = reserve_cell_spacing(widths, Pt::new(60.0));
+        assert_eq!(out, vec![Pt::ZERO, Pt::ZERO]);
+        assert!(out.iter().all(|w| *w >= Pt::ZERO));
+    }
+
+    /// §17.4.81: `hRule="auto"` ignores `val`, so the row carries **no** height
+    /// constraint — it is not a zero-height minimum, and not a minimum of the
+    /// stated value either.
+    ///
+    /// Word writes `val="0"` alongside `hRule="auto"` ([MS-OE376] §2.4.77(c)),
+    /// which is why treating `auto` as `AtLeast(val)` was invisible on Word
+    /// output: `AtLeast(0)` constrains nothing. Other producers are not bound by
+    /// that, and a non-zero `val` under `auto` would have become a real minimum.
+    #[test]
+    fn auto_height_rule_carries_no_constraint() {
+        use crate::model::{HeightRule, TableRowHeight};
+        use crate::render::layout::table::RowHeightRule;
+        let to_layout = |rule, twips: i64| -> Option<RowHeightRule> {
+            row_height_rule(TableRowHeight {
+                value: crate::model::dimension::Dimension::new(twips),
+                rule,
+            })
+        };
+        assert!(
+            to_layout(HeightRule::Auto, 1000).is_none(),
+            "auto ignores val entirely"
+        );
+        assert!(matches!(
+            to_layout(HeightRule::AtLeast, 1000),
+            Some(RowHeightRule::AtLeast(_))
+        ));
+        assert!(matches!(
+            to_layout(HeightRule::Exact, 1000),
+            Some(RowHeightRule::Exact(_))
+        ));
     }
 }

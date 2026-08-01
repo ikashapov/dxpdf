@@ -8,6 +8,7 @@ use crate::render::layout::section::{FloatingImage, FloatingImageY, FloatingShap
 use crate::render::resolve::shape_geometry::build_geometry;
 use crate::render::resolve::shape_visuals::resolve_shape_visuals;
 
+use super::convert::vml_style_length_to_pt;
 use super::{BuildContext, BuildState};
 
 /// Coordinate frame in which an anchor's position is resolved.
@@ -226,6 +227,7 @@ pub(super) fn extract_floating_shapes(
             shape_props,
             wsp.style_line_ref.as_ref(),
             wsp.style_effect_ref.as_ref(),
+            wsp.style_fill_ref.as_ref(),
             ctx.resolved.theme.as_ref(),
         );
 
@@ -371,8 +373,8 @@ fn build_vml_floating_image(
         AnchorFrame::Stack => page_x - state.page_config.margins.left,
     };
 
-    let width = common.style.width.map(vml_length_to_pt)?;
-    let height = common.style.height.map(vml_length_to_pt)?;
+    let width = common.style.width.and_then(vml_style_length_to_pt)?;
+    let height = common.style.height.and_then(vml_style_length_to_pt)?;
     if width <= Pt::ZERO || height <= Pt::ZERO {
         return None;
     }
@@ -514,8 +516,8 @@ fn build_vml_rect_shape(
 
     // Size via `style.width` / `style.height`. A rect with no extent
     // can't meaningfully render.
-    let width = common.style.width.map(vml_length_to_pt)?;
-    let height = common.style.height.map(vml_length_to_pt)?;
+    let width = common.style.width.and_then(vml_style_length_to_pt)?;
+    let height = common.style.height.and_then(vml_style_length_to_pt)?;
     if width <= Pt::ZERO || height <= Pt::ZERO {
         return None;
     }
@@ -708,10 +710,19 @@ fn resolve_anchor_y(
             relative_from,
             alignment,
         } => {
-            let (margin_top, page_height, margin_bottom) = match frame {
-                AnchorFrame::Page => (pc.margins.top, pc.page_size.height, pc.margins.bottom),
-                AnchorFrame::Stack => (Pt::ZERO, Pt::ZERO, Pt::ZERO),
-            };
+            // `Stack` has no resolved container extent at extraction time —
+            // the stacker decides the frame origin later — so there is no
+            // area to align within. Collapse to the paragraph origin, the
+            // same convention the `Offset` arm above uses. Emitting an
+            // `Absolute` page coordinate here would be doubly wrong: the
+            // caller shifts stack coordinates into page space afterwards,
+            // and with the frame's margins zeroed `Bottom`/`Center` resolve
+            // to negative y — off the top of the page.
+            if frame == AnchorFrame::Stack {
+                return FloatingImageY::RelativeToParagraph(Pt::ZERO);
+            }
+            let (margin_top, page_height, margin_bottom) =
+                (pc.margins.top, pc.page_size.height, pc.margins.bottom);
             let (area_top, area_height) = match relative_from {
                 AnchorRelativeFrom::Page => (Pt::ZERO, page_height),
                 AnchorRelativeFrom::Margin => (
@@ -783,8 +794,8 @@ fn vml_absolute_position(style: &model::VmlStyle) -> Option<(Pt, Pt)> {
     if style.position != Some(CssPosition::Absolute) {
         return None;
     }
-    let x = style.margin_left.map(vml_length_to_pt)?;
-    let y = style.margin_top.map(vml_length_to_pt)?;
+    let x = style.margin_left.and_then(vml_style_length_to_pt)?;
+    let y = style.margin_top.and_then(vml_style_length_to_pt)?;
     Some((x, y))
 }
 
@@ -902,15 +913,49 @@ pub(super) fn build_shape_text_commands(
         return Vec::new();
     }
 
+    // §20.1.4.1.17: a wps:style/fontRef sets the shape's default text color and
+    // theme font collection for the text-box content. Resolved here and threaded
+    // through BuildState so the paragraph cascade uses them as the base (an
+    // explicit run/style color still wins).
+    let theme = ctx.resolved.theme.as_ref();
+    let (shape_default_text_color, shape_default_font_family) = match &wsp.style_font_ref {
+        Some(fr) => {
+            let color = fr.color.as_ref().map(|c| {
+                let dc = crate::render::resolve::drawing_color::DrawingColorContext::new(theme);
+                let rgba = crate::render::resolve::drawing_color::resolve_drawing_color(c, &dc);
+                crate::render::resolve::color::rgb_from_u32(rgba.to_rgb24())
+            });
+            let family = theme.and_then(|t| {
+                let fam = match fr.collection {
+                    crate::model::FontCollectionIndex::Major => t.major_font.latin.clone(),
+                    crate::model::FontCollectionIndex::Minor => t.minor_font.latin.clone(),
+                    crate::model::FontCollectionIndex::None => String::new(),
+                };
+                (!fam.is_empty()).then_some(fam)
+            });
+            (color, family)
+        }
+        None => (None, None),
+    };
+
     // Sub-state with the host's page dimensions and field context. Counters
     // are reset so a footnote/list inside a shape body doesn't bump the
     // outer counters.
     let mut sub_state = BuildState {
         page_config: state.page_config.clone(),
-        footnote_counter: 0,
+        footnotes: Default::default(),
         endnote_counter: 0,
         list_counters: std::collections::HashMap::new(),
         field_ctx: state.field_ctx,
+        shape_default_text_color,
+        shape_default_font_family,
+        // Its own set: this sub-state is built from a `&BuildState`, so the
+        // parent's set can't be borrowed mutably here. A border style used
+        // only inside a shape text box is therefore reported once per shape
+        // rather than once per render — bounded over-reporting in a rare case,
+        // preferred over making `state` mutable through ten signatures.
+        warned_border_styles: std::collections::HashSet::new(),
+        warned_row_cell_spacing: false,
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
@@ -924,21 +969,6 @@ pub(super) fn build_shape_text_commands(
         commands.push(cmd);
     }
     commands
-}
-
-/// Convert a VML CSS length to points.
-fn vml_length_to_pt(len: model::VmlLength) -> Pt {
-    use crate::model::VmlLengthUnit;
-    let value = len.value as f32;
-    Pt::new(match len.unit {
-        VmlLengthUnit::Pt => value,
-        VmlLengthUnit::In => value * 72.0,
-        VmlLengthUnit::Cm => value * 72.0 / 2.54,
-        VmlLengthUnit::Mm => value * 72.0 / 25.4,
-        VmlLengthUnit::Px => value * 0.75, // 96dpi → 72pt/in
-        VmlLengthUnit::None => value / 914400.0 * 72.0, // bare number = EMU
-        _ => value,                        // Em, Percent — fallback to raw value
-    })
 }
 
 #[cfg(test)]
@@ -971,6 +1001,8 @@ mod tests {
                 shape_properties: None,
                 style_line_ref: None,
                 style_effect_ref: None,
+                style_fill_ref: None,
+                style_font_ref: None,
                 body_pr: None,
                 txbx_content: vec![],
             })),
@@ -1005,7 +1037,7 @@ mod tests {
     fn ac_with_wps_choice() -> AlternateContent {
         AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![Inline::Image(Box::new(anchored_wps_image()))],
             }],
             // A non-empty fallback that would otherwise be searched.
@@ -1021,7 +1053,7 @@ mod tests {
     #[test]
     fn choices_render_wps_shape_false_without_shape() {
         let choices = vec![McChoice {
-            requires: McRequires::Wps,
+            requires: vec![McRequires::Wps],
             content: vec![Inline::InstrText(String::new())],
         }];
         assert!(!choices_render_wps_shape(&choices));
@@ -1035,13 +1067,13 @@ mod tests {
     fn choices_render_wps_shape_recurses_into_nested_alternate_content() {
         let nested = AlternateContent {
             choices: vec![McChoice {
-                requires: McRequires::Wps,
+                requires: vec![McRequires::Wps],
                 content: vec![Inline::Image(Box::new(anchored_wps_image()))],
             }],
             fallback: None,
         };
         let outer = vec![McChoice {
-            requires: McRequires::Wps,
+            requires: vec![McRequires::Wps],
             content: vec![Inline::AlternateContent(nested)],
         }];
         assert!(choices_render_wps_shape(&outer));
@@ -1054,5 +1086,107 @@ mod tests {
     fn wps_choice_suppresses_fallback_absolute_position() {
         let inline = Inline::AlternateContent(ac_with_wps_choice());
         assert!(find_vml_absolute_position(&inline).is_none());
+    }
+
+    // ── §20.4.2.10 vertical anchor resolution ────────────────────────────
+
+    use super::{resolve_anchor_y, AnchorFrame};
+    use crate::model::AnchorAlignment;
+    use crate::render::dimension::Pt;
+    use crate::render::layout::build::BuildState;
+    use crate::render::layout::section::FloatingImageY;
+
+    fn default_state() -> BuildState {
+        BuildState {
+            page_config: Default::default(),
+            footnotes: Default::default(),
+            endnote_counter: 0,
+            list_counters: Default::default(),
+            field_ctx: Default::default(),
+            warned_border_styles: Default::default(),
+            warned_row_cell_spacing: false,
+            shape_default_text_color: None,
+            shape_default_font_family: None,
+        }
+    }
+
+    fn anchor_with_v(vertical_position: AnchorPosition) -> AnchorProperties {
+        let ImagePlacement::Anchor(mut a) = anchored_wps_image().placement else {
+            unreachable!("fixture is anchored")
+        };
+        a.vertical_position = vertical_position;
+        a
+    }
+
+    fn v_align(alignment: AnchorAlignment) -> AnchorProperties {
+        anchor_with_v(AnchorPosition::Align {
+            relative_from: AnchorRelativeFrom::Margin,
+            alignment,
+        })
+    }
+
+    /// Regression: the `Align` arm used to ignore `AnchorFrame`, returning an
+    /// `Absolute` *page* coordinate for stack-framed anchors. With the frame's
+    /// margins zeroed that put `Center`/`Bottom` at negative y — so an anchored
+    /// float in a table cell, header, or footer using `<wp:align>` rendered at
+    /// or above the top of the page instead of next to its paragraph.
+    #[test]
+    fn stack_frame_align_is_paragraph_relative() {
+        let state = default_state();
+        for alignment in [
+            AnchorAlignment::Top,
+            AnchorAlignment::Center,
+            AnchorAlignment::Bottom,
+        ] {
+            let y = resolve_anchor_y(
+                &v_align(alignment),
+                Pt::new(50.0),
+                &state,
+                AnchorFrame::Stack,
+            );
+            let FloatingImageY::RelativeToParagraph(offset) = y else {
+                panic!("{alignment:?} in Stack frame must be paragraph-relative");
+            };
+            assert_eq!(offset, Pt::ZERO, "{alignment:?} collapses to the paragraph");
+        }
+    }
+
+    /// The `Offset` arm already honored the frame — pinned so the two arms
+    /// can't drift apart again.
+    #[test]
+    fn stack_frame_offset_is_paragraph_relative() {
+        let anchor = anchor_with_v(AnchorPosition::Offset {
+            relative_from: AnchorRelativeFrom::Margin,
+            offset: Dimension::new(914400), // 1 inch in EMU
+        });
+        let y = resolve_anchor_y(&anchor, Pt::new(50.0), &default_state(), AnchorFrame::Stack);
+        let FloatingImageY::RelativeToParagraph(offset) = y else {
+            panic!("Offset in Stack frame must be paragraph-relative");
+        };
+        assert!((offset.raw() - 72.0).abs() < 1e-3, "1in = 72pt");
+    }
+
+    /// `Page` frame still resolves alignment against the real margin box.
+    /// Default page: 792pt tall, 72pt margins → content area 72..720.
+    #[test]
+    fn page_frame_align_resolves_against_margin_box() {
+        let state = default_state();
+        let content_h = Pt::new(50.0);
+        let cases = [
+            (AnchorAlignment::Top, 72.0),
+            (AnchorAlignment::Center, 72.0 + (648.0 - 50.0) * 0.5),
+            (AnchorAlignment::Bottom, 72.0 + 648.0 - 50.0),
+        ];
+        for (alignment, expected) in cases {
+            let y = resolve_anchor_y(&v_align(alignment), content_h, &state, AnchorFrame::Page);
+            let FloatingImageY::Absolute(got) = y else {
+                panic!("{alignment:?} in Page frame must be absolute");
+            };
+            assert!(
+                (got.raw() - expected).abs() < 1e-3,
+                "{alignment:?}: expected {expected}, got {}",
+                got.raw()
+            );
+        }
     }
 }

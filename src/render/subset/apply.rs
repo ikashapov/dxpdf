@@ -29,13 +29,14 @@ pub enum SubsetOutcome {
         bytes_after: usize,
         codepoints_kept: usize,
     },
-    /// Subsetting did not shrink the bytes — typically because every glyph
-    /// in the typeface is referenced by the requested codepoint set, so
-    /// there's nothing to drop. Original typeface left in place.
+    /// The bytes we would install are no smaller than the original, so the
+    /// original typeface is left in place. `reason` says which of the two
+    /// distinct causes applied — see [`NoSavingsReason`].
     UnchangedNoSavings {
         id: TypefaceId,
         bytes: usize,
         codepoints_kept: usize,
+        reason: NoSavingsReason,
     },
     /// Capability boundary — the typeface bytes are in a format we don't
     /// extract (WOFF1, TTC). Original typeface left in place.
@@ -49,16 +50,90 @@ pub enum SubsetOutcome {
     /// subsetted bytes — would indicate fontcull produced malformed SFNT.
     SkiaRebuildFailed { id: TypefaceId },
     /// The subsetted typeface is structurally valid (Skia accepted the
-    /// bytes) but shaping a kept codepoint produces `.notdef`. Observed
+    /// bytes) but subsetting **lost** cmap coverage the original had —
+    /// a kept codepoint that shaped before now yields `.notdef`. Observed
     /// with macOS Apple-vendored fonts (Helvetica Neue, Arial Unicode MS)
     /// where klippa's cmap reconstruction silently drops mappings.
     /// Original typeface left in place; PDF embeds the full font.
+    ///
+    /// `regressed` counts codepoints that went from a real glyph to
+    /// `.notdef`; `shapeable_before` is how many the *original* could shape.
+    /// A codepoint the original could not shape either is not counted —
+    /// it is a gap in the font, not damage from subsetting.
     UnshapeableSubset {
         id: TypefaceId,
         codepoints_kept: usize,
-        notdef_count: usize,
-        notdef_total: usize,
+        regressed: usize,
+        shapeable_before: usize,
     },
+}
+
+/// Why a subset was not installed, when the final bytes did not shrink.
+///
+/// Two causes with nothing in common but their outcome, kept apart because they
+/// point at different things: the first is the pass working correctly on a font
+/// with nothing to drop, the second is the `name` splice giving back a saving
+/// that subsetting had already achieved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoSavingsReason {
+    /// Subsetting itself did not shrink the font — typically every glyph in the
+    /// typeface is referenced by the requested codepoint set.
+    NothingToDrop,
+    /// Subsetting *did* shrink the font, but splicing the original `name` table
+    /// back in cost more than it saved. Nothing is wrong; a font with many
+    /// localized name records and few glyphs can land here.
+    NameSpliceOutweighedSavings,
+}
+
+/// A spliced font together with the size it had *before* the `name` table went
+/// back in.
+///
+/// The two travel together deliberately. Measuring the pre-splice size at the
+/// call site is how it drifts out of step — the original defect was exactly
+/// that, a single `len()` taken after the splice and used to answer a question
+/// only the pre-splice size can answer.
+struct SplicedFont {
+    bytes: Vec<u8>,
+    size_before_splice: usize,
+}
+
+/// Restore the original `name` table, keeping the pre-splice size.
+///
+/// `fontcull`'s API drops every record from the `name` table; without this the
+/// embedded PDF font loses its real PostScript name and Skia falls back to a
+/// synthetic `font<hex>` identifier. Best-effort: on failure the unnamed subset
+/// is used rather than aborting.
+fn splice_name_recording_size(subsetted: Vec<u8>, original: &[u8]) -> SplicedFont {
+    let size_before_splice = subsetted.len();
+    let bytes = match crate::render::subset::name_splice::splice_original_name(&subsetted, original)
+    {
+        Ok(b) => b,
+        Err(_) => subsetted,
+    };
+    SplicedFont {
+        bytes,
+        size_before_splice,
+    }
+}
+
+/// Decide whether the bytes we would install are worth installing.
+///
+/// `after` — not `subsetted` — is what governs, because `after` is what gets
+/// embedded: installing a spliced subset larger than the original would make
+/// the PDF bigger. `subsetted` only separates the two causes for reporting.
+///
+/// Split out as a pure function because it is the one part of `process_one`
+/// testable without a font, and because the three sizes are easy to compare in
+/// the wrong order.
+fn savings_verdict(before: usize, subsetted: usize, after: usize) -> Option<NoSavingsReason> {
+    if after < before {
+        return None;
+    }
+    if subsetted >= before {
+        Some(NoSavingsReason::NothingToDrop)
+    } else {
+        Some(NoSavingsReason::NameSpliceOutweighedSavings)
+    }
 }
 
 impl SubsetOutcome {
@@ -114,6 +189,25 @@ impl SubsetReport {
             .filter(|o| matches!(o, SubsetOutcome::UnshapeableSubset { .. }))
             .count()
     }
+
+    /// Typefaces that subsetting *did* shrink, only for the restored `name`
+    /// table to give the saving back. Worth surfacing separately from
+    /// "nothing to drop": it is the one no-savings cause that points at
+    /// something we could improve rather than at the font.
+    pub fn name_splice_outweighed_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o,
+                    SubsetOutcome::UnchangedNoSavings {
+                        reason: NoSavingsReason::NameSpliceOutweighedSavings,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
 }
 
 impl fmt::Display for SubsetReport {
@@ -123,19 +217,18 @@ impl fmt::Display for SubsetReport {
         let total = self.outcomes.len();
         let other = total - subsetted;
         let unshapeable = self.unshapeable_count();
-        if unshapeable == 0 {
-            write!(
-                f,
-                "{subsetted}/{total} typefaces subsetted ({} bytes saved, {other} unchanged)",
-                savings
-            )
-        } else {
-            write!(
-                f,
-                "{subsetted}/{total} typefaces subsetted ({} bytes saved, {other} unchanged, {unshapeable} rejected as unshapeable)",
-                savings
-            )
+        let splice_cost = self.name_splice_outweighed_count();
+        write!(
+            f,
+            "{subsetted}/{total} typefaces subsetted ({savings} bytes saved, {other} unchanged"
+        )?;
+        if unshapeable > 0 {
+            write!(f, ", {unshapeable} rejected as unshapeable")?;
         }
+        if splice_cost > 0 {
+            write!(f, ", {splice_cost} outweighed by the name table")?;
+        }
+        write!(f, ")")
     }
 }
 
@@ -201,23 +294,16 @@ fn process_one(
         }
     };
 
-    // fontcull's API drops every record from the `name` table; restore it from
-    // the original so the embedded PDF font keeps its real PostScript name
-    // (otherwise Skia falls back to a synthetic `font<hex>` identifier).
-    let subsetted = match crate::render::subset::name_splice::splice_original_name(
-        &subsetted,
-        &extracted.bytes,
-    ) {
-        Ok(b) => b,
-        Err(_) => subsetted, // Splice is best-effort; fall back to unnamed subset.
-    };
+    let spliced = splice_name_recording_size(subsetted, &extracted.bytes);
+    let subsetted = spliced.bytes;
 
     let bytes_after = subsetted.len();
-    if bytes_after >= bytes_before {
+    if let Some(reason) = savings_verdict(bytes_before, spliced.size_before_splice, bytes_after) {
         return SubsetOutcome::UnchangedNoSavings {
             id,
             bytes: bytes_before,
             codepoints_kept: codepoints.len(),
+            reason,
         };
     }
 
@@ -234,12 +320,12 @@ fn process_one(
     // cmap. Verified by shaping the kept codepoints against the rebuilt
     // typeface and checking for `.notdef`. If the subsetter's output is
     // unshapeable we keep the original — PDF gets bigger but text renders.
-    if let Some(failure) = check_shapeability(&new_tf, codepoints) {
+    if let Some(failure) = check_shapeability(&entry.typeface, &new_tf, codepoints) {
         return SubsetOutcome::UnshapeableSubset {
             id,
             codepoints_kept: codepoints.len(),
-            notdef_count: failure.notdef_count,
-            notdef_total: failure.notdef_total,
+            regressed: failure.regressed,
+            shapeable_before: failure.shapeable_before,
         };
     }
 
@@ -257,59 +343,74 @@ fn process_one(
 }
 
 struct ShapeabilityFailure {
-    /// Number of kept codepoints that shaped to `.notdef`.
-    notdef_count: usize,
-    /// Total kept codepoints probed.
-    notdef_total: usize,
+    /// Kept codepoints that shaped in the original but are `.notdef` in the
+    /// subset.
+    regressed: usize,
+    /// Kept codepoints the *original* could shape — the denominator that
+    /// makes `regressed` meaningful.
+    shapeable_before: usize,
 }
 
-/// Shape every kept codepoint against the rebuilt typeface and return
-/// `Some` if any codepoint maps to `.notdef`. Catches the
-/// macOS-Apple-font subsetter pathology where Skia accepts the bytes but
-/// the cmap doesn't bind glyph IDs.
+/// Reject a subset that **lost** cmap coverage the original typeface had.
 ///
-/// Whitespace and control codepoints are exempt — their .notdef-ness is
-/// font-dependent and not a sign of a broken subset.
+/// Catches the macOS-Apple-font pathology where Skia accepts the subsetted
+/// bytes but the cmap no longer binds glyph IDs, so every glyph paints as
+/// `.notdef` and the page comes out blank.
+///
+/// **The comparison against `original` is the whole point.** Asking only
+/// "does this codepoint shape in the subset?" cannot tell a subsetter that
+/// destroyed the cmap from a font that never had the glyph — and the second is
+/// ordinary. A single U+25AA bullet, or one SOFT HYPHEN, is enough to make a
+/// perfectly good subset look broken; measured, that mistake embedded a 606 KB
+/// face instead of its 13 KB subset. Only a codepoint that shaped *before* and
+/// fails *after* is evidence of damage.
+///
+/// This is also why there is no whitespace/control exemption. The old code
+/// skipped those because their `.notdef`-ness is font-dependent — which is true
+/// of *every* codepoint, and is exactly what the baseline now handles. Worse,
+/// the exemption hid real regressions: a subset that dropped a space the
+/// original had would have gone uncaught.
+///
+/// Uses `Typeface::unichar_to_glyph` per codepoint rather than shaping a probe
+/// string, so no assumption is needed about glyphs corresponding one-to-one
+/// with `char`s.
 fn check_shapeability(
-    typeface: &skia_safe::Typeface,
+    original: &skia_safe::Typeface,
+    subsetted: &skia_safe::Typeface,
     codepoints: &std::collections::BTreeSet<crate::render::subset::collect::Codepoint>,
 ) -> Option<ShapeabilityFailure> {
-    use skia_safe::Font;
-    let font = Font::from_typeface(typeface.clone(), 12.0);
+    let mut regressed = 0usize;
+    let mut shapeable_before = 0usize;
 
-    // Build a probe string from the kept codepoints, skipping whitespace
-    // and other glyph-optional categories so the result reflects actual
-    // shapeability of the kept set.
-    let probe: String = codepoints
-        .iter()
-        .filter_map(|c| char::from_u32(c.0))
-        .filter(|c| !c.is_whitespace() && !c.is_control())
-        .collect();
-    if probe.is_empty() {
-        return None;
+    for cp in codepoints {
+        let Ok(unichar) = i32::try_from(cp.0) else {
+            continue;
+        };
+        if original.unichar_to_glyph(unichar) == 0 {
+            // The original could not shape it either — a gap in the font, not
+            // damage from subsetting.
+            continue;
+        }
+        shapeable_before += 1;
+        if subsetted.unichar_to_glyph(unichar) == 0 {
+            regressed += 1;
+        }
     }
-    let glyphs = font.text_to_glyphs_vec(&probe);
-    let notdef_count = glyphs.iter().filter(|&&g| g == 0).count();
-    if notdef_count == 0 {
+
+    if regressed == 0 {
         return None;
     }
     Some(ShapeabilityFailure {
-        notdef_count,
-        notdef_total: glyphs.len(),
+        regressed,
+        shapeable_before,
     })
 }
 
-#[cfg(feature = "subset-fonts")]
 fn subset_with_fontcull(bytes: &[u8], unicodes: &[u32]) -> Result<Vec<u8>, String> {
     fontcull::subset_font_data_unicode(bytes, unicodes, &[]).map_err(|e| e.to_string())
 }
 
-#[cfg(not(feature = "subset-fonts"))]
-fn subset_with_fontcull(_bytes: &[u8], _unicodes: &[u32]) -> Result<Vec<u8>, String> {
-    Err("subset-fonts feature is disabled".to_string())
-}
-
-#[cfg(all(test, feature = "subset-fonts"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::EmbeddedFontVariant;
@@ -582,34 +683,34 @@ mod tests {
         );
     }
 
-    /// Unit-level test for the post-validation predicate itself: given a
-    /// known-good typeface and codepoints in its repertoire, the predicate
-    /// reports no failure.
+    fn cps_of(text: &str) -> std::collections::BTreeSet<crate::render::subset::collect::Codepoint> {
+        text.chars()
+            .map(crate::render::subset::collect::Codepoint::from)
+            .collect()
+    }
+
+    /// A typeface compared against itself can never regress, whatever it can or
+    /// cannot shape.
     #[test]
-    fn check_shapeability_passes_on_valid_typeface() {
-        use std::collections::BTreeSet;
+    fn check_shapeability_passes_when_nothing_changed() {
         let mgr = fmgr();
         let tf = mgr
             .legacy_make_typeface(None::<&str>, FontStyle::normal())
             .expect("system has a default typeface");
-        let mut cps = BTreeSet::new();
-        for c in "abc".chars() {
-            cps.insert(crate::render::subset::collect::Codepoint::from(c));
-        }
         assert!(
-            check_shapeability(&tf, &cps).is_none(),
-            "default typeface must shape 'abc' without .notdef"
+            check_shapeability(&tf, &tf, &cps_of("abc")).is_none(),
+            "identical typefaces cannot have lost coverage"
         );
     }
 
-    /// Helper for the synthetic broken-cmap case: build a typeface from
-    /// arbitrary system bytes, then probe with a codepoint outside its
-    /// repertoire. Confirms the predicate fires — independent of any
-    /// klippa-specific behaviour.
+    /// **This test asserted the opposite before F1#1.** It required the
+    /// predicate to fire when a Latin font could not shape a CJK codepoint —
+    /// which is a gap in the font, not damage from subsetting, and is exactly
+    /// the confusion that made one SOFT HYPHEN embed a whole 606 KB face.
+    ///
+    /// A codepoint neither side can shape is not a regression.
     #[test]
-    fn check_shapeability_fires_on_missing_codepoint() {
-        use std::collections::BTreeSet;
-        // Pick a Latin-only font; CJK ideographs will be .notdef.
+    fn a_codepoint_the_original_never_had_is_not_a_regression() {
         let tf = match host_font("Helvetica").or_else(|| host_font("Arial")) {
             Some(t) => t,
             None => {
@@ -617,12 +718,185 @@ mod tests {
                 return;
             }
         };
-        let mut cps = BTreeSet::new();
-        // 烏 is not in standard Helvetica/Arial.
-        cps.insert(crate::render::subset::collect::Codepoint::from('\u{70CF}'));
-        let failure = check_shapeability(&tf, &cps)
-            .expect("a Latin font must report .notdef for a CJK codepoint");
-        assert!(failure.notdef_count >= 1);
-        assert!(failure.notdef_total >= 1);
+        // 烏 is not in standard Helvetica/Arial — precondition, asserted rather
+        // than assumed, so this cannot pass vacuously on a host where it is.
+        assert_eq!(
+            tf.unichar_to_glyph('\u{70CF}' as i32),
+            0,
+            "precondition: the chosen font must lack this codepoint"
+        );
+        assert!(
+            check_shapeability(&tf, &tf, &cps_of("\u{70CF}")).is_none(),
+            "the original could not shape it either — not the subsetter's doing"
+        );
+    }
+
+    /// The case the check exists for: coverage the original *had* is gone after
+    /// subsetting. Built with the real subsetter rather than two unrelated host
+    /// fonts, so it does not depend on which fonts a machine happens to carry.
+    #[test]
+    fn losing_coverage_the_original_had_is_a_regression() {
+        let mgr = fmgr();
+        let Some(tf) = host_font("Carlito")
+            .or_else(|| host_font("Helvetica"))
+            .or_else(|| host_font("Arial"))
+        else {
+            eprintln!("skipping: no system font");
+            return;
+        };
+        let Some((bytes, _)) = tf.to_font_data() else {
+            eprintln!("skipping: no font data");
+            return;
+        };
+        // Subset down to 'a' only; 'b' is then absent from the result's cmap.
+        let Ok(narrow) = fontcull::subset_font_data_unicode(&bytes, &['a' as u32], &[]) else {
+            eprintln!("skipping: subsetter declined");
+            return;
+        };
+        let Some(narrow_tf) = mgr.new_from_data(&Data::new_copy(&narrow), 0) else {
+            eprintln!("skipping: rebuild failed");
+            return;
+        };
+        // Preconditions, so a subsetter change cannot make this vacuous.
+        assert_ne!(tf.unichar_to_glyph('b' as i32), 0, "original shapes 'b'");
+        assert_eq!(
+            narrow_tf.unichar_to_glyph('b' as i32),
+            0,
+            "narrow drops 'b'"
+        );
+
+        let failure = check_shapeability(&tf, &narrow_tf, &cps_of("ab"))
+            .expect("losing 'b' must be reported");
+        assert_eq!(failure.regressed, 1, "only 'b' regressed");
+        assert_eq!(
+            failure.shapeable_before, 2,
+            "'a' and 'b' both shaped before"
+        );
+    }
+
+    /// Whitespace is no longer exempt, and that is deliberate: the old
+    /// exemption existed because a space's `.notdef`-ness is font-dependent,
+    /// which the baseline now handles properly. Dropping a space the original
+    /// had is a real regression and must be caught.
+    #[test]
+    fn a_dropped_space_is_not_exempt() {
+        let mgr = fmgr();
+        let Some(tf) = host_font("Carlito")
+            .or_else(|| host_font("Helvetica"))
+            .or_else(|| host_font("Arial"))
+        else {
+            eprintln!("skipping: no system font");
+            return;
+        };
+        let Some((bytes, _)) = tf.to_font_data() else {
+            eprintln!("skipping: no font data");
+            return;
+        };
+        let Ok(narrow) = fontcull::subset_font_data_unicode(&bytes, &['a' as u32], &[]) else {
+            eprintln!("skipping: subsetter declined");
+            return;
+        };
+        let Some(narrow_tf) = mgr.new_from_data(&Data::new_copy(&narrow), 0) else {
+            eprintln!("skipping: rebuild failed");
+            return;
+        };
+        if tf.unichar_to_glyph(' ' as i32) == 0 || narrow_tf.unichar_to_glyph(' ' as i32) != 0 {
+            eprintln!("skipping: this font/subsetter pair keeps the space glyph");
+            return;
+        }
+        assert!(
+            check_shapeability(&tf, &narrow_tf, &cps_of(" ")).is_some(),
+            "a space present before and gone after is a regression"
+        );
+    }
+
+    // ── `savings_verdict` ────────────────────────────────────────────────
+    //
+    // The one part of `process_one` testable without a font. The
+    // `NameSpliceOutweighedSavings` case in particular is unreachable with the
+    // fonts on any test host — Carlito saves 606 KB against a name table of a
+    // few KB — so without a pure function it could not be covered at all.
+
+    /// A smaller result installs, whatever the intermediate size was.
+    #[test]
+    fn a_smaller_result_is_always_installed() {
+        assert_eq!(savings_verdict(1000, 400, 900), None);
+        // Even when the splice ate most of the gain, smaller is smaller.
+        assert_eq!(savings_verdict(1000, 400, 999), None);
+    }
+
+    /// Subsetting achieved nothing: the result was already no smaller before
+    /// the `name` table went back in.
+    #[test]
+    fn no_shrink_before_the_splice_is_nothing_to_drop() {
+        assert_eq!(
+            savings_verdict(1000, 1000, 1200),
+            Some(NoSavingsReason::NothingToDrop)
+        );
+        assert_eq!(
+            savings_verdict(1000, 1100, 1300),
+            Some(NoSavingsReason::NothingToDrop)
+        );
+    }
+
+    /// Subsetting *did* shrink the font and the splice gave the gain back.
+    /// Reported before F1#7 as "nothing to drop", which pointed at the wrong
+    /// cause — subsetting had worked.
+    #[test]
+    fn shrink_undone_by_the_splice_is_reported_as_such() {
+        assert_eq!(
+            savings_verdict(1000, 900, 1000),
+            Some(NoSavingsReason::NameSpliceOutweighedSavings)
+        );
+        assert_eq!(
+            savings_verdict(1000, 100, 5000),
+            Some(NoSavingsReason::NameSpliceOutweighedSavings)
+        );
+    }
+
+    /// Equal sizes do not install — the byte-for-byte case is not worth the
+    /// rebuild, and it is `NothingToDrop` because subsetting achieved nothing.
+    #[test]
+    fn equal_sizes_do_not_install() {
+        assert_eq!(
+            savings_verdict(1000, 1000, 1000),
+            Some(NoSavingsReason::NothingToDrop)
+        );
+    }
+
+    /// The splice must actually add bytes, or `size_before_splice` and the
+    /// final length would be interchangeable and the distinction F1#7 is about
+    /// would not exist. Guards the premise the verdict rests on.
+    #[test]
+    fn the_name_splice_grows_the_font_and_the_pre_splice_size_is_kept() {
+        let Some(tf) = host_font("Carlito")
+            .or_else(|| host_font("Helvetica"))
+            .or_else(|| host_font("Arial"))
+        else {
+            eprintln!("skipping: no system font");
+            return;
+        };
+        let Some((bytes, _)) = tf.to_font_data() else {
+            eprintln!("skipping: no font data");
+            return;
+        };
+        let unicodes: Vec<u32> = (0x41u32..0x5B).collect();
+        let Ok(subsetted) = fontcull::subset_font_data_unicode(&bytes, &unicodes, &[]) else {
+            eprintln!("skipping: subsetter declined");
+            return;
+        };
+
+        let raw_len = subsetted.len();
+        let spliced = splice_name_recording_size(subsetted, &bytes);
+        assert_eq!(
+            spliced.size_before_splice, raw_len,
+            "the recorded size must be the one before splicing"
+        );
+        assert!(
+            spliced.bytes.len() > spliced.size_before_splice,
+            "restoring the name table must add bytes: {} -> {}",
+            spliced.size_before_splice,
+            spliced.bytes.len()
+        );
     }
 }

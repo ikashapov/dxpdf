@@ -16,7 +16,7 @@ use crate::docx::parse::primitives::st_enums::{
     StXAlign, StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::OnOff;
+use crate::docx::parse::primitives::{last_toggle, OnOff};
 
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
@@ -197,12 +197,20 @@ pub(crate) struct TblpPrXml {
 pub(crate) struct TblPrExXml {
     #[serde(rename = "tblBorders", default)]
     tbl_borders: Option<TableBordersXml>,
+    /// §17.4.41: per-row override of the table's `tblCellSpacing`.
+    #[serde(
+        rename = "tblCellSpacing",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+    )]
+    tbl_cell_spacing: Option<TableMeasureXml>,
 }
 
 impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
     fn from(x: TblPrExXml) -> Self {
         Self {
             borders: x.tbl_borders.map(Into::into),
+            cell_spacing: x.tbl_cell_spacing.map(Into::into),
         }
     }
 }
@@ -290,10 +298,12 @@ impl From<TblpPrXml> for TablePositioning {
 pub(crate) struct TrPrXml {
     #[serde(rename = "trHeight", default)]
     tr_height: Option<TrHeightXml>,
+    // `Vec<OnOff>` (not `Option`) tolerates duplicated toggles per §17.7.2
+    // last-wins — see `RPrXml` / `PPrXml` for the rationale.
     #[serde(rename = "tblHeader", default)]
-    tbl_header: Option<OnOff>,
+    tbl_header: Vec<OnOff>,
     #[serde(rename = "cantSplit", default)]
-    cant_split: Option<OnOff>,
+    cant_split: Vec<OnOff>,
     #[serde(rename = "jc", default)]
     jc: Option<ValAttr<StJc>>,
     #[serde(rename = "cnfStyle", default)]
@@ -314,6 +324,13 @@ pub(crate) struct TrPrXml {
         deserialize_with = "deserialize_optional_nonnegative_table_measure"
     )]
     w_after: Option<TableMeasureXml>,
+    /// §17.4.42: row-level override of the table's `tblCellSpacing`.
+    #[serde(
+        rename = "tblCellSpacing",
+        default,
+        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+    )]
+    tbl_cell_spacing: Option<TableMeasureXml>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -332,10 +349,16 @@ impl From<TrHeightXml> for TableRowHeight {
     fn from(x: TrHeightXml) -> Self {
         Self {
             value: x.val.unwrap_or_default(),
+            // §17.4.81 says an omitted `hRule` means `auto`; [MS-OI29500]
+            // §17.4.80(a) records that **Word assumes `atLeast`**, and Word is
+            // what produced these files. Defaulting to `Auto` here would be
+            // indistinguishable from an explicit `hRule="auto"`, where the
+            // standard says the `val` is ignored — so the two must not collapse
+            // to the same variant.
             rule: x
                 .rule
                 .map(Into::into)
-                .unwrap_or(crate::docx::model::HeightRule::Auto),
+                .unwrap_or(crate::docx::model::HeightRule::AtLeast),
         }
     }
 }
@@ -344,14 +367,15 @@ impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
         Self {
             height: x.tr_height.map(Into::into),
-            is_header: x.tbl_header.map(|OnOff(b)| b),
-            cant_split: x.cant_split.map(|OnOff(b)| b),
+            is_header: last_toggle(x.tbl_header),
+            cant_split: last_toggle(x.cant_split),
             justification: x.jc.map(|v| Alignment::from(v.val)),
             cnf_style: x.cnf_style.map(CnfStyle::from),
             grid_before: x.grid_before.map(|v| v.val).unwrap_or(0),
             w_before: x.w_before.map(Into::into),
             grid_after: x.grid_after.map(|v| v.val).unwrap_or(0),
             w_after: x.w_after.map(Into::into),
+            cell_spacing: x.tbl_cell_spacing.map(Into::into),
         }
     }
 }
@@ -381,7 +405,7 @@ pub(crate) struct TcPrXml {
     #[serde(rename = "textDirection", default)]
     text_direction: Option<ValAttr<StTextDirection>>,
     #[serde(rename = "noWrap", default)]
-    no_wrap: Option<OnOff>,
+    no_wrap: Vec<OnOff>,
     #[serde(rename = "cnfStyle", default)]
     cnf_style: Option<CnfStyleXml>,
 }
@@ -425,7 +449,7 @@ impl From<TcPrXml> for TableCellProperties {
             text_direction: x
                 .text_direction
                 .map(|v| crate::docx::model::TextDirection::from(v.val)),
-            no_wrap: x.no_wrap.map(|OnOff(b)| b),
+            no_wrap: last_toggle(x.no_wrap),
             cnf_style: x.cnf_style.map(CnfStyle::from),
         }
     }
@@ -619,6 +643,21 @@ mod tests {
     }
 
     #[test]
+    fn tr_pr_duplicate_toggles_tolerated_last_wins() {
+        // Duplicated row toggles (as some writers emit) must not fail the parse.
+        let tr = parse_tr_pr(r#"<trPr><cantSplit/><cantSplit/></trPr>"#);
+        assert_eq!(tr.cant_split, Some(true));
+        let tr = parse_tr_pr(r#"<trPr><tblHeader val="1"/><tblHeader val="0"/></trPr>"#);
+        assert_eq!(tr.is_header, Some(false));
+    }
+
+    #[test]
+    fn tc_pr_duplicate_no_wrap_tolerated() {
+        let tc = parse_tc_pr(r#"<tcPr><noWrap/><noWrap/></tcPr>"#);
+        assert_eq!(tc.no_wrap, Some(true));
+    }
+
+    #[test]
     fn tr_pr_grid_after_and_w_after() {
         let tr = parse_tr_pr(r#"<trPr><gridAfter val="2"/><wAfter w="500" type="dxa"/></trPr>"#);
         assert_eq!(tr.grid_after, 2);
@@ -699,5 +738,57 @@ mod tests {
         let tc = parse_tc_pr(r#"<tcPr><noWrap/><cnfStyle val="100000000000"/></tcPr>"#);
         assert_eq!(tc.no_wrap, Some(true));
         assert_eq!(tc.cnf_style, Some(CnfStyle::FIRST_ROW));
+    }
+
+    /// §17.4.81 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
+    /// `hRule` means `auto`; Word assumes `atLeast`, and Word wrote these files.
+    ///
+    /// The distinction is load-bearing rather than cosmetic: with `hRule="auto"`
+    /// the standard says `val` is **ignored**, so collapsing "omitted" into
+    /// `Auto` would make every Word row with a `trHeight` lose its minimum
+    /// height — or, as before this change, force an explicit `auto` to be
+    /// treated as a minimum it should not have.
+    #[test]
+    fn omitted_hrule_is_at_least_but_explicit_auto_is_auto() {
+        use crate::docx::model::HeightRule;
+        let parse = |xml: &str| -> crate::docx::model::TableRowHeight {
+            quick_xml::de::from_str::<TrHeightXml>(xml).unwrap().into()
+        };
+        assert_eq!(parse(r#"<trHeight val="440"/>"#).rule, HeightRule::AtLeast);
+        assert_eq!(
+            parse(r#"<trHeight val="440" hRule="auto"/>"#).rule,
+            HeightRule::Auto
+        );
+        assert_eq!(
+            parse(r#"<trHeight val="440" hRule="atLeast"/>"#).rule,
+            HeightRule::AtLeast
+        );
+        assert_eq!(
+            parse(r#"<trHeight val="440" hRule="exact"/>"#).rule,
+            HeightRule::Exact
+        );
+        // The value survives in every case; only the rule decides its meaning.
+        assert_eq!(parse(r#"<trHeight val="440"/>"#).value.raw(), 440);
+    }
+
+    /// §17.4.41 / §17.4.42: both cell-spacing overrides now reach the model.
+    /// Layout applies spacing per table and warns rather than honouring these,
+    /// but dropping them at the parser would make that gap invisible.
+    #[test]
+    fn cell_spacing_overrides_reach_the_model() {
+        let tr: crate::docx::model::TableRowProperties = quick_xml::de::from_str::<TrPrXml>(
+            r#"<trPr><tblCellSpacing w="72" type="dxa"/></trPr>"#,
+        )
+        .unwrap()
+        .into();
+        assert!(tr.cell_spacing.is_some(), "row-level §17.4.42");
+
+        let ex: crate::docx::model::TableRowPropertyExceptions =
+            quick_xml::de::from_str::<TblPrExXml>(
+                r#"<tblPrEx><tblCellSpacing w="72" type="dxa"/></tblPrEx>"#,
+            )
+            .unwrap()
+            .into();
+        assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.41");
     }
 }

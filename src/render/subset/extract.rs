@@ -65,7 +65,6 @@ fn classify_and_unwrap(bytes: Vec<u8>) -> Result<ExtractedSfnt, ExtractionError>
     }
 }
 
-#[cfg(feature = "subset-fonts")]
 fn unwrap_woff2(bytes: &[u8]) -> Result<ExtractedSfnt, ExtractionError> {
     let unwrapped = fontcull::decompress_font(bytes)
         .map_err(|e| ExtractionError::Woff2DecompressionFailed(e.to_string()))?;
@@ -77,16 +76,6 @@ fn unwrap_woff2(bytes: &[u8]) -> Result<ExtractedSfnt, ExtractionError> {
         }),
         other => Err(ExtractionError::PostUnwrapNotSfnt(other)),
     }
-}
-
-// When the feature is off this branch is unreachable from `classify_and_unwrap`
-// at the FontFormat::Woff(V2) match arm, but Rust still needs an
-// implementation for the function reference.
-#[cfg(not(feature = "subset-fonts"))]
-fn unwrap_woff2(_bytes: &[u8]) -> Result<ExtractedSfnt, ExtractionError> {
-    Err(ExtractionError::UnsupportedFormat(FontFormat::Woff(
-        crate::render::subset::WoffVersion::V2,
-    )))
 }
 
 #[cfg(test)]
@@ -180,7 +169,6 @@ mod tests {
         assert!(matches!(result, Err(ExtractionError::Format(_))));
     }
 
-    #[cfg(feature = "subset-fonts")]
     #[test]
     fn extract_unwraps_woff2_to_sfnt() {
         // Synthesize a WOFF2 from a real SFNT via fontcull's compress_to_woff2,

@@ -17,7 +17,7 @@ use crate::docx::parse::primitives::st_enums::{
     StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::OnOff;
+use crate::docx::parse::primitives::{last_toggle, OnOff};
 
 use super::border::ParagraphBordersXml;
 use super::cnf_style::CnfStyleXml;
@@ -67,27 +67,31 @@ pub(crate) struct PPrXml {
     #[serde(rename = "framePr", default)]
     frame_pr: Option<FramePrXml>,
 
-    // OnOff toggles
+    // OnOff toggles. Typed as `Vec<OnOff>` (not `Option<OnOff>`) so a duplicated
+    // toggle — which LibreOffice/AOO emit, e.g. `<w:keepNext/><w:keepNext/>` —
+    // doesn't trip serde's "duplicate field" error and fail the whole parse.
+    // §17.7.2 last-wins is applied via `last_toggle` in `split`. Same rationale
+    // as `RPrXml`'s run toggles.
     #[serde(rename = "keepNext", default)]
-    keep_next: Option<OnOff>,
+    keep_next: Vec<OnOff>,
     #[serde(rename = "keepLines", default)]
-    keep_lines: Option<OnOff>,
+    keep_lines: Vec<OnOff>,
     #[serde(rename = "widowControl", default)]
-    widow_control: Option<OnOff>,
+    widow_control: Vec<OnOff>,
     #[serde(rename = "pageBreakBefore", default)]
-    page_break_before: Option<OnOff>,
+    page_break_before: Vec<OnOff>,
     #[serde(rename = "suppressAutoHyphens", default)]
-    suppress_auto_hyphens: Option<OnOff>,
+    suppress_auto_hyphens: Vec<OnOff>,
     #[serde(rename = "contextualSpacing", default)]
-    contextual_spacing: Option<OnOff>,
+    contextual_spacing: Vec<OnOff>,
     #[serde(default)]
-    bidi: Option<OnOff>,
+    bidi: Vec<OnOff>,
     #[serde(rename = "wordWrap", default)]
-    word_wrap: Option<OnOff>,
+    word_wrap: Vec<OnOff>,
     #[serde(rename = "autoSpaceDE", default)]
-    auto_space_de: Option<OnOff>,
+    auto_space_de: Vec<OnOff>,
     #[serde(rename = "autoSpaceDN", default)]
-    auto_space_dn: Option<OnOff>,
+    auto_space_dn: Vec<OnOff>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -302,22 +306,22 @@ impl PPrXml {
             tabs: self.tabs.map(<Vec<TabStop>>::from).unwrap_or_default(),
             borders: self.p_bdr.map(ParagraphBorders::from),
             shading: self.shd.map(Shading::from),
-            keep_next: self.keep_next.map(|OnOff(b)| b),
-            keep_lines: self.keep_lines.map(|OnOff(b)| b),
-            widow_control: self.widow_control.map(|OnOff(b)| b),
-            page_break_before: self.page_break_before.map(|OnOff(b)| b),
-            suppress_auto_hyphens: self.suppress_auto_hyphens.map(|OnOff(b)| b),
-            contextual_spacing: self.contextual_spacing.map(|OnOff(b)| b),
-            bidi: self.bidi.map(|OnOff(b)| b),
-            word_wrap: self.word_wrap.map(|OnOff(b)| b),
+            keep_next: last_toggle(self.keep_next),
+            keep_lines: last_toggle(self.keep_lines),
+            widow_control: last_toggle(self.widow_control),
+            page_break_before: last_toggle(self.page_break_before),
+            suppress_auto_hyphens: last_toggle(self.suppress_auto_hyphens),
+            contextual_spacing: last_toggle(self.contextual_spacing),
+            bidi: last_toggle(self.bidi),
+            word_wrap: last_toggle(self.word_wrap),
             outline_level: self
                 .outline_lvl
                 .and_then(|v| OutlineLevel::from_ooxml(v.val)),
             text_alignment: self.text_alignment.map(|v| TextAlignment::from(v.val)),
             cnf_style: self.cnf_style.map(CnfStyle::from),
             frame_properties: self.frame_pr.map(FrameKind::from),
-            auto_space_de: self.auto_space_de.map(|OnOff(b)| b),
-            auto_space_dn: self.auto_space_dn.map(|OnOff(b)| b),
+            auto_space_de: last_toggle(self.auto_space_de),
+            auto_space_dn: last_toggle(self.auto_space_dn),
         };
 
         ParsedPPr {
@@ -510,5 +514,18 @@ mod tests {
     fn unknown_jc_is_strict() {
         let r: Result<PPrXml, _> = quick_xml::de::from_str(r#"<pPr><jc val="bogus"/></pPr>"#);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn duplicate_toggles_are_tolerated_last_wins() {
+        // LibreOffice/AOO emit redundant duplicate toggles. With `Option<OnOff>`
+        // serde would fail with "duplicate field" and take down the whole parse;
+        // `Vec<OnOff>` + last_toggle accepts them (§17.7.2 last wins).
+        let r = parse(r#"<pPr><keepNext/><keepNext/></pPr>"#);
+        assert_eq!(r.properties.keep_next, Some(true));
+
+        // When duplicates disagree, the last one wins.
+        let r = parse(r#"<pPr><widowControl val="1"/><widowControl val="0"/></pPr>"#);
+        assert_eq!(r.properties.widow_control, Some(false));
     }
 }

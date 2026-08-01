@@ -36,6 +36,7 @@ pub(super) fn build_block(
             Some(LayoutBlock::Table {
                 rows: built.rows,
                 col_widths: built.col_widths,
+                cell_spacing: built.cell_spacing,
                 border_config: built.border_config,
                 indent: built.indent,
                 alignment: built.alignment,
@@ -61,6 +62,12 @@ pub(super) fn build_paragraph_block(
     cond: Option<&CellConditionalFormatting>,
 ) -> Option<LayoutBlock> {
     let (mut fragments, mut merged_props) = build_fragments(p, ctx, state, table_style, cond);
+    // Drain immediately: this paragraph owns exactly the references its own
+    // fragment collection recorded. Draining before the drop-cap early return
+    // below keeps them from leaking into the next paragraph's batch, and
+    // before `build_note_content` re-enters `build_fragments` (a footnote body
+    // may itself carry references) from mixing the two levels together.
+    let fn_refs = state.footnotes.take_pending();
 
     // §17.9.22: inject list label if paragraph has a numbering reference.
     super::list_label::inject_list_label(p, &mut fragments, &mut merged_props, ctx, state);
@@ -78,8 +85,13 @@ pub(super) fn build_paragraph_block(
     // Headers/footers have their own injection in
     // `build_header_footer_content` (§17.10.1) and do not call this.
     if fragments.is_empty() {
-        let (family, mut size, ..) =
-            resolve_paragraph_defaults(p, ctx.resolved, table_style.is_some());
+        let (family, mut size, ..) = resolve_paragraph_defaults(
+            p,
+            ctx.resolved,
+            table_style.is_some(),
+            state.shape_default_text_color,
+            state.shape_default_font_family.as_deref(),
+        );
         if let Some(ref mrp) = p.mark_run_properties {
             if let Some(fs) = mrp.font_size {
                 size = Pt::from(fs);
@@ -92,10 +104,18 @@ pub(super) fn build_paragraph_block(
     // Word suppresses Hyperlink character style (blue/underline) for ToC
     // entries in print view. Strip visual hyperlink styling but keep the
     // click annotation URL.
-    if p.style_id
+    //
+    // §17.7.4.9: identified by the resolved style's *primary style name*
+    // (`toc 1` … `toc 9`, locale-independent), not by the `w:styleId`
+    // spelling — a `starts_with("TOC")` test both over-matches (an unrelated
+    // user style `TOCustom`) and under-matches (producers that don't spell
+    // their ToC style IDs `TOC1`).
+    let is_toc_entry = p
+        .style_id
         .as_ref()
-        .is_some_and(|id| id.as_str().starts_with("TOC") || id.as_str().starts_with("toc"))
-    {
+        .and_then(|id| ctx.resolved.styles.get(id))
+        .is_some_and(|s| s.is_toc_entry);
+    if is_toc_entry {
         for frag in &mut fragments {
             if let Fragment::Text {
                 font,
@@ -182,7 +202,8 @@ pub(super) fn build_paragraph_block(
         return None;
     }
 
-    let mut style = paragraph_style_from_props(&merged_props);
+    let mut style =
+        paragraph_style_from_props(&merged_props, Pt::from(ctx.resolved.default_tab_stop));
     style.style_id = p.style_id.clone();
 
     // Attach pending drop cap to this paragraph.
@@ -192,26 +213,17 @@ pub(super) fn build_paragraph_block(
 
     let page_break_before = merged_props.page_break_before.unwrap_or(false);
 
-    // Collect footnotes referenced in this paragraph.
-    // The footnote_counter was already incremented during fragment collection,
-    // so we count backwards to get the display number for each reference.
-    let fn_refs: Vec<_> = p
-        .content
-        .iter()
-        .filter_map(|i| {
-            if let model::Inline::FootnoteRef(id) = i {
-                Some(id)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let fn_base = state.footnote_counter - fn_refs.len() as u32;
+    // §17.11.12: render a body for each footnote this paragraph referenced.
+    // `collect_fragments` recorded them — id *and* the display number it
+    // emitted as the superscript — as it walked, so the body and the mark
+    // cannot disagree. Draining here also covers references nested inside
+    // hyperlinks, fields, and text boxes, which the previous flat scan of
+    // `p.content` missed entirely.
     let mut para_footnotes = Vec::new();
-    for (i, note_id) in fn_refs.iter().enumerate() {
-        let display = format!("{}", fn_base + i as u32 + 1);
-        if let Some(content) = ctx.resolved.footnotes.get(note_id) {
-            let notes = build_note_content(note_id.value(), &display, content, ctx, state);
+    for note in fn_refs {
+        if let Some(content) = ctx.resolved.footnotes.get(&note.id) {
+            let display = format!("{}", note.display);
+            let notes = build_note_content(&display, content, ctx, state);
             for (_, frags, style) in notes {
                 para_footnotes.push((frags, style));
             }
@@ -248,7 +260,6 @@ pub(super) fn build_paragraph_block(
 
 /// Build note content (footnotes or endnotes) with a display number prefix.
 pub(super) fn build_note_content(
-    _note_id_value: i64,
     display_num: &str,
     content: &[Block],
     ctx: &BuildContext,
@@ -262,13 +273,20 @@ pub(super) fn build_note_content(
     for (i, block) in content.iter().enumerate() {
         if let model::Block::Paragraph(p) = block {
             let (mut frags, merged_props) = build_fragments(p, ctx, state, None, None);
+            // §17.11.12: a footnote body may itself carry references. We don't
+            // render nested footnote bodies (matching the previous behaviour),
+            // but the references must be drained so they aren't attributed to
+            // the paragraph that hosts this note.
+            let _ = state.footnotes.take_pending();
 
             // Prepend display number to the first paragraph.
             if i == 0 && !frags.is_empty() {
                 let num_text = format!("{}  ", display_num);
+                // §17.8.3.2 / §17.3.2.14: fall back to the document-level spec
+                // defaults rather than restating a font name here.
                 let font = frags[0].font_props().cloned().unwrap_or_else(|| FontProps {
-                    family: std::rc::Rc::from("Times New Roman"),
-                    size: Pt::new(10.0),
+                    family: std::rc::Rc::from(super::SPEC_FALLBACK_FONT),
+                    size: super::SPEC_DEFAULT_FONT_SIZE,
                     bold: false,
                     italic: false,
                     underline: false,
@@ -277,7 +295,8 @@ pub(super) fn build_note_content(
                     underline_position: Pt::ZERO,
                     underline_thickness: Pt::ZERO,
                 });
-                let ref_size = font.size * 0.58;
+                let ref_size =
+                    font.size * crate::render::layout::fragment::SUPERSCRIPT_FONT_SIZE_RATIO;
                 let ref_font = FontProps {
                     size: ref_size,
                     ..font
@@ -295,13 +314,15 @@ pub(super) fn build_note_content(
                         trimmed_width: w,
                         metrics: m,
                         hyperlink_url: None,
-                        baseline_offset: -(font.size * 0.4),
+                        baseline_offset: -(font.size
+                            * crate::render::layout::fragment::NOTE_REF_BASELINE_OFFSET_RATIO),
                         text_offset: Pt::ZERO,
                         is_footnote_ref: false,
                     },
                 );
             }
-            let style = paragraph_style_from_props(&merged_props);
+            let style =
+                paragraph_style_from_props(&merged_props, Pt::from(ctx.resolved.default_tab_stop));
             results.push((display_num.to_string(), frags, style));
         }
     }
@@ -329,13 +350,7 @@ pub(super) fn collect_endnotes(
     for (i, note_id) in en_ids.iter().enumerate() {
         let display = crate::render::layout::fragment::to_roman_lower((i + 1) as u32);
         if let Some(content) = ctx.resolved.endnotes.get(note_id) {
-            endnotes.extend(build_note_content(
-                note_id.value(),
-                &display,
-                content,
-                ctx,
-                state,
-            ));
+            endnotes.extend(build_note_content(&display, content, ctx, state));
         }
     }
 }
@@ -355,7 +370,13 @@ pub(super) fn build_fragments(
     // Doc defaults are deferred so table style/conditional can be inserted
     // between paragraph style and doc defaults in the cascade.
     let (default_family, mut default_size, mut default_color, mut merged_props, mut run_defaults) =
-        resolve_paragraph_defaults(para, ctx.resolved, table_style.is_some());
+        resolve_paragraph_defaults(
+            para,
+            ctx.resolved,
+            table_style.is_some(),
+            state.shape_default_text_color,
+            state.shape_default_font_family.as_deref(),
+        );
 
     // §17.7.2: table conditional formatting — lower priority than paragraph style.
     if let Some(c) = cond {
@@ -417,7 +438,7 @@ pub(super) fn build_fragments(
         &frag_ctx,
         None,
         &measure,
-        &mut state.footnote_counter,
+        &mut state.footnotes,
         &mut state.endnote_counter,
         state.field_ctx,
     );
@@ -425,4 +446,263 @@ pub(super) fn build_fragments(
     populate_underline_metrics(&mut fragments, ctx.measurer);
 
     (fragments, merged_props)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::model::dimension::Dimension;
+    use crate::render::fonts::FontRegistry;
+    use crate::render::layout::measurer::TextMeasurer;
+    use crate::render::resolve::ResolvedDocument;
+
+    fn empty_resolved() -> ResolvedDocument {
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: model::ParagraphProperties::default(),
+            doc_defaults_run: model::RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn para(content: Vec<model::Inline>) -> Paragraph {
+        Paragraph {
+            style_id: None,
+            properties: model::ParagraphProperties::default(),
+            mark_run_properties: None,
+            content,
+            rsids: model::ParagraphRevisionIds::default(),
+        }
+    }
+
+    fn text_run(s: &str) -> model::Inline {
+        model::Inline::TextRun(Box::new(model::TextRun {
+            style_id: None,
+            properties: model::RunProperties::default(),
+            content: vec![model::RunElement::Text(s.to_string())],
+            rsids: model::RevisionIds::default(),
+        }))
+    }
+
+    /// Run a closure with a live `BuildContext` + `BuildState`. A real Skia
+    /// measurer is used, so assertions below are structural — never on
+    /// platform-dependent metric values.
+    fn with_ctx<R>(
+        resolved: &ResolvedDocument,
+        f: impl FnOnce(&BuildContext, &mut BuildState) -> R,
+    ) -> R {
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved,
+        };
+        let mut state = BuildState::default();
+        f(&ctx, &mut state)
+    }
+
+    fn resolved_style(paragraph: model::ParagraphProperties) -> ResolvedStyle {
+        ResolvedStyle {
+            paragraph,
+            run: model::RunProperties::default(),
+            table: None,
+            table_style_overrides: Vec::new(),
+            is_toc_entry: false,
+        }
+    }
+
+    #[test]
+    fn section_break_produces_no_layout_block() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let block = Block::SectionBreak(Box::default());
+            let mut pending = None;
+            assert!(
+                build_block(&block, Pt::new(400.0), ctx, state, &mut pending).is_none(),
+                "section breaks are consumed by resolve, not laid out"
+            );
+        });
+    }
+
+    /// §17.3.1.29: a paragraph with no runs still occupies one line. Without an
+    /// injected `LineBreak` the fragment list is empty and `layout_section`
+    /// drops the paragraph, collapsing it to zero height.
+    #[test]
+    fn empty_paragraph_gets_a_line_break_fragment() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut pending = None;
+            let block = build_paragraph_block(&para(vec![]), ctx, state, &mut pending, None, None)
+                .expect("empty paragraph still lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                matches!(fragments.as_slice(), [Fragment::LineBreak { line_height }] if line_height.raw() > 0.0),
+                "exactly one LineBreak with a real height"
+            );
+        });
+    }
+
+    #[test]
+    fn paragraph_with_content_gets_no_injected_line_break() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut pending = None;
+            let block = build_paragraph_block(
+                &para(vec![text_run("hi")]),
+                ctx,
+                state,
+                &mut pending,
+                None,
+                None,
+            )
+            .expect("lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                !fragments
+                    .iter()
+                    .any(|f| matches!(f, Fragment::LineBreak { .. })),
+                "no LineBreak injected when the paragraph has runs"
+            );
+        });
+    }
+
+    /// §17.3.1.11: a drop-cap paragraph emits no block of its own — it is held
+    /// aside and attached to the *following* paragraph.
+    #[test]
+    fn drop_cap_paragraph_is_deferred_onto_the_next_paragraph() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut cap = para(vec![text_run("D")]);
+            cap.properties.frame_properties = Some(model::FrameKind::DropCap {
+                style: model::DropCap::Drop,
+                lines: 3,
+                h_space: None,
+            });
+
+            let mut pending = None;
+            assert!(
+                build_paragraph_block(&cap, ctx, state, &mut pending, None, None).is_none(),
+                "the drop-cap paragraph itself produces no block"
+            );
+            let held = pending
+                .as_ref()
+                .expect("drop cap held for the next paragraph");
+            assert_eq!(held.lines, 3, "line span carried through");
+
+            // The next paragraph consumes it.
+            let next = build_paragraph_block(
+                &para(vec![text_run("body")]),
+                ctx,
+                state,
+                &mut pending,
+                None,
+                None,
+            )
+            .expect("lays out");
+            let LayoutBlock::Paragraph { style, .. } = next else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                style.drop_cap.is_some(),
+                "attached to the following paragraph"
+            );
+            assert!(pending.is_none(), "and taken, so it attaches only once");
+        });
+    }
+
+    /// §17.7.2 precedence inside a table cell: conditional formatting outranks
+    /// the table style, which outranks document defaults. Asserted on the
+    /// merged paragraph properties returned by `build_fragments`.
+    #[test]
+    fn conditional_formatting_outranks_table_style() {
+        let mut resolved = empty_resolved();
+        resolved.doc_defaults_paragraph.alignment = Some(model::Alignment::Start);
+        let table_style = resolved_style(model::ParagraphProperties {
+            alignment: Some(model::Alignment::Center),
+            ..Default::default()
+        });
+
+        with_ctx(&resolved, |ctx, state| {
+            // Table style alone.
+            let (_, props) = build_fragments(
+                &para(vec![text_run("x")]),
+                ctx,
+                state,
+                Some(&table_style),
+                None,
+            );
+            assert_eq!(
+                props.alignment,
+                Some(model::Alignment::Center),
+                "table style beats doc defaults"
+            );
+
+            // Conditional formatting on top of it.
+            let cond = CellConditionalFormatting {
+                cell_properties: None,
+                run_properties: None,
+                paragraph_properties: Some(model::ParagraphProperties {
+                    alignment: Some(model::Alignment::End),
+                    ..Default::default()
+                }),
+            };
+            let (_, props) = build_fragments(
+                &para(vec![text_run("x")]),
+                ctx,
+                state,
+                Some(&table_style),
+                Some(&cond),
+            );
+            assert_eq!(
+                props.alignment,
+                Some(model::Alignment::End),
+                "conditional formatting beats the table style"
+            );
+        });
+    }
+
+    /// The paragraph's own direct formatting outranks every table-level layer.
+    #[test]
+    fn direct_paragraph_properties_outrank_conditional_formatting() {
+        let resolved = empty_resolved();
+        let table_style = resolved_style(model::ParagraphProperties {
+            alignment: Some(model::Alignment::Center),
+            ..Default::default()
+        });
+        let cond = CellConditionalFormatting {
+            cell_properties: None,
+            run_properties: None,
+            paragraph_properties: Some(model::ParagraphProperties {
+                alignment: Some(model::Alignment::End),
+                ..Default::default()
+            }),
+        };
+
+        with_ctx(&resolved, |ctx, state| {
+            let mut p = para(vec![text_run("x")]);
+            p.properties.alignment = Some(model::Alignment::Both);
+            let (_, props) = build_fragments(&p, ctx, state, Some(&table_style), Some(&cond));
+            assert_eq!(
+                props.alignment,
+                Some(model::Alignment::Both),
+                "direct pPr wins over every table layer"
+            );
+        });
+    }
 }

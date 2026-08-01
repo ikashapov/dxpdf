@@ -162,30 +162,31 @@ mod tests {
         assert_eq!(m.color, Color::Auto);
     }
 
+    /// §17.18.2 ST_Border: `nil` and `none` both mean "no border", but they
+    /// are **not** merged. [MS-OI29500] §17.4.66 separates them in table border
+    /// conflict resolution — `nil` suppresses the shared edge, `none` inherits
+    /// and yields — so the distinction has to survive parsing. The cascade sees
+    /// `Some(Border)` either way, so an explicit child can still override an
+    /// inherited side.
     #[test]
-    fn border_val_nil_round_trips_to_none_style() {
-        // §17.18.2 ST_Border: `nil` and `none` are both "no border". The
-        // parser collapses them to `BorderStyle::None`, but the cascade
-        // must still see `Some(Border)` so an explicit child can override
-        // an inherited side. The render boundary drops the sentinel.
-        let xml = r#"<top val="nil"/>"#;
-        let b: BorderXml = quick_xml::de::from_str(xml).unwrap();
-        let m: Border = b.into();
-        assert_eq!(m.style, crate::docx::model::BorderStyle::None);
-    }
-
-    #[test]
-    fn border_val_none_round_trips_to_none_style() {
-        let xml = r#"<top val="none"/>"#;
-        let b: BorderXml = quick_xml::de::from_str(xml).unwrap();
-        let m: Border = b.into();
-        assert_eq!(m.style, crate::docx::model::BorderStyle::None);
+    fn border_val_nil_and_none_stay_distinct() {
+        let nil: Border = quick_xml::de::from_str::<BorderXml>(r#"<top val="nil"/>"#)
+            .unwrap()
+            .into();
+        let none: Border = quick_xml::de::from_str::<BorderXml>(r#"<top val="none"/>"#)
+            .unwrap()
+            .into();
+        assert_eq!(nil.style, crate::docx::model::BorderStyle::Nil);
+        assert_eq!(none.style, crate::docx::model::BorderStyle::None);
+        assert_ne!(nil.style, none.style, "merging these loses §17.4.66");
+        // Both still paint nothing — only conflict resolution tells them apart.
+        assert!(nil.style.draws_nothing() && none.style.draws_nothing());
     }
 
     #[test]
     fn paragraph_borders_all_nil_preserves_some_per_side() {
         // Word emits this in pPrDefault. Each side must round-trip as
-        // `Some(Border { style: None })`, not as the parent `pBdr` being
+        // `Some(Border { style: Nil })`, not as the parent `pBdr` being
         // None — the merge cascade needs the explicit override.
         let xml = r#"<pBdr>
             <top val="nil"/>
@@ -198,7 +199,7 @@ mod tests {
         let px: ParagraphBordersXml = quick_xml::de::from_str(xml).unwrap();
         let p: ParagraphBorders = px.into();
         assert!(p.top.is_some());
-        assert_eq!(p.top.unwrap().style, crate::docx::model::BorderStyle::None);
+        assert_eq!(p.top.unwrap().style, crate::docx::model::BorderStyle::Nil);
         assert!(p.bottom.is_some());
         assert!(p.left.is_some());
         assert!(p.right.is_some());

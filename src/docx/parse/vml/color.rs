@@ -1,25 +1,22 @@
 //! VML color parsing.
 
-use crate::docx::error::Result;
 use crate::docx::model::*;
 
 /// Parse a VML color value (§14.1.2.1): `#RRGGBB`, `RRGGBB` hex, or named color.
-pub(super) fn parse_color(s: &str) -> Result<VmlColor> {
+///
+/// Returns `None` for an unrecognized value; every call site treats a color as
+/// optional (an unparseable `fillcolor` simply means "no color"), so this
+/// mirrors the sibling `parse_style`/`parse_formula`/`parse_length` helpers
+/// rather than raising a document-fatal error.
+pub(super) fn parse_color(s: &str) -> Option<VmlColor> {
     let hex = s.strip_prefix('#').unwrap_or(s);
     if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
         let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
         let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-        return Ok(VmlColor::Rgb(r, g, b));
+        return Some(VmlColor::Rgb(r, g, b));
     }
-    match parse_named_color(s) {
-        Some(named) => Ok(VmlColor::Named(named)),
-        None => Err(crate::docx::error::ParseError::InvalidAttributeValue {
-            attr: "fillcolor".into(),
-            value: s.into(),
-            reason: "unrecognized VML color name per §14.1.2.1".into(),
-        }),
-    }
+    parse_named_color(s).map(VmlColor::Named)
 }
 
 fn parse_named_color(s: &str) -> Option<VmlNamedColor> {
@@ -192,4 +189,87 @@ fn parse_named_color(s: &str) -> Option<VmlNamedColor> {
         "windowtext" => VmlNamedColor::WindowText,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_with_hash() {
+        assert_eq!(
+            parse_color("#4F81BD"),
+            Some(VmlColor::Rgb(0x4F, 0x81, 0xBD))
+        );
+    }
+
+    #[test]
+    fn hex_without_hash() {
+        assert_eq!(parse_color("FF0000"), Some(VmlColor::Rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn hex_is_case_insensitive() {
+        assert_eq!(
+            parse_color("#abcdef"),
+            Some(VmlColor::Rgb(0xAB, 0xCD, 0xEF))
+        );
+    }
+
+    #[test]
+    fn named_color_basic() {
+        assert_eq!(
+            parse_color("red"),
+            Some(VmlColor::Named(VmlNamedColor::Red))
+        );
+    }
+
+    #[test]
+    fn named_color_is_case_insensitive() {
+        // §14.1.2.1 matches CSS color names case-insensitively.
+        assert_eq!(
+            parse_color("RED"),
+            Some(VmlColor::Named(VmlNamedColor::Red))
+        );
+        assert_eq!(
+            parse_color("Red"),
+            Some(VmlColor::Named(VmlNamedColor::Red))
+        );
+    }
+
+    #[test]
+    fn gray_grey_spelling_aliases() {
+        let gray = Some(VmlColor::Named(VmlNamedColor::Gray));
+        assert_eq!(parse_color("gray"), gray);
+        assert_eq!(parse_color("grey"), gray);
+        let dark = Some(VmlColor::Named(VmlNamedColor::DarkGray));
+        assert_eq!(parse_color("darkgray"), dark);
+        assert_eq!(parse_color("darkgrey"), dark);
+    }
+
+    #[test]
+    fn vml_system_color() {
+        assert_eq!(
+            parse_color("threeddarkshadow"),
+            Some(VmlColor::Named(VmlNamedColor::ThreeDDarkShadow))
+        );
+    }
+
+    #[test]
+    fn unrecognized_name_is_none() {
+        // Callers `.and_then` this, so an unknown color degrades to "no color".
+        assert_eq!(parse_color("notacolor"), None);
+    }
+
+    #[test]
+    fn three_digit_hex_is_not_six_digit_and_falls_through_to_none() {
+        // Not 6 hex digits → not treated as RGB; "fff" is not a named color.
+        assert_eq!(parse_color("#fff"), None);
+    }
+
+    #[test]
+    fn six_non_hex_chars_are_not_rgb() {
+        // Length 6 but not all hex digits → named lookup (which also fails).
+        assert_eq!(parse_color("gggggg"), None);
+    }
 }

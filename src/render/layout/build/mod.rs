@@ -54,23 +54,45 @@ impl BuildContext<'_> {
 pub struct BuildState {
     /// Page configuration for the current section.
     pub page_config: crate::render::layout::page::PageConfig,
-    /// Sequential footnote display number (1, 2, 3...).
-    pub footnote_counter: u32,
+    /// §17.11.12: footnote display numbering plus the ordered record of which
+    /// notes each paragraph referenced. Advanced by `collect_fragments` and
+    /// drained per paragraph — see
+    /// [`FootnoteTracker`](crate::render::layout::fragment::FootnoteTracker).
+    pub footnotes: crate::render::layout::fragment::FootnoteTracker,
     /// Sequential endnote display number (i, ii, iii...).
     pub endnote_counter: u32,
     /// Per-(numId, level) running counters for list labels.
     pub list_counters: HashMap<(model::NumId, u8), u32>,
     /// Field evaluation context (page number, total pages).
     pub field_ctx: crate::render::layout::fragment::FieldContext,
+    /// §20.1.4.1.17: default text color for the current shape text box (from
+    /// `wps:style/fontRef`), applied as the base below the run/style cascade.
+    /// `None` outside a shape text box.
+    pub shape_default_text_color: Option<crate::render::resolve::color::RgbColor>,
+    /// §20.1.4.1.17: default font family for the current shape text box (the
+    /// theme major/minor collection selected by `fontRef@idx`). `None` outside
+    /// a shape text box.
+    pub shape_default_font_family: Option<String>,
+    /// §17.4.38: border styles already reported as unsupported this render.
+    ///
+    /// The layout layer draws only `Single` and `Double`, so the other 24
+    /// `BorderStyle` variants are approximated by a solid line. Warning at
+    /// every call would emit one line per cell edge — thousands for a large
+    /// table — so each distinct style is reported once. Scoped to the render
+    /// (like `Measurer::warned_emoji`) rather than to the process, so a second
+    /// document still reports its own.
+    pub warned_border_styles: std::collections::HashSet<model::BorderStyle>,
+    /// §17.4.41 / §17.4.42: a row overrode the table's `tblCellSpacing`, which
+    /// layout applies per *table*, not per row. Reported once per render for
+    /// the same reason as `warned_border_styles`.
+    pub warned_row_cell_spacing: bool,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
-/// Built section output — layout blocks plus endnotes.
+/// Built section output — layout blocks.
 pub struct BuiltSection {
     pub blocks: Vec<LayoutBlock>,
-    /// Endnote content (display number, fragments, style) — rendered at document end.
-    pub endnotes: Vec<(String, Vec<Fragment>, ParagraphStyle)>,
 }
 
 /// Build layout blocks for one section by recursing into its block tree.
@@ -95,11 +117,22 @@ pub fn build_section_blocks(
         })
         .collect();
 
-    // Collect endnotes (rendered at document end).
+    BuiltSection { blocks }
+}
+
+/// §17.11.2: build the document's endnote content, rendered once at the end of
+/// the document.
+///
+/// Endnotes are **document-scoped**, not section-scoped: `ResolvedDocument`
+/// holds a single endnote map. Calling this per section would emit every
+/// endnote once per section, so it deliberately sits outside the section loop.
+pub fn build_document_endnotes(
+    ctx: &BuildContext,
+    state: &mut BuildState,
+) -> Vec<(String, Vec<Fragment>, ParagraphStyle)> {
     let mut endnotes = Vec::new();
     collect_endnotes(ctx, state, &mut endnotes);
-
-    BuiltSection { blocks, endnotes }
+    endnotes
 }
 
 /// Collected header/footer content with layout metadata.
@@ -152,7 +185,12 @@ pub fn build_header_footer_content(
         match block {
             Block::Paragraph(p) => {
                 let (mut frags, props) = build_fragments(p, ctx, state, None, None);
-                let style = paragraph_style_from_props(&props);
+                // §17.11.12: headers/footers don't render footnote bodies, but
+                // they must still drain — otherwise a reference inside one
+                // would be attributed to the next body paragraph.
+                let _ = state.footnotes.take_pending();
+                let style =
+                    paragraph_style_from_props(&props, Pt::from(ctx.resolved.default_tab_stop));
 
                 // Check for VML absolute positioning in Pict inlines.
                 if absolute_position.is_none() {
@@ -217,7 +255,8 @@ pub fn build_header_footer_content(
                 // (otherwise the shape displaces text it should flank).
                 let has_floating_anchor = has_float_images || !paragraph_shapes.is_empty();
                 if frags.is_empty() && block_i + 1 < block_count && !has_floating_anchor {
-                    let (family, mut size, ..) = resolve_paragraph_defaults(p, ctx.resolved, false);
+                    let (family, mut size, ..) =
+                        resolve_paragraph_defaults(p, ctx.resolved, false, None, None);
                     if let Some(ref mrp) = p.mark_run_properties {
                         if let Some(fs) = mrp.font_size {
                             size = Pt::from(fs);
@@ -241,6 +280,7 @@ pub fn build_header_footer_content(
                 layout_blocks.push(LayoutBlock::Table {
                     rows: built.rows,
                     col_widths: built.col_widths,
+                    cell_spacing: built.cell_spacing,
                     border_config: built.border_config,
                     indent: built.indent,
                     alignment: built.alignment,
@@ -265,4 +305,111 @@ pub fn default_line_height(ctx: &BuildContext) -> Pt {
     let family = doc_font_family(ctx);
     let size = doc_font_size(ctx);
     ctx.measurer.default_line_height(&family, size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::dimension::Dimension;
+    use crate::render::fonts::FontRegistry;
+    use crate::render::layout::measurer::TextMeasurer;
+
+    fn empty_resolved() -> ResolvedDocument {
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: model::ParagraphProperties::default(),
+            doc_defaults_run: model::RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn empty_para() -> Block {
+        Block::Paragraph(Box::new(model::Paragraph {
+            style_id: None,
+            properties: model::ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: Vec::new(),
+            rsids: model::ParagraphRevisionIds::default(),
+        }))
+    }
+
+    fn line_break_counts(blocks: &[LayoutBlock]) -> Vec<usize> {
+        blocks
+            .iter()
+            .map(|b| match b {
+                LayoutBlock::Paragraph { fragments, .. } => fragments
+                    .iter()
+                    .filter(|f| matches!(f, Fragment::LineBreak { .. }))
+                    .count(),
+                _ => 0,
+            })
+            .collect()
+    }
+
+    /// §17.10.1: an empty paragraph in a header/footer holds a line of height —
+    /// *except* the last one, which would otherwise push the whole stack.
+    #[test]
+    fn empty_header_paragraphs_hold_a_line_except_the_last() {
+        let resolved = empty_resolved();
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let mut state = BuildState::default();
+
+        let blocks = vec![empty_para(), empty_para(), empty_para()];
+        let hf = build_header_footer_content(&blocks, &ctx, &mut state);
+
+        assert_eq!(hf.blocks.len(), 3);
+        assert_eq!(
+            line_break_counts(&hf.blocks),
+            vec![1, 1, 0],
+            "the trailing empty paragraph contributes no line"
+        );
+    }
+
+    /// A single empty paragraph is also the last one, so it contributes nothing.
+    #[test]
+    fn a_lone_empty_header_paragraph_holds_no_line() {
+        let resolved = empty_resolved();
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let mut state = BuildState::default();
+
+        let hf = build_header_footer_content(&[empty_para()], &ctx, &mut state);
+        assert_eq!(line_break_counts(&hf.blocks), vec![0]);
+    }
+
+    /// Section breaks inside header/footer content are structural, not laid out.
+    #[test]
+    fn header_section_breaks_produce_no_blocks() {
+        let resolved = empty_resolved();
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let mut state = BuildState::default();
+
+        let blocks = vec![Block::SectionBreak(Box::default()), empty_para()];
+        let hf = build_header_footer_content(&blocks, &ctx, &mut state);
+        assert_eq!(hf.blocks.len(), 1, "only the paragraph survives");
+    }
 }

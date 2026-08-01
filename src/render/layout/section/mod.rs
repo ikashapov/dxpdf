@@ -196,11 +196,11 @@ mod tests {
                     is_header: Some(*header),
                     cant_split: Some(true),
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 })
                 .collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -1760,10 +1760,10 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             }],
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -1859,7 +1859,7 @@ mod tests {
         );
     }
 
-    // ── §17.4.59 — floating-table page overflow ────────────────────────
+    // ── §17.4.58 — floating-table page overflow ────────────────────────
     //
     // A floating table (`<w:tbl>` with `<w:tblpPr>`) that is taller than
     // the available height on its anchor page must split at row
@@ -1893,7 +1893,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }
@@ -1904,6 +1903,7 @@ mod tests {
         LayoutBlock::Table {
             rows: (0..n).map(|i| row_with_label(&format!("r{i}"))).collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2267,10 +2267,10 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             }],
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2341,7 +2341,6 @@ mod tests {
                     is_header: None,
                     cant_split: None,
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 },
                 TableRowInput {
@@ -2373,7 +2372,6 @@ mod tests {
                     is_header: None,
                     cant_split: None,
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 },
                 TableRowInput {
@@ -2401,11 +2399,11 @@ mod tests {
                     is_header: None,
                     cant_split: None,
                     grid_before: 0,
-                    grid_after: 0,
                     border_overrides: None,
                 },
             ],
             col_widths: vec![Pt::new(50.0), Pt::new(50.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2468,6 +2466,7 @@ mod tests {
                 .map(|i| row_with_label(&format!("row{i}")))
                 .collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2801,6 +2800,7 @@ mod tests {
         LayoutBlock::Table {
             rows: (0..n).map(|i| row_with_label(&format!("r{i}"))).collect(),
             col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::ZERO,
             border_config: None,
             indent: Pt::ZERO,
             alignment: None,
@@ -2816,7 +2816,7 @@ mod tests {
         }
     }
 
-    /// §17.4.39: two floating tables both declaring `tblOverlap=Never`
+    /// §17.4.57: two floating tables both declaring `tblOverlap=Never`
     /// must not draw at overlapping y-positions on the same page. The
     /// second table either slides down past the first or spills to
     /// the next page.
@@ -2872,7 +2872,87 @@ mod tests {
         }
     }
 
-    /// §17.4.39 default behavior (overlap omitted) — overlap is
+    /// §17.4.57 governs table-vs-table overlap **only**. A floating
+    /// *image* across the anchor must not push a `tblOverlap=Never`
+    /// table down: the spec defines the setting as "whether the current
+    /// table shall allow other floating **tables** to overlap its
+    /// extents", and Word lets a table sit over an image.
+    ///
+    /// Self-calibrating: the same document is laid out twice, differing
+    /// only in whether the paragraph carries the image float. The table
+    /// must land in the identical place both times. Asserting equality
+    /// rather than a hard-coded y keeps the test honest if page metrics
+    /// or paragraph height ever change.
+    #[test]
+    fn never_overlap_table_is_not_shifted_by_a_floating_image() {
+        use crate::model::TableOverlap;
+
+        // The image spans y = 10..52, straight across the table's y=15
+        // anchor — so a resolver that counted it would shift to y=52.
+        let owner_with_image = LayoutBlock::Paragraph {
+            fragments: vec![text_frag("owner", 30.0, 14.0)],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![absolute_floating_image(
+                WrapMode::Square(crate::model::WrapText::BothSides),
+                10.0,
+                42.0,
+            )],
+            floating_shapes: vec![],
+        };
+        let owner_without_image = LayoutBlock::Paragraph {
+            fragments: vec![text_frag("owner", 30.0, 14.0)],
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+
+        // (page index, y) of the first table row.
+        let first_row_at = |owner: LayoutBlock| -> (usize, f32) {
+            let blocks = vec![
+                owner,
+                floating_table_with_rows_and_overlap(3, 15.0, Some(TableOverlap::Never)),
+            ];
+            let pages = layout_section(
+                &blocks,
+                &small_config(),
+                None,
+                Pt::ZERO,
+                Pt::new(14.0),
+                None,
+            );
+            pages
+                .iter()
+                .enumerate()
+                .find_map(|(pi, page)| {
+                    page.commands.iter().find_map(|cmd| match cmd {
+                        DrawCommand::Text { text, position, .. } if &**text == "r0" => {
+                            Some((pi, position.y.raw()))
+                        }
+                        _ => None,
+                    })
+                })
+                .expect("first table row is drawn")
+        };
+
+        let (page_with, y_with) = first_row_at(owner_with_image);
+        let (page_without, y_without) = first_row_at(owner_without_image);
+
+        assert_eq!(
+            page_with, page_without,
+            "the image must not push the table onto another page"
+        );
+        assert!(
+            (y_with - y_without).abs() < 0.01,
+            "table moved from y={y_without} to y={y_with} because of an image float; \
+             tblOverlap does not govern images"
+        );
+    }
+
+    /// §17.4.57 default behavior (overlap omitted) — overlap is
     /// permitted. Two tables at the same anchor on the same page
     /// DO draw at overlapping y-positions. This is intentional.
     #[test]
@@ -2911,7 +2991,7 @@ mod tests {
     }
 
     /// The continuation slice starts at the top content area on page 2
-    /// (margin.top), not at the original `tblpY` anchor. §17.4.59 only
+    /// (margin.top), not at the original `tblpY` anchor. §17.4.58 only
     /// anchors the first slice; the continuation flows at the top of
     /// each subsequent page. Behavioral check: the first text on page
     /// 2 must sit *higher* on the page than the first text on page 1

@@ -124,10 +124,12 @@ struct EmbedXml {
     font_key: String,
 }
 
-/// §17.8.3.3: Parse a fontKey GUID string into 16 bytes.
+/// §17.8.3.3: Parse a fontKey GUID string into the 16-byte XOR key.
 ///
-/// The GUID format is `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`.
-/// Byte order per RFC 4122: first 4 bytes LE, next 2 LE, next 2 LE, remaining 8 BE.
+/// The GUID format is `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`. Strip the
+/// braces and dashes to get 16 bytes in GUID display order, then reverse the
+/// whole 16-byte sequence to form the de-obfuscation key (§17.8.3.3) — the
+/// reversal is applied to the entire byte array, not field-wise per RFC 4122.
 fn parse_font_key(key: &str) -> Result<[u8; 16]> {
     let hex: String = key.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     if hex.len() != 32 {

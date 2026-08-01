@@ -140,6 +140,82 @@ fn convert_docx_with_two_numbering_definitions() {
     assert_eq!(&pdf[..5], b"%PDF-");
 }
 
+/// §17.9.28: `w:start` is an `ST_DecimalNumber`, so a list may legally start at
+/// zero. Seeding the running counter with `start - 1` underflowed `u32` and
+/// panicked ("attempt to subtract with overflow") in any build with overflow
+/// checks on; release silently wrapped through `u32::MAX` back to the right
+/// answer, hiding the crash outside debug/test builds.
+#[test]
+fn numbering_starting_at_zero_converts() {
+    let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"#;
+    let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="0"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+      <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+    </w:numbering>"#;
+    let pdf = dxpdf::convert(&make_numbered_docx(document, numbering)).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
+/// §17.9.27: `w:startOverride` reaches the same counter seed as `w:start`, so
+/// a zero override must not underflow either.
+#[test]
+fn numbering_start_override_of_zero_converts() {
+    let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Only</w:t></w:r></w:p>
+      </w:body>
+    </w:document>"#;
+    let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="5"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+      <w:num w:numId="1"><w:abstractNumId w:val="0"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="0"/></w:lvlOverride></w:num>
+    </w:numbering>"#;
+    let pdf = dxpdf::convert(&make_numbered_docx(document, numbering)).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
+/// §17.4.14: a row may address more grid columns than `<w:tblGrid>` declares —
+/// producers emit this and Word recovers by extending the grid. The cell-width
+/// slice clamped only its end index, so the range inverted and panicked
+/// ("range start index 3 out of range for slice of length 2"). Unlike an
+/// arithmetic overflow this fires in release too, since slice bounds are
+/// always checked.
+#[test]
+fn table_row_with_more_cells_than_grid_columns_converts() {
+    let cell = |t: &str| format!("<w:tc><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>");
+    let docx = simple_docx(&format!(
+        r#"<w:tbl>
+          <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+          <w:tr>{}{}{}{}</w:tr>
+        </w:tbl><w:p/>"#,
+        cell("a"),
+        cell("b"),
+        cell("c"),
+        cell("d")
+    ));
+    let pdf = dxpdf::convert(&docx).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
+/// §17.4.17: same clamp, reached via `<w:gridBefore>` pointing past the grid.
+#[test]
+fn table_grid_before_past_declared_columns_converts() {
+    let docx = simple_docx(
+        r#"<w:tbl>
+          <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+          <w:tr><w:trPr><w:gridBefore w:val="5"/></w:trPr>
+            <w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:tbl><w:p/>"#,
+    );
+    let pdf = dxpdf::convert(&docx).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
 #[test]
 fn decimal_integer_measurements_convert_without_preprocessing() {
     let docx = simple_docx(
@@ -638,5 +714,48 @@ fn position_tab_lays_out_by_position() {
     assert!(
         x_right - x_center > 100.0,
         "right ptab should right-align near the margin, got center={x_center} right={x_right}"
+    );
+}
+
+/// Regression: a body-anchored `wps:wsp` shape's text-box content (`wps:txbx`)
+/// must render. `layout_section` emitted the shape's fill/stroke but dropped its
+/// `text_commands`, so shape text vanished in the body (it only worked for
+/// paragraph-anchored-in-cell and header/footer shapes, via the stacker).
+#[test]
+fn body_shape_txbx_text_is_rendered() {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+
+    let doc_xml = r#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+  <w:body><w:p><w:r><w:drawing>
+    <wp:anchor distT="0" distB="0" distL="0" distR="0" relativeHeight="1" behindDoc="0" locked="0" allowOverlap="1">
+      <wp:simplePos x="0" y="0"/>
+      <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+      <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+      <wp:extent cx="2743200" cy="914400"/><wp:wrapNone/><wp:docPr id="1" name="tb"/>
+      <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+        <wps:wsp><wps:cNvSpPr/>
+          <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr>
+          <wps:txbx><w:txbxContent><w:p><w:r><w:t>SHAPETEXTZZ</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+          <wps:bodyPr/>
+        </wps:wsp>
+      </a:graphicData></a:graphic>
+    </wp:anchor>
+  </w:drawing></w:r></w:p></w:body>
+</w:document>"#;
+
+    let docx = make_docx(doc_xml);
+    let doc = dxpdf::docx::parse(&docx).expect("parse");
+    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let found = pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.contains("SHAPETEXTZZ")));
+    assert!(
+        found,
+        "wps:txbx text-box content must render as a Text draw command"
     );
 }

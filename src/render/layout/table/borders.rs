@@ -6,13 +6,70 @@ use super::types::{
 };
 use crate::render::layout::draw_command::DrawCommand;
 
-/// Resolved borders for one cell edge.
+/// One cell edge during and after §17.4.38 resolution.
+///
+/// Three states rather than `Option<TableBorderLine>`, because [MS-OI29500]
+/// §17.4.66 distinguishes "nothing said about this edge" from "declared
+/// `val="nil"`". The difference is entirely about **inheritance**: an omitted
+/// or `none` edge falls back to the table style, then `tblPrEx`, then
+/// `tblBorders`; `nil` declines that fallback and stays empty.
+///
+/// It is *not* about outranking the facing cell. `nil` removes this cell's
+/// border and nothing else — see [`resolve_border_conflict`].
+///
+/// The distinction survives resolution for one downstream reader: the page-split
+/// top-border restore in `emit.rs` may revive an `Absent` top but must not
+/// revive a `Suppressed` one. For painting they are identical, which is what
+/// [`CellEdge::line`] expresses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum CellEdge {
+    /// Nothing said about this edge — or it was declared `val="none"`, which
+    /// §17.4.66 treats identically. Inherits, then yields.
+    Absent,
+    /// Declared `val="nil"`: no border here, and no inheritance either.
+    Suppressed,
+    /// A border to resolve against the opposing edge, and paint if it wins.
+    Line(TableBorderLine),
+}
+
+impl CellEdge {
+    /// The line to paint, if any. Both `Absent` and `Suppressed` paint nothing.
+    pub(super) fn line(self) -> Option<TableBorderLine> {
+        match self {
+            Self::Line(l) => Some(l),
+            Self::Absent | Self::Suppressed => None,
+        }
+    }
+
+    /// Whether two *resolved* edges paint the same thing.
+    ///
+    /// Not `==`: by this point the `Absent`/`Suppressed` distinction is not
+    /// observable to the painter, and letting it in would split a run of columns
+    /// that paints one continuous line. Callers asking "can one cell draw this
+    /// whole span in a single stroke?" mean *this* question.
+    pub(super) fn paints_same(self, other: Self) -> bool {
+        self.line() == other.line()
+    }
+}
+
+impl From<Option<TableBorderLine>> for CellEdge {
+    /// Table-level borders have no way to express `nil` — an edge is either
+    /// configured or not — so an absent one is `Absent`, never `Suppressed`.
+    fn from(b: Option<TableBorderLine>) -> Self {
+        match b {
+            Some(l) => Self::Line(l),
+            None => Self::Absent,
+        }
+    }
+}
+
+/// Resolved borders for one cell.
 #[derive(Clone)]
 pub(super) struct CellBorders {
-    pub(super) top: Option<TableBorderLine>,
-    pub(super) bottom: Option<TableBorderLine>,
-    pub(super) left: Option<TableBorderLine>,
-    pub(super) right: Option<TableBorderLine>,
+    pub(super) top: CellEdge,
+    pub(super) bottom: CellEdge,
+    pub(super) left: CellEdge,
+    pub(super) right: CellEdge,
 }
 
 /// §17.4.38 / §17.7.6: resolve effective borders for a cell.
@@ -33,41 +90,46 @@ pub(super) fn resolve_cell_effective_borders(
     cell_grid_span: usize,
     num_rows: usize,
     num_grid_cols: usize,
-) -> (
-    Option<TableBorderLine>,
-    Option<TableBorderLine>,
-    Option<TableBorderLine>,
-    Option<TableBorderLine>,
-) {
+) -> (CellEdge, CellEdge, CellEdge, CellEdge) {
     // Start with table-level borders mapped to cell edges.
     let tb = table_borders;
     let is_first_row = row_idx == 0;
-    let is_last_row = row_idx == num_rows - 1;
+    // `row_idx + 1 == num_rows`, not `row_idx == num_rows - 1`: the latter
+    // underflows on an empty table. No caller passes `num_rows == 0` today, but
+    // the parameter is free and the guard would live entirely in the callers.
+    let is_last_row = row_idx + 1 == num_rows;
     let is_first_col = cell_grid_col == 0;
     let is_last_col = cell_grid_col + cell_grid_span >= num_grid_cols;
 
-    let mut top = if is_first_row {
+    let mut top: CellEdge = if is_first_row {
         tb.and_then(|b| b.top)
     } else {
         tb.and_then(|b| b.inside_h)
-    };
-    let mut bottom = if is_last_row {
+    }
+    .into();
+    let mut bottom: CellEdge = if is_last_row {
         tb.and_then(|b| b.bottom)
     } else {
         tb.and_then(|b| b.inside_h)
-    };
-    let mut left = if is_first_col {
+    }
+    .into();
+    let mut left: CellEdge = if is_first_col {
         tb.and_then(|b| b.left)
     } else {
         tb.and_then(|b| b.inside_v)
-    };
-    let mut right = if is_last_col {
+    }
+    .into();
+    let mut right: CellEdge = if is_last_col {
         tb.and_then(|b| b.right)
     } else {
         tb.and_then(|b| b.inside_v)
-    };
+    }
+    .into();
 
-    // Per-cell borders from conditional formatting override.
+    // Per-cell overrides. Only `nil` and a real border reach here — an explicit
+    // `none` was mapped to "no override" upstream (§17.4.66: it inherits
+    // exactly like an omitted edge), so it correctly leaves the table-level
+    // border above untouched instead of erasing it.
     if let Some(ref cb) = cell.cell_borders {
         if let Some(v) = &cb.top {
             top = resolve_override(v);
@@ -86,27 +148,138 @@ pub(super) fn resolve_cell_effective_borders(
     (top, bottom, left, right)
 }
 
-/// §17.4.43: resolve a border conflict between two competing borders on
-/// a shared edge.  Returns the winning border (or `None` if both are `None`).
+/// Resolve a border conflict between two competing borders on a shared edge.
+/// Returns the winning border (or `None` if both are `None`).
 ///
-/// Algorithm per [MS-OI29500] §17.4.66:
-///   1. `none` yields to the opposing border; `nil` suppresses both.
-///   2. Weight = border_width_eighths × border_number.  Higher wins.
-///   3. Equal weight: style precedence list.
-///   4. Equal style: darker color wins (R+B+2G, then B+2G, then G).
-pub(super) fn resolve_border_conflict(
-    a: Option<TableBorderLine>,
-    b: Option<TableBorderLine>,
-) -> Option<TableBorderLine> {
+/// The algorithm is **not in ISO/IEC 29500-1** — the standard only says a method
+/// exists. It is spelled out in [MS-OI29500] §17.4.66 (`tcBorders`, note a),
+/// which is the authority for every step below:
+///   1. An edge with no border yields to one that has it. `none` counts as
+///      no border, per *"If the conflicting table cell border is `none` (no
+///      border), then the opposing border shall be displayed."*
+///   2. Weight = width in eighths of a point × style number. Higher wins.
+///   3. Equal weight: the style **earlier in the spec's precedence list** wins —
+///      `Single` over `Double`. See `style_precedence_index`.
+///   4. Equal style: darker colour wins (`R+B+2G`, then `B+2G`, then `G`).
+///
+/// **What `nil` does, and what it does not.** The note adds *"If the conflicting
+/// table cell border is `nil`, then no border shall be displayed"*, which reads
+/// as `nil` beating everything on the far side of the edge. It does not, and
+/// implementing it that way deleted borders Word draws. `nil` acts on **its own
+/// cell only**: it is how a cell declines the inheritance the note describes one
+/// step earlier (style → `tblPrEx` → `tblBorders`), which is the whole of its
+/// difference from `none`. The facing cell's border is untouched, so
+/// `Suppressed` yields here exactly like `Absent`.
+///
+/// Three independent facts in `IP 05 Trenches` fix the reading, and no evidence
+/// contradicts it:
+///
+/// * a cell declaring `<w:bottom w:val="single"/>` above one declaring
+///   `<w:top w:val="nil"/>` — Word draws the line, as does macOS's own DOCX
+///   renderer on the same markup;
+/// * a cell that *inherits* its bottom from `insideH`, faced by a `gridSpan=2`
+///   spacer cell whose `nil` was aimed at the neighbouring column — Word draws
+///   that line too, and it could not do otherwise: a cell paints one border
+///   across its whole width, so a wide cell's `nil` cannot punch a hole in the
+///   cell above it;
+/// * down the document's spacer columns the generator writes `nil` on **both**
+///   sides of every shared edge. Writing both is only necessary because one
+///   alone does not suppress.
+///
+/// `nil` is still not a no-op: with nothing facing it — a table's outer edge, or
+/// a facing cell that is also `nil` — declining inheritance is exactly what
+/// removes the border. Both halves are pinned by
+/// `tests/table_border_conflict.rs`.
+///
+/// **The comparison is a total order, and that is the point.** The caller feeds
+/// this (upper row's bottom, lower row's top) and (left cell's right, right
+/// cell's left), so a rule that stops at step 2 leaves the winner decided by
+/// *which side of the edge a border came from* — an implementation detail. Ties
+/// used to fall through to whichever argument came first, which meant an
+/// equal-weight 3pt single beat a 1pt double or lost to it depending on
+/// argument order, and of two equal borders differing only in colour the paler
+/// one won half the time. `resolve_border_conflict(a, b)` now always equals
+/// `resolve_border_conflict(b, a)`.
+///
+/// Suppression is still a *third* state, which is why the argument type is
+/// [`CellEdge`] and not `Option<TableBorderLine>`: when neither side paints,
+/// returning `Suppressed` rather than `Absent` keeps the two distinguishable for
+/// the caller — a suppressed edge must not be revived by the page-split
+/// top-border restore in `emit.rs`, whereas an absent one should be.
+pub(super) fn resolve_border_conflict(a: CellEdge, b: CellEdge) -> CellEdge {
     match (a, b) {
-        (None, b) => b,
-        (a, None) => a,
-        (Some(a), Some(b)) => Some(if border_weight(&b) > border_weight(&a) {
-            b
-        } else {
-            a
-        }),
+        (CellEdge::Line(la), CellEdge::Line(lb)) => {
+            match border_precedence(&la).cmp(&border_precedence(&lb)) {
+                std::cmp::Ordering::Less => b,
+                _ => a,
+            }
+        }
+        // One side paints: it does so regardless of what the other side says.
+        // A facing `nil` removed *its* border, not this one.
+        (CellEdge::Line(_), _) => a,
+        (_, CellEdge::Line(_)) => b,
+        // Neither side paints. Carry suppression forward so the page-split
+        // restore cannot revive an edge the author explicitly emptied.
+        (CellEdge::Suppressed, _) | (_, CellEdge::Suppressed) => CellEdge::Suppressed,
+        (CellEdge::Absent, CellEdge::Absent) => CellEdge::Absent,
     }
+}
+
+/// Sort key for [MS-OI29500] §17.4.66 conflict resolution — greater wins.
+///
+/// Returns integers so the key is `Ord`: comparing `f32` weights directly would
+/// need `partial_cmp`, and a `NaN` width (unreachable, but the type permits it)
+/// would silently make the comparison non-transitive and reintroduce the
+/// order-dependence this exists to remove.
+///
+/// **Two fields are inverted, and for the same reason.** The spec states both
+/// style and colour as "lower value wins" rankings — earliest in the precedence
+/// list, and smallest brightness. This key is "greater wins", so each is
+/// subtracted from its type's maximum. Inverting one and not the other is the
+/// defect this layout is meant to make obvious.
+fn border_precedence(b: &TableBorderLine) -> (u32, u8, u32, u32, u32) {
+    let (l0, l1, l2) = colour_luminance(b);
+    (
+        // Weight in eighths of a point, rounded — the spec's `sz` unit.
+        (border_weight(b) * 8.0).round().max(0.0) as u32,
+        u8::MAX - style_precedence_index(b.style),
+        u32::MAX - l0,
+        u32::MAX - l1,
+        u32::MAX - l2,
+    )
+}
+
+/// [MS-OI29500] §17.4.66 style precedence: at equal weight, *"the higher of the
+/// two on this precedence list shall be displayed"*, the list being
+///
+/// > single, thick, double, dotted, dashed, dotDash, dotDotDash, triple,
+/// > thinThickSmallGap, … outset, inset
+///
+/// "Higher on the list" means **earlier**, so this returns the 0-based index
+/// into it and **lower wins** — `border_precedence` inverts it.
+///
+/// So `Single` beats `Double` at equal weight, which is worth stating plainly
+/// because the intuition runs the other way: a double border has the greater
+/// *style number* (3 vs 1) and therefore the greater weight at equal width, and
+/// it is easy to carry that ordering into the tie-break, where the spec
+/// reverses it. Equal weight means the single is three times wider — a 3pt
+/// solid line against two 0.33pt hairlines — and the spec prefers the single.
+///
+/// Only `Single` and `Double` reach layout (the other 24 §17.4.38 styles are
+/// approximated as `Single` — see `convert_model_border`), so only their two
+/// positions are modelled: single is first, double is third.
+fn style_precedence_index(style: TableBorderStyle) -> u8 {
+    match style {
+        TableBorderStyle::Single => 0,
+        TableBorderStyle::Double => 2,
+    }
+}
+
+/// [MS-OI29500] §17.4.66 darkness keys, compared in order: `R+B+2G`, then
+/// `B+2G`, then `G`. Lower is darker.
+fn colour_luminance(b: &TableBorderLine) -> (u32, u32, u32) {
+    let (r, g, bl) = (b.color.r as u32, b.color.g as u32, b.color.b as u32);
+    (r + bl + 2 * g, bl + 2 * g, g)
 }
 
 /// Emit all four borders for a cell as filled rectangles.
@@ -124,13 +297,16 @@ pub(super) fn emit_cell_borders(
     row_y: Pt,
     row_h: Pt,
 ) {
-    let top_w = b.top.map(|b| b.width).unwrap_or(Pt::ZERO);
-    let bot_w = b.bottom.map(|b| b.width).unwrap_or(Pt::ZERO);
-    let left_w = b.left.map(|b| b.width).unwrap_or(Pt::ZERO);
-    let right_w = b.right.map(|b| b.width).unwrap_or(Pt::ZERO);
+    // Resolution is over by now, so `Suppressed` and `Absent` are the same
+    // thing here: nothing to paint.
+    let (top, bottom, left, right) = (b.top.line(), b.bottom.line(), b.left.line(), b.right.line());
+    let top_w = top.map(|b| b.width).unwrap_or(Pt::ZERO);
+    let bot_w = bottom.map(|b| b.width).unwrap_or(Pt::ZERO);
+    let left_w = left.map(|b| b.width).unwrap_or(Pt::ZERO);
+    let right_w = right.map(|b| b.width).unwrap_or(Pt::ZERO);
 
     // Horizontal borders: full cell width, covering corner squares.
-    if let Some(ref border) = b.top {
+    if let Some(ref border) = top {
         emit_border_rect(
             commands,
             border,
@@ -138,7 +314,7 @@ pub(super) fn emit_cell_borders(
             true,
         );
     }
-    if let Some(ref border) = b.bottom {
+    if let Some(ref border) = bottom {
         emit_border_rect(
             commands,
             border,
@@ -148,11 +324,11 @@ pub(super) fn emit_cell_borders(
     }
 
     // Vertical borders: between horizontal borders (no corner overlap).
-    let top_inset = if b.top.is_some() { top_w } else { Pt::ZERO };
-    let bot_inset = if b.bottom.is_some() { bot_w } else { Pt::ZERO };
+    let top_inset = if top.is_some() { top_w } else { Pt::ZERO };
+    let bot_inset = if bottom.is_some() { bot_w } else { Pt::ZERO };
     let v_height = row_h - top_inset - bot_inset;
     if v_height > Pt::ZERO {
-        if let Some(ref border) = b.left {
+        if let Some(ref border) = left {
             emit_border_rect(
                 commands,
                 border,
@@ -160,7 +336,7 @@ pub(super) fn emit_cell_borders(
                 false,
             );
         }
-        if let Some(ref border) = b.right {
+        if let Some(ref border) = right {
             emit_border_rect(
                 commands,
                 border,
@@ -176,26 +352,33 @@ pub(super) fn emit_cell_borders(
     }
 }
 
-/// §17.4.43: compute border weight = width_eighths × style_number.
-/// We only support Single (1) and Double (3).
+/// [MS-OI29500] §17.4.66: border weight = width × style number, in points.
+///
+/// The spec states the rule in eighths of a point (`w:sz`), but every use is a
+/// *comparison* between two weights, and converting both to eighths scales both
+/// by the same 8 — so the factor cancels. Keeping it in points avoids implying
+/// that a unit conversion is load-bearing here. `border_precedence` scales to
+/// eighths once, where rounding to an integer sort key does depend on the unit.
 fn border_weight(b: &TableBorderLine) -> f32 {
-    let eighths = b.width.raw() * 8.0; // width is in points, sz is eighths
     let style_number = match b.style {
         TableBorderStyle::Single => 1.0,
         TableBorderStyle::Double => 3.0,
     };
-    eighths * style_number
+    b.width.raw() * style_number
 }
 
-/// Extract border width or zero if absent.
-pub(super) fn border_width(b: Option<TableBorderLine>) -> Pt {
-    b.map(|b| b.width).unwrap_or(Pt::ZERO)
+/// Width of the line this edge paints, or zero when it paints none — which
+/// includes a suppressed edge, since suppression reserves no space.
+pub(super) fn border_width(b: CellEdge) -> Pt {
+    b.line().map(|b| b.width).unwrap_or(Pt::ZERO)
 }
 
-fn resolve_override(ovr: &CellBorderOverride) -> Option<TableBorderLine> {
+fn resolve_override(ovr: &CellBorderOverride) -> CellEdge {
     match ovr {
-        CellBorderOverride::Nil => None,
-        CellBorderOverride::Border(line) => Some(*line),
+        CellBorderOverride::Suppress => CellEdge::Suppressed,
+        // The cell's own `<w:tcBorders>` — the provenance that beats a facing
+        // `nil` in `resolve_border_conflict`.
+        CellBorderOverride::Border(line) => CellEdge::Line(*line),
     }
 }
 
@@ -255,7 +438,7 @@ fn emit_border_rect(
 #[cfg(test)]
 mod tests {
     use crate::render::dimension::Pt;
-    use crate::render::geometry::{PtEdgeInsets, PtSize};
+    use crate::render::geometry::PtEdgeInsets;
     use crate::render::layout::draw_command::DrawCommand;
     use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
     use crate::render::layout::paragraph::ParagraphStyle;
@@ -264,7 +447,6 @@ mod tests {
         layout_table, CellVAlign, TableBorderConfig, TableBorderLine, TableBorderStyle,
         TableCellInput, TableRowInput,
     };
-    use crate::render::layout::BoxConstraints;
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
 
@@ -318,10 +500,6 @@ mod tests {
         }
     }
 
-    fn body_constraints() -> BoxConstraints {
-        BoxConstraints::loose(PtSize::new(Pt::new(400.0), Pt::new(1000.0)))
-    }
-
     #[test]
     fn borders_emit_lines() {
         let rows = vec![TableRowInput {
@@ -330,14 +508,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&TableBorderConfig {
                 top: Some(TableBorderLine {
@@ -383,7 +560,7 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, DrawCommand::Rect { color, .. } if *color == RgbColor::BLACK))
             .count();
-        // §17.4.43: shared edges drawn once after conflict resolution.
+        // [MS-OI29500] §17.4.66: shared edges drawn once after conflict resolution.
         // Top(2) + bottom(2) + left(1) + insideV(1) + right(1) = 7 border rects.
         assert_eq!(border_rect_count, 7);
     }
@@ -424,7 +601,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: Some(no_borders),
             },
             TableRowInput {
@@ -433,7 +609,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
         ];
@@ -441,7 +616,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&all_single),
             None,
@@ -487,5 +662,420 @@ mod tests {
                 interior_bottom.raw(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use crate::render::resolve::color::RgbColor;
+
+    const BLACK: RgbColor = RgbColor { r: 0, g: 0, b: 0 };
+    const PALE: RgbColor = RgbColor {
+        r: 220,
+        g: 220,
+        b: 220,
+    };
+
+    fn line(width: f32, style: TableBorderStyle, color: RgbColor) -> TableBorderLine {
+        TableBorderLine {
+            width: Pt::new(width),
+            color,
+            style,
+        }
+    }
+
+    /// A representative spread: both styles, several widths, both colours.
+    fn sample_borders() -> Vec<TableBorderLine> {
+        let mut v = Vec::new();
+        for &w in &[0.5f32, 1.0, 2.0, 3.0, 6.0] {
+            for &s in &[TableBorderStyle::Single, TableBorderStyle::Double] {
+                for &c in &[BLACK, PALE] {
+                    v.push(line(w, s, c));
+                }
+            }
+        }
+        v
+    }
+
+    /// **The property that matters.** The caller passes (upper row's bottom,
+    /// lower row's top) and (left cell's right, right cell's left), so a
+    /// resolution that depends on argument order makes the rendered border
+    /// depend on which *side of the edge* it was declared on.
+    ///
+    /// Before this was a total order, ties fell through to whichever argument
+    /// came first: an equal-weight 3pt single beat a 1pt double or lost to it
+    /// depending on the call, and of two borders differing only in colour the
+    /// paler one won half the time.
+    #[test]
+    fn resolution_is_independent_of_argument_order() {
+        let borders = sample_borders();
+        for a in &borders {
+            for b in &borders {
+                let ab = resolve_border_conflict(CellEdge::Line(*a), CellEdge::Line(*b));
+                let ba = resolve_border_conflict(CellEdge::Line(*b), CellEdge::Line(*a));
+                assert_eq!(
+                    (ab.line().map(|x| (x.width, x.style, x.color))),
+                    (ba.line().map(|x| (x.width, x.style, x.color))),
+                    "order-dependent for {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    /// Step 2 — the heavier border wins outright.
+    #[test]
+    fn heavier_weight_wins() {
+        let thin = line(0.5, TableBorderStyle::Single, BLACK);
+        let thick = line(2.0, TableBorderStyle::Single, BLACK);
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Line(thin), CellEdge::Line(thick))
+                .line()
+                .map(|b| b.width),
+            Some(Pt::new(2.0))
+        );
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Line(thick), CellEdge::Line(thin))
+                .line()
+                .map(|b| b.width),
+            Some(Pt::new(2.0))
+        );
+    }
+
+    /// Step 3 — equal weight, so position in the spec's precedence list decides,
+    /// and **`Single` wins**. 3pt single and 1pt double both weigh 3
+    /// (width × style number), which is exactly the tie the pre-E5b#2 code
+    /// resolved by argument position.
+    ///
+    /// This test previously asserted the opposite, and was mutation-checked in
+    /// that state — the code and the assertion shared one error, so no mutation
+    /// could expose it. [MS-OI29500] §17.4.66 orders the list
+    /// `single, thick, double, …` and displays *"the higher of the two on this
+    /// precedence list"*, i.e. the earlier one.
+    #[test]
+    fn equal_weight_prefers_the_earlier_style_in_the_precedence_list() {
+        let single = line(3.0, TableBorderStyle::Single, BLACK);
+        let double = line(1.0, TableBorderStyle::Double, BLACK);
+        assert_eq!(
+            border_weight(&single),
+            border_weight(&double),
+            "same weight"
+        );
+
+        for (a, b) in [(single, double), (double, single)] {
+            assert_eq!(
+                resolve_border_conflict(CellEdge::Line(a), CellEdge::Line(b))
+                    .line()
+                    .map(|x| x.style),
+                Some(TableBorderStyle::Single),
+                "Single is earlier in the precedence list, so it wins at equal weight"
+            );
+        }
+    }
+
+    /// The tie-break must not leak into the *weight* comparison: a double
+    /// border of equal width still outweighs a single (style number 3 vs 1) and
+    /// wins at step 2, before precedence is consulted.
+    ///
+    /// Pins the two steps apart. Ranking `Single` above `Double` is only correct
+    /// as a tie-break; applied one step earlier it would invert every ordinary
+    /// single-vs-double edge in a table.
+    #[test]
+    fn precedence_does_not_override_weight() {
+        let single = line(1.0, TableBorderStyle::Single, BLACK);
+        let double = line(1.0, TableBorderStyle::Double, BLACK);
+        assert!(
+            border_weight(&double) > border_weight(&single),
+            "equal width, double is heavier"
+        );
+
+        for (a, b) in [(single, double), (double, single)] {
+            assert_eq!(
+                resolve_border_conflict(CellEdge::Line(a), CellEdge::Line(b))
+                    .line()
+                    .map(|x| x.style),
+                Some(TableBorderStyle::Double),
+                "the heavier border wins outright, regardless of precedence"
+            );
+        }
+    }
+
+    /// Step 4 — equal weight and style, so the darker colour decides.
+    #[test]
+    fn equal_weight_and_style_prefers_the_darker_colour() {
+        let dark = line(1.0, TableBorderStyle::Single, BLACK);
+        let pale = line(1.0, TableBorderStyle::Single, PALE);
+        for (a, b) in [(dark, pale), (pale, dark)] {
+            assert_eq!(
+                resolve_border_conflict(CellEdge::Line(a), CellEdge::Line(b))
+                    .line()
+                    .map(|x| x.color),
+                Some(BLACK),
+                "darker colour wins regardless of argument order"
+            );
+        }
+    }
+
+    /// The §17.4.66 darkness keys are compared in order `R+B+2G`, then `B+2G`,
+    /// then `G` — so two colours with the same total brightness are separated by
+    /// the later keys rather than by argument order.
+    #[test]
+    fn darkness_tie_breaks_on_the_secondary_keys() {
+        // R+B+2G equal (both 255*2 = 510... constructed to match), differing in
+        // the B+2G term.
+        let a = line(
+            1.0,
+            TableBorderStyle::Single,
+            RgbColor { r: 100, g: 0, b: 0 },
+        );
+        let b = line(
+            1.0,
+            TableBorderStyle::Single,
+            RgbColor { r: 0, g: 0, b: 100 },
+        );
+        assert_eq!(
+            colour_luminance(&a).0,
+            colour_luminance(&b).0,
+            "primary key ties"
+        );
+        // a has B+2G = 0, b has B+2G = 100 → a is "darker" by the second key.
+        let winner = resolve_border_conflict(CellEdge::Line(a), CellEdge::Line(b))
+            .line()
+            .expect("some");
+        assert_eq!(winner.color, RgbColor { r: 100, g: 0, b: 0 });
+        // And symmetric.
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Line(b), CellEdge::Line(a))
+                .line()
+                .map(|x| x.color),
+            Some(RgbColor { r: 100, g: 0, b: 0 })
+        );
+    }
+
+    /// Step 1 — an absent border yields to a present one, in both directions,
+    /// and two absent borders stay absent.
+    #[test]
+    fn absent_yields_to_present() {
+        let some = line(1.0, TableBorderStyle::Single, BLACK);
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Absent, CellEdge::Line(some))
+                .line()
+                .map(|b| b.width),
+            Some(Pt::new(1.0))
+        );
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Line(some), CellEdge::Absent)
+                .line()
+                .map(|b| b.width),
+            Some(Pt::new(1.0))
+        );
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Absent, CellEdge::Absent),
+            CellEdge::Absent
+        );
+    }
+
+    /// **`nil` does not reach across the edge.** [MS-OI29500] §17.4.66 says
+    /// *"If the conflicting table cell border is nil, then no border shall be
+    /// displayed"*, and read literally that is wrong: `nil` empties its own
+    /// cell's edge and leaves the facing cell's border alone. It loses from
+    /// either side and at any weight — even a hairline survives it.
+    ///
+    /// `IP 05 Trenches` is the reference. `<w:bottom w:val="single"/>` above
+    /// `<w:top w:val="nil"/>` draws in Word and in macOS's DOCX renderer; so
+    /// does an *inherited* bottom faced by a `gridSpan` spacer cell's `nil`, and
+    /// it must — a cell paints one border across its whole width, so a wide
+    /// cell's `nil` cannot punch a hole in the cell above it.
+    #[test]
+    fn nil_yields_to_the_facing_border() {
+        let hair = line(0.25, TableBorderStyle::Single, BLACK);
+        for (a, b) in [
+            (CellEdge::Suppressed, CellEdge::Line(hair)),
+            (CellEdge::Line(hair), CellEdge::Suppressed),
+        ] {
+            assert_eq!(
+                resolve_border_conflict(a, b).line(),
+                Some(hair),
+                "the facing border must survive the nil: {a:?} vs {b:?}"
+            );
+        }
+    }
+
+    /// …and yet `nil` is not a no-op, because it declined **inheritance**
+    /// upstream in `resolve_cell_effective_borders`. With nothing facing it —
+    /// another `nil`, or an edge nobody spoke for — nothing is painted, and the
+    /// result stays `Suppressed` rather than collapsing to `Absent`.
+    ///
+    /// That last part is load-bearing: `emit.rs` may revive an `Absent` top when
+    /// a row starts a page slice, and must not revive an emptied one.
+    #[test]
+    fn nil_stays_suppressed_when_nothing_faces_it() {
+        for (a, b) in [
+            (CellEdge::Suppressed, CellEdge::Absent),
+            (CellEdge::Absent, CellEdge::Suppressed),
+            (CellEdge::Suppressed, CellEdge::Suppressed),
+        ] {
+            assert_eq!(
+                resolve_border_conflict(a, b),
+                CellEdge::Suppressed,
+                "suppression must survive where nothing paints: {a:?} vs {b:?}"
+            );
+        }
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Absent, CellEdge::Absent),
+            CellEdge::Absent,
+            "…but two silent edges stay restorable"
+        );
+    }
+
+    /// The counterpart, and the half that is easy to get wrong when fixing the
+    /// other: an edge declared `none` is **not** suppression. §17.4.66 puts it
+    /// with the omitted case — *"If the conflicting table cell border is none
+    /// (no border), then the opposing border shall be displayed."*
+    ///
+    /// `none` never reaches the resolver as its own state; it arrives as
+    /// `Absent` because `convert_cell_border_override` maps it to "no override".
+    /// This test pins the consequence at the level the resolver sees.
+    #[test]
+    fn an_absent_edge_never_suppresses() {
+        let border = line(1.0, TableBorderStyle::Single, BLACK);
+        assert_eq!(
+            resolve_border_conflict(CellEdge::Absent, CellEdge::Line(border)),
+            CellEdge::Line(border),
+            "absent (which is what `none` becomes) must yield, not suppress"
+        );
+    }
+
+    /// Identical borders resolve to themselves — the reflexive case, which a
+    /// comparison built on `partial_cmp` of `f32` could get wrong.
+    #[test]
+    fn identical_borders_resolve_to_themselves() {
+        for b in sample_borders() {
+            let r = resolve_border_conflict(CellEdge::Line(b), CellEdge::Line(b))
+                .line()
+                .expect("some");
+            assert_eq!((r.width, r.style, r.color), (b.width, b.style, b.color));
+        }
+    }
+}
+
+/// §17.4.38 edge mapping: which of the six table-level borders each cell edge
+/// draws from, given the cell's position in the grid.
+#[cfg(test)]
+mod edge_mapping_tests {
+    use super::*;
+    use crate::render::geometry::PtEdgeInsets;
+    use crate::render::layout::table::CellVAlign;
+    use crate::render::resolve::color::RgbColor;
+
+    /// Every edge gets its own width, so a resolved border names the config
+    /// field it came from.
+    const TOP: f32 = 1.0;
+    const BOTTOM: f32 = 2.0;
+    const LEFT: f32 = 3.0;
+    const RIGHT: f32 = 4.0;
+    const INSIDE_H: f32 = 5.0;
+    const INSIDE_V: f32 = 6.0;
+
+    fn edge(width: f32) -> Option<TableBorderLine> {
+        Some(TableBorderLine {
+            width: Pt::new(width),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        })
+    }
+
+    fn config() -> TableBorderConfig {
+        TableBorderConfig {
+            top: edge(TOP),
+            bottom: edge(BOTTOM),
+            left: edge(LEFT),
+            right: edge(RIGHT),
+            inside_h: edge(INSIDE_H),
+            inside_v: edge(INSIDE_V),
+        }
+    }
+
+    fn plain_cell() -> TableCellInput {
+        TableCellInput {
+            blocks: vec![],
+            margins: PtEdgeInsets::ZERO,
+            grid_span: 1,
+            shading: None,
+            cell_borders: None,
+            vertical_merge: None,
+            vertical_align: CellVAlign::Top,
+        }
+    }
+
+    /// `(top, bottom, left, right)` widths, so a failure reads as which edges
+    /// were mis-mapped rather than as four separate assertions.
+    fn widths(
+        row_idx: usize,
+        grid_col: usize,
+        num_rows: usize,
+        num_grid_cols: usize,
+    ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+        let (t, b, l, r) = resolve_cell_effective_borders(
+            &plain_cell(),
+            Some(&config()),
+            row_idx,
+            grid_col,
+            1,
+            num_rows,
+            num_grid_cols,
+        );
+        let w = |e: CellEdge| e.line().map(|e| e.width.raw());
+        (w(t), w(b), w(l), w(r))
+    }
+
+    /// A 3×3 grid: the corners take the outer borders, the middle takes
+    /// `insideH`/`insideV` on all four sides.
+    #[test]
+    fn outer_edges_use_outer_borders_and_interior_edges_use_inside() {
+        assert_eq!(
+            widths(0, 0, 3, 3),
+            (Some(TOP), Some(INSIDE_H), Some(LEFT), Some(INSIDE_V)),
+            "top-left cell"
+        );
+        assert_eq!(
+            widths(1, 1, 3, 3),
+            (
+                Some(INSIDE_H),
+                Some(INSIDE_H),
+                Some(INSIDE_V),
+                Some(INSIDE_V)
+            ),
+            "centre cell"
+        );
+        assert_eq!(
+            widths(2, 2, 3, 3),
+            (Some(INSIDE_H), Some(BOTTOM), Some(INSIDE_V), Some(RIGHT)),
+            "bottom-right cell"
+        );
+    }
+
+    /// A single-row, single-column table is both first and last on both axes,
+    /// so it takes all four outer borders and neither inside border.
+    #[test]
+    fn a_one_cell_table_takes_all_four_outer_borders() {
+        assert_eq!(
+            widths(0, 0, 1, 1),
+            (Some(TOP), Some(BOTTOM), Some(LEFT), Some(RIGHT))
+        );
+    }
+
+    /// E5b#7. `num_rows == 0` is unreachable through `layout_table` — it returns
+    /// early on empty input, and every other caller is inside a row loop — but
+    /// `num_rows` is a free parameter of a `pub(super)` function, so the
+    /// last-row test must not depend on a caller having checked it.
+    /// `row_idx == num_rows - 1` underflows here; `row_idx + 1 == num_rows`
+    /// answers "no row is the last row of an empty table".
+    #[test]
+    fn an_empty_table_does_not_underflow_the_last_row_check() {
+        assert_eq!(
+            widths(0, 0, 0, 3),
+            (Some(TOP), Some(INSIDE_H), Some(LEFT), Some(INSIDE_V))
+        );
     }
 }

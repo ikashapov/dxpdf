@@ -105,3 +105,141 @@ pub(super) fn table_x_offset(
         _ => margin_left + indent,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Alignment;
+
+    fn page_break() -> Fragment {
+        Fragment::PageBreak {
+            line_height: Pt::ZERO,
+        }
+    }
+
+    /// A distinguishable non-break fragment.
+    fn item(text: &str) -> Fragment {
+        Fragment::Bookmark { name: text.into() }
+    }
+
+    fn names(chunks: &[&[Fragment]]) -> Vec<Vec<String>> {
+        chunks
+            .iter()
+            .map(|c| {
+                c.iter()
+                    .map(|f| match f {
+                        Fragment::Bookmark { name, .. } => name.to_string(),
+                        _ => "?".to_string(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    // ── §17.3.3.1 break chunking ─────────────────────────────────────────
+
+    #[test]
+    fn no_break_yields_the_whole_slice_as_one_chunk() {
+        let frags = vec![item("a"), item("b")];
+        assert_eq!(names(&split_at_page_breaks(&frags)), vec![vec!["a", "b"]]);
+    }
+
+    #[test]
+    fn a_break_splits_and_is_itself_excluded() {
+        let frags = vec![item("a"), page_break(), item("b")];
+        assert_eq!(
+            names(&split_at_page_breaks(&frags)),
+            vec![vec!["a"], vec!["b"]],
+            "the break fragment is dropped, not carried into either chunk"
+        );
+    }
+
+    /// A leading break must produce an *empty* first chunk, not be swallowed:
+    /// that empty chunk is what makes `<w:br type="page"/>` at the start of a
+    /// paragraph break *before* its content. `layout.rs` skips empty chunks
+    /// after acting on the break, so dropping it here would lose the break.
+    #[test]
+    fn a_leading_break_yields_an_empty_first_chunk() {
+        let frags = vec![page_break(), item("a")];
+        let chunks = split_at_page_breaks(&frags);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].is_empty(), "empty chunk carries the break");
+        assert_eq!(names(&chunks)[1], vec!["a"]);
+    }
+
+    #[test]
+    fn a_trailing_break_yields_an_empty_last_chunk() {
+        let frags = vec![item("a"), page_break()];
+        let chunks = split_at_page_breaks(&frags);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(names(&chunks)[0], vec!["a"]);
+        assert!(chunks[1].is_empty());
+    }
+
+    /// Consecutive breaks each produce their own chunk boundary, so N breaks
+    /// yield N+1 chunks however they cluster.
+    #[test]
+    fn consecutive_breaks_each_yield_a_boundary() {
+        let frags = vec![item("a"), page_break(), page_break(), item("b")];
+        let chunks = split_at_page_breaks(&frags);
+        assert_eq!(chunks.len(), 3, "two breaks → three chunks");
+        assert!(chunks[1].is_empty(), "the gap between the two breaks");
+    }
+
+    /// Column and page breaks are split independently — a column break is not
+    /// a page boundary and vice versa.
+    #[test]
+    fn column_and_page_breaks_are_split_independently() {
+        let frags = vec![item("a"), Fragment::ColumnBreak, item("b")];
+        assert_eq!(
+            split_at_page_breaks(&frags).len(),
+            1,
+            "a column break is not a page boundary"
+        );
+        assert_eq!(
+            names(&split_at_column_breaks(&frags)),
+            vec![vec!["a"], vec!["b"]]
+        );
+    }
+
+    // ── §17.4.28 table alignment ─────────────────────────────────────────
+
+    #[test]
+    fn table_x_offset_centers_and_right_aligns_within_the_content_area() {
+        let (indent, width, content, margin) =
+            (Pt::ZERO, Pt::new(100.0), Pt::new(400.0), Pt::new(72.0));
+        assert_eq!(
+            table_x_offset(Some(Alignment::Center), indent, width, content, margin).raw(),
+            72.0 + 150.0,
+        );
+        assert_eq!(
+            table_x_offset(Some(Alignment::End), indent, width, content, margin).raw(),
+            72.0 + 300.0,
+        );
+    }
+
+    #[test]
+    fn table_x_offset_applies_indent_when_left_aligned() {
+        let (width, content, margin) = (Pt::new(100.0), Pt::new(400.0), Pt::new(72.0));
+        for alignment in [None, Some(Alignment::Start), Some(Alignment::Both)] {
+            assert_eq!(
+                table_x_offset(alignment, Pt::new(20.0), width, content, margin).raw(),
+                92.0,
+                "{alignment:?} places at margin + indent"
+            );
+        }
+    }
+
+    /// §17.4.51: `tblInd` is deliberately ignored for centered and right-
+    /// aligned tables — they are positioned as a unit within the content area,
+    /// matching Word. Pinned because nothing in the signature says so.
+    #[test]
+    fn table_x_offset_ignores_indent_when_centered_or_right_aligned() {
+        let (width, content, margin) = (Pt::new(100.0), Pt::new(400.0), Pt::new(72.0));
+        for alignment in [Alignment::Center, Alignment::End] {
+            let without = table_x_offset(Some(alignment), Pt::ZERO, width, content, margin);
+            let with = table_x_offset(Some(alignment), Pt::new(50.0), width, content, margin);
+            assert_eq!(without, with, "{alignment:?} ignores tblInd");
+        }
+    }
+}

@@ -37,7 +37,12 @@ pub const DEFAULT_IMAGE_DPI: f32 = 220.0;
 
 /// Lower bound applied to any requested image DPI. A non-positive request would
 /// produce a zero/negative downsample target, so it is clamped up to this floor.
-const MIN_IMAGE_DPI: f32 = 1.0;
+///
+/// Public alongside [`DEFAULT_IMAGE_DPI`] because [`RenderOptions::with_image_dpi`]
+/// silently clamps to it: a caller passing `0.0` gets this value back, and
+/// without the constant there is no way to predict or detect that from outside
+/// the crate.
+pub const MIN_IMAGE_DPI: f32 = 1.0;
 
 /// Clamp a requested image DPI to a positive, finite value: non-positive and
 /// non-finite (`NaN`, `±∞`) requests are floored to [`MIN_IMAGE_DPI`]. The
@@ -65,8 +70,14 @@ pub struct RenderOptions {
 }
 
 impl RenderOptions {
-    /// Set the target image resolution in pixels per inch. Non-positive or
-    /// non-finite requests are clamped up to [`MIN_IMAGE_DPI`].
+    /// Set the target image resolution in pixels per inch.
+    ///
+    /// Non-positive or non-finite requests are **silently clamped** up to
+    /// [`MIN_IMAGE_DPI`], which is public precisely so a caller can predict the
+    /// result: passing `0.0` yields `MIN_IMAGE_DPI`, not an error. The `dxpdf`
+    /// CLI takes the opposite line and *rejects* out-of-range `--image-dpi`,
+    /// on the reasoning that a computed value should still render while a typed
+    /// one is usually a typo.
     pub fn with_image_dpi(mut self, image_dpi: f32) -> Self {
         self.image_dpi = sanitize_image_dpi(image_dpi);
         self
@@ -88,7 +99,7 @@ impl Default for RenderOptions {
 
 use crate::model::Block;
 use crate::render::layout::build::{
-    build_section_blocks, default_line_height, BuildContext, BuildState,
+    build_document_endnotes, build_section_blocks, default_line_height, BuildContext, BuildState,
 };
 use crate::render::layout::draw_command::LayoutedPage;
 use crate::render::layout::header_footer::{
@@ -99,30 +110,45 @@ use crate::render::layout::section::layout_section_with_clearance;
 use crate::render::resolve::header_footer::HeaderFooterSet;
 use crate::render::resolve::ResolvedDocument;
 
-/// Render a parsed DOCX document to PDF bytes.
+/// Estimate where the content on `page` ends, so a `Continuous` section
+/// (§17.6.22) knows where to resume on the same page.
 ///
-/// Estimate the cursor_y position from the last page's draw commands.
-/// Used to determine where a continuous section should start on the page.
+/// The match is **exhaustive on purpose**: a `_ => continue` arm silently gives
+/// any unlisted variant zero height, and the following section then paints over
+/// it. That is how `EmojiCluster` and `Path` came to be ignored — a paragraph
+/// containing only an emoji resumed at `margins.top`, drawing the next
+/// section's text inside the emoji's box. Adding a variant should break this
+/// build, not the output.
 fn estimate_cursor_y(
     page: &layout::draw_command::LayoutedPage,
     config: &layout::page::PageConfig,
 ) -> dimension::Pt {
+    use layout::draw_command::DrawCommand;
     let mut max_y = config.margins.top;
     for cmd in &page.commands {
         let bottom = match cmd {
-            layout::draw_command::DrawCommand::Text {
+            // Baseline plus a full font size approximates the descender.
+            DrawCommand::Text {
                 position,
                 font_size,
                 ..
             } => position.y + *font_size,
-            layout::draw_command::DrawCommand::Image { rect, .. } => {
-                rect.origin.y + rect.size.height
+            // A segment may run in either direction; take the lower end.
+            DrawCommand::Underline { line, .. } | DrawCommand::Line { line, .. } => {
+                line.start.y.max(line.end.y)
             }
-            layout::draw_command::DrawCommand::Rect { rect, .. } => {
-                rect.origin.y + rect.size.height
-            }
-            layout::draw_command::DrawCommand::Line { line, .. } => line.end.y,
-            _ => continue,
+            DrawCommand::Image { rect, .. }
+            | DrawCommand::EmojiCluster { rect, .. }
+            | DrawCommand::Rect { rect, .. } => rect.origin.y + rect.size.height,
+            // `extent` is the shape's unrotated bounding box; a rotation can
+            // reach slightly past it, which is within this function's remit.
+            DrawCommand::Path { origin, extent, .. } => origin.y + extent.height,
+            // Annotations mark content that is already accounted for by the
+            // command underneath them, and a named destination is a point.
+            // Neither adds extent of its own.
+            DrawCommand::LinkAnnotation { .. }
+            | DrawCommand::InternalLink { .. }
+            | DrawCommand::NamedDestination { .. } => continue,
         };
         if bottom > max_y {
             max_y = bottom;
@@ -149,7 +175,7 @@ pub fn render_with_font_mgr(
         font_mgr.clone(),
         &doc.embedded_fonts,
         &resolved.font_families,
-    );
+    )?;
     let pages = layout_document(&resolved, &registry);
 
     #[cfg(feature = "subset-fonts")]
@@ -167,8 +193,11 @@ pub fn render_with_font_mgr(
 pub fn resolve_and_layout(doc: &Document) -> (ResolvedDocument, Vec<LayoutedPage>) {
     let font_mgr = skia_safe::FontMgr::new();
     let resolved = resolve::resolve(doc);
+    // A debug/test helper: it always supplies the real system `FontMgr`, so
+    // the font-less case `build` guards against cannot arise here.
     let registry =
-        fonts::FontRegistry::build(font_mgr, &doc.embedded_fonts, &resolved.font_families);
+        fonts::FontRegistry::build(font_mgr, &doc.embedded_fonts, &resolved.font_families)
+            .expect("the system FontMgr exposes at least one typeface");
     let pages = layout_document(&resolved, &registry);
     (resolved, pages)
 }
@@ -187,7 +216,6 @@ pub fn layout_document(
     let mut state = BuildState::default();
     let dlh = default_line_height(&ctx);
     let mut all_pages = Vec::new();
-    let mut all_endnotes = Vec::new();
     let mut last_config = PageConfig::default();
     // Per-section metadata for deferred header/footer rendering.
     // Carries the section's resolved slot sets, `<w:titlePg/>` flag,
@@ -268,9 +296,6 @@ pub fn layout_document(
             &clearance,
         );
 
-        // Collect endnotes for rendering at document end.
-        all_endnotes.extend(built.endnotes);
-
         last_config = config.clone();
 
         // Check if the NEXT section is continuous — if so, save the last page
@@ -302,6 +327,10 @@ pub fn layout_document(
             logical_page_base,
         });
     }
+
+    // §17.11.2: endnotes are document-scoped — built once, after every section,
+    // so a multi-section document doesn't repeat them per section.
+    let all_endnotes = build_document_endnotes(&ctx, &mut state);
 
     // Phase 2: render headers/footers with correct NUMPAGES (total page count).
     let total_pages = all_pages.len();
@@ -730,5 +759,185 @@ mod tests {
         let (_, pages) = resolve_and_layout(&doc);
         assert_eq!(pages[0].page_size.width.raw(), 612.0);
         assert_eq!(pages[0].page_size.height.raw(), 792.0);
+    }
+
+    // ─── estimate_cursor_y (H3#1) ─────────────────────────────────────────
+
+    mod cursor_y {
+        use super::*;
+        use crate::render::dimension::Pt;
+        use crate::render::geometry::{PtLineSegment, PtOffset, PtRect, PtSize};
+        use crate::render::layout::draw_command::{DrawCommand, LayoutedPage};
+        use crate::render::layout::page::PageConfig;
+
+        fn page_with(cmd: DrawCommand) -> (LayoutedPage, PageConfig) {
+            let config = PageConfig::default();
+            let mut page = LayoutedPage::new(config.page_size);
+            page.commands.push(cmd);
+            (page, config)
+        }
+
+        fn rect_at(y: f32, h: f32) -> PtRect {
+            PtRect::from_xywh(Pt::ZERO, Pt::new(y), Pt::new(10.0), Pt::new(h))
+        }
+
+        /// An empty page resumes at the top margin — the floor every case
+        /// below has to beat.
+        #[test]
+        fn empty_page_resumes_at_the_top_margin() {
+            let config = PageConfig::default();
+            let page = LayoutedPage::new(config.page_size);
+            assert_eq!(estimate_cursor_y(&page, &config), config.margins.top);
+        }
+
+        /// Every variant that occupies vertical space must move the cursor.
+        /// `EmojiCluster` and `Path` are H3#1: both were swallowed by a
+        /// `_ => continue`, so a section following them resumed at the top
+        /// margin and painted over them.
+        #[test]
+        fn every_extent_bearing_variant_advances_the_cursor() {
+            let below = Pt::new(400.0);
+            let cases: Vec<(&str, DrawCommand)> = vec![
+                (
+                    "Image",
+                    DrawCommand::Image {
+                        rect: rect_at(400.0, 50.0),
+                        image_data: crate::render::resolve::images::MediaEntry {
+                            data: std::rc::Rc::from(Vec::new().into_boxed_slice()),
+                            format: crate::model::ImageFormat::Png,
+                        },
+                        src_rect: None,
+                    },
+                ),
+                (
+                    "Rect",
+                    DrawCommand::Rect {
+                        rect: rect_at(400.0, 50.0),
+                        color: crate::render::resolve::color::RgbColor::BLACK,
+                    },
+                ),
+                (
+                    "Line",
+                    DrawCommand::Line {
+                        line: PtLineSegment::new(
+                            PtOffset::new(Pt::ZERO, Pt::new(450.0)),
+                            PtOffset::new(Pt::new(10.0), Pt::new(400.0)),
+                        ),
+                        color: crate::render::resolve::color::RgbColor::BLACK,
+                        width: Pt::new(1.0),
+                    },
+                ),
+                (
+                    "Path",
+                    DrawCommand::Path {
+                        origin: PtOffset::new(Pt::ZERO, Pt::new(400.0)),
+                        rotation: crate::model::dimension::Dimension::new(0),
+                        flip_h: false,
+                        flip_v: false,
+                        extent: PtSize::new(Pt::new(10.0), Pt::new(50.0)),
+                        paths: Vec::new(),
+                        fill: crate::render::layout::draw_command::ResolvedFill::None,
+                        stroke: None,
+                        effects: Vec::new(),
+                    },
+                ),
+            ];
+
+            for (label, cmd) in cases {
+                let (page, config) = page_with(cmd);
+                let y = estimate_cursor_y(&page, &config);
+                assert!(
+                    y > below,
+                    "{label} occupies y=400..450 but the cursor resumed at {y:?} — \
+                     the next section would paint over it"
+                );
+            }
+        }
+
+        /// The emoji case, kept separate because it is the one reproduced
+        /// end-to-end: a paragraph containing only an emoji, followed by a
+        /// continuous section break, resumed at exactly `margins.top`.
+        #[test]
+        fn emoji_cluster_advances_the_cursor() {
+            let (page, config) = page_with(DrawCommand::EmojiCluster {
+                rect: rect_at(36.0, 47.25),
+                text: "\u{1F4DE}".into(),
+                typeface: emoji_test_typeface(),
+                size: Pt::new(36.0),
+                presentation: crate::render::emoji::cluster::EmojiPresentation::Emoji,
+                structure: crate::render::emoji::cluster::EmojiStructure::Single,
+            });
+            assert_eq!(
+                estimate_cursor_y(&page, &config),
+                Pt::new(83.25),
+                "the cursor must clear the emoji's box, not sit inside it"
+            );
+        }
+
+        fn emoji_test_typeface() -> crate::render::fonts::TypefaceEntry {
+            use skia_safe::{FontMgr, FontStyle};
+            let tf = FontMgr::new()
+                .legacy_make_typeface(None::<&str>, FontStyle::normal())
+                .expect("system default typeface");
+            let id = crate::render::fonts::TypefaceId::from(&tf);
+            crate::render::fonts::TypefaceEntry {
+                typeface: tf,
+                origin: crate::render::fonts::TypefaceOrigin::System { typeface_id: id },
+            }
+        }
+
+        /// Annotations sit on top of content that already contributed its own
+        /// extent, and a destination is a point. Counting them would push the
+        /// cursor past content that is not there.
+        #[test]
+        fn annotations_and_destinations_contribute_nothing() {
+            for cmd in [
+                DrawCommand::LinkAnnotation {
+                    rect: rect_at(400.0, 50.0),
+                    url: "https://example.invalid".into(),
+                },
+                DrawCommand::InternalLink {
+                    rect: rect_at(400.0, 50.0),
+                    destination: "anchor".into(),
+                },
+                DrawCommand::NamedDestination {
+                    position: PtOffset::new(Pt::ZERO, Pt::new(400.0)),
+                    name: "anchor".into(),
+                },
+            ] {
+                let (page, config) = page_with(cmd);
+                assert_eq!(estimate_cursor_y(&page, &config), config.margins.top);
+            }
+        }
+    }
+
+    // ─── Error surface (H3#4) ─────────────────────────────────────────────
+
+    /// The only condition the pipeline cannot render its way out of. Emptiness
+    /// is deliberately not one — see `empty_document_still_renders_a_page`.
+    #[test]
+    fn a_font_less_host_is_an_error_not_a_panic() {
+        let doc = empty_doc();
+        let err = render_with_font_mgr(
+            &doc,
+            &skia_safe::FontMgr::empty(),
+            &RenderOptions::default(),
+        )
+        .expect_err("a FontMgr with no typefaces cannot render");
+        assert!(matches!(err, error::RenderError::NoFontsAvailable));
+        assert!(
+            err.to_string().contains("no fonts available"),
+            "the message must say what went wrong, got {err}"
+        );
+    }
+
+    /// The behaviour that made `RenderError::EmptyDocument` unreachable: an
+    /// empty document is a blank page, as in Word — not an error.
+    #[test]
+    fn empty_document_still_renders_a_page() {
+        let pdf = render(&empty_doc(), &RenderOptions::default()).expect("empty doc renders");
+        assert!(pdf.starts_with(b"%PDF"));
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Count 1"), "exactly one blank page");
     }
 }

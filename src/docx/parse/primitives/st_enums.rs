@@ -2,7 +2,10 @@
 //!
 //! Each schema enum mirrors an OOXML spec-defined simple type. `From<St…>`
 //! implementations convert the schema enum into the matching model type.
-//! Unknown string values fail deserialization (plan §Decisions: strict).
+//! Unknown string values fail deserialization (plan §Decisions: strict) — the
+//! one exception is `StNumberFormat`, a large extensible value space (~60 spec
+//! values) whose unsupported members must degrade rather than fail the parse
+//! (see its `#[serde(other)]` variant).
 //!
 //! Alphabetically ordered by schema type name. Layered as:
 //!
@@ -29,8 +32,8 @@ use crate::docx::model::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StBorderType {
-    /// §17.18.2: "no border" sentinel (distinct from `none` per spec but
-    /// treated identically by the model).
+    /// §17.18.2: "no border" — distinct from `none`, and carried through as
+    /// such. See `BorderStyle` for why the two must not be merged.
     Nil,
     None,
     Single,
@@ -63,7 +66,11 @@ pub enum StBorderType {
 impl From<StBorderType> for BorderStyle {
     fn from(s: StBorderType) -> Self {
         match s {
-            StBorderType::Nil | StBorderType::None => Self::None,
+            // §17.18.2: kept distinct. Both draw nothing, but [MS-OI29500]
+            // §17.4.66 gives them opposite behaviour in table border conflict
+            // resolution — `nil` suppresses the shared edge, `none` yields.
+            StBorderType::Nil => Self::Nil,
+            StBorderType::None => Self::None,
             StBorderType::Single => Self::Single,
             StBorderType::Thick => Self::Thick,
             StBorderType::Double => Self::Double,
@@ -252,6 +259,19 @@ pub enum StJc {
     Distribute,
     #[serde(rename = "thaiDistribute")]
     ThaiDistribute,
+    // §17.18.44: Arabic kashida justification and the legacy numbering-tab
+    // alignment are spec-legal but not modelled distinctly. They must still
+    // parse (else an Arabic document fails outright); each degrades to the
+    // nearest modelled alignment. Kept as named variants rather than a
+    // catch-all so a genuine typo still fails deserialization.
+    #[serde(rename = "mediumKashida")]
+    MediumKashida,
+    #[serde(rename = "highKashida")]
+    HighKashida,
+    #[serde(rename = "lowKashida")]
+    LowKashida,
+    #[serde(rename = "numTab")]
+    NumTab,
 }
 
 impl From<StJc> for Alignment {
@@ -263,6 +283,10 @@ impl From<StJc> for Alignment {
             StJc::Both => Self::Both,
             StJc::Distribute => Self::Distribute,
             StJc::ThaiDistribute => Self::Thai,
+            // Kashida is a form of full justification; numTab aligns to the
+            // start of the numbering area.
+            StJc::MediumKashida | StJc::HighKashida | StJc::LowKashida => Self::Both,
+            StJc::NumTab => Self::Start,
         }
     }
 }
@@ -296,6 +320,15 @@ pub enum StNumberFormat {
     CardinalText,
     OrdinalText,
     None,
+    /// §17.18.59 ST_NumberFormat lists ~60 values (hebrew1, japaneseCounting,
+    /// decimalZero, russianLower, hex, …); the renderer models only the common
+    /// subset above. This is the **exception to the strict-enum rule**: a large,
+    /// extensible value space where a legal-but-unsupported value must degrade,
+    /// not fail — otherwise one exotic `<w:numFmt>` would fail the *whole*
+    /// document parse (`parse_numbering(..)?` propagates the error). Word itself
+    /// falls back to decimal for formats it can't render.
+    #[serde(other)]
+    Other,
 }
 
 impl From<StNumberFormat> for NumberFormat {
@@ -311,6 +344,7 @@ impl From<StNumberFormat> for NumberFormat {
             StNumberFormat::CardinalText => Self::CardinalText,
             StNumberFormat::OrdinalText => Self::OrdinalText,
             StNumberFormat::None => Self::None,
+            StNumberFormat::Other => Self::Decimal,
         }
     }
 }
@@ -1003,7 +1037,19 @@ mod tests {
         assert_eq!(de::<StJc>("thaiDistribute").unwrap(), StJc::ThaiDistribute);
     }
     #[test]
+    fn jc_kashida_and_numtab_are_legal_and_degrade() {
+        // §17.18.44: spec-legal values that would otherwise crash an Arabic /
+        // legacy-numbered document's parse. They parse and degrade to the
+        // nearest modelled alignment.
+        assert_eq!(de::<StJc>("mediumKashida").unwrap(), StJc::MediumKashida);
+        assert_eq!(de::<StJc>("highKashida").unwrap(), StJc::HighKashida);
+        assert_eq!(de::<StJc>("lowKashida").unwrap(), StJc::LowKashida);
+        assert_eq!(de::<StJc>("numTab").unwrap(), StJc::NumTab);
+    }
+    #[test]
     fn jc_strict() {
+        // A genuine typo still fails — the kashida/numTab additions are named
+        // variants, not a catch-all.
         assert_bad::<StJc>("middle");
     }
     #[test]
@@ -1011,6 +1057,8 @@ mod tests {
         assert_eq!(Alignment::from(StJc::Left), Alignment::Start);
         assert_eq!(Alignment::from(StJc::Right), Alignment::End);
         assert_eq!(Alignment::from(StJc::ThaiDistribute), Alignment::Thai);
+        assert_eq!(Alignment::from(StJc::MediumKashida), Alignment::Both);
+        assert_eq!(Alignment::from(StJc::NumTab), Alignment::Start);
     }
 
     // ── StNumberFormat ──
@@ -1034,8 +1082,26 @@ mod tests {
         );
     }
     #[test]
-    fn number_format_strict() {
-        assert_bad::<StNumberFormat>("hex");
+    fn number_format_unsupported_legal_values_degrade_not_fail() {
+        // §17.18.59 has ~60 legal values; unsupported ones must parse (→ Other)
+        // and convert to Decimal rather than failing the whole document parse.
+        for v in [
+            "hex",
+            "hebrew1",
+            "japaneseCounting",
+            "decimalZero",
+            "russianLower",
+        ] {
+            assert_eq!(
+                de::<StNumberFormat>(v).unwrap(),
+                StNumberFormat::Other,
+                "{v:?} is spec-legal and must degrade to Other, not error"
+            );
+        }
+        assert_eq!(
+            NumberFormat::from(StNumberFormat::Other),
+            NumberFormat::Decimal
+        );
     }
 
     // ── StPageOrientation ──

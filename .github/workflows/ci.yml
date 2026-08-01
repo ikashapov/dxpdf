@@ -34,6 +34,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Rustdoc warnings are silent locally unless you happen to run
+      # `cargo doc`, so broken intra-doc links accumulated unnoticed until a
+      # review counted 11 of them. `-D warnings` catches dangling `[`links`]`,
+      # links from public docs to private items, and prose that rustdoc parses
+      # as HTML (`Vec<Thing>` outside backticks).
+      - name: Doc links
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -56,6 +66,15 @@ jobs:
 
       - name: Run tests
         run: cargo test --all
+
+      # `subset-fonts` is default-on, so `cargo test --all` never compiles the
+      # crate without it. AGENTS.md documents `--no-default-features` as a
+      # supported build; nothing verified it, which is how a `not(feature)`
+      # arm survived in a module that only exists *with* the feature. This
+      # catches the real failure mode: a `fontcull` reference leaking outside
+      # the gated module.
+      - name: Build without default features
+        run: cargo build --no-default-features
 
   build:
     name: Build release

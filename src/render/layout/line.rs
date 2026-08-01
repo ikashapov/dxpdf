@@ -439,4 +439,24 @@ mod tests {
         assert!(lines.len() >= 3, "should produce at least 3 lines");
         // Each line should have at most 1 fragment since 40+40=80 > 70
     }
+
+    #[test]
+    fn first_line_narrower_than_remaining() {
+        // first_line_width=60, remaining_width=100.
+        // "a " (40pt) fits the narrow first line alone; "b " (40pt) + "c" (40pt)
+        // = 80pt fit together on the full 100pt remaining line.
+        let frags = vec![
+            text_frag("a ", 40.0),
+            text_frag("b ", 40.0),
+            text_frag("c", 40.0),
+        ];
+        let lines = fit_lines_with_first(&frags, Pt::new(60.0), Pt::new(100.0));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].end, 1, "only 'a ' fits the narrow first line");
+        assert_eq!(lines[1].start, 1);
+        assert_eq!(
+            lines[1].end, 3,
+            "'b ' + 'c' both fit on the full second line"
+        );
+    }
 }

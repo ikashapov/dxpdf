@@ -1,10 +1,9 @@
 //! Line placement, command emission, and related helpers.
 
-use std::borrow::Cow;
 use std::rc::Rc;
 
 use super::super::draw_command::DrawCommand;
-use super::super::fragment::Fragment;
+use super::super::fragment::{Fragment, LinkTarget};
 use super::types::{LineSpacingRule, MeasureTextFn, ParagraphStyle, TabStopDef};
 use super::{LineLayoutParams, LinePlacement, LEADER_CHAR_WIDTH_FALLBACK, LEADER_FONT_SIZE_CAP};
 use crate::render::dimension::Pt;
@@ -431,28 +430,28 @@ pub(super) fn emit_line_commands(
                         text_scale: font.text_scale,
                     });
 
-                    if let Some(url) = hyperlink_url {
+                    if let Some(link) = hyperlink_url {
                         let rect = crate::render::geometry::PtRect::from_xywh(
                             x,
                             *cursor_y,
                             rendered_width,
                             line_height,
                         );
-                        if url.starts_with("http://")
-                            || url.starts_with("https://")
-                            || url.starts_with("mailto:")
-                            || url.starts_with("ftp://")
-                        {
-                            commands.push(DrawCommand::LinkAnnotation {
-                                rect,
-                                url: url.clone(),
-                            });
-                        } else {
-                            // Internal bookmark link.
-                            commands.push(DrawCommand::InternalLink {
-                                rect,
-                                destination: url.clone(),
-                            });
+                        // The external/internal kind is carried on the fragment
+                        // (§17.16.22), so route by the ADT — no URL-scheme guess.
+                        match link {
+                            LinkTarget::External(url) => {
+                                commands.push(DrawCommand::LinkAnnotation {
+                                    rect,
+                                    url: url.clone(),
+                                })
+                            }
+                            LinkTarget::Internal(dest) => {
+                                commands.push(DrawCommand::InternalLink {
+                                    rect,
+                                    destination: dest.clone(),
+                                })
+                            }
                         }
                     }
 
@@ -533,7 +532,8 @@ pub(super) fn emit_line_commands(
                     // §17.3.1.37: resolve to the next tab stop.
                     // Tab stop positions are absolute from the paragraph's
                     // left edge, not relative to the text indent.
-                    let (tab_pos, tab_stop) = find_next_tab_stop(x, &style.tabs, line_available);
+                    let (tab_pos, tab_stop) =
+                        find_next_tab_stop(x, &style.tabs, line_available, style.default_tab_stop);
 
                     let new_x = if let Some(ts) = tab_stop {
                         use crate::model::TabAlignment;
@@ -648,75 +648,6 @@ pub(super) fn emit_line_commands(
     }
 }
 
-/// Split text fragments wider than `max_width` into per-character fragments.
-/// Uses accurate measurements when a measurer is provided, otherwise
-/// falls back to uniform width distribution.
-///
-/// Returns [`Cow::Borrowed`] on the common no-split path so callers avoid
-/// deep-cloning every paragraph's fragment vector; only an actual split
-/// materializes an owned `Vec`.
-pub(super) fn split_oversized_fragments<'a>(
-    fragments: &'a [Fragment],
-    max_width: Pt,
-    measure: MeasureTextFn<'_>,
-) -> Cow<'a, [Fragment]> {
-    // Fast path: check if any fragment actually needs splitting.
-    let needs_split = fragments.iter().any(
-        |f| matches!(f, Fragment::Text { width, text, .. } if *width > max_width && text.len() > 1),
-    );
-    if !needs_split {
-        return Cow::Borrowed(fragments);
-    }
-
-    let mut result = Vec::with_capacity(fragments.len());
-    // Reusable buffer for single-character measurement (avoids per-char heap allocation).
-    let mut ch_buf = [0u8; 4];
-    for frag in fragments {
-        match frag {
-            Fragment::Text {
-                text,
-                width,
-                font,
-                color,
-                shading,
-                border,
-                metrics,
-                hyperlink_url,
-                baseline_offset,
-                ..
-            } if *width > max_width && text.chars().count() > 1 => {
-                let char_count = text.chars().count();
-                let per_char_fallback = *width / char_count as f32;
-                for ch in text.chars() {
-                    let ch_str = ch.encode_utf8(&mut ch_buf);
-                    let (w, char_metrics) = if let Some(m) = measure {
-                        m(ch_str, font)
-                    } else {
-                        (per_char_fallback, *metrics)
-                    };
-                    result.push(Fragment::Text {
-                        text: Rc::from(&*ch_str),
-                        font: font.clone(),
-                        color: *color,
-                        shading: *shading,
-                        border: *border,
-                        width: w,
-                        trimmed_width: w,
-                        metrics: char_metrics,
-                        hyperlink_url: hyperlink_url.clone(),
-                        baseline_offset: *baseline_offset,
-                        text_offset: Pt::ZERO,
-                        // Per-character split of an over-wide word — not a mark.
-                        is_footnote_ref: false,
-                    });
-                }
-            }
-            _ => result.push(frag.clone()),
-        }
-    }
-    Cow::Owned(result)
-}
-
 /// True for fragments that place content by tab semantics — a regular tab
 /// stop (§17.3.1.37) or an absolute-position tab (§17.3.1.30). Both terminate
 /// a tab zone and suppress paragraph alignment for the line.
@@ -726,15 +657,14 @@ fn is_tab_like(f: &Fragment) -> bool {
 
 /// §17.3.1.37: find the next tab stop position greater than `current_x`.
 /// Returns (position, optional tab stop definition).
-/// If no custom tab stop matches, uses default tab stops every 36pt (0.5 inch).
+/// If no custom tab stop matches, falls back to the document's default tab-stop
+/// interval (§17.15.1.25 `w:defaultTabStop`, spec default 36pt / 0.5 inch).
 pub(super) fn find_next_tab_stop(
     current_x: Pt,
     tabs: &[TabStopDef],
     line_width: Pt,
+    default_interval: Pt,
 ) -> (Pt, Option<&TabStopDef>) {
-    // §17.15.1.25: default tab stop interval is 36pt (0.5 inch).
-    const DEFAULT_TAB_INTERVAL: f32 = 36.0;
-
     // Find the first custom tab stop past current position.
     for ts in tabs {
         if ts.position > current_x {
@@ -742,8 +672,14 @@ pub(super) fn find_next_tab_stop(
         }
     }
 
-    // No custom tab stop — use default interval.
-    let next = ((current_x.raw() / DEFAULT_TAB_INTERVAL).floor() + 1.0) * DEFAULT_TAB_INTERVAL;
+    // No custom tab stop — use the document default interval. Guard against a
+    // zero/negative interval (a degenerate w:defaultTabStop) to avoid a stall.
+    let interval = if default_interval.raw() > 0.0 {
+        default_interval.raw()
+    } else {
+        36.0
+    };
+    let next = ((current_x.raw() / interval).floor() + 1.0) * interval;
     (Pt::new(next.min(line_width.raw())), None)
 }
 
@@ -837,5 +773,68 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
         }
         LineSpacingRule::Exact(h) => *h,
         LineSpacingRule::AtLeast(min) => natural.max(*min),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_next_tab_stop;
+    use crate::model;
+    use crate::render::dimension::Pt;
+    use crate::render::layout::paragraph::TabStopDef;
+
+    // ── find_next_tab_stop ────────────────────────────────────────────────────
+
+    #[test]
+    fn default_interval_36pt_advances_half_inch() {
+        // No custom stops: land on the next multiple of the default interval.
+        let (pos, ts) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 36.0);
+        assert!(ts.is_none());
+        let (pos, _) = find_next_tab_stop(Pt::new(40.0), &[], Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 72.0);
+    }
+
+    #[test]
+    fn custom_default_interval_is_honored() {
+        // A custom w:defaultTabStop (e.g. 1440tw = 72pt / 1 inch) changes the grid.
+        let (pos, _) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::new(72.0));
+        assert_eq!(pos.raw(), 72.0);
+        let (pos, _) = find_next_tab_stop(Pt::new(80.0), &[], Pt::new(1000.0), Pt::new(72.0));
+        assert_eq!(pos.raw(), 144.0);
+    }
+
+    #[test]
+    fn zero_interval_falls_back_to_36pt() {
+        // A degenerate w:defaultTabStop of 0 must not stall the tab grid.
+        let (pos, _) = find_next_tab_stop(Pt::ZERO, &[], Pt::new(1000.0), Pt::ZERO);
+        assert_eq!(pos.raw(), 36.0);
+    }
+
+    #[test]
+    fn custom_tab_stop_preferred_over_default_grid() {
+        // A 72pt custom stop beats the 36pt default grid when the cursor is before it.
+        let tabs = vec![TabStopDef {
+            position: Pt::new(72.0),
+            alignment: model::TabAlignment::Left,
+            leader: model::TabLeader::None,
+        }];
+        let (pos, ts) = find_next_tab_stop(Pt::new(10.0), &tabs, Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 72.0, "custom stop wins over 36pt grid");
+        assert!(ts.is_some(), "custom TabStopDef returned");
+    }
+
+    #[test]
+    fn cursor_past_all_custom_stops_falls_back_to_default_grid() {
+        // All custom stops are behind the cursor — fall back to the default interval.
+        let tabs = vec![TabStopDef {
+            position: Pt::new(72.0),
+            alignment: model::TabAlignment::Left,
+            leader: model::TabLeader::None,
+        }];
+        // cursor=80 → floor(80/36)+1 = 2+1 = 3 → 3×36 = 108
+        let (pos, ts) = find_next_tab_stop(Pt::new(80.0), &tabs, Pt::new(1000.0), Pt::new(36.0));
+        assert_eq!(pos.raw(), 108.0, "default grid past the custom stop");
+        assert!(ts.is_none(), "no custom stop returned");
     }
 }

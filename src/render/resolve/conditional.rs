@@ -29,13 +29,25 @@ pub struct CellGridPosition {
 
 /// §17.7.6: resolve conditional formatting for a cell at (row, col).
 ///
-/// Overlays applicable `tblStylePr` overrides in priority order per §17.7.6:
-/// 1. Whole table (lowest)
-/// 2. Band1/Band2 Horizontal
-/// 3. Band1/Band2 Vertical
-/// 4. First/Last Column
-/// 5. First/Last Row
-/// 6. Corner cells (highest)
+/// Overlays applicable `tblStylePr` overrides in ascending priority (later
+/// overlays win), per §17.7.6:
+/// 0. `wholeTable` — the base layer, applying to every cell
+/// 1. Band1/Band2 Vertical (banded columns)
+/// 2. Band1/Band2 Horizontal (banded rows — override column banding)
+/// 3. First/Last Column
+/// 4. First/Last Row
+/// 5. Corner cells (highest)
+///
+/// `wholeTable` is not positional — it applies to every cell — so it is not
+/// produced by `applicable_regions`, which answers "which *positional* regions
+/// is this cell in?". Seeding the chain with it here keeps that function honest
+/// and reuses the existing overlay machinery unchanged, so the positional
+/// precedence (including D1's banding fix) is untouched: `wholeTable` simply
+/// sits underneath.
+///
+/// The table-level half — a `wholeTable` override's `tblPr` (borders, cell
+/// margins) — is folded into `ResolvedStyle::table` during style resolution,
+/// because that is where `build_table` reads them from.
 pub fn resolve_cell_conditional(
     pos: &CellGridPosition,
     look: Option<&TableLook>,
@@ -55,7 +67,7 @@ pub fn resolve_cell_conditional(
 
     // §17.7.6: apply overrides in priority order (lowest first, highest last).
     // Later overlays take precedence.
-    for region in &regions {
+    for region in std::iter::once(&TableStyleOverrideType::WholeTable).chain(regions.iter()) {
         if let Some(ovr) = overrides.iter().find(|o| o.override_type == *region) {
             if let Some(ref tcp) = ovr.table_cell_properties {
                 overlay_cell_properties(&mut result, tcp);
@@ -93,7 +105,31 @@ fn applicable_regions(
     let h_band_active = !look.and_then(|l| l.no_h_band).unwrap_or(false);
     let v_band_active = !look.and_then(|l| l.no_v_band).unwrap_or(false);
 
-    // §17.7.6 priority 2: horizontal banding.
+    // §17.7.6 priority 1: vertical banding (banded columns). Pushed *before*
+    // horizontal banding so that — per the spec's ascending order (band1Vert,
+    // band2Vert, band1Horz, band2Horz) — row banding overrides column banding.
+    if v_band_active {
+        let band_col = if first_col_active && col_idx > 0 {
+            col_idx - 1
+        } else {
+            col_idx
+        };
+        let band_size = col_band_size.max(1) as usize;
+        let in_first_band = (band_col / band_size).is_multiple_of(2);
+
+        let is_first = first_col_active && col_idx == 0;
+        let is_last = last_col_active && col_idx == num_cols - 1;
+        if !is_first && !is_last {
+            if in_first_band {
+                regions.push(TableStyleOverrideType::Band1Vert);
+            } else {
+                regions.push(TableStyleOverrideType::Band2Vert);
+            }
+        }
+    }
+
+    // §17.7.6 priority 2: horizontal banding (banded rows) — higher priority
+    // than vertical banding.
     if h_band_active {
         // When firstRow is active, banding starts from row 1.
         let band_row = if first_row_active && row_idx > 0 {
@@ -112,27 +148,6 @@ fn applicable_regions(
                 regions.push(TableStyleOverrideType::Band1Horz);
             } else {
                 regions.push(TableStyleOverrideType::Band2Horz);
-            }
-        }
-    }
-
-    // §17.7.6 priority 3: vertical banding.
-    if v_band_active {
-        let band_col = if first_col_active && col_idx > 0 {
-            col_idx - 1
-        } else {
-            col_idx
-        };
-        let band_size = col_band_size.max(1) as usize;
-        let in_first_band = (band_col / band_size).is_multiple_of(2);
-
-        let is_first = first_col_active && col_idx == 0;
-        let is_last = last_col_active && col_idx == num_cols - 1;
-        if !is_first && !is_last {
-            if in_first_band {
-                regions.push(TableStyleOverrideType::Band1Vert);
-            } else {
-                regions.push(TableStyleOverrideType::Band2Vert);
             }
         }
     }
@@ -458,5 +473,185 @@ mod tests {
         );
         assert!(result.cell_properties.is_none());
         assert!(result.run_properties.is_none());
+    }
+
+    #[test]
+    fn horizontal_banding_overrides_vertical() {
+        // §17.7.6: band1Horz is applied after band1Vert, so on a cell that is in
+        // both an odd row-band and an odd column-band the *row* banding wins.
+        let overrides = vec![
+            make_override(
+                TableStyleOverrideType::Band1Vert,
+                Some(blue_shading()),
+                None,
+            ),
+            make_override(
+                TableStyleOverrideType::Band1Horz,
+                Some(green_shading()),
+                None,
+            ),
+        ];
+        // Interior cell (1,1): band_row=0 → Band1Horz, band_col=0 → Band1Vert.
+        let result = resolve_cell_conditional(
+            &CellGridPosition {
+                row_idx: 1,
+                col_idx: 1,
+                num_rows: 6,
+                num_cols: 6,
+                row_band_size: 1,
+                col_band_size: 1,
+            },
+            None,
+            &overrides,
+        );
+        let shading = result.cell_properties.unwrap().shading.unwrap();
+        assert_eq!(
+            shading.fill,
+            Color::Rgb(0x9BBB59),
+            "row banding (green) must override column banding (blue)"
+        );
+    }
+
+    // ── wholeTable base layer (§17.7.6, backlog Unit 5) ──────────────
+
+    fn pos(row_idx: usize, col_idx: usize) -> CellGridPosition {
+        CellGridPosition {
+            row_idx,
+            col_idx,
+            num_rows: 6,
+            num_cols: 6,
+            row_band_size: 1,
+            col_band_size: 1,
+        }
+    }
+
+    fn red_shading() -> Shading {
+        Shading {
+            fill: Color::Rgb(0xFF0000),
+            pattern: ShadingPattern::Clear,
+            color: Color::Auto,
+        }
+    }
+
+    /// `wholeTable` applies to every cell — including plain interior cells that
+    /// match no positional region at all, which used to resolve to nothing.
+    #[test]
+    fn whole_table_applies_to_an_interior_cell() {
+        let overrides = vec![make_override(
+            TableStyleOverrideType::WholeTable,
+            Some(red_shading()),
+            Some(true),
+        )];
+        // (2,2) with band sizes of 1 lands in a band, but a table whose style
+        // declares no banding override still gets the base layer.
+        let result = resolve_cell_conditional(&pos(2, 2), None, &overrides);
+        assert_eq!(
+            result.cell_properties.unwrap().shading.unwrap().fill,
+            Color::Rgb(0xFF0000)
+        );
+        assert_eq!(result.run_properties.unwrap().bold, Some(true));
+    }
+
+    /// …and to the corners, where the highest-priority region also applies.
+    #[test]
+    fn whole_table_applies_to_every_position() {
+        let overrides = vec![make_override(
+            TableStyleOverrideType::WholeTable,
+            Some(red_shading()),
+            None,
+        )];
+        for (r, c) in [(0, 0), (0, 5), (5, 0), (5, 5), (0, 3), (3, 0), (3, 3)] {
+            let result = resolve_cell_conditional(&pos(r, c), None, &overrides);
+            assert_eq!(
+                result
+                    .cell_properties
+                    .and_then(|p| p.shading)
+                    .map(|s| s.fill),
+                Some(Color::Rgb(0xFF0000)),
+                "cell ({r},{c}) must receive the wholeTable base layer"
+            );
+        }
+    }
+
+    /// It is the *base*: every positional region outranks it.
+    #[test]
+    fn positional_regions_override_whole_table() {
+        for (region, r, c) in [
+            (TableStyleOverrideType::Band1Horz, 1, 2),
+            (TableStyleOverrideType::FirstRow, 0, 2),
+            (TableStyleOverrideType::FirstCol, 2, 0),
+            (TableStyleOverrideType::NwCell, 0, 0),
+        ] {
+            let overrides = vec![
+                make_override(
+                    TableStyleOverrideType::WholeTable,
+                    Some(red_shading()),
+                    None,
+                ),
+                make_override(region, Some(green_shading()), None),
+            ];
+            let result = resolve_cell_conditional(&pos(r, c), None, &overrides);
+            assert_eq!(
+                result.cell_properties.unwrap().shading.unwrap().fill,
+                Color::Rgb(0x9BBB59),
+                "{region:?} must outrank wholeTable"
+            );
+        }
+    }
+
+    /// A positional override that sets only *some* properties leaves the rest
+    /// of the base layer showing through — that is what makes it a layer and
+    /// not a replacement.
+    #[test]
+    fn whole_table_shows_through_a_partial_positional_override() {
+        let overrides = vec![
+            make_override(
+                TableStyleOverrideType::WholeTable,
+                Some(red_shading()),
+                Some(true),
+            ),
+            // firstRow sets bold=false but no shading.
+            make_override(TableStyleOverrideType::FirstRow, None, Some(false)),
+        ];
+        let result = resolve_cell_conditional(&pos(0, 2), None, &overrides);
+        assert_eq!(
+            result.cell_properties.unwrap().shading.unwrap().fill,
+            Color::Rgb(0xFF0000),
+            "shading falls through from wholeTable"
+        );
+        assert_eq!(
+            result.run_properties.unwrap().bold,
+            Some(false),
+            "but firstRow's own bold wins"
+        );
+    }
+
+    /// D1 fixed horizontal-over-vertical banding precedence (§17.7.6). Adding a
+    /// base layer beneath both must not disturb it.
+    #[test]
+    fn whole_table_does_not_disturb_banding_precedence() {
+        let overrides = vec![
+            make_override(
+                TableStyleOverrideType::WholeTable,
+                Some(red_shading()),
+                None,
+            ),
+            make_override(
+                TableStyleOverrideType::Band1Vert,
+                Some(blue_shading()),
+                None,
+            ),
+            make_override(
+                TableStyleOverrideType::Band1Horz,
+                Some(green_shading()),
+                None,
+            ),
+        ];
+        let result = resolve_cell_conditional(&pos(1, 1), None, &overrides);
+        assert_eq!(
+            result.cell_properties.unwrap().shading.unwrap().fill,
+            Color::Rgb(0x9BBB59),
+            "row banding must still override column banding, and both the base"
+        );
     }
 }

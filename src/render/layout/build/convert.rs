@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::model::{self, FirstLineIndent, LineSpacing};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
+use crate::render::layout::build::BuildState;
 use crate::render::layout::fragment::Fragment;
 use crate::render::layout::measurer::TextMeasurer;
 use crate::render::layout::paragraph::TabStopDef;
@@ -33,6 +33,11 @@ pub(super) fn resolve_paragraph_defaults(
     para: &model::Paragraph,
     resolved: &ResolvedDocument,
     defer_doc_defaults: bool,
+    // §20.1.4.1.17: base color / font family for a shape text box (from
+    // `wps:style/fontRef`). They sit *below* the style/run cascade — an
+    // explicit run or style value still wins. `None` uses the normal defaults.
+    base_color: Option<RgbColor>,
+    base_family: Option<&str>,
 ) -> (
     String,
     Pt,
@@ -43,20 +48,23 @@ pub(super) fn resolve_paragraph_defaults(
     let mut para_props = para.properties.clone();
     let mut run_defaults = resolved.doc_defaults_run.clone();
 
-    // Derive default font from: doc defaults → theme minor font → spec fallback.
-    let mut default_family = resolved
-        .theme
-        .as_ref()
-        .map(|t| t.minor_font.latin.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(SPEC_FALLBACK_FONT)
-        .to_string();
+    // Derive default font from: fontRef base → doc defaults → theme minor → spec.
+    let mut default_family = match base_family.filter(|s| !s.is_empty()) {
+        Some(f) => f.to_string(),
+        None => resolved
+            .theme
+            .as_ref()
+            .map(|t| t.minor_font.latin.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(SPEC_FALLBACK_FONT)
+            .to_string(),
+    };
     let mut default_size = resolved
         .doc_defaults_run
         .font_size
         .map(Pt::from)
         .unwrap_or(SPEC_DEFAULT_FONT_SIZE);
-    let mut default_color = RgbColor::BLACK;
+    let mut default_color = base_color.unwrap_or(RgbColor::BLACK);
 
     // §17.7.4.17: if no style is specified, use the default paragraph style.
     let effective_style_id = para
@@ -115,7 +123,10 @@ pub(super) fn doc_font_size(ctx: &BuildContext) -> Pt {
 }
 
 /// Convert a model paragraph properties into a layout ParagraphStyle.
-pub(super) fn paragraph_style_from_props(props: &model::ParagraphProperties) -> ParagraphStyle {
+pub(super) fn paragraph_style_from_props(
+    props: &model::ParagraphProperties,
+    default_tab_stop: Pt,
+) -> ParagraphStyle {
     let indent_left = props
         .indentation
         .and_then(|i| i.start)
@@ -189,6 +200,7 @@ pub(super) fn paragraph_style_from_props(props: &model::ParagraphProperties) -> 
         indent_first_line,
         line_spacing,
         tabs,
+        default_tab_stop,
         drop_cap: None,
         borders: resolve_paragraph_borders(props),
         shading: props
@@ -223,7 +235,7 @@ pub(super) fn resolve_paragraph_borders(
     let pbdr = props.borders.as_ref()?;
 
     let convert = |b: &model::Border| -> Option<BorderLine> {
-        if b.style == model::BorderStyle::None {
+        if b.style.draws_nothing() {
             return None;
         }
         Some(BorderLine {
@@ -252,27 +264,57 @@ pub(super) fn resolve_paragraph_borders(
 }
 
 /// Convert a model `Border` to a layout `TableBorderLine`.
-fn convert_model_border(b: &model::Border) -> TableBorderLine {
+///
+/// §17.4.38 defines 26 border styles; the painter draws two. `Double` maps
+/// through, and the remaining 24 — `Dotted`, `Dashed`, `Triple`, `Wave`,
+/// `DashDotStroked`, the `ThinThick*` family and the rest — are approximated
+/// by a solid line of the declared width and colour. The approximation is
+/// bounded (position, thickness and colour are all preserved; only the stroke
+/// pattern is lost) but it is not free, so each distinct style is reported once
+/// per render via `state.warned_border_styles`.
+fn convert_model_border(b: &model::Border, state: &mut BuildState) -> TableBorderLine {
+    let style = match b.style {
+        model::BorderStyle::Double => TableBorderStyle::Double,
+        model::BorderStyle::Single => TableBorderStyle::Single,
+        other => {
+            if state.warned_border_styles.insert(other) {
+                log::warn!(
+                    "[build] §17.4.38 border style {other:?} is not drawn; \
+                     approximating with a single solid line"
+                );
+            }
+            TableBorderStyle::Single
+        }
+    };
     TableBorderLine {
         width: Pt::from(b.width),
         color: resolve_color(b.color, ColorContext::Text),
-        style: match b.style {
-            model::BorderStyle::Double => TableBorderStyle::Double,
-            _ => TableBorderStyle::Single,
-        },
+        style,
     }
 }
 
 /// Convert a model cell border to a `CellBorderOverride`.
+///
+/// Three inputs, three outcomes ([MS-OI29500] §17.4.66):
+///
+/// | Markup | Result | Meaning |
+/// |---|---|---|
+/// | edge omitted | `None` | inherit: style → `tblPrEx` → table borders |
+/// | `val="none"` | `None` | **same as omitted** — the spec's cascade starts with *"if the cell border is omitted or none"* |
+/// | `val="nil"` | `Some(Suppress)` | draw nothing, and win the shared-edge conflict |
+/// | anything else | `Some(Border(..))` | that border, subject to conflict resolution |
+///
+/// `none` collapsing to `None` is the whole point: it makes an explicit
+/// `<w:top w:val="none"/>` behave as if the author had written nothing, which
+/// is what the spec says and the opposite of suppressing the edge.
 pub(super) fn convert_cell_border_override(
     b: &Option<model::Border>,
+    state: &mut BuildState,
 ) -> Option<CellBorderOverride> {
-    b.as_ref().map(|b| {
-        if b.style == model::BorderStyle::None {
-            CellBorderOverride::Nil
-        } else {
-            CellBorderOverride::Border(convert_model_border(b))
-        }
+    b.as_ref().and_then(|b| match b.style {
+        model::BorderStyle::Nil => Some(CellBorderOverride::Suppress),
+        model::BorderStyle::None => None,
+        _ => Some(CellBorderOverride::Border(convert_model_border(b, state))),
     })
 }
 
@@ -295,13 +337,16 @@ pub(super) fn merge_table_borders(
 
 /// Convert model `TableBorders` to a layout `TableBorderConfig`.
 /// §17.4.38: borders with `val="none"` or `val="nil"` are suppressed.
-pub(super) fn convert_table_border_config(b: &model::TableBorders) -> TableBorderConfig {
-    let convert = |border: &Option<model::Border>| -> Option<TableBorderLine> {
+pub(super) fn convert_table_border_config(
+    b: &model::TableBorders,
+    state: &mut BuildState,
+) -> TableBorderConfig {
+    let mut convert = |border: &Option<model::Border>| -> Option<TableBorderLine> {
         border.as_ref().and_then(|b| {
-            if b.style == model::BorderStyle::None {
+            if b.style.draws_nothing() {
                 None
             } else {
-                Some(convert_model_border(b))
+                Some(convert_model_border(b, state))
             }
         })
     };
@@ -313,61 +358,6 @@ pub(super) fn convert_table_border_config(b: &model::TableBorders) -> TableBorde
         inside_h: convert(&b.inside_h),
         inside_v: convert(&b.inside_v),
     }
-}
-
-/// Split text fragments wider than `max_width` into per-character fragments
-/// with individually measured widths. Used in narrow table cells for
-/// character-level line breaking.
-pub(super) fn split_oversized_fragments(
-    fragments: Vec<Fragment>,
-    max_width: Pt,
-    ctx: &BuildContext,
-) -> Vec<Fragment> {
-    if max_width <= Pt::ZERO {
-        return fragments;
-    }
-    let mut result = Vec::with_capacity(fragments.len());
-    for frag in fragments {
-        match &frag {
-            Fragment::Text {
-                text, width, font, ..
-            } if *width > max_width && text.chars().count() > 1 => {
-                // Re-measure each character individually.
-                for ch in text.chars() {
-                    let ch_str = ch.to_string();
-                    let (w, m) = ctx.measurer.measure(&ch_str, font);
-                    if let Fragment::Text {
-                        color,
-                        shading,
-                        border,
-                        hyperlink_url,
-                        baseline_offset,
-                        ..
-                    } = &frag
-                    {
-                        result.push(Fragment::Text {
-                            text: Rc::from(ch_str.as_str()),
-                            font: font.clone(),
-                            color: *color,
-                            shading: *shading,
-                            border: *border,
-                            width: w,
-                            trimmed_width: w,
-                            metrics: m,
-                            hyperlink_url: hyperlink_url.clone(),
-                            baseline_offset: *baseline_offset,
-                            text_offset: Pt::ZERO,
-                            // A per-character split of an over-wide word is never
-                            // a footnote mark (those are tiny superscripts).
-                            is_footnote_ref: false,
-                        });
-                    }
-                }
-            }
-            _ => result.push(frag),
-        }
-    }
-    result
 }
 
 /// Populate image data on Fragment::Image fragments from the media map.
@@ -417,134 +407,241 @@ pub(super) fn remap_legacy_font_chars(
         return (text.to_string(), family.to_string());
     }
 
-    let remapped: String = text
-        .chars()
-        .map(|ch| {
-            let code = ch as u32;
-            if is_symbol && (0xF020..=0xF0FF).contains(&code) {
-                // Symbol font PUA mapping per unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt
-                match code {
-                    0xF020 => '\u{0020}',                                           // SPACE
-                    0xF021 => '\u{0021}', // EXCLAMATION MARK
-                    0xF025 => '\u{0025}', // PERCENT SIGN
-                    0xF028 => '\u{0028}', // LEFT PARENTHESIS
-                    0xF029 => '\u{0029}', // RIGHT PARENTHESIS
-                    0xF02B => '\u{002B}', // PLUS SIGN
-                    0xF02E => '\u{002E}', // FULL STOP
-                    0xF030..=0xF039 => char::from_u32(code - 0xF000).unwrap_or(ch), // DIGITS
-                    0xF03C => '\u{003C}', // LESS-THAN SIGN
-                    0xF03D => '\u{003D}', // EQUALS SIGN
-                    0xF03E => '\u{003E}', // GREATER-THAN SIGN
-                    0xF05B => '\u{005B}', // LEFT SQUARE BRACKET
-                    0xF05D => '\u{005D}', // RIGHT SQUARE BRACKET
-                    0xF07B => '\u{007B}', // LEFT CURLY BRACKET
-                    0xF07C => '\u{007C}', // VERTICAL LINE
-                    0xF07D => '\u{007D}', // RIGHT CURLY BRACKET
-                    0xF07E => '\u{223C}', // TILDE OPERATOR
-                    0xF0A0 => '\u{20AC}', // EURO SIGN
-                    0xF0A5 => '\u{221E}', // INFINITY
-                    0xF0A7 => '\u{2663}', // BLACK CLUB SUIT
-                    0xF0A8 => '\u{2666}', // BLACK DIAMOND SUIT
-                    0xF0A9 => '\u{2665}', // BLACK HEART SUIT
-                    0xF0AA => '\u{2660}', // BLACK SPADE SUIT
-                    0xF0AB => '\u{2194}', // LEFT RIGHT ARROW
-                    0xF0AC => '\u{2190}', // LEFTWARDS ARROW
-                    0xF0AD => '\u{2191}', // UPWARDS ARROW
-                    0xF0AE => '\u{2192}', // RIGHTWARDS ARROW
-                    0xF0AF => '\u{2193}', // DOWNWARDS ARROW
-                    0xF0B0 => '\u{00B0}', // DEGREE SIGN
-                    0xF0B1 => '\u{00B1}', // PLUS-MINUS SIGN
-                    0xF0B2 => '\u{2033}', // DOUBLE PRIME
-                    0xF0B3 => '\u{2265}', // GREATER-THAN OR EQUAL TO
-                    0xF0B4 => '\u{00D7}', // MULTIPLICATION SIGN
-                    0xF0B5 => '\u{221D}', // PROPORTIONAL TO
-                    0xF0B7 => '\u{2022}', // BULLET
-                    0xF0B8 => '\u{00F7}', // DIVISION SIGN
-                    0xF0B9 => '\u{2260}', // NOT EQUAL TO
-                    0xF0BA => '\u{2261}', // IDENTICAL TO
-                    0xF0BB => '\u{2248}', // ALMOST EQUAL TO
-                    0xF0BC => '\u{2026}', // HORIZONTAL ELLIPSIS
-                    0xF0C0 => '\u{2135}', // ALEF SYMBOL
-                    0xF0C1 => '\u{2111}', // BLACK-LETTER CAPITAL I
-                    0xF0C2 => '\u{211C}', // BLACK-LETTER CAPITAL R
-                    0xF0C3 => '\u{2118}', // SCRIPT CAPITAL P
-                    0xF0C5 => '\u{2297}', // CIRCLED TIMES
-                    0xF0C6 => '\u{2295}', // CIRCLED PLUS
-                    0xF0C7 => '\u{2205}', // EMPTY SET
-                    0xF0C8 => '\u{2229}', // INTERSECTION
-                    0xF0C9 => '\u{222A}', // UNION
-                    0xF0CB => '\u{2283}', // SUPERSET OF
-                    0xF0CC => '\u{2287}', // SUPERSET OF OR EQUAL TO
-                    0xF0CD => '\u{2284}', // NOT A SUBSET OF
-                    0xF0CE => '\u{2282}', // SUBSET OF
-                    0xF0CF => '\u{2286}', // SUBSET OF OR EQUAL TO
-                    0xF0D0 => '\u{2208}', // ELEMENT OF
-                    0xF0D1 => '\u{2209}', // NOT AN ELEMENT OF
-                    0xF0D5 => '\u{220F}', // N-ARY PRODUCT
-                    0xF0D6 => '\u{221A}', // SQUARE ROOT
-                    0xF0D7 => '\u{22C5}', // DOT OPERATOR
-                    0xF0D8 => '\u{00AC}', // NOT SIGN
-                    0xF0D9 => '\u{2227}', // LOGICAL AND
-                    0xF0DA => '\u{2228}', // LOGICAL OR
-                    0xF0E0 => '\u{21D0}', // LEFTWARDS DOUBLE ARROW
-                    0xF0E1 => '\u{21D1}', // UPWARDS DOUBLE ARROW
-                    0xF0E2 => '\u{21D2}', // RIGHTWARDS DOUBLE ARROW
-                    0xF0E3 => '\u{21D3}', // DOWNWARDS DOUBLE ARROW
-                    0xF0E4 => '\u{21D4}', // LEFT RIGHT DOUBLE ARROW
-                    0xF0E5 => '\u{2329}', // LEFT-POINTING ANGLE BRACKET
-                    0xF0F1 => '\u{232A}', // RIGHT-POINTING ANGLE BRACKET
-                    0xF0F2 => '\u{222B}', // INTEGRAL
-                    _ => ch,
-                }
-            } else if is_wingdings && (0xF020..=0xF0FF).contains(&code) {
-                // Wingdings PUA mapping per Microsoft Wingdings-to-Unicode table
-                match code {
-                    0xF021 => '\u{270E}',  // LOWER RIGHT PENCIL
-                    0xF022 => '\u{2702}',  // BLACK SCISSORS
-                    0xF023 => '\u{2701}',  // UPPER BLADE SCISSORS
-                    0xF028 => '\u{1F4CB}', // CLIPBOARD (may need supplementary)
-                    0xF029 => '\u{1F4CB}', // CLIPBOARD
-                    0xF041 => '\u{FE4E}',  // WAVY LOW LINE (approximate)
-                    0xF046 => '\u{1F44D}', // THUMBS UP SIGN
-                    0xF04C => '\u{2639}',  // WHITE FROWNING FACE
-                    0xF04A => '\u{263A}',  // WHITE SMILING FACE
-                    0xF06C => '\u{25CF}',  // BLACK CIRCLE
-                    0xF06D => '\u{274D}',  // SHADOWED WHITE CIRCLE
-                    0xF06E => '\u{25A0}',  // BLACK SQUARE
-                    0xF06F => '\u{25A1}',  // WHITE SQUARE
-                    0xF070 => '\u{25A1}',  // WHITE SQUARE (alt)
-                    0xF071 => '\u{2751}',  // LOWER RIGHT SHADOWED WHITE SQUARE
-                    0xF072 => '\u{2752}',  // UPPER RIGHT SHADOWED WHITE SQUARE
-                    0xF073 => '\u{25C6}',  // BLACK DIAMOND
-                    0xF074 => '\u{2756}',  // BLACK DIAMOND MINUS WHITE X
-                    0xF076 => '\u{2756}',  // BLACK DIAMOND MINUS WHITE X
-                    0xF09F => '\u{2708}',  // AIRPLANE
-                    0xF0A1 => '\u{270C}',  // VICTORY HAND
-                    0xF0A4 => '\u{261C}',  // WHITE LEFT POINTING INDEX
-                    0xF0A5 => '\u{261E}',  // WHITE RIGHT POINTING INDEX
-                    0xF0A7 => '\u{25AA}',  // BLACK SMALL SQUARE
-                    0xF0A8 => '\u{25FB}',  // WHITE MEDIUM SQUARE
-                    0xF0D5 => '\u{232B}',  // ERASE TO THE LEFT
-                    0xF0D8 => '\u{27A2}',  // THREE-D TOP-LIGHTED RIGHTWARDS ARROWHEAD
-                    0xF0E8 => '\u{2B22}',  // BLACK HEXAGON (approximate)
-                    0xF0F0 => '\u{2B1A}',  // DOTTED SQUARE (approximate)
-                    0xF0FC => '\u{2714}',  // HEAVY CHECK MARK
-                    0xF0FB => '\u{2718}',  // HEAVY BALLOT X
-                    0xF0FE => '\u{2612}',  // BALLOT BOX WITH X (approximate)
-                    _ => ch,
-                }
-            } else {
-                ch
-            }
-        })
-        .collect();
+    let mut remapped = String::with_capacity(text.len());
+    // True once a PUA codepoint is found that we have no Unicode mapping for.
+    // Such a character survives as a raw PUA scalar, which *only* the original
+    // legacy font can render — see the family choice below.
+    let mut unmapped_pua = false;
 
-    // After PUA→Unicode remapping, the original Symbol/Wingdings font
-    // cannot render the standard Unicode codepoints (legacy fonts lack
-    // Unicode cmaps). Use the document's fallback font for the remapped
-    // glyphs — standard Unicode bullets (U+2022, U+25AA) are in most
-    // text fonts.
-    (remapped, fallback_family.to_string())
+    for ch in text.chars() {
+        let code = ch as u32;
+        if !LEGACY_PUA_RANGE.contains(&code) {
+            // Not legacy-encoded; pass through untouched.
+            remapped.push(ch);
+            continue;
+        }
+        let mapped = if is_symbol {
+            symbol_pua_to_unicode(code)
+        } else {
+            wingdings_pua_to_unicode(code)
+        };
+        match mapped {
+            Some(unicode) => remapped.push(unicode),
+            None => {
+                unmapped_pua = true;
+                remapped.push(ch);
+            }
+        }
+    }
+
+    // Font choice follows what actually happened to the text:
+    //
+    // * Everything mapped → the text is now standard Unicode, which the legacy
+    //   font cannot render (Symbol/Wingdings carry no Unicode cmap). Switch to
+    //   the document's fallback font; standard bullets (U+2022, U+25AA) and
+    //   Greek are present in most text fonts.
+    // * Something didn't map → that character is still a PUA scalar, and the
+    //   *only* font that can render it is the legacy one it came from. Keeping
+    //   the original family renders correctly wherever the real Symbol /
+    //   Wingdings face is installed; handing a PUA scalar to a text font is a
+    //   guaranteed `.notdef` box.
+    let family = if unmapped_pua {
+        font_family
+    } else {
+        fallback_family
+    };
+    (remapped, family.to_string())
+}
+
+/// The PUA block Word uses for legacy symbol-font encodings: character code
+/// `0xNN` is stored as `0xF0NN` (§17.3.3.30 `w:sym`).
+const LEGACY_PUA_RANGE: std::ops::RangeInclusive<u32> = 0xF020..=0xF0FF;
+
+/// Symbol-font PUA codepoint → Unicode, per the Adobe mapping table
+/// (unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt).
+///
+/// `None` means "no mapping known" — deliberately distinct from "maps to
+/// itself", because the caller uses it to decide whether the remapped text can
+/// safely move to a Unicode text font.
+fn symbol_pua_to_unicode(code: u32) -> Option<char> {
+    // Greek is the Symbol font's primary content: the letter positions carry
+    // the alphabet, with four glyph-variant slots (theta1, sigma1, phi1,
+    // omega1) that do not follow the plain A–Z / a–z order.
+    const GREEK_UPPER: [char; 26] = [
+        '\u{0391}', // A Alpha
+        '\u{0392}', // B Beta
+        '\u{03A7}', // C Chi
+        '\u{0394}', // D Delta
+        '\u{0395}', // E Epsilon
+        '\u{03A6}', // F Phi
+        '\u{0393}', // G Gamma
+        '\u{0397}', // H Eta
+        '\u{0399}', // I Iota
+        '\u{03D1}', // J theta1 (GREEK THETA SYMBOL)
+        '\u{039A}', // K Kappa
+        '\u{039B}', // L Lambda
+        '\u{039C}', // M Mu
+        '\u{039D}', // N Nu
+        '\u{039F}', // O Omicron
+        '\u{03A0}', // P Pi
+        '\u{0398}', // Q Theta
+        '\u{03A1}', // R Rho
+        '\u{03A3}', // S Sigma
+        '\u{03A4}', // T Tau
+        '\u{03A5}', // U Upsilon
+        '\u{03C2}', // V sigma1 (FINAL SIGMA)
+        '\u{03A9}', // W Omega
+        '\u{039E}', // X Xi
+        '\u{03A8}', // Y Psi
+        '\u{0396}', // Z Zeta
+    ];
+    const GREEK_LOWER: [char; 26] = [
+        '\u{03B1}', // a alpha
+        '\u{03B2}', // b beta
+        '\u{03C7}', // c chi
+        '\u{03B4}', // d delta
+        '\u{03B5}', // e epsilon
+        '\u{03C6}', // f phi
+        '\u{03B3}', // g gamma
+        '\u{03B7}', // h eta
+        '\u{03B9}', // i iota
+        '\u{03D5}', // j phi1 (GREEK PHI SYMBOL)
+        '\u{03BA}', // k kappa
+        '\u{03BB}', // l lambda
+        '\u{03BC}', // m mu
+        '\u{03BD}', // n nu
+        '\u{03BF}', // o omicron
+        '\u{03C0}', // p pi
+        '\u{03B8}', // q theta
+        '\u{03C1}', // r rho
+        '\u{03C3}', // s sigma
+        '\u{03C4}', // t tau
+        '\u{03C5}', // u upsilon
+        '\u{03D6}', // v omega1 (GREEK PI SYMBOL)
+        '\u{03C9}', // w omega
+        '\u{03BE}', // x xi
+        '\u{03C8}', // y psi
+        '\u{03B6}', // z zeta
+    ];
+
+    Some(match code {
+        0xF020 => '\u{0020}',                              // SPACE
+        0xF021 => '\u{0021}',                              // EXCLAMATION MARK
+        0xF025 => '\u{0025}',                              // PERCENT SIGN
+        0xF028 => '\u{0028}',                              // LEFT PARENTHESIS
+        0xF029 => '\u{0029}',                              // RIGHT PARENTHESIS
+        0xF02B => '\u{002B}',                              // PLUS SIGN
+        0xF02E => '\u{002E}',                              // FULL STOP
+        0xF030..=0xF039 => char::from_u32(code - 0xF000)?, // DIGITS
+        0xF03C => '\u{003C}',                              // LESS-THAN SIGN
+        0xF03D => '\u{003D}',                              // EQUALS SIGN
+        0xF03E => '\u{003E}',                              // GREATER-THAN SIGN
+        0xF041..=0xF05A => GREEK_UPPER[(code - 0xF041) as usize],
+        0xF05B => '\u{005B}', // LEFT SQUARE BRACKET
+        0xF05D => '\u{005D}', // RIGHT SQUARE BRACKET
+        0xF061..=0xF07A => GREEK_LOWER[(code - 0xF061) as usize],
+        0xF07B => '\u{007B}', // LEFT CURLY BRACKET
+        0xF07C => '\u{007C}', // VERTICAL LINE
+        0xF07D => '\u{007D}', // RIGHT CURLY BRACKET
+        0xF07E => '\u{223C}', // TILDE OPERATOR
+        0xF0A0 => '\u{20AC}', // EURO SIGN
+        0xF0A5 => '\u{221E}', // INFINITY
+        0xF0A7 => '\u{2663}', // BLACK CLUB SUIT
+        0xF0A8 => '\u{2666}', // BLACK DIAMOND SUIT
+        0xF0A9 => '\u{2665}', // BLACK HEART SUIT
+        0xF0AA => '\u{2660}', // BLACK SPADE SUIT
+        0xF0AB => '\u{2194}', // LEFT RIGHT ARROW
+        0xF0AC => '\u{2190}', // LEFTWARDS ARROW
+        0xF0AD => '\u{2191}', // UPWARDS ARROW
+        0xF0AE => '\u{2192}', // RIGHTWARDS ARROW
+        0xF0AF => '\u{2193}', // DOWNWARDS ARROW
+        0xF0B0 => '\u{00B0}', // DEGREE SIGN
+        0xF0B1 => '\u{00B1}', // PLUS-MINUS SIGN
+        0xF0B2 => '\u{2033}', // DOUBLE PRIME
+        0xF0B3 => '\u{2265}', // GREATER-THAN OR EQUAL TO
+        0xF0B4 => '\u{00D7}', // MULTIPLICATION SIGN
+        0xF0B5 => '\u{221D}', // PROPORTIONAL TO
+        0xF0B7 => '\u{2022}', // BULLET
+        0xF0B8 => '\u{00F7}', // DIVISION SIGN
+        0xF0B9 => '\u{2260}', // NOT EQUAL TO
+        0xF0BA => '\u{2261}', // IDENTICAL TO
+        0xF0BB => '\u{2248}', // ALMOST EQUAL TO
+        0xF0BC => '\u{2026}', // HORIZONTAL ELLIPSIS
+        0xF0C0 => '\u{2135}', // ALEF SYMBOL
+        0xF0C1 => '\u{2111}', // BLACK-LETTER CAPITAL I
+        0xF0C2 => '\u{211C}', // BLACK-LETTER CAPITAL R
+        0xF0C3 => '\u{2118}', // SCRIPT CAPITAL P
+        0xF0C5 => '\u{2297}', // CIRCLED TIMES
+        0xF0C6 => '\u{2295}', // CIRCLED PLUS
+        0xF0C7 => '\u{2205}', // EMPTY SET
+        0xF0C8 => '\u{2229}', // INTERSECTION
+        0xF0C9 => '\u{222A}', // UNION
+        0xF0CB => '\u{2283}', // SUPERSET OF
+        0xF0CC => '\u{2287}', // SUPERSET OF OR EQUAL TO
+        0xF0CD => '\u{2284}', // NOT A SUBSET OF
+        0xF0CE => '\u{2282}', // SUBSET OF
+        0xF0CF => '\u{2286}', // SUBSET OF OR EQUAL TO
+        0xF0D0 => '\u{2208}', // ELEMENT OF
+        0xF0D1 => '\u{2209}', // NOT AN ELEMENT OF
+        0xF0D5 => '\u{220F}', // N-ARY PRODUCT
+        0xF0D6 => '\u{221A}', // SQUARE ROOT
+        0xF0D7 => '\u{22C5}', // DOT OPERATOR
+        0xF0D8 => '\u{00AC}', // NOT SIGN
+        0xF0D9 => '\u{2227}', // LOGICAL AND
+        0xF0DA => '\u{2228}', // LOGICAL OR
+        0xF0E0 => '\u{21D0}', // LEFTWARDS DOUBLE ARROW
+        0xF0E1 => '\u{21D1}', // UPWARDS DOUBLE ARROW
+        0xF0E2 => '\u{21D2}', // RIGHTWARDS DOUBLE ARROW
+        0xF0E3 => '\u{21D3}', // DOWNWARDS DOUBLE ARROW
+        0xF0E4 => '\u{21D4}', // LEFT RIGHT DOUBLE ARROW
+        0xF0E5 => '\u{2329}', // LEFT-POINTING ANGLE BRACKET
+        0xF0F1 => '\u{232A}', // RIGHT-POINTING ANGLE BRACKET
+        0xF0F2 => '\u{222B}', // INTEGRAL
+        _ => return None,
+    })
+}
+
+/// Wingdings PUA codepoint → Unicode, per the Microsoft Wingdings-to-Unicode
+/// table. `None` means "no mapping known" — see [`symbol_pua_to_unicode`].
+///
+/// Wingdings is a dingbat font with no canonical full mapping; this covers the
+/// glyphs that appear as list bullets, which is what routes through here.
+fn wingdings_pua_to_unicode(code: u32) -> Option<char> {
+    Some(match code {
+        0xF021 => '\u{270E}',  // LOWER RIGHT PENCIL
+        0xF022 => '\u{2702}',  // BLACK SCISSORS
+        0xF023 => '\u{2701}',  // UPPER BLADE SCISSORS
+        0xF028 => '\u{1F4CB}', // CLIPBOARD
+        0xF029 => '\u{1F4CB}', // CLIPBOARD
+        0xF041 => '\u{FE4E}',  // WAVY LOW LINE (approximate)
+        0xF046 => '\u{1F44D}', // THUMBS UP SIGN
+        0xF04A => '\u{263A}',  // WHITE SMILING FACE
+        0xF04C => '\u{2639}',  // WHITE FROWNING FACE
+        0xF06C => '\u{25CF}',  // BLACK CIRCLE
+        0xF06D => '\u{274D}',  // SHADOWED WHITE CIRCLE
+        0xF06E => '\u{25A0}',  // BLACK SQUARE
+        0xF06F => '\u{25A1}',  // WHITE SQUARE
+        0xF070 => '\u{25A1}',  // WHITE SQUARE (alt)
+        0xF071 => '\u{2751}',  // LOWER RIGHT SHADOWED WHITE SQUARE
+        0xF072 => '\u{2752}',  // UPPER RIGHT SHADOWED WHITE SQUARE
+        0xF073 => '\u{25C6}',  // BLACK DIAMOND
+        0xF074 => '\u{2756}',  // BLACK DIAMOND MINUS WHITE X
+        0xF076 => '\u{2756}',  // BLACK DIAMOND MINUS WHITE X
+        0xF09F => '\u{2708}',  // AIRPLANE
+        0xF0A1 => '\u{270C}',  // VICTORY HAND
+        0xF0A4 => '\u{261C}',  // WHITE LEFT POINTING INDEX
+        0xF0A5 => '\u{261E}',  // WHITE RIGHT POINTING INDEX
+        0xF0A7 => '\u{25AA}',  // BLACK SMALL SQUARE
+        0xF0A8 => '\u{25FB}',  // WHITE MEDIUM SQUARE
+        0xF0D5 => '\u{232B}',  // ERASE TO THE LEFT
+        0xF0D8 => '\u{27A2}',  // THREE-D TOP-LIGHTED RIGHTWARDS ARROWHEAD
+        0xF0E8 => '\u{2B22}',  // BLACK HEXAGON (approximate)
+        0xF0F0 => '\u{2B1A}',  // DOTTED SQUARE (approximate)
+        0xF0FB => '\u{2718}',  // HEAVY BALLOT X
+        0xF0FC => '\u{2714}',  // HEAVY CHECK MARK
+        0xF0FE => '\u{2612}',  // BALLOT BOX WITH X (approximate)
+        _ => return None,
+    })
 }
 
 /// Populate underline position/thickness from Skia font metrics.
@@ -566,41 +663,55 @@ pub(super) fn populate_underline_metrics(fragments: &mut [Fragment], measurer: &
 /// Extract the display size for a picture bullet from its VML shape style.
 /// Falls back to 9pt × 9pt (common Word default for picture bullets).
 pub(super) fn pic_bullet_size(bullet: &model::NumPicBullet) -> PtSize {
-    use crate::model::VmlLengthUnit;
-
     let default = PtSize::new(Pt::new(9.0), Pt::new(9.0));
     let shape = match bullet.pict.as_ref().and_then(|p| p.shapes().next()) {
         Some(s) => s,
         None => return default,
     };
 
-    let to_pt = |len: &crate::model::VmlLength| -> Pt {
-        let val = len.value as f32;
-        match len.unit {
-            VmlLengthUnit::Pt => Pt::new(val),
-            VmlLengthUnit::In => Pt::new(val * 72.0),
-            VmlLengthUnit::Cm => Pt::new(val * 28.3465),
-            VmlLengthUnit::Mm => Pt::new(val * 2.83465),
-            VmlLengthUnit::Px => Pt::new(val * 0.75),
-            _ => Pt::new(val),
-        }
-    };
-
     let w = shape
         .common
         .style
         .width
-        .as_ref()
-        .map(to_pt)
+        .and_then(vml_style_length_to_pt)
         .unwrap_or(default.width);
     let h = shape
         .common
         .style
         .height
-        .as_ref()
-        .map(to_pt)
+        .and_then(vml_style_length_to_pt)
         .unwrap_or(default.height);
     PtSize::new(w, h)
+}
+
+/// §14.1.2: convert a VML **style** measurement (`width`, `height`,
+/// `margin-left`, …) to points.
+///
+/// The absolute units come from [`model::VmlLength::to_absolute_points`], the
+/// one unit table shared with the parse layer. What this function adds is the
+/// policy for the units that table leaves unresolved, which is specific to
+/// style measurements:
+///
+/// * a **bare number** is EMU — the interpretation the model documents for
+///   this context (on a primitive's `from`/`to` the same bare number would
+///   instead be local coordinate units, which is why the rule can't live on
+///   the model type);
+/// * **`%`** and **`em`** are relative to a containing box or font size that
+///   isn't available here, so they yield `None` rather than a fabricated
+///   number. Returning the raw value — the previous behaviour — turned
+///   `width:50%` into 50pt.
+pub(super) fn vml_style_length_to_pt(len: model::VmlLength) -> Option<Pt> {
+    use crate::model::VmlLengthUnit;
+    if let Some(pt) = len.to_absolute_points() {
+        return Some(Pt::new(pt));
+    }
+    match len.unit {
+        VmlLengthUnit::None => Some(Pt::new(len.value as f32 / 914400.0 * 72.0)),
+        // Unresolvable without a containing box / font size.
+        VmlLengthUnit::Em | VmlLengthUnit::Percent => None,
+        // `to_absolute_points` already handled every absolute unit.
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -608,6 +719,59 @@ mod tests {
     use super::*;
     use crate::model::dimension::Dimension;
     use crate::model::{Border, BorderStyle, Color, ParagraphBorders, ParagraphProperties};
+    use crate::render::resolve::color::rgb_from_u32;
+
+    /// An all-empty ResolvedDocument for exercising `resolve_paragraph_defaults`.
+    fn empty_resolved() -> ResolvedDocument {
+        use std::collections::HashMap;
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: ParagraphProperties::default(),
+            doc_defaults_run: model::RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn bare_para() -> model::Paragraph {
+        model::Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: Vec::new(),
+            rsids: model::ParagraphRevisionIds::default(),
+        }
+    }
+
+    #[test]
+    fn shape_font_ref_base_color_and_family_apply_as_defaults() {
+        // §20.1.4.1.17: a shape's fontRef supplies the base text color / family
+        // used when the run/style specify none.
+        let resolved = empty_resolved();
+        let para = bare_para();
+
+        let (_, _, color, _, _) =
+            resolve_paragraph_defaults(&para, &resolved, false, Some(rgb_from_u32(0xFF0000)), None);
+        assert_eq!(color, rgb_from_u32(0xFF0000), "fontRef base color applies");
+
+        // Without a base, the default stays black (unchanged behavior).
+        let (_, _, black, _, _) = resolve_paragraph_defaults(&para, &resolved, false, None, None);
+        assert_eq!(black, rgb_from_u32(0x000000));
+
+        // Base family applies when set.
+        let (family, _, _, _, _) =
+            resolve_paragraph_defaults(&para, &resolved, false, None, Some("Foo Sans"));
+        assert_eq!(family, "Foo Sans");
+    }
 
     fn border_with_style(style: BorderStyle) -> Border {
         Border {
@@ -684,5 +848,240 @@ mod tests {
     fn paragraph_borders_absent_yields_none() {
         let props = ParagraphProperties::default();
         assert!(resolve_paragraph_borders(&props).is_none());
+    }
+
+    // ── §17.3.3.30 legacy symbol-font PUA remapping ──────────────────────
+
+    /// The Symbol font's letter positions carry the Greek alphabet — its
+    /// primary content, and previously absent from the table entirely, so
+    /// every Greek character survived as a raw PUA scalar.
+    #[test]
+    fn symbol_pua_maps_the_greek_alphabet() {
+        // Plain alphabetical positions, spot-checked at both ends.
+        for (code, expected) in [
+            (0xF041, '\u{0391}'), // A → Alpha
+            (0xF044, '\u{0394}'), // D → Delta
+            (0xF05A, '\u{0396}'), // Z → Zeta
+            (0xF061, '\u{03B1}'), // a → alpha
+            (0xF06D, '\u{03BC}'), // m → mu
+            (0xF07A, '\u{03B6}'), // z → zeta
+        ] {
+            assert_eq!(symbol_pua_to_unicode(code), Some(expected), "U+{code:04X}");
+        }
+    }
+
+    /// Four Symbol slots hold glyph *variants* rather than the letter their
+    /// position would suggest — the easiest thing to get wrong when filling
+    /// in the alphabet mechanically.
+    #[test]
+    fn symbol_pua_greek_variant_slots_are_not_alphabetical() {
+        for (code, expected, what) in [
+            (0xF04A, '\u{03D1}', "J is theta1, not Iota-then-Kappa order"),
+            (0xF056, '\u{03C2}', "V is final sigma, not Upsilon+1"),
+            (0xF06A, '\u{03D5}', "j is phi1 (phi symbol)"),
+            (0xF076, '\u{03D6}', "v is omega1 (pi symbol), not omega"),
+        ] {
+            assert_eq!(symbol_pua_to_unicode(code), Some(expected), "{what}");
+        }
+        // The plain letters those variants are easily confused with.
+        assert_eq!(
+            symbol_pua_to_unicode(0xF051),
+            Some('\u{0398}'),
+            "Q is Theta"
+        );
+        assert_eq!(symbol_pua_to_unicode(0xF066), Some('\u{03C6}'), "f is phi");
+        assert_eq!(
+            symbol_pua_to_unicode(0xF077),
+            Some('\u{03C9}'),
+            "w is omega"
+        );
+    }
+
+    /// Adding the Greek ranges must not have displaced the punctuation and
+    /// math symbols that sit between them.
+    #[test]
+    fn symbol_pua_keeps_non_greek_mappings() {
+        for (code, expected) in [
+            (0xF05B, '\u{005B}'), // [ — just past uppercase Greek
+            (0xF05D, '\u{005D}'), // ]
+            (0xF07B, '\u{007B}'), // { — just past lowercase Greek
+            (0xF0B7, '\u{2022}'), // bullet
+            (0xF030, '\u{0030}'), // digit zero
+            (0xF0F2, '\u{222B}'), // integral
+        ] {
+            assert_eq!(symbol_pua_to_unicode(code), Some(expected), "U+{code:04X}");
+        }
+    }
+
+    /// An unmapped codepoint is `None`, not "maps to itself" — the caller
+    /// needs the distinction to choose a font.
+    #[test]
+    fn unmapped_pua_is_none() {
+        assert_eq!(symbol_pua_to_unicode(0xF0FF), None);
+        assert_eq!(wingdings_pua_to_unicode(0xF0FF), None);
+    }
+
+    /// When every PUA character maps, the text is standard Unicode and must
+    /// move to the fallback text font — the legacy face has no Unicode cmap.
+    #[test]
+    fn fully_mapped_text_switches_to_the_fallback_font() {
+        let (text, family) = remap_legacy_font_chars("\u{F0B7}", "Symbol", "Calibri");
+        assert_eq!(text, "\u{2022}", "bullet remapped");
+        assert_eq!(family, "Calibri");
+    }
+
+    /// Regression: an *unmapped* PUA character used to be handed to the
+    /// fallback text font anyway, which is a guaranteed `.notdef` box. The
+    /// only font that can render a surviving PUA scalar is the legacy face it
+    /// came from, so the original family must be kept.
+    #[test]
+    fn unmapped_pua_keeps_the_legacy_font() {
+        let (text, family) = remap_legacy_font_chars("\u{F0FF}", "Symbol", "Calibri");
+        assert_eq!(text, "\u{F0FF}", "unmapped codepoint survives unchanged");
+        assert_eq!(
+            family, "Symbol",
+            "keep the legacy face — it is the only one that can render this"
+        );
+    }
+
+    /// Mixed input: one unmapped character is enough to keep the legacy font,
+    /// because the family is a whole-string decision.
+    #[test]
+    fn one_unmapped_char_keeps_the_legacy_font_for_the_whole_label() {
+        let (_, family) = remap_legacy_font_chars("\u{F0B7}\u{F0FF}", "Symbol", "Calibri");
+        assert_eq!(family, "Symbol");
+    }
+
+    /// Non-legacy families are passed through untouched.
+    #[test]
+    fn non_legacy_family_is_untouched() {
+        let (text, family) = remap_legacy_font_chars("abc", "Arial", "Calibri");
+        assert_eq!(text, "abc");
+        assert_eq!(family, "Arial");
+    }
+
+    // ── §14.1.2 style-measurement policy ─────────────────────────────────
+
+    fn vml_len(value: f64, unit: model::VmlLengthUnit) -> model::VmlLength {
+        model::VmlLength { value, unit }
+    }
+
+    #[test]
+    fn style_length_passes_absolute_units_through() {
+        use model::VmlLengthUnit;
+        assert_eq!(
+            vml_style_length_to_pt(vml_len(9.0, VmlLengthUnit::Pt)),
+            Some(Pt::new(9.0))
+        );
+        assert_eq!(
+            vml_style_length_to_pt(vml_len(1.0, VmlLengthUnit::In)),
+            Some(Pt::new(72.0))
+        );
+    }
+
+    /// Regression: the two render-layer converters disagreed here — one read a
+    /// bare number as EMU, the other as points, so the same `width:9` meant
+    /// 0.0007pt in one code path and 9pt in the other. EMU is the rule the
+    /// model documents for `style` measurements.
+    #[test]
+    fn style_length_reads_a_bare_number_as_emu() {
+        let got = vml_style_length_to_pt(vml_len(914400.0, model::VmlLengthUnit::None))
+            .expect("unitless resolves in a style measurement");
+        assert!(
+            (got.raw() - 72.0).abs() < 1e-3,
+            "914400 EMU is one inch, got {}",
+            got.raw()
+        );
+    }
+
+    /// Regression: `%` and `em` used to fall through to the raw value, so
+    /// `width:50%` became 50pt. They are unresolvable here; the caller
+    /// substitutes its own default.
+    #[test]
+    fn style_length_rejects_units_needing_a_container() {
+        for unit in [model::VmlLengthUnit::Percent, model::VmlLengthUnit::Em] {
+            assert_eq!(
+                vml_style_length_to_pt(vml_len(50.0, unit)),
+                None,
+                "{unit:?} needs a containing box / font size"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod border_style_tests {
+    use super::*;
+
+    fn border(style: model::BorderStyle) -> model::Border {
+        model::Border {
+            style,
+            width: crate::model::dimension::Dimension::new(8),
+            color: model::Color::Auto,
+            space: crate::model::dimension::Dimension::new(0),
+        }
+    }
+
+    /// §17.4.38: only `Single` and `Double` are drawn; the other 24 styles are
+    /// approximated by a solid line of the declared width and colour.
+    #[test]
+    fn unsupported_styles_collapse_to_single_preserving_width_and_colour() {
+        let mut state = BuildState::default();
+        for style in [
+            model::BorderStyle::Dotted,
+            model::BorderStyle::Dashed,
+            model::BorderStyle::Triple,
+            model::BorderStyle::Wave,
+            model::BorderStyle::DashDotStroked,
+            model::BorderStyle::ThinThickLargeGap,
+        ] {
+            let line = convert_model_border(&border(style), &mut state);
+            assert_eq!(
+                line.style,
+                TableBorderStyle::Single,
+                "{style:?} should approximate as a single line"
+            );
+            assert_eq!(line.width, Pt::from(border(style).width), "width preserved");
+        }
+    }
+
+    #[test]
+    fn supported_styles_are_not_approximated() {
+        let mut state = BuildState::default();
+        assert_eq!(
+            convert_model_border(&border(model::BorderStyle::Double), &mut state).style,
+            TableBorderStyle::Double
+        );
+        assert_eq!(
+            convert_model_border(&border(model::BorderStyle::Single), &mut state).style,
+            TableBorderStyle::Single
+        );
+        assert!(
+            state.warned_border_styles.is_empty(),
+            "styles that render faithfully must not be reported as approximated"
+        );
+    }
+
+    /// Each distinct style is recorded once, so the warning fires once per
+    /// render instead of once per cell edge — thousands of lines for a large
+    /// table with dotted borders.
+    #[test]
+    fn each_unsupported_style_is_recorded_exactly_once() {
+        let mut state = BuildState::default();
+        for _ in 0..50 {
+            convert_model_border(&border(model::BorderStyle::Dotted), &mut state);
+            convert_model_border(&border(model::BorderStyle::Dashed), &mut state);
+        }
+        assert_eq!(
+            state.warned_border_styles.len(),
+            2,
+            "one entry per distinct style, regardless of occurrence count"
+        );
+        assert!(state
+            .warned_border_styles
+            .contains(&model::BorderStyle::Dotted));
+        assert!(state
+            .warned_border_styles
+            .contains(&model::BorderStyle::Dashed));
     }
 }

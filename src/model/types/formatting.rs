@@ -63,8 +63,20 @@ pub struct Border {
     pub color: Color,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// §17.18.2 `ST_Border`.
+///
+/// `Nil` and `None` are **not** synonyms and must not be merged. Both draw
+/// nothing, but [MS-OI29500] §17.4.66 separates them in table border conflict
+/// resolution: a `nil` edge *suppresses* the shared border outright, while a
+/// `none` edge behaves exactly like an omitted one — it inherits from the style
+/// and table-level borders, and yields to the opposing cell's border. Use
+/// [`BorderStyle::draws_nothing`] wherever only "is there a line to paint"
+/// matters, so the distinction can't be lost by an `== None` comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BorderStyle {
+    /// `val="nil"` — no border, and it wins conflict resolution.
+    Nil,
+    /// `val="none"` — no border, but inherits and yields like an omitted edge.
     None,
     Single,
     Thick,
@@ -91,6 +103,22 @@ pub enum BorderStyle {
     ThreeDEngrave,
     Outset,
     Inset,
+}
+
+impl BorderStyle {
+    /// Whether this style paints no line at all — true for both `nil` and
+    /// `none` (§17.18.2).
+    ///
+    /// Every consumer that only asks "is there a border to draw" should call
+    /// this rather than comparing against a variant, because the two differ
+    /// solely in table conflict resolution ([MS-OI29500] §17.4.66). Comparing
+    /// `== BorderStyle::None` is how the distinction was lost before: it
+    /// silently answered "no" for `nil` too, at every site outside the table
+    /// resolver where the difference is genuinely irrelevant — and at the one
+    /// site where it isn't.
+    pub fn draws_nothing(self) -> bool {
+        matches!(self, Self::Nil | Self::None)
+    }
 }
 
 // ── Shading ──────────────────────────────────────────────────────────────────
@@ -227,6 +255,68 @@ impl From<PTabLeader> for TabLeader {
             PTabLeader::Underscore => Self::Underscore,
             PTabLeader::MiddleDot => Self::MiddleDot,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cnf_first_row_bit_is_leftmost() {
+        assert_eq!(CnfStyle::from_val_str("100000000000"), CnfStyle::FIRST_ROW);
+    }
+
+    #[test]
+    fn cnf_last_row_last_column_is_rightmost() {
+        assert_eq!(
+            CnfStyle::from_val_str("000000000001"),
+            CnfStyle::LAST_ROW_LAST_COLUMN
+        );
+    }
+
+    #[test]
+    fn cnf_all_twelve_bits() {
+        assert_eq!(CnfStyle::from_val_str("111111111111"), CnfStyle::all());
+    }
+
+    #[test]
+    fn cnf_empty_is_empty() {
+        assert_eq!(CnfStyle::from_val_str(""), CnfStyle::empty());
+    }
+
+    #[test]
+    fn cnf_short_string_sets_only_leading_bits() {
+        assert_eq!(
+            CnfStyle::from_val_str("11"),
+            CnfStyle::FIRST_ROW | CnfStyle::LAST_ROW
+        );
+    }
+
+    #[test]
+    fn cnf_chars_beyond_twelve_are_ignored() {
+        assert_eq!(
+            CnfStyle::from_val_str("100000000000ZZZ"),
+            CnfStyle::FIRST_ROW
+        );
+    }
+
+    #[test]
+    fn cnf_non_one_chars_leave_bits_unset() {
+        // Only '1' sets a bit; '0' and anything else leave it clear.
+        assert_eq!(CnfStyle::from_val_str("0x0000000000"), CnfStyle::empty());
+    }
+
+    #[test]
+    fn ptab_leader_maps_to_tab_leader() {
+        assert_eq!(TabLeader::from(PTabLeader::None), TabLeader::None);
+        assert_eq!(TabLeader::from(PTabLeader::Dot), TabLeader::Dot);
+        assert_eq!(TabLeader::from(PTabLeader::Hyphen), TabLeader::Hyphen);
+        assert_eq!(
+            TabLeader::from(PTabLeader::Underscore),
+            TabLeader::Underscore
+        );
+        assert_eq!(TabLeader::from(PTabLeader::MiddleDot), TabLeader::MiddleDot);
     }
 }
 

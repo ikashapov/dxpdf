@@ -11,7 +11,7 @@ use crate::docx::model::dimension::{Dimension, HalfPoints, Twips, Unit};
 use crate::docx::model::{RunProperties, StrikeStyle, StyleId, TextScale, UnderlineStyle};
 use crate::docx::parse::primitives::st_enums::{StHighlightColor, StUnderline, StVerticalAlignRun};
 use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
-use crate::docx::parse::primitives::{HexColor, OnOff};
+use crate::docx::parse::primitives::{last_toggle, HexColor, OnOff};
 
 use super::border::BorderXml;
 use super::fonts::RFontsXml;
@@ -97,13 +97,6 @@ pub(crate) struct RPrXml {
     bdr: Option<BorderXml>,
 }
 
-/// OOXML §17.7.2 — when the same toggle element repeats inside one container,
-/// the last occurrence wins. Returns `None` when the toggle is absent so the
-/// style cascade can supply an inherited value.
-fn last_toggle(toggles: Vec<OnOff>) -> Option<bool> {
-    toggles.into_iter().last().map(|OnOff(b)| b)
-}
-
 /// `<w:u w:val="..."/>` — underline. Unlike other ST-enum wrappers we can't
 /// use a bare `ValAttr<StUnderline>` because the attribute is optional; an
 /// underline element with no `@val` means "Single" per §17.3.2.40.
@@ -115,8 +108,7 @@ pub(crate) struct UnderlineXml {
 
 /// `<w:color w:val="RRGGBB" ... />` — run color. The spec also allows
 /// theme-color fields (`@themeColor`, `@themeTint`, `@themeShade`) which we
-/// don't yet resolve; recorded here as raw strings in case a future pass
-/// wants them.
+/// don't yet resolve — they are currently ignored (only `@val` is read).
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ColorXml {
     #[serde(rename = "@val")]

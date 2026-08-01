@@ -7,8 +7,6 @@
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
 
-use super::BoxConstraints;
-
 mod borders;
 mod emit;
 mod grid;
@@ -31,6 +29,10 @@ use split::{find_row_cut, split_row_at, RowCutInput};
 pub(crate) fn measure_leading_table_group_height(
     rows: &[TableRowInput],
     col_widths: &[Pt],
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -45,6 +47,7 @@ pub(crate) fn measure_leading_table_group_height(
     let measured = measure_table_rows(
         &rows[..measured_end],
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -66,7 +69,10 @@ pub(crate) fn measure_leading_table_group_height(
 pub fn layout_table(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    _constraints: &BoxConstraints,
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -82,6 +88,7 @@ pub fn layout_table(
     let measured = measure_table_rows(
         rows,
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -112,7 +119,9 @@ pub fn layout_table(
 
     TableLayout {
         commands,
-        size: PtSize::new(measured.table_width, cursor_y),
+        // §17.4.44: each row reserves its own leading gap, so the only one left
+        // to add is the trailing gap at the table's bottom edge.
+        size: PtSize::new(measured.table_width, cursor_y + cell_spacing),
     }
 }
 
@@ -150,7 +159,10 @@ pub(crate) struct TablePaginationHeights<F> {
 pub fn layout_table_paginated(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    _constraints: &BoxConstraints,
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -160,7 +172,7 @@ pub fn layout_table_paginated(
     layout_table_paginated_with_page_heights(
         rows,
         col_widths,
-        _constraints,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -175,7 +187,10 @@ pub fn layout_table_paginated(
 pub(crate) fn layout_table_paginated_with_page_heights(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    _constraints: &BoxConstraints,
+    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // slots must already be shrunk by this amount — see
+    // `build/table.rs::reserve_cell_spacing`.
+    cell_spacing: Pt,
     default_line_height: Pt,
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
@@ -196,6 +211,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
     let measured = measure_table_rows(
         rows,
         col_widths,
+        cell_spacing,
         default_line_height,
         borders,
         measure_text,
@@ -313,16 +329,40 @@ pub(crate) fn layout_table_paginated_with_page_heights(
             }
         }
 
-        // No split possible — move the whole group to the next page.
-        slices.push(std::mem::take(&mut current_slice));
-        remaining = page_height_for_slice(slices.len());
-        // §17.4.49: prepend the repeating header rows only when this group
-        // sits past the headers. When advancing because a header row itself
-        // doesn't fit, the row is part of the table's first appearance —
-        // emitting `Range(0..header_count)` here would duplicate it.
-        if !is_header && header_count > 0 {
-            current_slice.push(SliceItem::Range(0..header_count));
-            remaining -= header_height;
+        // No split possible — move the whole group to the next page, but only
+        // if the next page is actually roomier than what is left here.
+        //
+        // A group taller than a whole page never fits anywhere. Advancing
+        // unconditionally then abandons `current_slice` while it is still
+        // empty — the caller turns that empty leading slice into a page push,
+        // so a table starting at the top of a page emitted a **blank page**
+        // and the group overflowed the next one just the same (the warning
+        // below fired either way). Same shape as the E4c floating-table
+        // spillover: acting on a condition the action cannot change.
+        //
+        // Comparing against the *post-header* room is what makes this exact —
+        // repeating headers can leave a fresh page with less usable space than
+        // the current one, and in that case staying put overflows by less.
+        // `slices.len() + 1` because this decision happens *before* the push
+        // that would append the current slice — the index being queried is the
+        // page the group would move onto, not the one it is leaving.
+        let next_page_height = page_height_for_slice(slices.len() + 1);
+        let next_remaining = if !is_header && header_count > 0 {
+            next_page_height - header_height
+        } else {
+            next_page_height
+        };
+        if next_remaining > remaining {
+            slices.push(std::mem::take(&mut current_slice));
+            remaining = next_page_height;
+            // §17.4.49: prepend the repeating header rows only when this group
+            // sits past the headers. When advancing because a header row itself
+            // doesn't fit, the row is part of the table's first appearance —
+            // emitting `Range(0..header_count)` here would duplicate it.
+            if !is_header && header_count > 0 {
+                current_slice.push(SliceItem::Range(0..header_count));
+                remaining -= header_height;
+            }
         }
         if group.height > remaining {
             log::warn!(
@@ -344,6 +384,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
     let outer_top_border = borders.and_then(|b| b.top);
 
     // Emit draw commands for each slice.
+    let last_slice_idx = slices.len().saturating_sub(1);
     slices
         .iter()
         .enumerate()
@@ -378,7 +419,12 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                         );
                     }
                     SliceItem::Split { row_idx, mr } | SliceItem::Continuation { row_idx, mr } => {
-                        let has_next = item_idx + 1 < items.len();
+                        // A split half's bottom border sits in a reserved gap
+                        // only when something follows it on *this* slice. The
+                        // last item on a page ends at a cut or page edge, where
+                        // `split_row_at` reserved no gap, so the border is
+                        // inset into the row instead.
+                        let has_reserved_bottom_gap = item_idx + 1 < items.len();
                         emit_split_row(
                             mr,
                             &rows[*row_idx],
@@ -389,16 +435,26 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                                 border_commands: &mut border_commands,
                             },
                             top_override,
-                            has_next,
+                            has_reserved_bottom_gap,
                         );
                     }
                 }
             }
             commands.append(&mut content_commands);
             commands.append(&mut border_commands);
+            // §17.4.44: the trailing gap belongs to the table's bottom *edge*,
+            // so only the final slice gets it — an intermediate slice ends at a
+            // page cut, not at the table's edge. Without this a table that
+            // happens to paginate loses the bottom gap that the same table
+            // keeps when it fits on one page (see the monolithic path above).
+            let trailing_gap = if slice_idx == last_slice_idx {
+                cell_spacing
+            } else {
+                Pt::ZERO
+            };
             TableSlice {
                 commands,
-                size: PtSize::new(measured.table_width, cursor_y),
+                size: PtSize::new(measured.table_width, cursor_y + trailing_gap),
             }
         })
         .collect()
@@ -484,23 +540,11 @@ mod tests {
         }
     }
 
-    fn body_constraints() -> BoxConstraints {
-        BoxConstraints::loose(PtSize::new(Pt::new(400.0), Pt::new(1000.0)))
-    }
-
     // ── layout_table ─────────────────────────────────────────────────────
 
     #[test]
     fn empty_table() {
-        let result = layout_table(
-            &[],
-            &[],
-            &body_constraints(),
-            Pt::new(14.0),
-            None,
-            None,
-            false,
-        );
+        let result = layout_table(&[], &[], Pt::ZERO, Pt::new(14.0), None, None, false);
         assert!(result.commands.is_empty());
         assert_eq!(result.size, PtSize::ZERO);
     }
@@ -513,14 +557,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -547,7 +590,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
             TableRowInput {
@@ -556,7 +598,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
         ];
@@ -564,7 +605,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -609,7 +650,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         // Column B is only 80 wide, so "long " + "text" (120) wraps
@@ -617,7 +657,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -635,14 +675,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -683,14 +722,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -728,14 +766,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -774,14 +811,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 1,
-            grid_after: 1,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(100.0), Pt::new(200.0), Pt::new(10.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -801,25 +837,40 @@ mod tests {
         assert_eq!(result.size.width.raw(), 320.0);
     }
 
+    /// §17.4.16: a row whose cells don't reach the last grid column leaves the
+    /// remainder empty — the `gridAfter` region — without stretching into it.
+    ///
+    /// The row declares no `gridAfter`: layout derives the right edge from
+    /// `grid_before` plus the cells' spans, so the trailing gap is a
+    /// *consequence* of the cells, not a separate input. (This test previously
+    /// set a `grid_after` field that no layout code read, so it asserted the
+    /// same positions whether the field was right, wrong, or absent.)
     #[test]
-    fn grid_after_does_not_overflow() {
-        // §17.4.16: gridAfter=2 leaves the rightmost two columns of a 4-column
-        // grid empty for this row. Cells must fit within the leftmost two
-        // columns and not overflow into the gridAfter region.
+    fn row_shorter_than_the_grid_leaves_the_trailing_columns_empty() {
+        // Shaded cells so the emitted rects expose each cell's *width* — text
+        // x-positions alone cannot see a cell stretching rightward, since the
+        // second cell's x is fixed by the first cell's grid column either way.
+        let shaded = |text: &str| TableCellInput {
+            shading: Some(RgbColor {
+                r: 200,
+                g: 200,
+                b: 200,
+            }),
+            ..simple_cell(text)
+        };
         let rows = vec![TableRowInput {
-            cells: vec![simple_cell("X"), simple_cell("Y")],
+            cells: vec![shaded("X"), shaded("Y")],
             height_rule: None,
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 2,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(100.0), Pt::new(200.0), Pt::new(10.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -827,31 +878,51 @@ mod tests {
         );
 
         let xs = text_x_positions(&result.commands);
-        assert_eq!(xs.len(), 2);
-        assert_eq!(xs[0], 0.0, "first cell at col 0");
-        assert_eq!(xs[1], 10.0, "second cell at col 1");
-        // The cells together occupy 10 + 100 = 110pt; the right 210pt are
-        // empty (gridAfter region). Total table width stays at 320pt.
+        assert_eq!(xs, vec![0.0, 10.0], "cells sit at grid columns 0 and 1");
+
+        // Each cell occupies exactly its own column — not the 210pt of unused
+        // grid to the right.
+        let rects: Vec<(f32, f32)> = result
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, .. } => {
+                    Some((rect.origin.x.raw(), rect.size.width.raw()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rects,
+            vec![(0.0, 10.0), (10.0, 100.0)],
+            "cells must not stretch into the trailing grid columns"
+        );
+
+        // The table still spans the whole declared grid; the gap is empty, not
+        // removed.
         assert_eq!(result.size.width.raw(), 320.0);
     }
 
+    /// §17.4.17 + §17.4.38: a row inset from **both** table edges takes
+    /// `inside_v` on both sides, never the outer `left`/`right`.
+    ///
+    /// `grid_before = 1` moves the first cell off the left edge; the two cells
+    /// then span only grid columns 1–2 of 4, so the last one stops short of the
+    /// right edge as well. Distinct widths identify which border was applied —
+    /// `left`/`right` are 4pt, `inside_v` is 1pt — so a single 4pt rect
+    /// anywhere in the output means an outer border leaked onto an interior
+    /// edge.
+    ///
+    /// The right-edge half of this used to be spelled `grid_after: 1` on a
+    /// field no layout code read; it is the cells' spans that place that edge.
     #[test]
-    fn grid_before_first_cell_uses_inside_v_left_border() {
-        // §17.4.17 + §17.4.38: with gridBefore>0, the row's first cell is not
-        // at the table's left edge, so its left border must come from
-        // `inside_v`, not `left`. Mirror for gridAfter>0 and the right edge.
-        //
-        // We use distinct border widths to identify which table border was
-        // applied: `left`/`right` = 4pt, `inside_v` = 1pt. With grid_before=1
-        // and grid_after=1 in a 4-column grid, both cells must use only the
-        // 1pt borders for left/right edges; no 4pt border rect should appear.
+    fn row_inset_from_both_edges_uses_inside_v_on_both_sides() {
         let rows = vec![TableRowInput {
             cells: vec![simple_cell("A"), simple_cell("B")],
             height_rule: None,
             is_header: None,
             cant_split: None,
             grid_before: 1,
-            grid_after: 1,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(10.0), Pt::new(50.0), Pt::new(50.0), Pt::new(10.0)];
@@ -878,7 +949,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -944,7 +1015,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 1,
-            grid_after: 0,
             border_overrides: None,
         };
         let row_b = TableRowInput {
@@ -965,14 +1035,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(50.0), Pt::new(100.0), Pt::new(150.0)];
         let result = layout_table(
             &[row_a, row_b],
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1041,14 +1110,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(200.0)];
         let result = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1085,7 +1153,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }];
         let col_widths = vec![Pt::new(100.0)];
@@ -1094,7 +1161,7 @@ mod tests {
         let normal = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -1110,7 +1177,7 @@ mod tests {
         let suppressed = layout_table(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -1162,7 +1229,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
             TableRowInput {
@@ -1174,7 +1240,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
             TableRowInput {
@@ -1191,7 +1256,6 @@ mod tests {
                 is_header: None,
                 cant_split: None,
                 grid_before: 0,
-                grid_after: 0,
                 border_overrides: None,
             },
         ];
@@ -1199,7 +1263,7 @@ mod tests {
         let result = layout_table(
             &rows,
             &[Pt::new(100.0), Pt::new(100.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             Some(&borders),
             None,
@@ -1264,7 +1328,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let row1 = TableRowInput {
@@ -1284,14 +1347,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(100.0), Pt::new(100.0)];
         let result = layout_table(
             &[row0, row1],
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1360,7 +1422,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }
@@ -1396,7 +1457,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         }
     }
@@ -1420,7 +1480,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1476,7 +1536,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1514,7 +1574,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1571,7 +1631,6 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let row1 = TableRowInput {
@@ -1588,14 +1647,13 @@ mod tests {
             is_header: None,
             cant_split: None,
             grid_before: 0,
-            grid_after: 0,
             border_overrides: None,
         };
         let col_widths = vec![Pt::new(40.0)];
         let slices = layout_table_paginated(
             &[row0, row1],
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1640,7 +1698,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1692,7 +1750,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1736,7 +1794,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1776,7 +1834,7 @@ mod tests {
         let slices = layout_table_paginated_with_page_heights(
             &rows,
             &col_widths,
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1804,6 +1862,142 @@ mod tests {
         assert_eq!(row_counts, vec![1, 1, 2]);
     }
 
+    // ── §17.4.85 lone vMerge=Restart ─────────────────────────────────────
+
+    /// A `Restart` cell with no `Continue` row under it is an ordinary cell.
+    ///
+    /// It used to fall through *both* height paths: `measure_table_rows`
+    /// skipped every merged cell (deferring to the span calculation) and
+    /// `expand_rows_for_vmerge` returned early because the "span" is one row.
+    /// The row therefore got zero height while still emitting its content, so
+    /// whatever followed the table drew on top of it.
+    ///
+    /// Asserted against the unmerged control rather than a literal, so the
+    /// test states the actual rule — a lone restart behaves like no merge at
+    /// all — instead of pinning today's line height.
+    #[test]
+    fn lone_vmerge_restart_row_gets_the_same_height_as_an_unmerged_cell() {
+        let build = |vmerge: Option<VerticalMergeState>| {
+            let mut row = tall_row(3);
+            row.cells[0].vertical_merge = vmerge;
+            layout_table(
+                &[row],
+                &[Pt::new(40.0)],
+                Pt::ZERO,
+                Pt::new(14.0),
+                None,
+                None,
+                false,
+            )
+        };
+
+        let lone_restart = build(Some(VerticalMergeState::Restart));
+        let control = build(None);
+
+        assert!(
+            control.size.height > Pt::ZERO,
+            "control must have real height for this test to mean anything"
+        );
+        assert_eq!(
+            lone_restart.size.height, control.size.height,
+            "a restart with nothing continuing below it is an ordinary cell"
+        );
+    }
+
+    /// The companion guard: a *genuine* merge span must still take its height
+    /// from `expand_rows_for_vmerge` across the whole span. Folding a
+    /// `Restart` cell into its first row unconditionally — the naive fix for
+    /// the case above — double-counts it against the rows below and inflates
+    /// the table.
+    #[test]
+    fn genuine_vmerge_span_height_is_not_double_counted() {
+        let mut restart = tall_row(6); // 6 lines ≈ 84pt of content
+        restart.cells[0].vertical_merge = Some(VerticalMergeState::Restart);
+        let mut cont = tall_row(0);
+        cont.cells[0].vertical_merge = Some(VerticalMergeState::Continue);
+
+        let result = layout_table(
+            &[restart, cont],
+            &[Pt::new(40.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+
+        // The span is exactly the restart cell's content: 6 lines × 14pt.
+        assert!(
+            (result.size.height.raw() - 84.0).abs() < 0.01,
+            "merged span should total the restart cell's content height (84pt), got {}",
+            result.size.height.raw()
+        );
+    }
+
+    // ── §17.4.1 page advance must gain space ─────────────────────────────
+
+    /// A row group taller than a whole page fits nowhere, so advancing to a
+    /// fresh page cannot help — it only abandons an empty leading slice, which
+    /// the section layer turns into a blank page.
+    ///
+    /// `available_height == page_height` models the table starting at the top
+    /// of a page, which is exactly when the old code emitted the blank.
+    #[test]
+    fn oversized_group_at_page_top_does_not_emit_an_empty_leading_slice() {
+        let mut row = tall_row(20); // ≈ 280pt
+        row.cant_split = Some(true);
+
+        let slices = layout_table_paginated(
+            &[row],
+            &[Pt::new(40.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(100.0),
+                page_height: Pt::new(100.0), // a fresh page is no roomier
+                suppress_first_row_top: false,
+            },
+        );
+
+        assert_eq!(slices.len(), 1, "no page to gain, so no page to push");
+        assert!(
+            !slices[0].commands.is_empty(),
+            "the single slice must carry the content, not be an abandoned empty"
+        );
+    }
+
+    /// The converse, so the fix can't be "never advance": when the table
+    /// starts part-way down a page, a fresh page *is* roomier and the group
+    /// must still move.
+    #[test]
+    fn oversized_group_still_advances_when_the_next_page_is_roomier() {
+        let mut row = tall_row(5); // ≈ 70pt
+        row.cant_split = Some(true);
+
+        let slices = layout_table_paginated(
+            &[row],
+            &[Pt::new(40.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(30.0), // little left here
+                page_height: Pt::new(100.0),     // but a full page next
+                suppress_first_row_top: false,
+            },
+        );
+
+        assert_eq!(slices.len(), 2, "advancing gains 70pt, so it must advance");
+        assert!(
+            slices[0].commands.is_empty(),
+            "leading slice is the advance"
+        );
+        assert!(!slices[1].commands.is_empty());
+    }
+
     // ── In-cell paragraph splitting semantics (§17.3.1.14/.15/.44) ───────
 
     #[test]
@@ -1818,7 +2012,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1846,7 +2040,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1874,7 +2068,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1906,7 +2100,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1937,7 +2131,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1968,7 +2162,7 @@ mod tests {
         let slices = layout_table_paginated(
             &rows,
             &[Pt::new(40.0)],
-            &body_constraints(),
+            Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
@@ -1988,6 +2182,65 @@ mod tests {
         assert!(
             counts.iter().all(|&c| c >= 2),
             "no single-line widow/orphan segment: {counts:?}"
+        );
+    }
+
+    /// §17.4.44: the bottom-edge gap belongs to the table, not to the page it
+    /// happens to land on. The monolithic path adds it (`cursor_y +
+    /// cell_spacing`); the paginated path did not, so the *same table* kept or
+    /// lost its bottom gap depending only on whether it fitted on one page.
+    ///
+    /// Asserted against absolute values and against the **monolithic** path,
+    /// which is a genuinely separate code path. Comparing one paginated layout
+    /// to another cannot see this: a mutation that drops the gap drops it from
+    /// both sides and the comparison still holds.
+    ///
+    /// Empty cells make the arithmetic exact — each row's whole height is its
+    /// own reserved leading gap (see
+    /// `measure::tests::cell_spacing_separates_rows_vertically`), so two rows
+    /// are `2 × spacing` of content plus one trailing gap.
+    #[test]
+    fn cell_spacing_bottom_edge_gap_survives_pagination() {
+        let spacing = Pt::new(6.0);
+        let rows = vec![one_cell_row(vec![]), one_cell_row(vec![])];
+        let widths = [Pt::new(94.0)];
+
+        let whole = layout_table(&rows, &widths, spacing, Pt::new(14.0), None, None, false);
+        assert_eq!(
+            whole.size.height,
+            spacing * 3.0,
+            "two leading gaps plus the table's own bottom edge"
+        );
+
+        let split = layout_table_paginated(
+            &rows,
+            &widths,
+            spacing,
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: spacing * 1.5,
+                page_height: spacing * 1.5,
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(split.len(), 2, "precondition: the table paginated");
+        assert_eq!(
+            split[0].size.height, spacing,
+            "an intermediate slice ends at a page cut, not at the table's edge"
+        );
+        assert_eq!(
+            split[1].size.height,
+            spacing * 2.0,
+            "the final slice owns the trailing gap"
+        );
+
+        let total: Pt = split.iter().map(|s| s.size.height).sum();
+        assert_eq!(
+            total, whole.size.height,
+            "a paginated table owns the same total height as the same table \
+             laid out whole"
         );
     }
 }

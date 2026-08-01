@@ -5,7 +5,7 @@ pub mod model;
 pub mod render;
 
 pub use error::Error;
-pub use render::{RenderOptions, DEFAULT_IMAGE_DPI};
+pub use render::{RenderOptions, DEFAULT_IMAGE_DPI, MIN_IMAGE_DPI};
 
 /// Convert raw DOCX bytes into PDF bytes using default [`RenderOptions`].
 pub fn convert(docx_bytes: &[u8]) -> Result<Vec<u8>, Error> {

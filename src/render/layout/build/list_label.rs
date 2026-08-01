@@ -38,12 +38,25 @@ pub(super) fn inject_list_label(
     };
 
     // Update counters: increment this level, reset deeper levels.
+    //
+    // The map holds the *current* (last-emitted) value, which is what
+    // `format_list_label` reads. §17.9.28 permits `w:start="0"` (and
+    // §17.9.27 `w:startOverride="0"`), so the first item must seed the
+    // counter with `start` directly — seeding `start - 1` and adding one
+    // underflows `u32` at zero, panicking debug builds and silently
+    // wrapping in release.
     {
+        use std::collections::hash_map::Entry;
         let counters = &mut state.list_counters;
-        let count = counters
-            .entry((num_id, level))
-            .or_insert_with(|| levels.get(level as usize).map(|l| l.start).unwrap_or(1) - 1);
-        *count += 1;
+        match counters.entry((num_id, level)) {
+            Entry::Vacant(slot) => {
+                slot.insert(levels.get(level as usize).map(|l| l.start).unwrap_or(1));
+            }
+            Entry::Occupied(mut slot) => {
+                let next = slot.get().saturating_add(1);
+                slot.insert(next);
+            }
+        }
         // Reset deeper levels.
         let max_level = levels.len() as u8;
         for deeper in (level + 1)..max_level {
@@ -82,25 +95,34 @@ pub(super) fn inject_list_label(
 
     if let Some((label_frag, label_height)) = pic_bullet_injected {
         let hanging = extract_hanging(level_def);
-        let tab_frag = Fragment::Tab {
-            line_height: label_height,
-            fitting_width: Some(hanging),
-        };
-        fragments.insert(0, tab_frag);
+        // §17.9.29: `Nothing` drops the separator entirely. `Tab` and `Space`
+        // both advance via a tab here — a picture bullet has no text font to emit
+        // a literal space with, and image-bullet + space is vanishingly rare.
+        let drop_separator =
+            level_def.map(|l| l.suffix) == Some(crate::model::LevelSuffix::Nothing);
+        if !drop_separator {
+            let tab_frag = Fragment::Tab {
+                line_height: label_height,
+                fitting_width: Some(hanging),
+            };
+            fragments.insert(0, tab_frag);
+        }
         fragments.insert(0, label_frag);
 
-        if let Some(lvl_left) = level_def
-            .and_then(|l| l.indentation.as_ref())
-            .and_then(|ind| ind.start)
-        {
-            merged_props.tabs.insert(
-                0,
-                crate::model::TabStop {
-                    position: lvl_left,
-                    alignment: crate::model::TabAlignment::Left,
-                    leader: crate::model::TabLeader::None,
-                },
-            );
+        if !drop_separator {
+            if let Some(lvl_left) = level_def
+                .and_then(|l| l.indentation.as_ref())
+                .and_then(|ind| ind.start)
+            {
+                merged_props.tabs.insert(
+                    0,
+                    crate::model::TabStop {
+                        position: lvl_left,
+                        alignment: crate::model::TabAlignment::Left,
+                        leader: crate::model::TabLeader::None,
+                    },
+                );
+            }
         }
     } else {
         inject_text_label(
@@ -158,7 +180,7 @@ fn inject_text_label(
         };
 
     let (default_family, default_size, default_color, _, paragraph_style_run) =
-        resolve_paragraph_defaults(para, ctx.resolved, false);
+        resolve_paragraph_defaults(para, ctx.resolved, false, None, None);
 
     // §17.9.23 / §17.3.1.29: assemble the label's character-property
     // cascade. Order matters — level rPr beats paragraph-mark rPr beats
@@ -234,27 +256,62 @@ fn inject_text_label(
         text_offset,
         is_footnote_ref: false,
     };
-    let tab_fitting = (hanging - label_width).max(Pt::ZERO);
-    let tab_frag = Fragment::Tab {
-        line_height: h,
-        fitting_width: Some(tab_fitting),
-    };
-    fragments.insert(0, tab_frag);
-    fragments.insert(0, label_frag);
+    // §17.9.29: the separator between the label and the body text depends on the
+    // level's `suff`. Tab (default) advances to the body-text indent via a tab
+    // stop; Space emits a single space; Nothing puts the text flush against the
+    // label.
+    use crate::model::LevelSuffix;
+    match level_def.map(|l| l.suffix).unwrap_or_default() {
+        LevelSuffix::Tab => {
+            let tab_fitting = (hanging - label_width).max(Pt::ZERO);
+            fragments.insert(
+                0,
+                Fragment::Tab {
+                    line_height: h,
+                    fitting_width: Some(tab_fitting),
+                },
+            );
+            fragments.insert(0, label_frag);
 
-    // Add implicit tab stop at numLvl.left so the tab lands at the body text position.
-    let lvl_left = level_def
-        .and_then(|l| l.indentation.as_ref())
-        .and_then(|ind| ind.start);
-    if let Some(lvl_left) = lvl_left {
-        merged_props.tabs.insert(
-            0,
-            crate::model::TabStop {
-                position: lvl_left,
-                alignment: crate::model::TabAlignment::Left,
-                leader: crate::model::TabLeader::None,
-            },
-        );
+            // Implicit tab stop at numLvl.left so the tab lands at body text.
+            if let Some(lvl_left) = level_def
+                .and_then(|l| l.indentation.as_ref())
+                .and_then(|ind| ind.start)
+            {
+                merged_props.tabs.insert(
+                    0,
+                    crate::model::TabStop {
+                        position: lvl_left,
+                        alignment: crate::model::TabAlignment::Left,
+                        leader: crate::model::TabLeader::None,
+                    },
+                );
+            }
+        }
+        LevelSuffix::Space => {
+            let (sw, sm) = ctx.measurer.measure(" ", &label_font);
+            fragments.insert(
+                0,
+                Fragment::Text {
+                    text: Rc::from(" "),
+                    font: Rc::new(label_font.clone()),
+                    color: label_color,
+                    shading: None,
+                    border: None,
+                    width: sw,
+                    trimmed_width: sw,
+                    metrics: sm,
+                    hyperlink_url: None,
+                    baseline_offset: Pt::ZERO,
+                    text_offset: Pt::ZERO,
+                    is_footnote_ref: false,
+                },
+            );
+            fragments.insert(0, label_frag);
+        }
+        LevelSuffix::Nothing => {
+            fragments.insert(0, label_frag);
+        }
     }
 }
 

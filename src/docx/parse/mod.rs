@@ -68,17 +68,17 @@ pub fn parse(data: &[u8]) -> Result<Document> {
     };
 
     // Numbering
-    let numbering_defs = if let Some(num_rel) = doc_rels.find_by_type(&RelationshipType::Numbering)
-    {
-        let num_path = zip::resolve_target(doc_dir, &num_rel.target);
-        if let Some(data) = package.get_part(&num_path) {
-            numbering::parse_numbering(data)?
+    let mut numbering_defs =
+        if let Some(num_rel) = doc_rels.find_by_type(&RelationshipType::Numbering) {
+            let num_path = zip::resolve_target(doc_dir, &num_rel.target);
+            if let Some(data) = package.get_part(&num_path) {
+                numbering::parse_numbering(data)?
+            } else {
+                NumberingDefinitions::default()
+            }
         } else {
             NumberingDefinitions::default()
-        }
-    } else {
-        NumberingDefinitions::default()
-    };
+        };
 
     // Settings
     let doc_settings =
@@ -94,27 +94,46 @@ pub fn parse(data: &[u8]) -> Result<Document> {
         };
 
     // Phase 2b: Extract media
+    //
+    // Body image bytes are *cloned* out of the package (not moved): a header
+    // or footer can reference the same media part through its own rels, and
+    // moving the bytes here would leave the later reader with nothing. The
+    // package is dropped at the end of parse, so the transient duplication is
+    // bounded.
     let mut media = HashMap::new();
     for rel in doc_rels.filter_by_type(&RelationshipType::Image) {
         let media_path = zip::resolve_target(doc_dir, &rel.target);
-        if let Some(data) = package.take_part(&media_path) {
+        if let Some(data) = package.get_part(&media_path).map(<[u8]>::to_vec) {
             let fmt = ImageFormat::detect(&rel.target, &data);
             media.insert(rel.id.clone(), (data, fmt));
         }
     }
 
     // §17.9.21: extract picture bullet images from numbering.xml relationships.
+    // These rIds live in numbering.xml.rels — an independent namespace from the
+    // body's document.xml.rels — so a numbering `rId1` must not overwrite a body
+    // `rId1` in the shared `media` map. Synthesize unique keys (as the
+    // header/footer path does) and rewrite the numbering model's VML rel_ids to
+    // match, so `list_label` looks the bullet up under the collision-free key.
     if let Some(num_rel) = doc_rels.find_by_type(&RelationshipType::Numbering) {
         let num_path = zip::resolve_target(doc_dir, &num_rel.target);
         let num_dir = zip::part_directory(&num_path);
         let num_rels_path = zip::rels_path_for(&num_path);
         if let Some(rels_data) = package.get_part(&num_rels_path) {
             let num_rels = Relationships::parse(rels_data)?;
+            let mut num_remap: HashMap<RelId, RelId> = HashMap::new();
             for rel in num_rels.filter_by_type(&RelationshipType::Image) {
                 let img_path = zip::resolve_target(num_dir, &rel.target);
-                if let Some(data) = package.take_part(&img_path) {
+                if let Some(data) = package.get_part(&img_path).map(<[u8]>::to_vec) {
                     let fmt = ImageFormat::detect(&rel.target, &data);
-                    media.insert(rel.id.clone(), (data, fmt));
+                    let unique_id = RelId::new(format!("{}::{}", num_path, rel.id.as_str()));
+                    media.insert(unique_id.clone(), (data, fmt));
+                    num_remap.insert(rel.id.clone(), unique_id);
+                }
+            }
+            for bullet in numbering_defs.pic_bullets.values_mut() {
+                if let Some(ref mut pict) = bullet.pict {
+                    rel_rewrite::rewrite_part_rels_in_pict(pict, &num_remap);
                 }
             }
         }
@@ -177,7 +196,7 @@ pub fn parse(data: &[u8]) -> Result<Document> {
     if let Some(fn_rel) = doc_rels.find_by_type(&RelationshipType::Footnotes) {
         let path = zip::resolve_target(doc_dir, &fn_rel.target);
         if let Some(data) = package.get_part(&path) {
-            footnotes = notes::parse_notes(data, "footnote")?;
+            footnotes = notes::parse_notes(data)?;
             let remap = load_part_rel_remap(&path, &mut package, &mut media)?;
             for blocks in footnotes.values_mut() {
                 rel_rewrite::rewrite_part_rels_in_blocks(blocks, &remap);
@@ -189,7 +208,7 @@ pub fn parse(data: &[u8]) -> Result<Document> {
     if let Some(en_rel) = doc_rels.find_by_type(&RelationshipType::Endnotes) {
         let path = zip::resolve_target(doc_dir, &en_rel.target);
         if let Some(data) = package.get_part(&path) {
-            endnotes = notes::parse_notes(data, "endnote")?;
+            endnotes = notes::parse_notes(data)?;
             let remap = load_part_rel_remap(&path, &mut package, &mut media)?;
             for blocks in endnotes.values_mut() {
                 rel_rewrite::rewrite_part_rels_in_blocks(blocks, &remap);
@@ -302,15 +321,15 @@ fn resolve_hyperlinks_in_inlines(
     inlines: &mut [crate::model::Inline],
     rels: &crate::docx::relationships::Relationships,
 ) {
-    use crate::model::{HyperlinkTarget, Inline, RelId};
+    use crate::model::{HyperlinkTarget, Inline};
 
     for inline in inlines {
         match inline {
             Inline::Hyperlink(link) => {
-                // Resolve External(RelId) to the actual URL.
-                if let HyperlinkTarget::External(ref rel_id) = link.target {
+                // Resolve an unresolved relationship id to its actual URL.
+                if let HyperlinkTarget::ExternalRel(ref rel_id) = link.target {
                     if let Some(rel) = rels.find_by_id(rel_id.as_str()) {
-                        link.target = HyperlinkTarget::External(RelId::new(&rel.target));
+                        link.target = HyperlinkTarget::ExternalUrl(rel.target.clone());
                     }
                 }
                 // Recurse into hyperlink content.
@@ -320,6 +339,11 @@ fn resolve_hyperlinks_in_inlines(
                 resolve_hyperlinks_in_inlines(&mut field.content, rels);
             }
             Inline::AlternateContent(ac) => {
+                // §M.2.2: choices are the preferred (usually rendered) branch,
+                // so resolve their hyperlinks too — not just the fallback.
+                for choice in &mut ac.choices {
+                    resolve_hyperlinks_in_inlines(&mut choice.content, rels);
+                }
                 if let Some(ref mut fallback) = ac.fallback {
                     resolve_hyperlinks_in_inlines(fallback, rels);
                 }

@@ -110,11 +110,16 @@ pub(crate) struct ParaXml {
 }
 
 /// Children of `<w:p>` excluding `<w:pPr>` (which is captured separately).
+/// This is `EG_PContent` — also the content model of `<w:hyperlink>`,
+/// `<w:fldSimple>`, and the revision/structural wrappers below.
 ///
-/// OOXML allows many annotation and revision-tracking elements at this level
-/// (proofErr, smartTag, ins/del, moveFrom/moveTo, commentRangeStart/End,
-/// permStart/End, customXml, sdt, ...). We only model the ones we render;
-/// the `Other` catch-all lets serde discard everything else cleanly.
+/// OOXML wraps run content in revision-tracking (`ins`/`del`/`moveFrom`/
+/// `moveTo`) and structural (`smartTag`/`customXml`) elements. These are
+/// modelled so `convert_para_children` can flatten them: insert-side and
+/// structural wrappers are rendered, delete-side wrappers are dropped (an
+/// "accept all changes" / final view). Remaining annotation elements
+/// (proofErr, permStart/End, commentRange*, sdt, ...) hit the `Other`
+/// catch-all and are discarded cleanly.
 #[derive(Deserialize)]
 pub(crate) enum ParaChildXml {
     #[serde(rename = "r")]
@@ -127,12 +132,41 @@ pub(crate) enum ParaChildXml {
     BookmarkStart(BookmarkStartXml),
     #[serde(rename = "bookmarkEnd")]
     BookmarkEnd(BookmarkEndXml),
+    /// §17.13.5.18 `<w:ins>` — insert-side revision wrapper; content is kept.
+    #[serde(rename = "ins")]
+    Ins(RunTrackChangeXml),
+    /// §17.13.5.14 `<w:del>` — delete-side revision wrapper; content is dropped.
+    #[serde(rename = "del")]
+    Del(RunTrackChangeXml),
+    /// §17.13.5.22 `<w:moveTo>` — destination side of a move; content is kept.
+    #[serde(rename = "moveTo")]
+    MoveTo(RunTrackChangeXml),
+    /// §17.13.5.19 `<w:moveFrom>` — source side of a move; content is dropped.
+    #[serde(rename = "moveFrom")]
+    MoveFrom(RunTrackChangeXml),
+    /// §17.5.1.9 `<w:smartTag>` — structural run wrapper; content is flattened.
+    #[serde(rename = "smartTag")]
+    SmartTag(RunTrackChangeXml),
+    /// §17.5.1.6 `<w:customXml>` (CT_CustomXmlRun) — content is flattened.
+    #[serde(rename = "customXml")]
+    CustomXml(RunTrackChangeXml),
     /// `<w:pPr>` is captured on `ParaXml` directly, but serde's untagged
     /// enum still has to handle it if it appears in `$value` ordering.
     #[serde(rename = "pPr")]
     PPr(Box<PPrXml>),
     #[serde(other)]
     Other,
+}
+
+/// A run-level revision (`ins`/`del`/`moveFrom`/`moveTo`, CT_RunTrackChange)
+/// or structural (`smartTag`/`customXml`) wrapper. Its content model is
+/// `EG_PContent` — the same children as `<w:p>` — so it nests recursively.
+/// The paragraph-level analogue of `RowTrackChangeXml`. Any `customXmlPr`
+/// child is absorbed by `$value` and ignored via `ParaChildXml::Other`.
+#[derive(Deserialize, Default)]
+pub(crate) struct RunTrackChangeXml {
+    #[serde(rename = "$value", default)]
+    pub content: Vec<ParaChildXml>,
 }
 
 // ── run ────────────────────────────────────────────────────────────────────

@@ -36,6 +36,17 @@ impl<'de> Deserialize<'de> for OnOff {
     }
 }
 
+/// OOXML §17.7.2 — when the same toggle element repeats inside one container,
+/// the last occurrence wins. Schema structs collect repeated toggles into a
+/// `Vec<OnOff>` (rather than `Option<OnOff>`, which serde rejects as a
+/// duplicate field) because third-party writers (notably LibreOffice/AOO) emit
+/// redundant duplicates like `<w:b/><w:b/>`. This collapses the list to the
+/// final value, or `None` when the toggle is absent so the style cascade can
+/// supply an inherited value.
+pub(crate) fn last_toggle(toggles: Vec<OnOff>) -> Option<bool> {
+    toggles.into_iter().next_back().map(|OnOff(b)| b)
+}
+
 /// Attribute-level boolean. Accepts `"1"`, `"true"`, `"on"` as true;
 /// anything else (including `"0"`, `"false"`, `"off"`) as false.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,5 +101,14 @@ mod tests {
     #[test]
     fn absent_is_none() {
         assert_eq!(flag(r#"<x/>"#), None);
+    }
+
+    #[test]
+    fn last_toggle_is_last_wins() {
+        assert_eq!(last_toggle(vec![]), None);
+        assert_eq!(last_toggle(vec![OnOff(true)]), Some(true));
+        // §17.7.2: last occurrence wins when a toggle is duplicated.
+        assert_eq!(last_toggle(vec![OnOff(true), OnOff(false)]), Some(false));
+        assert_eq!(last_toggle(vec![OnOff(false), OnOff(true)]), Some(true));
     }
 }

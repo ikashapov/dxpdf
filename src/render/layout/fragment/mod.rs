@@ -15,22 +15,37 @@ use crate::render::resolve::images::MediaEntry;
 
 mod collect;
 mod segment;
+mod split;
 mod text;
 
-pub use collect::{collect_fragments, FieldContext, FragmentCtx};
+pub use collect::{
+    collect_fragments, FieldContext, FootnoteTracker, FragmentCtx, RecordedFootnote,
+};
+pub use split::split_oversized_fragments;
 
 // ── Superscript / subscript rendering constants ───────────────────────────────
 // §17.3.2.42: these ratios are "application-defined" per the spec; the values
 // below match Word's rendering as documented in the OpenXML SDK reference.
 
 /// Font size of super/subscript text as a fraction of the base font size.
-pub(super) const SUPERSCRIPT_FONT_SIZE_RATIO: f32 = 0.58;
+/// Also the size of a note reference mark and its body number (§17.11.12).
+pub(crate) const SUPERSCRIPT_FONT_SIZE_RATIO: f32 = 0.58;
 
 /// Superscript baseline shift: fraction of base ascent to raise the text by.
 pub(super) const SUPERSCRIPT_ASCENT_OFFSET_RATIO: f32 = 0.33;
 
 /// Subscript baseline shift: fraction of base character height to lower the text by.
 pub(super) const SUBSCRIPT_HEIGHT_OFFSET_RATIO: f32 = 0.08;
+
+/// §17.11.12: baseline shift for a footnote/endnote reference mark, and for
+/// the matching number prefixed to the note body — as a fraction of the base
+/// **font size**.
+///
+/// Deliberately *not* [`SUPERSCRIPT_ASCENT_OFFSET_RATIO`]: that one is a
+/// fraction of the measured *ascent* and carries a different value (0.33).
+/// Note marks are raised relative to the font size so the mark and its body
+/// number line up without a measurement round-trip.
+pub(crate) const NOTE_REF_BASELINE_OFFSET_RATIO: f32 = 0.4;
 
 /// Font properties needed for rendering a text fragment.
 #[derive(Clone, Debug)]
@@ -87,6 +102,19 @@ pub struct FragmentBorder {
     pub space: Pt,
 }
 
+/// The target of a hyperlink carried on a text fragment. Keeps the
+/// §17.16.22 external-vs-internal distinction (from `HyperlinkTarget`) as a
+/// closed ADT so the emitter routes each to the right PDF annotation
+/// (external → URI action, internal → GoTo a named destination) instead of
+/// re-deriving it from a URL-scheme string check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// A resolved external URI (`http:`, `mailto:`, `file:`, …).
+    External(String),
+    /// An internal bookmark name (`w:hyperlink/@w:anchor`).
+    Internal(String),
+}
+
 /// A measured fragment — the atomic unit for line fitting.
 #[derive(Clone, Debug)]
 pub enum Fragment {
@@ -109,7 +137,11 @@ pub enum Fragment {
         trimmed_width: Pt,
         /// Font metrics (ascent + descent = text height).
         metrics: TextMetrics,
-        hyperlink_url: Option<String>,
+        /// Hyperlink target (external URI or internal bookmark), if this
+        /// fragment is inside a `w:hyperlink`. Named `hyperlink_url` for
+        /// historical reasons; carries the external/internal kind, not a bare
+        /// URL, so the emitter never has to guess from the string.
+        hyperlink_url: Option<LinkTarget>,
         baseline_offset: Pt,
         /// Horizontal offset for drawing text within the fragment width.
         /// Used for right/center-justified list labels where the text is

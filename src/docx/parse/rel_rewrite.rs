@@ -79,6 +79,13 @@ fn rewrite_in_inlines(inlines: &mut [Inline], remap: &HashMap<RelId, RelId>) {
             }
             Inline::Field(f) => rewrite_in_inlines(&mut f.content, remap),
             Inline::AlternateContent(ac) => {
+                // §M.2.2: the renderer prefers a supported `<mc:Choice>` over
+                // `<mc:Fallback>` (see `layout::choices_render_wps_shape`), so
+                // rIds inside the choices must be rewritten too — not just the
+                // fallback. A header/footer logo or link often lives in a choice.
+                for choice in &mut ac.choices {
+                    rewrite_in_inlines(&mut choice.content, remap);
+                }
                 if let Some(ref mut fb) = ac.fallback {
                     rewrite_in_inlines(fb, remap);
                 }
@@ -168,6 +175,17 @@ fn rewrite_blip(blip: &mut Blip, remap: &HashMap<RelId, RelId>) {
     }
 }
 
+/// Apply `remap` to every `RelId` inside a single VML `Pict`. Numbering
+/// picture bullets (§17.9.21) hold their image in a `Pict` that lives outside
+/// the block tree, so they need this entry point rather than
+/// [`rewrite_part_rels_in_blocks`]. A no-op on an empty remap.
+pub fn rewrite_part_rels_in_pict(pict: &mut Pict, remap: &HashMap<RelId, RelId>) {
+    if remap.is_empty() {
+        return;
+    }
+    rewrite_in_pict(pict, remap);
+}
+
 fn rewrite_in_pict(pict: &mut Pict, remap: &HashMap<RelId, RelId>) {
     for primitive in &mut pict.primitives {
         rewrite_in_vml_primitive(primitive, remap);
@@ -231,9 +249,12 @@ fn rewrite_vml_image_data(data: &mut VmlImageData, remap: &HashMap<RelId, RelId>
 /// reason) the URL won't match any rId in `remap` and this is a
 /// no-op.
 fn rewrite_in_hyperlink_target(target: &mut HyperlinkTarget, remap: &HashMap<RelId, RelId>) {
-    if let HyperlinkTarget::External(ref id) = target {
+    if let HyperlinkTarget::ExternalRel(ref id) = target {
         if let Some(new) = remap.get(id) {
-            *target = HyperlinkTarget::External(new.clone());
+            // For a subordinate part the remap resolves a hyperlink rId directly
+            // to its external URL (see `load_part_rel_remap`), so the target
+            // becomes a resolved URL rather than another rId.
+            *target = HyperlinkTarget::ExternalUrl(new.as_str().to_string());
         }
     }
 }
@@ -440,6 +461,8 @@ mod tests {
                 shape_properties,
                 style_line_ref: None,
                 style_effect_ref: None,
+                style_fill_ref: None,
+                style_font_ref: None,
                 body_pr: None,
                 txbx_content,
             })),
@@ -653,5 +676,130 @@ mod tests {
         };
         let v = crate::render::resolve::images::extract_image_rel_id(img).unwrap();
         assert_eq!(v.as_str(), "synth_vml_box");
+    }
+
+    // ── hyperlink target rewrite ────────────────────────────────────────
+
+    #[test]
+    fn rewrites_external_hyperlink_target() {
+        let mut blocks = vec![Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![Inline::Hyperlink(Hyperlink {
+                target: HyperlinkTarget::ExternalRel(RelId::new("rId7")),
+                content: vec![],
+            })],
+            rsids: ParagraphRevisionIds::default(),
+        }))];
+        let remap = remap_one("rId7", "https://example.com");
+        rewrite_part_rels_in_blocks(&mut blocks, &remap);
+
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!()
+        };
+        let Inline::Hyperlink(h) = &p.content[0] else {
+            panic!()
+        };
+        let HyperlinkTarget::ExternalUrl(url) = &h.target else {
+            panic!()
+        };
+        assert_eq!(url, "https://example.com");
+    }
+
+    // ── §M.2.2 AlternateContent choice (the preferred branch) ───────────
+
+    #[test]
+    fn rewrites_image_inside_alternate_content_choice() {
+        // Regression for the fix: the renderer prefers a supported <mc:Choice>
+        // over <mc:Fallback>, so image rIds inside a choice must be rewritten
+        // too — previously only the fallback was walked.
+        let ac = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wps],
+                content: vec![Inline::Image(Box::new(picture_with_blip("rId1")))],
+            }],
+            fallback: None,
+        };
+        let mut blocks = vec![Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![Inline::AlternateContent(ac)],
+            rsids: ParagraphRevisionIds::default(),
+        }))];
+        let remap = remap_one("rId1", "header3.xml::rId1");
+        rewrite_part_rels_in_blocks(&mut blocks, &remap);
+
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!()
+        };
+        let Inline::AlternateContent(ac) = &p.content[0] else {
+            panic!()
+        };
+        let Inline::Image(img) = &ac.choices[0].content[0] else {
+            panic!()
+        };
+        let v = crate::render::resolve::images::extract_image_rel_id(img).unwrap();
+        assert_eq!(v.as_str(), "header3.xml::rId1");
+    }
+
+    // ── VML group child recursion ───────────────────────────────────────
+
+    #[test]
+    fn recurses_into_vml_group_children() {
+        let child = VmlPrimitive::Shape(VmlShape {
+            common: VmlCommonAttrs {
+                image_data: Some(VmlImageData {
+                    rel_id: Some(RelId::new("rId1")),
+                    title: None,
+                }),
+                ..VmlCommonAttrs::default()
+            },
+            shape_type_ref: None,
+            vml_path: None,
+        });
+        let pict = Pict {
+            shape_type: None,
+            primitives: vec![VmlPrimitive::Group(Box::new(VmlGroup {
+                common: VmlCommonAttrs::default(),
+                coord_size: None,
+                coord_origin: None,
+                children: vec![child],
+            }))],
+        };
+        let mut blocks = vec![Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![Inline::Pict(pict)],
+            rsids: ParagraphRevisionIds::default(),
+        }))];
+        let remap = remap_one("rId1", "grouped");
+        rewrite_part_rels_in_blocks(&mut blocks, &remap);
+
+        let Block::Paragraph(p) = &blocks[0] else {
+            panic!()
+        };
+        let Inline::Pict(pict) = &p.content[0] else {
+            panic!()
+        };
+        let VmlPrimitive::Group(g) = &pict.primitives[0] else {
+            panic!()
+        };
+        let VmlPrimitive::Shape(s) = &g.children[0] else {
+            panic!()
+        };
+        assert_eq!(
+            s.common
+                .image_data
+                .as_ref()
+                .unwrap()
+                .rel_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "grouped"
+        );
     }
 }

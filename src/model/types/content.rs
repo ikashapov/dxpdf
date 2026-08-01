@@ -129,10 +129,17 @@ pub struct Hyperlink {
     pub content: Vec<Inline>,
 }
 
-/// A hyperlink either targets an external URL (via relationship) or an internal bookmark.
+/// A hyperlink target. External links start life as an unresolved relationship
+/// id (`w:hyperlink/@r:id`) and are rewritten to a concrete URL by the
+/// parse-time `resolve_hyperlinks` pass; the two states are distinct variants so
+/// no code has to guess whether an `External` payload is an rId or a URL.
 #[derive(Clone, Debug)]
 pub enum HyperlinkTarget {
-    External(super::identifiers::RelId),
+    /// Unresolved external relationship id, before the rels lookup.
+    ExternalRel(super::identifiers::RelId),
+    /// Resolved external URL, after `resolve_hyperlinks`.
+    ExternalUrl(String),
+    /// Internal bookmark anchor.
     Internal { anchor: String },
 }
 
@@ -160,8 +167,9 @@ pub struct AlternateContent {
 /// MCE §M.2.2: a single choice in alternate content.
 #[derive(Clone, Debug)]
 pub struct McChoice {
-    /// Required namespace/feature identifier.
-    pub requires: McRequires,
+    /// Required namespace/feature identifiers. `@Requires` is a space-separated
+    /// list of prefixes; the choice is usable only if every one is understood.
+    pub requires: Vec<McRequires>,
     /// Inline content for this choice.
     pub content: Vec<Inline>,
 }
