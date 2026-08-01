@@ -38,6 +38,7 @@ pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
         crate::render::layout::paragraph::PTabGeometry {
             max_width,
             indent_left: Pt::ZERO,
+            indent_first_line: Pt::ZERO,
             content_width: max_width,
         },
     )
@@ -77,7 +78,20 @@ pub fn fit_lines_with_first(
     // which jumps the pen to its anchor while contributing a nominal width.
     // Tracking it separately keeps `line_width` — and therefore every
     // non-ptab paragraph's fitting — bit-for-bit unchanged.
-    let mut pen_x = Pt::ZERO;
+    let line_pen_start = |is_first_line: bool| {
+        ptab_geometry.indent_left
+            + if is_first_line {
+                ptab_geometry.indent_first_line
+            } else {
+                Pt::ZERO
+            }
+    };
+    let mut pen_x = line_pen_start(true);
+    // §17.3.1.30: `relativeTo="margin"` measures against the full text area,
+    // so once such a tab has placed content this line may legitimately use the
+    // space a paragraph's own right indent excludes. Until then the ordinary
+    // `content_width` bound applies.
+    let mut margin_span_active = false;
     let mut line_height = Pt::ZERO;
     let mut line_text_height = Pt::ZERO;
     let mut line_ascent = Pt::ZERO;
@@ -103,7 +117,8 @@ pub fn fit_lines_with_first(
             });
             line_start = i + 1;
             line_width = Pt::ZERO;
-            pen_x = Pt::ZERO;
+            pen_x = line_pen_start(lines.is_empty());
+            margin_span_active = false;
             line_height = Pt::ZERO;
             line_text_height = Pt::ZERO;
             line_ascent = Pt::ZERO;
@@ -129,7 +144,11 @@ pub fn fit_lines_with_first(
                 zone_width,
             );
             match placement {
-                crate::render::layout::paragraph::PTabPlacement::Placed(at) => pen_x = at,
+                crate::render::layout::paragraph::PTabPlacement::Placed(at) => {
+                    pen_x = at;
+                    margin_span_active |=
+                        matches!(relative_to, crate::model::PTabRelativeTo::Margin);
+                }
                 crate::render::layout::paragraph::PTabPlacement::AdvancesToNextLine { .. } => {
                     // Only break when doing so can help. A tab already first
                     // on its line would find the same anchor behind the same
@@ -149,7 +168,8 @@ pub fn fit_lines_with_first(
                         });
                         line_start = i;
                         line_width = Pt::ZERO;
-                        pen_x = Pt::ZERO;
+                        pen_x = line_pen_start(lines.is_empty());
+                        margin_span_active = false;
                         line_height = Pt::ZERO;
                         line_text_height = Pt::ZERO;
                         line_ascent = Pt::ZERO;
@@ -159,8 +179,6 @@ pub fn fit_lines_with_first(
                     }
                 }
             }
-        } else {
-            pen_x += frag.width();
         }
 
         let frag_width = frag.width();
@@ -178,8 +196,15 @@ pub fn fit_lines_with_first(
         // The check uses: previous fragments' full widths + this fragment's trimmed width.
         let check_width = line_width + frag.trimmed_width();
 
-        // Check if adding this fragment overflows.
-        if check_width > current_max && line_start < i {
+        // Check if adding this fragment overflows. Once a margin-relative tab
+        // has placed content, the line's real right edge is the margin, and
+        // the pen — not the accumulated width sum — says where we are.
+        let overflows = if margin_span_active {
+            pen_x + frag.trimmed_width() > ptab_geometry.max_width
+        } else {
+            check_width > current_max
+        };
+        if overflows && line_start < i {
             // Overflow — break at last break point, or before this fragment.
             let break_at = last_break_point.unwrap_or(i);
             let m = measure_range(fragments, line_start, break_at);
@@ -194,7 +219,8 @@ pub fn fit_lines_with_first(
             });
             line_start = break_at;
             line_width = Pt::ZERO;
-            pen_x = Pt::ZERO;
+            pen_x = line_pen_start(lines.is_empty());
+            margin_span_active = false;
             line_height = Pt::ZERO;
             line_text_height = Pt::ZERO;
             line_ascent = Pt::ZERO;
@@ -207,6 +233,12 @@ pub fn fit_lines_with_first(
         // allow it (it will be the only fragment on this line). The
         // paragraph renderer will clip/overflow as needed.
         line_width = new_width;
+        // A position tab has already jumped the pen to its anchor; every other
+        // fragment advances it by its own width. Done here, after the overflow
+        // check, so the check sees the pen *at* this fragment rather than past it.
+        if !matches!(frag, Fragment::PTab { .. }) {
+            pen_x += frag_width;
+        }
         line_height = line_height.max(frag.height());
         // §17.3.1.33: text_height is the Auto line spacing base — use
         // line_height() (includes leading) for text, glyph height for tabs.
@@ -553,6 +585,7 @@ mod tests {
             crate::render::layout::paragraph::PTabGeometry {
                 max_width: Pt::new(100.0),
                 indent_left: Pt::ZERO,
+                indent_first_line: Pt::ZERO,
                 content_width: Pt::new(100.0),
             },
         );

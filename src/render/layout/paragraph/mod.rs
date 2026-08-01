@@ -1854,6 +1854,84 @@ mod tests {
     }
 
     #[test]
+    fn fitting_and_emission_agree_about_the_pen_on_an_indented_line() {
+        // Fitting decides whether a ptab can be honoured on this line;
+        // emission decides its x. Both must start the line at the same place,
+        // or an indented paragraph gets classified one way and drawn another.
+        //
+        // The fitter seeded its pen at 0 while emission seeds it at the
+        // indent, so the two could classify the same tab differently. Here the
+        // right-margin anchor for a 150pt zone is 250: ahead of the fitter's
+        // pen (200) but behind emission's (300). The fitter therefore saw no
+        // reason to break, and emission — unable to break — clamped to 300,
+        // running B out to 450, past the 400pt margin B1 was meant to protect.
+        let frags = vec![
+            text_frag("A", 200.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("B", 150.0),
+        ];
+        let style = ParagraphStyle {
+            indent_left: Pt::new(100.0),
+            ..Default::default()
+        };
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert!(
+            positions[1].2 > positions[0].2,
+            "B advances to the next line: {positions:?}"
+        );
+        assert_eq!(positions[1].1, 250.0, "and lands on its anchor: 400 - 150");
+        assert!(positions[1].1 + 150.0 <= 400.0, "B stays within the margin");
+    }
+
+    #[test]
+    fn a_margin_ptab_may_use_the_space_a_right_indent_excludes() {
+        // §17.3.1.30: `relativeTo="margin"` measures against the full text
+        // area, so its zone may occupy space the paragraph's own right indent
+        // excludes. Fitting bounds lines by `content_width` (net of indents),
+        // which wrapped such a line even though the content fits the margin
+        // region — leaving a stray leader on the short line.
+        //
+        // content_width = 400 - 100 (right indent) = 300, but A(50) + B(320)
+        // reaches only 400, exactly the margin.
+        let frags = vec![
+            text_frag("A", 50.0),
+            ptab_frag(PTabAlignment::Right, PTabRelativeTo::Margin),
+            text_frag("B", 320.0),
+        ];
+        let style = ParagraphStyle {
+            indent_right: Pt::new(100.0),
+            ..Default::default()
+        };
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &style,
+            Pt::new(14.0),
+            None,
+        );
+
+        let positions = text_positions(&result);
+        assert_eq!(positions.len(), 2, "{positions:?}");
+        assert_eq!(
+            positions[0].2, positions[1].2,
+            "the line fits the margin region and must not wrap: {positions:?}"
+        );
+        assert_eq!(
+            positions[1].1, 80.0,
+            "B right-aligned at the margin: 400 - 320"
+        );
+    }
+
+    #[test]
     fn ptab_three_region_header() {
         // The canonical Word header: left ⟶ ptab(center) ⟶ center ⟶
         // ptab(right) ⟶ right, all relative to the page margins.

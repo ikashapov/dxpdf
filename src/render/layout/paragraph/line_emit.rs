@@ -28,6 +28,7 @@ pub(super) fn compute_line_placements(
     let ptab_geometry = PTabGeometry {
         max_width: params.max_width,
         indent_left: style.indent_left,
+        indent_first_line: style.indent_first_line,
         content_width,
     };
     if style.page_floats.is_empty() {
@@ -611,6 +612,7 @@ pub(super) fn emit_line_commands(
                     let geometry = PTabGeometry {
                         max_width: params.max_width,
                         indent_left: style.indent_left,
+                        indent_first_line: style.indent_first_line,
                         content_width,
                     };
                     let new_x = match resolve_ptab(*align, *relative_to, geometry, x, zone_width) {
@@ -714,8 +716,13 @@ pub struct PTabGeometry {
     /// Full constraint width, before paragraph indents. `relativeTo="margin"`
     /// measures against this.
     pub max_width: Pt,
-    /// Paragraph left indent.
+    /// Paragraph left indent. Line fitting seeds its pen here, matching where
+    /// emission starts a line — otherwise the two classify the same tab
+    /// differently and emission, unable to break, falls back to clamping.
     pub indent_left: Pt,
+    /// §17.3.1.12 first-line indent, added to the seed on the first line only.
+    /// Callers that fit a single continuation line pass `Pt::ZERO`.
+    pub indent_first_line: Pt,
     /// Constraint width net of indents. `relativeTo="indent"` measures against
     /// `indent_left + content_width`.
     pub content_width: Pt,
