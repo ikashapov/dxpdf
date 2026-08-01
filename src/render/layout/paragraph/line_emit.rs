@@ -540,32 +540,21 @@ pub(super) fn emit_line_commands(
                         find_next_tab_stop(x, &style.tabs, line_available, style.default_tab_stop);
 
                     let new_x = if let Some(ts) = tab_stop {
-                        use crate::model::TabAlignment;
-                        // §17.3.1.37: for right/center tabs, compute the width
-                        // of content in this tab's zone — from here to the next
-                        // tab (regular or position) or line end, whichever comes
-                        // first.
+                        // §17.3.1.37: this tab's *zone* is the content from
+                        // here to the next tab (regular or position) or the
+                        // line end, whichever comes first. §17.18.85 decides
+                        // which point of that zone lands on the stop.
                         let zone_end = fragments[frag_idx + 1..line.end]
                             .iter()
                             .position(is_tab_like)
                             .map_or(line.end, |i| frag_idx + 1 + i);
-                        match ts.alignment {
-                            TabAlignment::Right => {
-                                let zone_width: Pt = fragments[frag_idx + 1..zone_end]
-                                    .iter()
-                                    .map(|f| f.width())
-                                    .sum();
-                                (tab_pos - zone_width).max(x)
-                            }
-                            TabAlignment::Center => {
-                                let zone_width: Pt = fragments[frag_idx + 1..zone_end]
-                                    .iter()
-                                    .map(|f| f.width())
-                                    .sum();
-                                (tab_pos - zone_width * 0.5).max(x)
-                            }
-                            _ => tab_pos,
-                        }
+                        let zone = &fragments[frag_idx + 1..zone_end];
+                        let offset = resolve_zone_anchor(ts.alignment, zone, measure_text)
+                            .offset(|| zone.iter().map(|f| f.width()).sum());
+                        // Never move the pen backwards: a zone wider than the
+                        // space before its stop overflows to the right rather
+                        // than overprinting what precedes it.
+                        (tab_pos - offset).max(x)
                     } else {
                         tab_pos
                     };
@@ -695,6 +684,108 @@ pub(super) fn find_next_tab_stop(
     (Pt::new(next.min(line_width.raw())), None)
 }
 
+/// §17.18.85 `decimal`: the character a decimal tab stop aligns on.
+///
+/// Word uses the decimal separator of the document's language — `,` across
+/// much of Europe — but no locale reaches layout today (the same gap that
+/// leaves §17.9 `ordinal`/`cardinalText` numbering English-only). Fixed to
+/// `.` until locale is threaded. A comma-decimal document falls through to
+/// the no-separator branch and right-aligns, which keeps a numeric column
+/// flush rather than aligning on the wrong character.
+const DECIMAL_TAB_SEPARATOR: char = '.';
+
+/// §17.18.85: which point of a tab's *zone* — the content from the tab to the
+/// next tab or the line end — lands on the stop.
+///
+/// `Decimal` is why this is an enum rather than a fraction of the zone width:
+/// its anchor is a property of the zone's **text**, not of its geometry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ZoneAnchor {
+    /// The zone starts at the stop (`left`; also `bar` and `clear`, neither of
+    /// which repositions the content that follows).
+    Start,
+    /// The zone ends at the stop (`right`).
+    End,
+    /// The zone is centred on the stop (`center`).
+    Middle,
+    /// This offset into the zone lands on the stop (`decimal`).
+    At(Pt),
+}
+
+impl ZoneAnchor {
+    /// Distance from the zone's start to its anchor point. `zone_width` is a
+    /// thunk so a `Start` anchor — the overwhelmingly common case — never pays
+    /// for the O(zone) width sum.
+    fn offset(self, zone_width: impl FnOnce() -> Pt) -> Pt {
+        match self {
+            ZoneAnchor::Start => Pt::ZERO,
+            ZoneAnchor::End => zone_width(),
+            ZoneAnchor::Middle => zone_width() * 0.5,
+            ZoneAnchor::At(offset) => offset,
+        }
+    }
+}
+
+/// §17.18.85: resolve a tab stop's alignment into the zone anchor it implies.
+///
+/// Total over `TabAlignment` by construction — a new variant must state its
+/// anchor here rather than inheriting a catch-all's `left`.
+fn resolve_zone_anchor(
+    alignment: crate::model::TabAlignment,
+    zone: &[Fragment],
+    measure_text: MeasureTextFn<'_>,
+) -> ZoneAnchor {
+    use crate::model::TabAlignment;
+    match alignment {
+        // `bar` (§17.18.85) draws a vertical rule at the stop and `clear`
+        // removes the stop; neither shifts the following content, so both
+        // position it exactly as `left` does. The bar rule itself is not
+        // drawn — recorded in `plans/open-findings.md`.
+        TabAlignment::Left | TabAlignment::Bar | TabAlignment::Clear => ZoneAnchor::Start,
+        TabAlignment::Right => ZoneAnchor::End,
+        TabAlignment::Center => ZoneAnchor::Middle,
+        TabAlignment::Decimal => decimal_anchor(zone, measure_text),
+    }
+}
+
+/// Offset of the first [`DECIMAL_TAB_SEPARATOR`] in `zone`.
+///
+/// Falls back to [`ZoneAnchor::End`] when the zone contains none: Word
+/// right-aligns a separator-less decimal zone, which is what keeps a column of
+/// figures flush when one entry is a whole number. Left-aligning it instead
+/// would make that one entry stick out by its full width.
+fn decimal_anchor(zone: &[Fragment], measure_text: MeasureTextFn<'_>) -> ZoneAnchor {
+    let mut before = Pt::ZERO;
+    for fragment in zone {
+        if let Fragment::Text {
+            text, font, width, ..
+        } = fragment
+        {
+            if let Some(byte_idx) = text.find(DECIMAL_TAB_SEPARATOR) {
+                let prefix = &text[..byte_idx];
+                let prefix_width = match measure_text {
+                    Some(measure) => measure(prefix, font).0,
+                    // No measurer (fitting-only paths): apportion the
+                    // fragment's known width by character share. Approximate
+                    // for proportional faces, but the alternative is ignoring
+                    // the separator entirely.
+                    None => {
+                        let total = text.chars().count();
+                        if total == 0 {
+                            Pt::ZERO
+                        } else {
+                            *width * (prefix.chars().count() as f32 / total as f32)
+                        }
+                    }
+                };
+                return ZoneAnchor::At(before + prefix_width);
+            }
+        }
+        before += fragment.width();
+    }
+    ZoneAnchor::End
+}
+
 /// §17.3.1.38: how a tab leader is drawn.
 ///
 /// A leader has no formatting of its own — it takes the formatting in effect
@@ -804,7 +895,7 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
 
 #[cfg(test)]
 mod tests {
-    use super::find_next_tab_stop;
+    use super::{find_next_tab_stop, resolve_zone_anchor, Fragment, ZoneAnchor};
     use crate::model;
     use crate::render::dimension::Pt;
     use crate::render::layout::paragraph::TabStopDef;
@@ -862,5 +953,110 @@ mod tests {
         let (pos, ts) = find_next_tab_stop(Pt::new(80.0), &tabs, Pt::new(1000.0), Pt::new(36.0));
         assert_eq!(pos.raw(), 108.0, "default grid past the custom stop");
         assert!(ts.is_none(), "no custom stop returned");
+    }
+
+    // ── ZoneAnchor (§17.18.85) ────────────────────────────────────────────────
+
+    /// A text fragment of known width, for anchor arithmetic.
+    fn text_fragment(text: &str, width: f32) -> Fragment {
+        use crate::render::layout::fragment::{FontProps, TextMetrics};
+        use std::rc::Rc;
+        Fragment::Text {
+            text: text.into(),
+            font: Rc::new(FontProps {
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: false,
+                italic: false,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            shading: None,
+            border: None,
+            width: Pt::new(width),
+            trimmed_width: Pt::new(width),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+            hyperlink_url: None,
+            baseline_offset: Pt::ZERO,
+            text_offset: Pt::ZERO,
+            is_footnote_ref: false,
+        }
+    }
+
+    #[test]
+    fn every_alignment_resolves_without_a_catch_all() {
+        // The point of the enum: each §17.18.85 value states its own anchor.
+        // `bar` and `clear` do not reposition following content, so they
+        // anchor at the zone start exactly as `left` does.
+        use model::TabAlignment::*;
+        for (alignment, expected) in [
+            (Left, ZoneAnchor::Start),
+            (Bar, ZoneAnchor::Start),
+            (Clear, ZoneAnchor::Start),
+            (Right, ZoneAnchor::End),
+            (Center, ZoneAnchor::Middle),
+        ] {
+            assert_eq!(
+                resolve_zone_anchor(alignment, &[], None),
+                expected,
+                "{alignment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_start_anchor_never_sums_the_zone_width() {
+        // The thunk exists so the common case skips an O(zone) walk; if it is
+        // ever called for `Start` this panics.
+        let offset = ZoneAnchor::Start.offset(|| panic!("zone width computed for a Start anchor"));
+        assert_eq!(offset, Pt::ZERO);
+    }
+
+    #[test]
+    fn zone_anchor_offsets_are_measured_from_the_zone_start() {
+        let width = || Pt::new(80.0);
+        assert_eq!(ZoneAnchor::End.offset(width).raw(), 80.0);
+        assert_eq!(ZoneAnchor::Middle.offset(width).raw(), 40.0);
+        assert_eq!(ZoneAnchor::At(Pt::new(12.5)).offset(width).raw(), 12.5);
+    }
+
+    #[test]
+    fn a_decimal_zone_with_no_separator_anchors_at_its_end() {
+        let zone = [text_fragment("1234", 40.0)];
+        assert_eq!(
+            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None),
+            ZoneAnchor::End,
+            "right-align rather than left-align, so a whole number stays flush"
+        );
+    }
+
+    #[test]
+    fn a_decimal_zone_without_a_measurer_apportions_by_character_share() {
+        // "12.5" is 4 chars, 40pt wide; the 2-char prefix is half of it.
+        let zone = [text_fragment("12.5", 40.0)];
+        assert_eq!(
+            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None),
+            ZoneAnchor::At(Pt::new(20.0))
+        );
+    }
+
+    #[test]
+    fn a_decimal_anchor_accumulates_fragments_before_the_separator() {
+        // The separator can arrive in a later fragment; everything before it
+        // still counts toward the offset.
+        let zone = [text_fragment("12", 20.0), text_fragment(".5", 20.0)];
+        assert_eq!(
+            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None),
+            ZoneAnchor::At(Pt::new(20.0)),
+            "20pt of leading fragment + 0pt before the separator in the second"
+        );
     }
 }

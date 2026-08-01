@@ -1801,6 +1801,107 @@ mod tests {
         assert_eq!(xs[1], 70.0, "right run ends at the right margin");
     }
 
+    // ── Decimal tab alignment (§17.18.85 `ST_TabJc` = decimal) ──
+    //
+    // A decimal stop aligns the *separator* on the stop, not an edge of the
+    // zone. These use a 10pt-per-character measurer so the expected x values
+    // are exact arithmetic rather than font-dependent.
+
+    /// Measure every character as 10pt wide, so a prefix's width is
+    /// `10 * prefix.chars().count()`.
+    fn ten_pt_per_char(text: &str, _f: &FontProps) -> (Pt, TextMetrics) {
+        (
+            Pt::new(10.0 * text.chars().count() as f32),
+            TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+        )
+    }
+
+    fn decimal_stop_at(pos: f32) -> ParagraphStyle {
+        ParagraphStyle {
+            tabs: vec![TabStopDef {
+                position: Pt::new(pos),
+                alignment: crate::model::TabAlignment::Decimal,
+                leader: crate::model::TabLeader::None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Lay out `a<tab>zone` against a decimal stop at 100 and return the x of
+    /// the zone's text.
+    fn decimal_zone_x(zone: &str) -> f32 {
+        let measurer: &dyn Fn(&str, &FontProps) -> (Pt, TextMetrics) = &ten_pt_per_char;
+        let frags = vec![
+            text_frag("a", 10.0),
+            Fragment::Tab {
+                line_height: Pt::new(12.0),
+                font: leader_font("Test", 12.0),
+                color: RgbColor::BLACK,
+                fitting_width: None,
+            },
+            text_frag(zone, 10.0 * zone.chars().count() as f32),
+        ];
+        let result = layout_paragraph(
+            &frags,
+            &body_constraints(400.0),
+            &decimal_stop_at(100.0),
+            Pt::new(14.0),
+            Some(measurer),
+        );
+        *text_xs(&result).last().expect("zone text is emitted")
+    }
+
+    #[test]
+    fn decimal_tab_puts_the_separator_on_the_stop() {
+        // §17.18.85: the decimal separator lands on the stop, whatever the
+        // integer part's width. "1.5" has one char before the separator,
+        // "22.75" has two — so they start 10pt apart and their separators
+        // coincide at x=100.
+        assert_eq!(decimal_zone_x("1.5"), 90.0, "one char before the separator");
+        assert_eq!(
+            decimal_zone_x("22.75"),
+            80.0,
+            "two chars before the separator"
+        );
+        assert_eq!(
+            decimal_zone_x("333.125"),
+            70.0,
+            "three chars before the separator"
+        );
+    }
+
+    #[test]
+    fn decimal_tab_without_a_separator_right_aligns() {
+        // Word right-aligns a decimal-tabbed zone that has no separator —
+        // aligning its left edge would leave numeric columns ragged.
+        assert_eq!(
+            decimal_zone_x("1234"),
+            60.0,
+            "4 chars ending at the stop → 100 - 40"
+        );
+    }
+
+    #[test]
+    fn decimal_tab_aligns_on_the_first_separator() {
+        // A version string has several; the first is the alignment point.
+        assert_eq!(decimal_zone_x("1.2.3"), 90.0);
+    }
+
+    #[test]
+    fn decimal_tab_never_moves_content_backwards() {
+        // The zone is wider than the stop, so honouring the separator would
+        // place text left of the current pen. Clamp, as right/center do.
+        assert_eq!(
+            decimal_zone_x("1234567890123.5"),
+            10.0,
+            "separator would land at -30; clamped to the pen after 'a'"
+        );
+    }
+
     // ── Tab leaders (§17.3.1.38) ──
     //
     // A leader carries no formatting of its own: §17.3.1.38 defines it as
