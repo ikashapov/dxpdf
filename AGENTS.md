@@ -66,9 +66,12 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 
 ## OOXML Reference
 
-`docs/` captures WHY the current code makes the choices it does, which is generally not re-derivable from the source. Consult the relevant page before changing layout behavior. When you change behavior a doc describes, update the doc in the same change.
+Two directories, split by what a document is *about*:
 
-**Current behavior:**
+- **`docs/` — behavior.** How the engine works today, and WHY it makes those choices, which is generally not re-derivable from the source. Consult the relevant page before changing layout behavior, and update it in the same change when you change behavior it describes. A page here stays valid as long as the behavior does.
+- **`plans/` — work.** Designs, profiling analyses and branch reviews. These describe a point in time, **not** necessarily current behavior; verify against source before acting on one. A plan whose work has fully landed and left nothing behind gets deleted, not archived.
+
+### `docs/` — current behavior
 
 - [Style Cascade](docs/style-cascade.md) — §17.7.2 property resolution, doc defaults, table style interaction
 - [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
@@ -83,17 +86,12 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 - [Font Resolution & Substitution](docs/font-substitution.md) — §17.8 the 5-step resolution chain, metric-compatible substitutes, per-render `FontRegistry` ownership
 - [Font Subsetting](docs/font-subsetting.md) — §17.8 / ISO 32000-1 §9.6 codepoint collection, `fontcull` subsetting, name-table splice, shapeability validation
 - [Shape Geometry](docs/shape-geometry.md) — §20.1.9 `prstGeom`/`custGeom` → paths, guide-formula evaluation, preset tiering
-- [Cross-Run Cluster Reassembly](docs/cross-run-cluster-reassembly.md) — §17.3.2.26 `w:rFonts` splitting grapheme clusters across runs, and how they are rejoined
 
-**Open work** — read the status line at the top of each before relying on it:
+### `plans/` — outstanding work
 
-- [Rendering Performance Analysis](docs/rendering-performance-analysis.md) — profiling of resolve → layout → subset → paint. Tiers 1–2 applied; Tier 3 (#11–#18) outstanding. Also the peak-memory investigation behind the move to Skia's HarfBuzz
-- [Position Tabs code review](docs/position-tab-code-review.md) — `w:ptab` branch review; findings #1–#5 and #8 still open
+- [Open Findings](plans/open-findings.md) — **the single list of everything known-unimplemented**: undocumented approximations, `w:ptab` edge cases, two ambiguities needing a Word reference render, Tier-3 performance items, and coverage gaps. Every item carries a `file:line` anchor and was verified against source. It also records what was *closed*, so stale notes elsewhere don't reopen settled work
 
-**Historical records** — point-in-time, **not** descriptions of current behavior:
-
-- [Deep Review Findings](docs/deep-review-findings.md) — per-chunk findings from a full `src/` audit, each with its resolution
-- [Deferred Backlog](docs/deferred-backlog-plan.md) — cross-layer items deferred out of that review; all units complete
+Add to that file rather than starting a new plan document. A design doc earns its own file only while it is being executed; once the work lands, its reasoning belongs in the code it describes and its residue belongs here.
 
 **No doc yet** — start from the module docs at these entry points: color-emoji pipeline (`src/render/emoji/mod.rs`), parse/serde schemas (`src/docx/parse/`, the `XxxXml` → domain seam), text shaping & fragments (`src/render/layout/fragment/`), paint & PDF emission (`src/render/painter.rs`), EMF images (`src/render/emf.rs`), numbering & list labels (`src/docx/parse/numbering.rs`, `src/render/layout/build/list_label.rs`), VML fallback (`src/docx/parse/vml/`).
 

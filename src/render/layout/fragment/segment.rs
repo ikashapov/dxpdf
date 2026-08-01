@@ -1,7 +1,5 @@
 //! Cross-run grapheme cluster reassembly.
 //!
-//! See `docs/cross-run-cluster-reassembly.md` for the full design.
-//!
 //! Word splits a UAX #29 grapheme cluster across `<w:r>` runs whenever
 //! consecutive characters land in different `<w:rFonts>` slots
 //! (§17.3.2.26). The classic example is the keycap `1️⃣` — digit `1`
@@ -161,6 +159,14 @@ struct TextBuffer<'a> {
 /// is not split — a UAX #29 cluster is one visual unit at one size, so
 /// when it spans runs we use the base run's formatting (font-name hint
 /// per §17.3.2.26, color, baseline offset, font size).
+///
+/// The same first-run rule applies to a *text* grapheme that spans runs:
+/// `classify` attributes a whole grapheme to the run its first scalar came
+/// from, so a combining mark authored in a second run with different
+/// formatting silently takes the base character's instead. Deliberate — a
+/// grapheme is one glyph and cannot carry two colors — and it matches what
+/// Word draws, but it does mean run properties on a trailing mark are
+/// dropped rather than honored.
 #[derive(Debug)]
 pub(super) enum SegmentPiece<'a> {
     Text {
