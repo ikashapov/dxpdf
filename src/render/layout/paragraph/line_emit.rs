@@ -273,6 +273,17 @@ pub(super) fn emit_line_commands(
     let drop_cap_indent = params.drop_cap_indent;
     let drop_cap_lines = params.drop_cap_lines;
     let default_line_height = params.default_line_height;
+    // §17.18.85: `bar` entries are paragraph decorations, not stops, so they
+    // are gathered here rather than reached from the `Fragment::Tab` arm — a
+    // bar draws on every line of the paragraph, including lines (and whole
+    // paragraphs) holding no tab character at all. Resolved once, outside the
+    // loop: the colour is a property of the paragraph and must not vary from
+    // line to line.
+    let has_bar_stop = style
+        .tabs
+        .iter()
+        .any(|ts| TabStopRole::of(ts.alignment) == TabStopRole::DrawsRule);
+    let bar_color = paragraph_bar_color(fragments);
     // `line_idx` stays absolute within the paragraph (not the emitted range) so
     // first-line indent (§17.3.1.12), drop caps (§17.3.1.11), and last-line
     // justification (§17.3.1.13) resolve correctly when a paragraph is split
@@ -359,6 +370,11 @@ pub(super) fn emit_line_commands(
         );
 
         let x_start = indent + align_offset;
+
+        // Before the content, so text wins wherever a rule and a glyph overlap.
+        if has_bar_stop {
+            emit_bar_rules(commands, &style.tabs, bar_color, *cursor_y, line_height);
+        }
 
         // Emit text commands for this line
         let mut x = x_start;
@@ -721,9 +737,13 @@ pub(super) fn find_next_tab_stop(
     line_width: Pt,
     default_interval: Pt,
 ) -> (Pt, Option<&TabStopDef>) {
-    // Find the first custom tab stop past current position.
+    // Find the first custom tab stop past current position. §17.18.85: a `bar`
+    // entry is a rule, not a stop, so a tab passes over it — skipping it here
+    // is what lets the pen reach the next real stop, or fall through to the
+    // default interval below when a bar is the only entry.
     for ts in tabs {
-        if ts.position > current_x {
+        if ts.position > current_x && TabStopRole::of(ts.alignment) == TabStopRole::PositionsContent
+        {
             return (ts.position, Some(ts));
         }
     }
@@ -876,6 +896,99 @@ impl ZoneAnchor {
     }
 }
 
+/// §17.18.85: the two exclusive roles an entry in `w:tabs` can have.
+///
+/// A `bar` entry is **not** a stop a tab character can land on. It names a
+/// column of the paragraph where a vertical rule is drawn — on every line,
+/// whether or not the paragraph contains a tab at all — and tabbing passes
+/// straight over it to the next real stop. Word's own tab dialog says as much:
+/// a bar tab does not position text.
+///
+/// The two roles want two different things from the same slice, and answering
+/// both from one `TabAlignment` match is what let a `bar` swallow a tab
+/// character *and* draw nothing. [`ZoneAnchor`] answers a question only a
+/// positioning stop has: where within its zone the content anchors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabStopRole {
+    /// Positions the content that follows a tab character.
+    PositionsContent,
+    /// §17.18.85 `bar`: draws a vertical rule; invisible to a tab character.
+    DrawsRule,
+}
+
+impl TabStopRole {
+    /// Total over `TabAlignment` by construction — a new variant must state
+    /// its role here rather than inheriting a catch-all's.
+    fn of(alignment: crate::model::TabAlignment) -> Self {
+        use crate::model::TabAlignment;
+        match alignment {
+            TabAlignment::Left
+            | TabAlignment::Center
+            | TabAlignment::Right
+            | TabAlignment::Decimal
+            // §17.3.1.38 `clear` deletes a stop during style merge, so one
+            // reaching layout at all is inert. Leaving it a positioning stop
+            // keeps the `left` behaviour it has always had; giving it a rule
+            // would invent a mark the document never asked for.
+            | TabAlignment::Clear => Self::PositionsContent,
+            TabAlignment::Bar => Self::DrawsRule,
+        }
+    }
+}
+
+/// §17.18.85 gives the rule no weight and `w:tab` has no attribute for one.
+/// Word draws a hairline; 0.75pt is the same default this renderer already
+/// applies to an unspecified DrawingML outline, so the two agree instead of
+/// each inventing a number.
+const BAR_RULE_WIDTH: Pt = Pt::new(0.75);
+
+/// The colour a paragraph's bar rules take.
+///
+/// §17.3.1.38's rule for tab leaders — a decoration has no formatting of its
+/// own, it takes the formatting in effect — is the nearest precedent, but a bar
+/// rule has no owning run to read it from: it is drawn on lines holding no tab.
+/// Word keys it off the paragraph mark's run properties, which do not reach
+/// layout. The paragraph's first run is the closest thing that does, and taking
+/// it from the *paragraph* rather than from each line is what keeps one rule
+/// one colour when the paragraph wraps or splits across pages.
+fn paragraph_bar_color(fragments: &[Fragment]) -> crate::render::resolve::color::RgbColor {
+    fragments
+        .iter()
+        .find_map(|f| match f {
+            Fragment::Text { color, .. } => Some(*color),
+            _ => None,
+        })
+        .unwrap_or(crate::render::resolve::color::RgbColor::BLACK)
+}
+
+/// §17.18.85: draw every `bar` stop's rule across one line's vertical band.
+///
+/// The x is the stop's own position and owes nothing to the line — not to its
+/// content, its alignment offset, or its float indent — because a bar names a
+/// fixed column of the paragraph. Successive lines' bands abut, so the
+/// per-line segments read as one continuous rule.
+fn emit_bar_rules(
+    commands: &mut Vec<DrawCommand>,
+    tabs: &[TabStopDef],
+    color: crate::render::resolve::color::RgbColor,
+    line_top: Pt,
+    line_height: Pt,
+) {
+    for ts in tabs
+        .iter()
+        .filter(|ts| TabStopRole::of(ts.alignment) == TabStopRole::DrawsRule)
+    {
+        commands.push(DrawCommand::Line {
+            line: crate::render::geometry::PtLineSegment::new(
+                PtOffset::new(ts.position, line_top),
+                PtOffset::new(ts.position, line_top + line_height),
+            ),
+            color,
+            width: BAR_RULE_WIDTH,
+        });
+    }
+}
+
 /// §17.18.85: resolve a tab stop's alignment into the zone anchor it implies.
 ///
 /// Total over `TabAlignment` by construction — a new variant must state its
@@ -887,14 +1000,17 @@ fn resolve_zone_anchor(
 ) -> ZoneAnchor {
     use crate::model::TabAlignment;
     match alignment {
-        // `bar` (§17.18.85) draws a vertical rule at the stop and `clear`
-        // removes the stop; neither shifts the following content, so both
-        // position it exactly as `left` does. The bar rule itself is not
-        // drawn — recorded in `plans/open-work.md` as Unit 1.
-        TabAlignment::Left | TabAlignment::Bar | TabAlignment::Clear => ZoneAnchor::Start,
+        // `clear` removes the stop (§17.3.1.38) and so never shifts what
+        // follows — exactly `left`'s placement.
+        TabAlignment::Left | TabAlignment::Clear => ZoneAnchor::Start,
         TabAlignment::Right => ZoneAnchor::End,
         TabAlignment::Center => ZoneAnchor::Middle,
         TabAlignment::Decimal => decimal_anchor(zone, measure_text),
+        // Unreachable in practice: `find_next_tab_stop` never hands back a
+        // rule stop, so no zone is ever anchored against one. Kept so the
+        // match stays total, and answering `Start` is the harmless reading if
+        // a future caller does reach it.
+        TabAlignment::Bar => ZoneAnchor::Start,
     }
 }
 

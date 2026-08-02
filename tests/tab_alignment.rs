@@ -1,10 +1,10 @@
-//! §17.18.85 `ST_TabJc` — decimal tab alignment, end to end.
+//! §17.18.85 `ST_TabJc` — `decimal` and `bar` tab stops, end to end.
 //!
-//! No document in `test-files/` uses `<w:tab w:val="decimal"/>`, so the whole
-//! corpus renders byte-identically whether this works or not. The fixture is
-//! built here rather than committed as a binary for the same reason the
-//! `wholeTable` fixture is: the XML *is* the point of the test, and a `.docx`
-//! would hide it.
+//! No document in `test-files/` uses `<w:tab w:val="decimal"/>` or
+//! `w:val="bar"`, so the whole corpus renders byte-identically whether either
+//! works or not. The fixtures are built here rather than committed as binaries
+//! for the same reason the `wholeTable` fixture is: the XML *is* the point of
+//! the test, and a `.docx` would hide it.
 
 use std::io::Write;
 
@@ -201,4 +201,317 @@ fn a_ptab_anchor_behind_the_pen_advances_to_the_next_line() {
         "the trailing run starts inside the text area, at {}",
         trail.1
     );
+}
+
+// ── §17.18.85 `bar` ──────────────────────────────────────────────────────────
+//
+// A `bar` entry in `w:tabs` is **not a tab stop**. It names a place where a
+// vertical rule is drawn on every line of the paragraph, and a tab character
+// passes straight over it to the next real stop. That is two behaviours, and
+// this renderer had neither: `bar` shared an arm with `left`, so a tab landed
+// on it and no rule was ever drawn.
+//
+// Both halves are pinned below, because fixing only the drawing half leaves a
+// paragraph whose text is positioned by a stop Word does not have.
+
+/// A paragraph with `tabs` (raw `<w:tab .../>` XML) holding `body`.
+fn tabbed_paragraph(tabs: &str, body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:tabs>{tabs}</w:tabs></w:pPr>
+      {body}
+    </w:p>
+  </w:body>
+</w:document>"#
+    )
+}
+
+fn layout(document_xml: &str) -> Vec<LayoutedPage> {
+    let doc = dxpdf::docx::parse(&make_docx(document_xml)).expect("fixture parses");
+    dxpdf::render::resolve_and_layout(doc).1
+}
+
+/// Every vertical line drawn, as `(x, top, bottom, colour)` in draw order.
+///
+/// Filtered to *vertical* segments so an underline or a run border edge can
+/// never be mistaken for a bar rule.
+fn vertical_rules(
+    pages: &[LayoutedPage],
+) -> Vec<(f32, f32, f32, dxpdf::render::resolve::color::RgbColor)> {
+    pages
+        .iter()
+        .flat_map(|p| p.commands.iter())
+        .filter_map(|c| match c {
+            DrawCommand::Line { line, color, .. }
+                if (line.start.x.raw() - line.end.x.raw()).abs() < 0.001 =>
+            {
+                Some((
+                    line.start.x.raw(),
+                    line.start.y.raw().min(line.end.y.raw()),
+                    line.start.y.raw().max(line.end.y.raw()),
+                    *color,
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// 4320 twips = 216pt = 3in, the position both fixtures below use.
+const THREE_INCHES: &str = "4320";
+
+#[test]
+fn a_bar_stop_draws_a_vertical_rule_at_its_position() {
+    let pages = layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        r#"<w:r><w:t>text</w:t></w:r>"#,
+    ));
+
+    let rules = vertical_rules(&pages);
+    assert_eq!(rules.len(), 1, "one line, one rule: {rules:?}");
+    assert!(rules[0].2 > rules[0].1, "the rule has height: {rules:?}");
+}
+
+/// Coordinate-free position check: the rule lands exactly where a `left` stop
+/// at the same `w:pos` puts the text that follows a tab. Nothing here depends
+/// on the page margin or on twips-to-points arithmetic done twice.
+#[test]
+fn the_rule_sits_where_a_stop_at_the_same_position_would_put_content() {
+    let rule_x = vertical_rules(&layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        r#"<w:r><w:t>text</w:t></w:r>"#,
+    )))[0]
+        .0;
+
+    let left_stop_x = xs_of_texts(&layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="left" w:pos="{THREE_INCHES}"/>"#),
+        r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+    )))[0]
+        .1;
+
+    assert!(
+        (rule_x - left_stop_x).abs() < 0.01,
+        "rule at {rule_x}, a left stop at the same w:pos puts text at {left_stop_x}",
+    );
+}
+
+/// The defining property, and the one that separates a bar from every other
+/// alignment: the rule is a paragraph decoration, not something a tab draws.
+/// This paragraph has no `<w:tab/>` at all.
+#[test]
+fn a_bar_stop_draws_its_rule_with_no_tab_character_in_the_paragraph() {
+    let pages = layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        r#"<w:r><w:t>no tab here</w:t></w:r>"#,
+    ));
+
+    assert_eq!(vertical_rules(&pages).len(), 1);
+}
+
+/// …and it draws on an empty paragraph, which still has a line.
+#[test]
+fn an_empty_paragraph_with_a_bar_stop_still_draws_its_rule() {
+    let pages = layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        "",
+    ));
+
+    assert_eq!(vertical_rules(&pages).len(), 1);
+}
+
+/// One rule per line, all at the same x, each spanning its own line's band and
+/// abutting the next — which is what makes a multi-line paragraph read as one
+/// continuous vertical rule rather than a dashed one.
+#[test]
+fn a_bar_stop_draws_on_every_line_and_the_rules_abut() {
+    let pages = layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        &format!(r#"<w:r><w:t>{}</w:t></w:r>"#, "wrapping ".repeat(60)),
+    ));
+
+    let rules = vertical_rules(&pages);
+    assert!(
+        rules.len() >= 3,
+        "the fixture must wrap to several lines: {rules:?}",
+    );
+    for w in rules.windows(2) {
+        assert!(
+            (w[0].0 - w[1].0).abs() < 0.001,
+            "every line's rule is at the same x: {rules:?}",
+        );
+        assert!(
+            (w[0].2 - w[1].1).abs() < 0.01,
+            "each rule ends where the next begins: {rules:?}",
+        );
+    }
+}
+
+/// §17.18.85: a bar is not a stop, so a tab character passes over it. With a
+/// bar at 3in and a left stop at 5in, the text lands at 5in — under the old
+/// shared `left` arm it stopped at 3in.
+#[test]
+fn a_tab_character_passes_over_a_bar_stop_to_the_next_real_one() {
+    let with_bar = xs_of_texts(&layout(&tabbed_paragraph(
+        r#"<w:tab w:val="bar" w:pos="4320"/><w:tab w:val="left" w:pos="7200"/>"#,
+        r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+    )))[0]
+        .1;
+
+    let without_bar = xs_of_texts(&layout(&tabbed_paragraph(
+        r#"<w:tab w:val="left" w:pos="7200"/>"#,
+        r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+    )))[0]
+        .1;
+
+    assert!(
+        (with_bar - without_bar).abs() < 0.01,
+        "the bar must be invisible to the tab: with it {with_bar}, without it {without_bar}",
+    );
+}
+
+/// …and with no other stop defined, the tab falls through to the document's
+/// default interval (§17.15.1.25) rather than landing on the bar. 3in is an
+/// exact multiple of the 0.5in default, so a bar-as-stop and a default stop
+/// would coincide — hence a bar at 2.6in, which no interval can produce.
+#[test]
+fn a_lone_bar_stop_leaves_a_tab_to_the_default_interval() {
+    let bar_only = xs_of_texts(&layout(&tabbed_paragraph(
+        r#"<w:tab w:val="bar" w:pos="3744"/>"#,
+        r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+    )))[0]
+        .1;
+
+    let no_tabs_at_all = xs_of_texts(&layout(&tabbed_paragraph(
+        "",
+        r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+    )))[0]
+        .1;
+
+    assert!(
+        (bar_only - no_tabs_at_all).abs() < 0.01,
+        "a lone bar leaves tabbing exactly as it was: {bar_only} vs {no_tabs_at_all}",
+    );
+}
+
+/// Adding a bar stop must not move a single glyph — it consumes no zone and
+/// takes no part in line fitting.
+///
+/// The short prefix matters: it leaves the pen well left of 3in, so the bar is
+/// the first entry past it and the one a naive `find_next_tab_stop` would
+/// return. A fixture whose pen is already past the bar would pass this whether
+/// or not the bar is skipped. The trailing run then wraps, so the pin covers
+/// fitting as well as placement.
+#[test]
+fn adding_a_bar_stop_moves_no_content() {
+    let body = format!(
+        r#"<w:r><w:t>ab</w:t></w:r><w:r><w:tab/><w:t>{}</w:t></w:r>"#,
+        "wrapping ".repeat(40)
+    );
+
+    let without = xs_of_texts(&layout(&tabbed_paragraph(
+        r#"<w:tab w:val="left" w:pos="7200"/>"#,
+        &body,
+    )));
+    let with = xs_of_texts(&layout(&tabbed_paragraph(
+        r#"<w:tab w:val="bar" w:pos="4320"/><w:tab w:val="left" w:pos="7200"/>"#,
+        &body,
+    )));
+
+    assert!(without.len() > 2, "the fixture must wrap: {without:?}");
+    assert_eq!(without, with, "the bar rule must not disturb line fitting");
+}
+
+#[test]
+fn two_bar_stops_draw_two_rules_per_line() {
+    let pages = layout(&tabbed_paragraph(
+        r#"<w:tab w:val="bar" w:pos="2880"/><w:tab w:val="bar" w:pos="4320"/>"#,
+        r#"<w:r><w:t>text</w:t></w:r>"#,
+    ));
+
+    let rules = vertical_rules(&pages);
+    assert_eq!(rules.len(), 2, "{rules:?}");
+    assert!(rules[0].0 < rules[1].0, "distinct positions: {rules:?}");
+}
+
+/// A stop past everything on the line still draws — the rule's x owes nothing
+/// to where the content happens to end.
+#[test]
+fn a_bar_stop_beyond_the_lines_content_still_draws() {
+    let pages = layout(&tabbed_paragraph(
+        r#"<w:tab w:val="bar" w:pos="6480"/>"#,
+        r#"<w:r><w:t>hi</w:t></w:r>"#,
+    ));
+
+    let rules = vertical_rules(&pages);
+    assert_eq!(rules.len(), 1, "{rules:?}");
+
+    let text_end = xs_of_texts(&pages)[0].1;
+    assert!(
+        rules[0].0 > text_end + 100.0,
+        "the rule is far right of the content: rule {:?}, text at {text_end}",
+        rules[0],
+    );
+}
+
+/// §17.3.1.38's rule for tab leaders — a decoration has no formatting of its
+/// own, it takes the formatting in effect — applied here. A red paragraph gets
+/// a red rule, not a black one.
+#[test]
+fn the_rule_takes_the_paragraphs_text_colour() {
+    let pages = layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        r#"<w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t>red</w:t></w:r>"#,
+    ));
+
+    let rules = vertical_rules(&pages);
+    assert_eq!(rules.len(), 1, "{rules:?}");
+    assert_eq!(
+        (rules[0].3.r, rules[0].3.g, rules[0].3.b),
+        (0xFF, 0x00, 0x00),
+        "the rule follows the run's colour: {rules:?}",
+    );
+}
+
+/// A paragraph mixing both kinds draws a rule for the bar and nothing for the
+/// rest — at the bar's own position, not at whichever entry came first.
+///
+/// "Does this paragraph have a bar?" and "which of its entries are bars?" are
+/// two different questions, and a fixture holding only bars cannot tell them
+/// apart: the first answer alone would draw a rule at every stop.
+#[test]
+fn only_the_bar_entry_draws_when_a_paragraph_mixes_stop_kinds() {
+    let mixed = vertical_rules(&layout(&tabbed_paragraph(
+        r#"<w:tab w:val="left" w:pos="2880"/><w:tab w:val="bar" w:pos="4320"/><w:tab w:val="right" w:pos="7200"/>"#,
+        r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+    )));
+    assert_eq!(mixed.len(), 1, "one bar entry, one rule: {mixed:?}");
+
+    let bar_only = vertical_rules(&layout(&tabbed_paragraph(
+        &format!(r#"<w:tab w:val="bar" w:pos="{THREE_INCHES}"/>"#),
+        r#"<w:r><w:t>text</w:t></w:r>"#,
+    )));
+    assert!(
+        (mixed[0].0 - bar_only[0].0).abs() < 0.01,
+        "the rule is at the bar's position: {mixed:?} vs {bar_only:?}",
+    );
+}
+
+/// The control. No `bar` entry, no rule — so the tests above cannot be passing
+/// on some line this renderer draws anyway.
+#[test]
+fn stops_that_are_not_bars_draw_no_rule() {
+    for val in ["left", "center", "right", "decimal"] {
+        let pages = layout(&tabbed_paragraph(
+            &format!(r#"<w:tab w:val="{val}" w:pos="{THREE_INCHES}"/>"#),
+            r#"<w:r><w:tab/><w:t>text</w:t></w:r>"#,
+        ));
+        assert!(
+            vertical_rules(&pages).is_empty(),
+            "{val} draws no vertical rule: {:?}",
+            vertical_rules(&pages),
+        );
+    }
 }
