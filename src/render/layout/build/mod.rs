@@ -199,6 +199,7 @@ pub fn build_header_footer_content(
                     &props,
                     Pt::from(ctx.resolved.default_tab_stop),
                     state.shape_auto_fit,
+                    convert::paragraph_locale(p, ctx.resolved),
                 );
 
                 // Check for VML absolute positioning in Pict inlines.

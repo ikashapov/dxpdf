@@ -187,12 +187,6 @@ fn inject_text_label(
     auto_fit: crate::render::layout::ShapeAutoFit,
 ) {
     let num_id = model::NumId::new(merged_props.numbering.as_ref().unwrap().num_id);
-    let label_text =
-        match crate::render::resolve::numbering::format_list_label(levels, level, counters, num_id)
-        {
-            Some(t) => t,
-            None => return,
-        };
 
     let (default_family, default_size, default_color, _, paragraph_style_run) =
         resolve_paragraph_defaults(para, ctx.resolved, false, None, None);
@@ -206,6 +200,24 @@ fn inject_text_label(
         level: level_def.and_then(|l| l.run_properties.as_ref()),
         paragraph_mark: para.mark_run_properties.as_ref(),
         paragraph_style: Some(&paragraph_style_run),
+    };
+
+    // §17.3.2.20: the label's language, read from the label's *own* cascade
+    // rather than the paragraph's — a `<w:lvl><w:rPr><w:lang>` is as much a
+    // property of the level as its font is, and §17.9.27's three text formats
+    // are the only thing that consults it. Document defaults close the cascade,
+    // the layer `default_family`/`default_size` carry for the other fields.
+    let locale = crate::render::resolve::locale::Locale::from_cascade(
+        cascade
+            .iter()
+            .chain(std::iter::once(&ctx.resolved.doc_defaults_run)),
+    );
+
+    let label_text = match crate::render::resolve::numbering::format_list_label(
+        levels, level, counters, num_id, locale,
+    ) {
+        Some(t) => t,
+        None => return,
     };
 
     // §17.3.2.6: color follows the same cascade as the font fields,

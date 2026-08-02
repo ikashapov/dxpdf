@@ -42,6 +42,14 @@ pub struct ParagraphStyle {
     /// §17.15.1.25: the default tab-stop interval, used when no custom tab stop
     /// applies (from `w:settings/w:defaultTabStop`; spec default 720tw = 36pt).
     pub default_tab_stop: Pt,
+    /// §17.3.2.20: the language in effect for this paragraph's own decisions —
+    /// today, only which character a §17.18.85 `decimal` stop aligns on.
+    ///
+    /// Resolved from the paragraph *mark*'s `w:rPr`, not from the runs inside
+    /// the paragraph: a decimal stop is a `w:pPr` property, and a zone whose
+    /// runs each declared their own `w:lang` would otherwise have no single
+    /// answer. See `build::convert::paragraph_locale`.
+    pub locale: crate::render::resolve::locale::Locale,
     /// Drop cap to render at the start of this paragraph.
     pub drop_cap: Option<DropCapInfo>,
     /// §17.3.1.24: paragraph borders.
@@ -130,6 +138,7 @@ impl ParagraphStyle {
             auto_fit: self.auto_fit,
             tabs: self.tabs.clone(),
             default_tab_stop: self.default_tab_stop,
+            locale: self.locale,
             drop_cap: self.drop_cap.clone(),
             borders: self.borders.clone(),
             shading: self.shading,
@@ -161,6 +170,7 @@ impl Default for ParagraphStyle {
             tabs: Vec::new(),
             // §17.15.1.25: 720 twips = 36pt is the OOXML default interval.
             default_tab_stop: Pt::new(36.0),
+            locale: crate::render::resolve::locale::Locale::English,
             drop_cap: None,
             borders: None,
             shading: None,
