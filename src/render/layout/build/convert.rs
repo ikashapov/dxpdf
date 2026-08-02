@@ -123,9 +123,17 @@ pub(super) fn doc_font_size(ctx: &BuildContext) -> Pt {
 }
 
 /// Convert a model paragraph properties into a layout ParagraphStyle.
+///
+/// `auto_fit` is the §20.1.2.1.18 `a:normAutofit` shrink of the enclosing shape
+/// text body. It is carried onto the style rather than applied here: its
+/// `@lnSpcReduction` half has to reach the line height *after* §17.3.1.33
+/// resolution — see [`ShapeAutoFit::scale_line_height`](crate::render::layout::ShapeAutoFit::scale_line_height).
+/// [`ShapeAutoFit::NONE`](crate::render::layout::ShapeAutoFit::NONE) outside a
+/// shape text box.
 pub(super) fn paragraph_style_from_props(
     props: &model::ParagraphProperties,
     default_tab_stop: Pt,
+    auto_fit: crate::render::layout::ShapeAutoFit,
 ) -> ParagraphStyle {
     let indent_left = props
         .indentation
@@ -192,6 +200,7 @@ pub(super) fn paragraph_style_from_props(
         .collect();
 
     ParagraphStyle {
+        auto_fit,
         alignment: props.alignment.unwrap_or(model::Alignment::Start),
         space_before,
         space_after,

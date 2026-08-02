@@ -251,7 +251,7 @@ pub(crate) fn place_paragraph<'a>(
                 } else {
                     default_line_height
                 };
-                let lh = resolve_line_height(natural, text_h, &style.line_spacing);
+                let lh = resolve_line_height(natural, text_h, &style.line_spacing, style.auto_fit);
                 if i == n - 1 {
                     y += lp.line.ascent;
                     break;
@@ -278,7 +278,7 @@ pub(crate) fn place_paragraph<'a>(
             } else {
                 default_line_height
             };
-            resolve_line_height(natural, text_h, &style.line_spacing)
+            resolve_line_height(natural, text_h, &style.line_spacing, style.auto_fit)
         })
         .collect();
 
@@ -1644,11 +1644,23 @@ mod tests {
     fn resolve_line_height_auto_text_only() {
         // Text-only line: multiplier applies to text_height.
         assert_eq!(
-            resolve_line_height(Pt::new(14.0), Pt::new(14.0), &LineSpacingRule::Auto(1.0)).raw(),
+            resolve_line_height(
+                Pt::new(14.0),
+                Pt::new(14.0),
+                &LineSpacingRule::Auto(1.0),
+                crate::render::layout::ShapeAutoFit::NONE
+            )
+            .raw(),
             14.0
         );
         assert_eq!(
-            resolve_line_height(Pt::new(14.0), Pt::new(14.0), &LineSpacingRule::Auto(1.5)).raw(),
+            resolve_line_height(
+                Pt::new(14.0),
+                Pt::new(14.0),
+                &LineSpacingRule::Auto(1.5),
+                crate::render::layout::ShapeAutoFit::NONE
+            )
+            .raw(),
             21.0
         );
     }
@@ -1657,7 +1669,12 @@ mod tests {
     fn resolve_line_height_auto_image_line() {
         // Image-only line: natural=325 (image), text_height=0 (no text).
         // The multiplier does NOT inflate the image height.
-        let h = resolve_line_height(Pt::new(325.0), Pt::ZERO, &LineSpacingRule::Auto(1.08));
+        let h = resolve_line_height(
+            Pt::new(325.0),
+            Pt::ZERO,
+            &LineSpacingRule::Auto(1.08),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert_eq!(h.raw(), 325.0, "image height should not be multiplied");
     }
 
@@ -1665,7 +1682,12 @@ mod tests {
     fn resolve_line_height_auto_mixed_line() {
         // Line with text (14pt) and image (100pt): multiplier scales text only.
         // max(14*1.5=21, 100) = 100.
-        let h = resolve_line_height(Pt::new(100.0), Pt::new(14.0), &LineSpacingRule::Auto(1.5));
+        let h = resolve_line_height(
+            Pt::new(100.0),
+            Pt::new(14.0),
+            &LineSpacingRule::Auto(1.5),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert_eq!(h.raw(), 100.0, "image dominates");
     }
 
@@ -1675,7 +1697,8 @@ mod tests {
             resolve_line_height(
                 Pt::new(14.0),
                 Pt::new(14.0),
-                &LineSpacingRule::Exact(Pt::new(20.0))
+                &LineSpacingRule::Exact(Pt::new(20.0)),
+                crate::render::layout::ShapeAutoFit::NONE,
             )
             .raw(),
             20.0
@@ -1688,7 +1711,8 @@ mod tests {
             resolve_line_height(
                 Pt::new(14.0),
                 Pt::new(14.0),
-                &LineSpacingRule::AtLeast(Pt::new(10.0))
+                &LineSpacingRule::AtLeast(Pt::new(10.0)),
+                crate::render::layout::ShapeAutoFit::NONE,
             )
             .raw(),
             14.0,
@@ -1698,7 +1722,8 @@ mod tests {
             resolve_line_height(
                 Pt::new(8.0),
                 Pt::new(8.0),
-                &LineSpacingRule::AtLeast(Pt::new(10.0))
+                &LineSpacingRule::AtLeast(Pt::new(10.0)),
+                crate::render::layout::ShapeAutoFit::NONE,
             )
             .raw(),
             10.0,

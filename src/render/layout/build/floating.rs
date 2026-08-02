@@ -1300,10 +1300,19 @@ pub(super) fn build_shape_text_commands(
         None => (None, None),
     };
 
+    // §20.1.2.1.18: the shrink Word already computed for this body. Read once
+    // here and carried on the sub-state, so every size the cascade resolves
+    // inside the body — runs, list labels, field substitutions, blank lines —
+    // goes through it.
+    let auto_fit = crate::render::layout::ShapeAutoFit::from_body(
+        wsp.body_pr.as_ref().and_then(|bp| bp.auto_fit),
+    );
+
     // Sub-state with the host's page dimensions and field context. Counters
     // are reset so a footnote/list inside a shape body doesn't bump the
     // outer counters.
     let mut sub_state = BuildState {
+        shape_auto_fit: auto_fit,
         page_config: state.page_config.clone(),
         footnotes: Default::default(),
         endnote_counter: 0,
@@ -1321,7 +1330,10 @@ pub(super) fn build_shape_text_commands(
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
-    let line_height = super::default_line_height(ctx);
+    // §20.1.2.1.18: the body's own shrink also applies to the fallback line
+    // height, which is what an empty paragraph and an image-only line fall back
+    // to — otherwise a shrunk body would keep full-size blank lines.
+    let line_height = auto_fit.scale_font(super::default_line_height(ctx));
     // Shape text is laid out at *build* time, before the shape is placed on a
     // page, so a §20.4.3.1 `inside`/`outside` float nested inside a shape's
     // text box has no parity to resolve against and takes the odd-page
@@ -1479,6 +1491,7 @@ mod tests {
     fn default_state() -> BuildState {
         BuildState {
             page_config: Default::default(),
+            shape_auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             footnotes: Default::default(),
             endnote_counter: 0,
             list_counters: Default::default(),

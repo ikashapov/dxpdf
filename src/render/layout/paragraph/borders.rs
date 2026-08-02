@@ -193,6 +193,7 @@ pub(super) fn emit_segment_borders_and_shading(
             default_line_height,
             default_line_height,
             &style.line_spacing,
+            style.auto_fit,
         );
         cursor_y = style.space_before + line_h + style.space_after;
     }

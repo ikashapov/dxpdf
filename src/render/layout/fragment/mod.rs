@@ -313,14 +313,23 @@ impl Fragment {
 pub const MIN_TAB_WIDTH: Pt = Pt::new(1.0);
 
 /// Extract font properties from RunProperties with a default font family fallback.
+///
+/// `auto_fit` is the §20.1.2.1.18 `a:normAutofit` shrink of the enclosing shape
+/// text body, applied to whichever size wins — the run's own or the inherited
+/// default — because the scale is a property of the *body*, not of any run in
+/// it. Every caller outside a shape text box passes
+/// [`ShapeAutoFit::NONE`](crate::render::layout::ShapeAutoFit::NONE); it is a
+/// parameter rather than a default so that a new call site has to say which it
+/// is.
 pub fn font_props_from_run(
     rp: &RunProperties,
     default_family: &str,
     default_size: Pt,
+    auto_fit: crate::render::layout::ShapeAutoFit,
 ) -> FontProps {
     let family = effective_font(&rp.fonts).unwrap_or(default_family);
 
-    let size = rp.font_size.map(Pt::from).unwrap_or(default_size);
+    let size = auto_fit.scale_font(rp.font_size.map(Pt::from).unwrap_or(default_size));
 
     let char_spacing = rp.spacing.map(Pt::from).unwrap_or(Pt::ZERO);
 
@@ -380,7 +389,12 @@ mod tests {
     #[test]
     fn font_props_default_fallback() {
         let rp = RunProperties::default();
-        let fp = font_props_from_run(&rp, "Helvetica", Pt::new(12.0));
+        let fp = font_props_from_run(
+            &rp,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert_eq!(&*fp.family, "Helvetica");
         assert_eq!(fp.size.raw(), 12.0);
         assert!(!fp.bold);
@@ -405,7 +419,12 @@ mod tests {
 
     #[test]
     fn font_props_underline_absent_is_false() {
-        let fp = font_props_from_run(&rp_with_underline(None), "Helvetica", Pt::new(12.0));
+        let fp = font_props_from_run(
+            &rp_with_underline(None),
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!(!fp.underline, "no <w:u> element → no underline");
     }
 
@@ -415,6 +434,7 @@ mod tests {
             &rp_with_underline(Some(UnderlineStyle::None)),
             "Helvetica",
             Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
         );
         assert!(
             !fp.underline,
@@ -429,6 +449,7 @@ mod tests {
             &rp_with_underline(Some(UnderlineStyle::Single)),
             "Helvetica",
             Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
         );
         assert!(fp.underline, "<w:u w:val=\"single\"/> → underline drawn");
     }
@@ -436,7 +457,12 @@ mod tests {
     #[test]
     fn font_props_text_scale_default_is_one() {
         // §17.3.2.45: when <w:w> is absent the run renders at 100% width.
-        let fp = font_props_from_run(&RunProperties::default(), "Helvetica", Pt::new(12.0));
+        let fp = font_props_from_run(
+            &RunProperties::default(),
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert_eq!(fp.text_scale, 1.0);
     }
 
@@ -447,7 +473,12 @@ mod tests {
             text_scale: Some(crate::model::TextScale::new(80)),
             ..RunProperties::default()
         };
-        let fp = font_props_from_run(&rp, "Helvetica", Pt::new(12.0));
+        let fp = font_props_from_run(
+            &rp,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!((fp.text_scale - 0.8).abs() < f32::EPSILON);
     }
 
@@ -458,7 +489,12 @@ mod tests {
             text_scale: Some(crate::model::TextScale::new(150)),
             ..RunProperties::default()
         };
-        let fp = font_props_from_run(&rp, "Helvetica", Pt::new(12.0));
+        let fp = font_props_from_run(
+            &rp,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!((fp.text_scale - 1.5).abs() < f32::EPSILON);
     }
 
@@ -471,6 +507,7 @@ mod tests {
             &rp_with_underline(Some(UnderlineStyle::Double)),
             "Helvetica",
             Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
         );
         assert!(fp.underline);
     }

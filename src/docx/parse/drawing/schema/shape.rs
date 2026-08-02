@@ -13,13 +13,13 @@
 
 use serde::{Deserialize, Deserializer};
 
-use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg};
+use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg, ThousandthPercent};
 use crate::docx::geometry::Offset;
 use crate::docx::model::{
     BlackWhiteMode, Block, BodyProperties, DrawingFill, FontCollectionIndex, FontReference,
-    GeomGuide, PresetGeometryDef, PresetShapeType, ShapeGeometry, ShapeProperties, StyleMatrixRef,
-    TextAnchoringType, TextAutoFit, TextVerticalType, TextWrappingType, Transform2D,
-    WordProcessingShape,
+    GeomGuide, NormalAutoFit, PresetGeometryDef, PresetShapeType, ShapeGeometry, ShapeProperties,
+    StyleMatrixRef, TextAnchoringType, TextAutoFit, TextVerticalType, TextWrappingType,
+    Transform2D, WordProcessingShape,
 };
 use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
 
@@ -418,17 +418,31 @@ pub struct BodyPrXml {
     #[serde(rename = "noAutofit", default)]
     pub no_autofit: Option<super::fill::Empty>,
     #[serde(rename = "normAutofit", default)]
-    pub norm_autofit: Option<super::fill::Empty>,
+    pub norm_autofit: Option<NormAutofitXml>,
     #[serde(rename = "spAutoFit", default)]
     pub sp_autofit: Option<super::fill::Empty>,
+}
+
+/// §20.1.2.1.18 CT_TextNormalAutofit. Both attributes are `ST_TextFontScalePercentOrPercentString`
+/// / `ST_TextSpacingPercentOrPercentString` — thousandths of a percent, so
+/// `62500` is 62.5%.
+#[derive(Debug, Deserialize, Default)]
+pub struct NormAutofitXml {
+    #[serde(rename = "@fontScale", default)]
+    pub font_scale: Option<Dimension<ThousandthPercent>>,
+    #[serde(rename = "@lnSpcReduction", default)]
+    pub ln_spc_reduction: Option<Dimension<ThousandthPercent>>,
 }
 
 impl From<BodyPrXml> for BodyProperties {
     fn from(x: BodyPrXml) -> Self {
         let auto_fit = if x.no_autofit.is_some() {
             Some(TextAutoFit::NoAutoFit)
-        } else if x.norm_autofit.is_some() {
-            Some(TextAutoFit::NormalAutoFit)
+        } else if let Some(na) = x.norm_autofit {
+            Some(TextAutoFit::NormalAutoFit(NormalAutoFit {
+                font_scale: na.font_scale,
+                line_spacing_reduction: na.ln_spc_reduction,
+            }))
         } else {
             x.sp_autofit.map(|_| TextAutoFit::SpAutoFit)
         };
@@ -856,7 +870,10 @@ mod tests {
         );
         assert_eq!(bp.wrap, Some(TextWrappingType::Square));
         assert_eq!(bp.anchor, Some(TextAnchoringType::Center));
-        assert_eq!(bp.auto_fit, Some(TextAutoFit::NormalAutoFit));
+        assert_eq!(
+            bp.auto_fit,
+            Some(TextAutoFit::NormalAutoFit(NormalAutoFit::default()))
+        );
         assert_eq!(bp.left_inset.unwrap().raw(), 91440);
     }
 
@@ -864,6 +881,45 @@ mod tests {
     fn body_pr_no_autofit() {
         let bp = parse_body_pr(r#"<bodyPr><noAutofit/></bodyPr>"#);
         assert_eq!(bp.auto_fit, Some(TextAutoFit::NoAutoFit));
+    }
+
+    /// §20.1.2.1.18: `normAutofit` carries the shrink Word already computed.
+    /// Both attributes are thousandths of a percent — `62500` is 62.5%, not
+    /// 62500%.
+    #[test]
+    fn norm_autofit_keeps_the_scale_word_computed() {
+        let bp = parse_body_pr(
+            r#"<bodyPr><normAutofit fontScale="62500" lnSpcReduction="20000"/></bodyPr>"#,
+        );
+        let Some(TextAutoFit::NormalAutoFit(na)) = bp.auto_fit else {
+            panic!("expected normAutofit, got {:?}", bp.auto_fit);
+        };
+        assert_eq!(na.font_scale.unwrap().raw(), 62500);
+        assert_eq!(na.line_spacing_reduction.unwrap().raw(), 20000);
+    }
+
+    /// Each attribute is independent — Word writes `fontScale` alone whenever
+    /// shrinking the glyphs was enough on its own.
+    #[test]
+    fn norm_autofit_attributes_are_independent() {
+        let scale_only = parse_body_pr(r#"<bodyPr><normAutofit fontScale="90000"/></bodyPr>"#);
+        assert_eq!(
+            scale_only.auto_fit,
+            Some(TextAutoFit::NormalAutoFit(NormalAutoFit {
+                font_scale: Some(Dimension::new(90000)),
+                line_spacing_reduction: None,
+            }))
+        );
+
+        let reduction_only =
+            parse_body_pr(r#"<bodyPr><normAutofit lnSpcReduction="10000"/></bodyPr>"#);
+        assert_eq!(
+            reduction_only.auto_fit,
+            Some(TextAutoFit::NormalAutoFit(NormalAutoFit {
+                font_scale: None,
+                line_spacing_reduction: Some(Dimension::new(10000)),
+            }))
+        );
     }
 
     #[test]

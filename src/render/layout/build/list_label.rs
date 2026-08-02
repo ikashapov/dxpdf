@@ -110,6 +110,7 @@ pub(super) fn inject_list_label(
                 &model::RunProperties::default(),
                 &fam,
                 size,
+                state.shape_auto_fit,
             );
             let tab_frag = Fragment::Tab {
                 line_height: label_height,
@@ -146,6 +147,7 @@ pub(super) fn inject_list_label(
             levels,
             level,
             level_def,
+            state.shape_auto_fit,
         );
     }
 
@@ -182,6 +184,7 @@ fn inject_text_label(
     levels: &[crate::render::resolve::numbering::ResolvedNumberingLevel],
     level: u8,
     level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
+    auto_fit: crate::render::layout::ShapeAutoFit,
 ) {
     let num_id = model::NumId::new(merged_props.numbering.as_ref().unwrap().num_id);
     let label_text =
@@ -232,7 +235,7 @@ fn inject_text_label(
     // label-relevant field (underline, char_spacing, text_scale, etc.)
     // flows from cascade.resolve() into `font_props_from_run`. After
     // remapping, override the family if it changed.
-    let mut label_font = build_label_font_props(&cascade, &default_family, default_size);
+    let mut label_font = build_label_font_props(&cascade, &default_family, default_size, auto_fit);
     if label_family != *label_font.family {
         label_font.family = Rc::from(label_family.as_str());
     }
@@ -357,9 +360,15 @@ pub(super) fn build_label_font_props(
     cascade: &ListLabelRunPropertyCascade<'_>,
     default_family: &str,
     default_size: Pt,
+    auto_fit: crate::render::layout::ShapeAutoFit,
 ) -> crate::render::layout::fragment::FontProps {
     let effective = cascade.resolve();
-    crate::render::layout::fragment::font_props_from_run(&effective, default_family, default_size)
+    crate::render::layout::fragment::font_props_from_run(
+        &effective,
+        default_family,
+        default_size,
+        auto_fit,
+    )
 }
 
 /// Populate `underline_position` and `underline_thickness` on a
@@ -1000,7 +1009,12 @@ mod tests {
             paragraph_mark: None,
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(12.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!(
             font.underline,
             "level rPr <w:u/> must become font.underline"
@@ -1019,7 +1033,12 @@ mod tests {
             paragraph_mark: Some(&mark),
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(12.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!(font.underline);
     }
 
@@ -1037,7 +1056,12 @@ mod tests {
             paragraph_mark: Some(&mark),
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(12.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!(
             !font.underline,
             "explicit UnderlineStyle::None must override lower layers"
@@ -1058,7 +1082,12 @@ mod tests {
             paragraph_mark: None,
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(12.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         // 40 twips = 2 pt.
         assert!((font.char_spacing.raw() - 2.0).abs() < 1e-4);
     }
@@ -1076,7 +1105,12 @@ mod tests {
             paragraph_mark: None,
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(12.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!((font.text_scale - 1.5).abs() < 1e-4);
     }
 
@@ -1099,7 +1133,12 @@ mod tests {
             paragraph_mark: None,
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(10.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(10.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert!(font.bold);
         assert!(font.italic);
         assert_eq!(font.size.raw(), 12.0);
@@ -1114,7 +1153,12 @@ mod tests {
             paragraph_mark: None,
             paragraph_style: None,
         };
-        let font = build_label_font_props(&cascade, "Helvetica", Pt::new(12.0));
+        let font = build_label_font_props(
+            &cascade,
+            "Helvetica",
+            Pt::new(12.0),
+            crate::render::layout::ShapeAutoFit::NONE,
+        );
         assert_eq!(&*font.family, "Helvetica");
     }
 

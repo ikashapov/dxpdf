@@ -121,6 +121,7 @@ fn resolve_run_styling<F>(
     >,
     paragraph_run_defaults: Option<&RunProperties>,
     theme: Option<&crate::model::Theme>,
+    auto_fit: crate::render::layout::ShapeAutoFit,
     measure_text: &F,
 ) -> (FontProps, TextRunStyle)
 where
@@ -143,7 +144,7 @@ where
         crate::render::resolve::properties::merge_run_properties(&mut effective_props, para_run);
     }
 
-    let mut font = font_props_from_run(&effective_props, default_family, default_size);
+    let mut font = font_props_from_run(&effective_props, default_family, default_size, auto_fit);
     let color = effective_props
         .color
         .map(|c| {
@@ -304,6 +305,7 @@ fn emit_field_substitution<F>(
     >,
     paragraph_run_defaults: Option<&RunProperties>,
     theme: Option<&crate::model::Theme>,
+    auto_fit: crate::render::layout::ShapeAutoFit,
     hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     measurer: Option<&crate::render::layout::measurer::TextMeasurer<'_>>,
@@ -320,12 +322,13 @@ fn emit_field_substitution<F>(
             resolved_styles,
             paragraph_run_defaults,
             theme,
+            auto_fit,
             measure_text,
         ),
         _ => (
             FontProps {
                 family: Rc::from(default_family),
-                size: default_size,
+                size: auto_fit.scale_font(default_size),
                 bold: false,
                 italic: false,
                 underline: false,
@@ -411,6 +414,11 @@ pub struct FragmentCtx<'a> {
     /// callers without a font registry (most unit tests) pass `None` and
     /// emoji codepoints flow through the existing text path unchanged.
     pub measurer: Option<&'a crate::render::layout::measurer::TextMeasurer<'a>>,
+    /// §20.1.2.1.18: the `a:normAutofit` shrink of the enclosing shape text
+    /// body. [`ShapeAutoFit::NONE`] everywhere else.
+    ///
+    /// [`ShapeAutoFit::NONE`]: crate::render::layout::ShapeAutoFit::NONE
+    pub auto_fit: crate::render::layout::ShapeAutoFit,
 }
 
 /// Walk inline content and collect fragments.
@@ -436,6 +444,7 @@ where
     let resolved_styles = ctx.resolved_styles;
     let paragraph_run_defaults = ctx.paragraph_run_defaults;
     let theme = ctx.theme;
+    let auto_fit = ctx.auto_fit;
     let mut fragments = Vec::new();
     let mut field_depth: i32 = 0; // tracks nested complex field state
     let mut field_instr = String::new(); // accumulated instruction text for current complex field
@@ -488,6 +497,7 @@ where
                         resolved_styles,
                         paragraph_run_defaults,
                         theme,
+                        auto_fit,
                         measure_text,
                     );
                     field_sub_emitted = true;
@@ -516,6 +526,7 @@ where
                                 resolved_styles,
                                 paragraph_run_defaults,
                                 theme,
+                                auto_fit,
                                 measure_text,
                             );
                             // Pre-classified text: bypass cluster::classify
@@ -543,6 +554,7 @@ where
                                 resolved_styles,
                                 paragraph_run_defaults,
                                 theme,
+                                auto_fit,
                                 measure_text,
                             );
                             if let Some(measurer) = ctx.measurer {
@@ -595,6 +607,7 @@ where
                         resolved_styles,
                         paragraph_run_defaults,
                         theme,
+                        auto_fit,
                         measure_text,
                     );
 
@@ -774,6 +787,7 @@ where
                                     resolved_styles,
                                     paragraph_run_defaults,
                                     theme,
+                                    auto_fit,
                                     hyperlink_url,
                                     measure_text,
                                     ctx.measurer,
@@ -953,6 +967,7 @@ where
                                         paragraph_run_defaults: p.mark_run_properties.as_ref(),
                                         theme,
                                         measurer: ctx.measurer,
+                                        auto_fit: ctx.auto_fit,
                                     };
                                     let mut sub = collect_fragments(
                                         &p.content,
@@ -1003,6 +1018,7 @@ mod tests {
             paragraph_run_defaults: None,
             theme: None,
             measurer: None,
+            auto_fit: crate::render::layout::ShapeAutoFit::NONE,
         }
     }
 

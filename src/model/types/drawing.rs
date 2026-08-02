@@ -250,12 +250,30 @@ pub enum TextAnchoringType {
 /// Text auto-fit mode for shape text bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAutoFit {
-    /// §20.1.2.1.16: no auto-fit.
+    /// §20.1.2.1.16 `a:noAutofit`: no auto-fit.
     NoAutoFit,
-    /// §20.1.2.1.18: shrink text to fit.
-    NormalAutoFit,
-    /// §20.1.2.1.20: resize shape to fit text.
+    /// §20.1.2.1.18 `a:normAutofit`: shrink text to fit.
+    NormalAutoFit(NormalAutoFit),
+    /// §20.1.2.1.20 `a:spAutoFit`: resize the shape to fit its text.
     SpAutoFit,
+}
+
+/// §20.1.2.1.18 `a:normAutofit` — the shrink Word computed when it laid the
+/// shape out, and wrote back into the file.
+///
+/// These attributes are the fit *itself*, not a hint. Word does not re-derive
+/// them on open, so a consumer that keeps the element and drops its attributes
+/// renders every shrunk body at full size — and then spills out of the box,
+/// because `vertOverflow` defaults to `overflow`. That is why this is a struct
+/// rather than a bare variant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NormalAutoFit {
+    /// `@fontScale` — the percentage every font size in the body is multiplied
+    /// by. Absent means 100%.
+    pub font_scale: Option<Dimension<ThousandthPercent>>,
+    /// `@lnSpcReduction` — the percentage subtracted from each paragraph's line
+    /// spacing. Absent means 0%.
+    pub line_spacing_reduction: Option<Dimension<ThousandthPercent>>,
 }
 
 /// §19.3.1.37 pic:pic — a picture element.

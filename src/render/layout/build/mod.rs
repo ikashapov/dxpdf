@@ -73,6 +73,12 @@ pub struct BuildState {
     /// theme major/minor collection selected by `fontRef@idx`). `None` outside
     /// a shape text box.
     pub shape_default_font_family: Option<String>,
+    /// §20.1.2.1.18: the `a:normAutofit` shrink in force for the current shape
+    /// text body — the scale Word computed and wrote into the file.
+    /// [`ShapeAutoFit::NONE`](crate::render::layout::ShapeAutoFit::NONE)
+    /// outside a shape text box, and for a body that declares
+    /// `noAutofit`/`spAutoFit`.
+    pub shape_auto_fit: crate::render::layout::ShapeAutoFit,
     /// §17.4.38: border styles already reported as unsupported this render.
     ///
     /// The layout layer draws only `Single` and `Double`, so the other 24
@@ -189,8 +195,11 @@ pub fn build_header_footer_content(
                 // they must still drain — otherwise a reference inside one
                 // would be attributed to the next body paragraph.
                 let _ = state.footnotes.take_pending();
-                let style =
-                    paragraph_style_from_props(&props, Pt::from(ctx.resolved.default_tab_stop));
+                let style = paragraph_style_from_props(
+                    &props,
+                    Pt::from(ctx.resolved.default_tab_stop),
+                    state.shape_auto_fit,
+                );
 
                 // Check for VML absolute positioning in Pict inlines.
                 if absolute_position.is_none() {
