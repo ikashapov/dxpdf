@@ -1180,16 +1180,70 @@ fn anchors_to_paragraph(anchor: &crate::model::AnchorProperties) -> bool {
     )
 }
 
+/// §20.1.10.60 `ST_TextAnchoringType`: where a shape's text body sits inside
+/// the box its insets leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyAnchor {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl BodyAnchor {
+    /// Total over `TextAnchoringType`, with the §20.1.2.1.1 default for an
+    /// absent attribute.
+    fn resolve(anchor: Option<crate::model::TextAnchoringType>) -> Self {
+        use crate::model::TextAnchoringType as T;
+        match anchor {
+            None | Some(T::Top) => Self::Top,
+            Some(T::Center) => Self::Center,
+            Some(T::Bottom) => Self::Bottom,
+            // §20.1.10.60 `just`/`dist` stretch the *inter-line* spacing to
+            // fill the box, which this sub-layout has no line-level control
+            // over. Degrading to `Top` is the closest honest reading: a
+            // justified body also begins at the top, it simply is not
+            // stretched to reach the bottom.
+            Some(anchor @ (T::Justified | T::Distributed)) => {
+                log::warn!(
+                    "shape text: anchor={anchor:?} distributes lines to fill the body \
+                     (§20.1.10.60), which is not modelled — anchoring to the top instead"
+                );
+                Self::Top
+            }
+        }
+    }
+
+    /// How far below the top inset a `text_height`-tall body sits in a
+    /// `box_height`-tall box.
+    ///
+    /// The slack is floored at zero, so a body taller than its box anchors to
+    /// the top and overflows *downward* whatever the attribute says.
+    /// §20.1.10.85 `vertOverflow` defaults to `overflow` — Word draws
+    /// overflowing shape text rather than clipping it — and centring a body
+    /// that does not fit would put its first lines above the shape, over
+    /// whatever sits there. So the choice here is only ever about where the
+    /// spare room goes.
+    fn offset(self, box_height: Pt, text_height: Pt) -> Pt {
+        let slack = (box_height - text_height).max(Pt::ZERO);
+        match self {
+            Self::Top => Pt::ZERO,
+            Self::Center => slack * 0.5,
+            Self::Bottom => slack,
+        }
+    }
+}
+
 /// §17.17.1 / §20.1.2.1.1: lay out a shape's `wps:txbx/w:txbxContent` into
 /// shape-local draw commands. Output is in shape-local Pt with origin at the
 /// shape's top-left; the stacker shifts by `(fs.x, shape_y)` when emitting,
 /// so the text appears inside the shape's bounding box on top of the fill.
 ///
-/// Body insets (§20.1.2.1.1 lIns/tIns/rIns/bIns) deflate the available width
-/// and shift the inner origin. The function also runs a fresh `BuildState`
-/// for list/footnote counters so the shape's interior doesn't pollute the
-/// outer document; `field_ctx` is copied so PAGE/NUMPAGES inside a shape's
-/// text body still resolve against the host page.
+/// Body insets (§20.1.2.1.1 lIns/tIns/rIns/bIns) deflate the box the body is
+/// laid out in, and §20.1.10.60 `anchor` places it within that box. The
+/// function also runs a fresh `BuildState` for list/footnote counters so the
+/// shape's interior doesn't pollute the outer document; `field_ctx` is copied
+/// so PAGE/NUMPAGES inside a shape's text body still resolve against the host
+/// page.
 pub(super) fn build_shape_text_commands(
     wsp: &crate::model::WordProcessingShape,
     extent: PtSize,
@@ -1203,7 +1257,7 @@ pub(super) fn build_shape_text_commands(
     // §20.1.2.1.1 spec defaults: 91440 EMU horizontal, 45720 EMU vertical.
     let default_lr = Pt::new(91440.0 / 12700.0); // ≈ 7.2pt
     let default_tb = Pt::new(45720.0 / 12700.0); // ≈ 3.6pt
-    let (left_inset, top_inset, right_inset, _bot_inset) =
+    let (left_inset, top_inset, right_inset, bot_inset) =
         wsp.body_pr
             .as_ref()
             .map_or((default_lr, default_tb, default_lr, default_tb), |bp| {
@@ -1280,9 +1334,16 @@ pub(super) fn build_shape_text_commands(
         PageParity::Odd,
     );
 
+    // §20.1.10.60: `bIns` closes off the bottom of the box the body sits in,
+    // and `anchor` decides where in that box it sits. Both were previously
+    // dropped, which pinned every body to the top.
+    let content_height = (extent.height - top_inset - bot_inset).max(Pt::ZERO);
+    let anchor = BodyAnchor::resolve(wsp.body_pr.as_ref().and_then(|bp| bp.anchor));
+    let body_top = top_inset + anchor.offset(content_height, result.height);
+
     let mut commands = Vec::with_capacity(result.commands.len());
     for mut cmd in result.commands {
-        cmd.shift(left_inset, top_inset);
+        cmd.shift(left_inset, body_top);
         commands.push(cmd);
     }
     commands
@@ -1504,6 +1565,214 @@ mod tests {
                 (got.raw() - expected).abs() < 1e-3,
                 "{alignment:?}: expected {expected}, got {}",
                 got.raw()
+            );
+        }
+    }
+
+    // ── §20.1.10.60 shape text-body anchoring ────────────────────────────
+
+    use super::build_shape_text_commands;
+    use crate::model::{
+        BodyProperties, Paragraph as ModelParagraph, ParagraphProperties, RunElement,
+        RunProperties, TextAnchoringType, TextRun,
+    };
+    use crate::render::fonts::FontRegistry;
+    use crate::render::geometry::PtSize;
+    use crate::render::layout::build::BuildContext;
+    use crate::render::layout::measurer::TextMeasurer;
+    use crate::render::resolve::ResolvedDocument;
+
+    fn empty_resolved() -> ResolvedDocument {
+        use std::collections::HashMap;
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: ParagraphProperties::default(),
+            doc_defaults_run: RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    /// A shape whose text body is one short line, with the given `bodyPr`.
+    fn wsp_with_text(body_pr: Option<BodyProperties>) -> WordProcessingShape {
+        WordProcessingShape {
+            cnv_pr: None,
+            shape_properties: None,
+            style_line_ref: None,
+            style_effect_ref: None,
+            style_fill_ref: None,
+            style_font_ref: None,
+            body_pr,
+            txbx_content: vec![crate::model::Block::Paragraph(Box::new(ModelParagraph {
+                style_id: None,
+                properties: ParagraphProperties::default(),
+                mark_run_properties: None,
+                content: vec![Inline::TextRun(Box::new(TextRun {
+                    style_id: None,
+                    properties: RunProperties::default(),
+                    content: vec![RunElement::Text("hi".into())],
+                    rsids: crate::model::RevisionIds::default(),
+                }))],
+                rsids: crate::model::ParagraphRevisionIds::default(),
+            }))],
+        }
+    }
+
+    fn body_pr(anchor: Option<TextAnchoringType>, inset_emu: i64) -> BodyProperties {
+        BodyProperties {
+            rotation: None,
+            vert: None,
+            wrap: None,
+            left_inset: Some(Dimension::new(inset_emu)),
+            top_inset: Some(Dimension::new(inset_emu)),
+            right_inset: Some(Dimension::new(inset_emu)),
+            bottom_inset: Some(Dimension::new(inset_emu)),
+            anchor,
+            auto_fit: None,
+        }
+    }
+
+    /// The y of the first emitted text command, in shape-local points.
+    fn shape_text_y(wsp: &WordProcessingShape, extent: PtSize) -> f32 {
+        let resolved = empty_resolved();
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let state = BuildState::default();
+        let commands = build_shape_text_commands(wsp, extent, &ctx, &state);
+        commands
+            .iter()
+            .find_map(|c| match c {
+                crate::render::layout::draw_command::DrawCommand::Text { position, .. } => {
+                    Some(position.y.raw())
+                }
+                _ => None,
+            })
+            .expect("the shape body emits text")
+    }
+
+    /// §20.1.10.60: `anchor` places the body within the box `bIns` closes off.
+    /// `t` pins it under the top inset, `ctr` centres it in the box, `b` sits
+    /// it on the bottom inset.
+    ///
+    /// Every assertion is a *difference* between two runs. The emitted y is a
+    /// baseline, so its absolute value carries Skia's real ascent for whatever
+    /// font the host resolves — differencing cancels it out and leaves only the
+    /// anchoring this test is about.
+    #[test]
+    fn body_anchor_places_text_within_the_inset_box() {
+        // 50800 EMU = 4pt on every side of a 200x120pt shape, so the text box
+        // is 112pt tall.
+        const INSET: f32 = 4.0;
+        const BOX_HEIGHT: f32 = 120.0 - 2.0 * INSET;
+        let extent = PtSize::new(Pt::new(200.0), Pt::new(120.0));
+        let y = |anchor| shape_text_y(&wsp_with_text(Some(body_pr(Some(anchor), 50800))), extent);
+        let (top, centre, bottom) = (
+            y(TextAnchoringType::Top),
+            y(TextAnchoringType::Center),
+            y(TextAnchoringType::Bottom),
+        );
+
+        assert!(
+            top < centre && centre < bottom,
+            "t < ctr < b, got {top} / {centre} / {bottom}"
+        );
+        // Bottom-anchoring pushes the body down by the whole slack, centring by
+        // half of it — exactly a 1:2 ratio, whatever the line height is.
+        let (half, full) = (centre - top, bottom - top);
+        assert!(
+            (full - 2.0 * half).abs() < 1e-3,
+            "the centre offset is half the bottom offset, got {half} / {full}"
+        );
+        // And the slack is the box height less the one line in it, so the line
+        // height falls out of `full` — a real number to check the box against.
+        let line_height = BOX_HEIGHT - full;
+        assert!(
+            line_height > 0.0 && line_height < BOX_HEIGHT,
+            "one line fits inside the 112pt box, implied height {line_height}"
+        );
+    }
+
+    /// The top inset shifts the body one-for-one — which is what says the box
+    /// is measured from it, rather than the anchoring happening to land there.
+    #[test]
+    fn the_top_inset_shifts_a_top_anchored_body_one_for_one() {
+        let extent = PtSize::new(Pt::new(200.0), Pt::new(120.0));
+        let anchor = Some(TextAnchoringType::Top);
+        // 0 EMU vs 50800 EMU (4pt).
+        let flush = shape_text_y(&wsp_with_text(Some(body_pr(anchor, 0))), extent);
+        let inset = shape_text_y(&wsp_with_text(Some(body_pr(anchor, 50800))), extent);
+        assert!(
+            (inset - flush - 4.0).abs() < 1e-3,
+            "a 4pt top inset moves the body 4pt down, got {flush} → {inset}"
+        );
+    }
+
+    /// The bottom inset shifts a bottom-anchored body one-for-one — which is
+    /// what says `bIns` closes off the box, rather than the anchoring reaching
+    /// the shape's own bottom edge. The 1:2 centre/bottom ratio above holds
+    /// either way, so nothing else here would notice `bIns` being dropped.
+    #[test]
+    fn the_bottom_inset_shifts_a_bottom_anchored_body_one_for_one() {
+        let extent = PtSize::new(Pt::new(200.0), Pt::new(120.0));
+        let anchor = Some(TextAnchoringType::Bottom);
+        let flush = shape_text_y(&wsp_with_text(Some(body_pr(anchor, 0))), extent);
+        let inset = shape_text_y(&wsp_with_text(Some(body_pr(anchor, 50800))), extent);
+        // 4pt of bottom inset lifts the body 4pt; the 4pt of *top* inset the
+        // same fixture adds cannot reach a bottom-anchored body at all.
+        assert!(
+            (flush - inset - 4.0).abs() < 1e-3,
+            "a 4pt bottom inset lifts the body 4pt, got {flush} → {inset}"
+        );
+    }
+
+    /// No `bodyPr` at all keeps the §20.1.2.1.1 defaults — top anchoring under
+    /// a 45720 EMU top inset. This is the behaviour every shape had before
+    /// anchoring existed, so nothing that omits `anchor` moves.
+    #[test]
+    fn a_shape_without_body_properties_keeps_the_spec_defaults() {
+        let extent = PtSize::new(Pt::new(200.0), Pt::new(120.0));
+        let bare = shape_text_y(&wsp_with_text(None), extent);
+        let explicit = shape_text_y(
+            &wsp_with_text(Some(body_pr(Some(TextAnchoringType::Top), 45720))),
+            extent,
+        );
+        assert!(
+            (bare - explicit).abs() < 1e-3,
+            "an absent bodyPr matches the spec defaults spelled out, \
+             got {bare} vs {explicit}"
+        );
+    }
+
+    /// §20.1.10.85 `vertOverflow` defaults to `overflow` — and every `bodyPr`
+    /// in the corpus says so explicitly — so a body taller than its box is
+    /// *not* clipped. It anchors to the top and overflows downward, which is
+    /// also what it did before anchoring existed: the change reaches only
+    /// bodies that fit. Centring an overflowing body would draw it above the
+    /// shape, over whatever sits there.
+    #[test]
+    fn an_overflowing_body_is_not_pushed_above_the_shape() {
+        // A 6pt-tall shape cannot hold a line of text at any font size.
+        let extent = PtSize::new(Pt::new(200.0), Pt::new(6.0));
+        let y = |anchor| shape_text_y(&wsp_with_text(Some(body_pr(Some(anchor), 50800))), extent);
+        let top = y(TextAnchoringType::Top);
+        for anchor in [TextAnchoringType::Center, TextAnchoringType::Bottom] {
+            assert!(
+                (y(anchor) - top).abs() < 1e-3,
+                "{anchor:?} on an overflowing body places as `t` does, got {} vs {top}",
+                y(anchor)
             );
         }
     }
