@@ -158,45 +158,69 @@ fn estimate_cursor_y(
 }
 
 /// Full pipeline: resolve → preload fonts → layout → paint.
-pub fn render(doc: &Document, options: &RenderOptions) -> Result<Vec<u8>, error::RenderError> {
+///
+/// Consumes the document — see [`resolve::resolve`] for why.
+pub fn render(doc: Document, options: &RenderOptions) -> Result<Vec<u8>, error::RenderError> {
     let font_mgr = skia_safe::FontMgr::new();
     render_with_font_mgr(doc, &font_mgr, options)
 }
 
 /// Render with a pre-configured FontMgr (for reuse across calls).
+///
+/// Each stage is timed at `debug` level. `convert` already reports
+/// parse-vs-render, but "render" is four very differently-shaped costs —
+/// registry construction is a fixed price paid per render regardless of
+/// document size, while layout and paint scale with content — and a single
+/// number cannot tell them apart. Any claim about where this pipeline spends
+/// its time should be checkable with `RUST_LOG=debug`, not inferred.
 pub fn render_with_font_mgr(
-    doc: &Document,
+    doc: Document,
     font_mgr: &skia_safe::FontMgr,
     options: &RenderOptions,
 ) -> Result<Vec<u8>, error::RenderError> {
+    use std::time::Instant;
+
+    let t = Instant::now();
     let resolved = resolve::resolve(doc);
+    log::debug!("  resolve:  {:?}", t.elapsed());
+
+    let t = Instant::now();
     #[allow(unused_mut)] // mut required only when subset-fonts is enabled
     let mut registry = fonts::FontRegistry::build(
         font_mgr.clone(),
-        &doc.embedded_fonts,
+        &resolved.embedded_fonts,
         &resolved.font_families,
     )?;
+    log::debug!("  registry: {:?}", t.elapsed());
+
+    let t = Instant::now();
     let pages = layout_document(&resolved, &registry);
+    log::debug!("  layout:   {:?} ({} pages)", t.elapsed(), pages.len());
 
     #[cfg(feature = "subset-fonts")]
     {
+        let t = Instant::now();
         let usage = subset::collect(&pages, &registry);
         let report = subset::apply(usage, &mut registry);
+        log::debug!("  subset:   {:?}", t.elapsed());
         log::info!("font subset: {report}");
     }
 
-    painter::render_to_pdf(&pages, &registry, options)
+    let t = Instant::now();
+    let pdf = painter::render_to_pdf(&pages, &registry, options);
+    log::debug!("  paint:    {:?}", t.elapsed());
+    pdf
 }
 
 /// Resolve and lay out a document without painting to PDF.
 /// Uses a real FontMgr for text measurement.
-pub fn resolve_and_layout(doc: &Document) -> (ResolvedDocument, Vec<LayoutedPage>) {
+pub fn resolve_and_layout(doc: Document) -> (ResolvedDocument, Vec<LayoutedPage>) {
     let font_mgr = skia_safe::FontMgr::new();
     let resolved = resolve::resolve(doc);
     // A debug/test helper: it always supplies the real system `FontMgr`, so
     // the font-less case `build` guards against cannot arise here.
     let registry =
-        fonts::FontRegistry::build(font_mgr, &doc.embedded_fonts, &resolved.font_families)
+        fonts::FontRegistry::build(font_mgr, &resolved.embedded_fonts, &resolved.font_families)
             .expect("the system FontMgr exposes at least one typeface");
     let pages = layout_document(&resolved, &registry);
     (resolved, pages)
@@ -605,7 +629,7 @@ mod tests {
     #[test]
     fn resolve_and_layout_empty_doc() {
         let doc = empty_doc();
-        let (resolved, pages) = resolve_and_layout(&doc);
+        let (resolved, pages) = resolve_and_layout(doc);
 
         assert_eq!(resolved.sections.len(), 1);
         assert_eq!(pages.len(), 1);
@@ -617,7 +641,7 @@ mod tests {
         let mut doc = empty_doc();
         doc.body = vec![para("hello"), para("world")];
 
-        let (_, pages) = resolve_and_layout(&doc);
+        let (_, pages) = resolve_and_layout(doc);
 
         assert_eq!(pages.len(), 1);
         let text_count = pages[0]
@@ -679,7 +703,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, pages) = resolve_and_layout(&doc);
+        let (_, pages) = resolve_and_layout(doc);
 
         assert_eq!(
             pages.len(),
@@ -740,7 +764,7 @@ mod tests {
             }],
         }))];
 
-        let (_, pages) = resolve_and_layout(&doc);
+        let (_, pages) = resolve_and_layout(doc);
         assert_eq!(pages.len(), 1);
 
         let text_count = pages[0]
@@ -763,7 +787,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, pages) = resolve_and_layout(&doc);
+        let (_, pages) = resolve_and_layout(doc);
         assert_eq!(pages[0].page_size.width.raw(), 612.0);
         assert_eq!(pages[0].page_size.height.raw(), 792.0);
     }
@@ -810,7 +834,7 @@ mod tests {
                     DrawCommand::Image {
                         rect: rect_at(400.0, 50.0),
                         image_data: crate::render::resolve::images::MediaEntry {
-                            data: std::rc::Rc::from(Vec::new().into_boxed_slice()),
+                            data: std::sync::Arc::from(Vec::new().into_boxed_slice()),
                             format: crate::model::ImageFormat::Png,
                         },
                         src_rect: None,
@@ -925,12 +949,9 @@ mod tests {
     #[test]
     fn a_font_less_host_is_an_error_not_a_panic() {
         let doc = empty_doc();
-        let err = render_with_font_mgr(
-            &doc,
-            &skia_safe::FontMgr::empty(),
-            &RenderOptions::default(),
-        )
-        .expect_err("a FontMgr with no typefaces cannot render");
+        let err =
+            render_with_font_mgr(doc, &skia_safe::FontMgr::empty(), &RenderOptions::default())
+                .expect_err("a FontMgr with no typefaces cannot render");
         assert!(matches!(err, error::RenderError::NoFontsAvailable));
         assert!(
             err.to_string().contains("no fonts available"),
@@ -942,7 +963,7 @@ mod tests {
     /// empty document is a blank page, as in Word — not an error.
     #[test]
     fn empty_document_still_renders_a_page() {
-        let pdf = render(&empty_doc(), &RenderOptions::default()).expect("empty doc renders");
+        let pdf = render(empty_doc(), &RenderOptions::default()).expect("empty doc renders");
         assert!(pdf.starts_with(b"%PDF"));
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/Count 1"), "exactly one blank page");

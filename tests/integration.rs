@@ -488,7 +488,7 @@ fn assert_whitespace_only_run_roundtrips(wml_namespace: &str) {
         "whitespace-only runs must survive normal, styled, and hyperlink boundaries"
     );
 
-    let (_, pages) = dxpdf::render::resolve_and_layout(&document);
+    let (_, pages) = dxpdf::render::resolve_and_layout(document);
     let laid_out_text: String = pages
         .iter()
         .flat_map(|page| &page.commands)
@@ -609,7 +609,7 @@ fn grid_before_offsets_each_row_first_cell() {
     );
 
     let document = dxpdf::docx::parse(&docx).expect("parse");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&document);
+    let (_, pages) = dxpdf::render::resolve_and_layout(document);
     let cmds: Vec<&DrawCommand> = pages.iter().flat_map(|p| p.commands.iter()).collect();
 
     let position_of = |needle: &str| -> Option<(f32, f32)> {
@@ -688,7 +688,7 @@ fn position_tab_lays_out_by_position() {
     );
 
     let document = dxpdf::docx::parse(&docx).expect("parse");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&document);
+    let (_, pages) = dxpdf::render::resolve_and_layout(document);
     let cmds: Vec<&DrawCommand> = pages.iter().flat_map(|p| p.commands.iter()).collect();
     let x_of = |needle: &str| -> f32 {
         cmds.iter()
@@ -749,7 +749,7 @@ fn body_shape_txbx_text_is_rendered() {
 
     let docx = make_docx(doc_xml);
     let doc = dxpdf::docx::parse(&docx).expect("parse");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     let found = pages
         .iter()
         .flat_map(|p| &p.commands)

@@ -16,6 +16,7 @@ pub mod theme;
 pub mod vml;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::docx::error::{ParseError, Result};
 use crate::docx::model::*;
@@ -100,10 +101,14 @@ pub fn parse(data: &[u8]) -> Result<Document> {
     // moving the bytes here would leave the later reader with nothing. The
     // package is dropped at the end of parse, so the transient duplication is
     // bounded.
+    //
+    // This is the pipeline's only copy of an image. `Document.media` holds
+    // `Arc<[u8]>`, so resolve, layout and paint all pass the same allocation
+    // around by handle.
     let mut media = HashMap::new();
     for rel in doc_rels.filter_by_type(&RelationshipType::Image) {
         let media_path = zip::resolve_target(doc_dir, &rel.target);
-        if let Some(data) = package.get_part(&media_path).map(<[u8]>::to_vec) {
+        if let Some(data) = package.get_part(&media_path).map(Arc::<[u8]>::from) {
             let fmt = ImageFormat::detect(&rel.target, &data);
             media.insert(rel.id.clone(), (data, fmt));
         }
@@ -124,7 +129,7 @@ pub fn parse(data: &[u8]) -> Result<Document> {
             let mut num_remap: HashMap<RelId, RelId> = HashMap::new();
             for rel in num_rels.filter_by_type(&RelationshipType::Image) {
                 let img_path = zip::resolve_target(num_dir, &rel.target);
-                if let Some(data) = package.get_part(&img_path).map(<[u8]>::to_vec) {
+                if let Some(data) = package.get_part(&img_path).map(Arc::<[u8]>::from) {
                     let fmt = ImageFormat::detect(&rel.target, &data);
                     let unique_id = RelId::new(format!("{}::{}", num_path, rel.id.as_str()));
                     media.insert(unique_id.clone(), (data, fmt));
@@ -265,7 +270,7 @@ pub fn parse(data: &[u8]) -> Result<Document> {
 fn load_part_rel_remap(
     part_path: &str,
     package: &mut PackageContents,
-    media: &mut HashMap<RelId, (Vec<u8>, ImageFormat)>,
+    media: &mut HashMap<RelId, (Arc<[u8]>, ImageFormat)>,
 ) -> Result<HashMap<RelId, RelId>> {
     let mut remap: HashMap<RelId, RelId> = HashMap::new();
     let rels_path = zip::rels_path_for(part_path);
@@ -281,7 +286,7 @@ fn load_part_rel_remap(
         // footer) commonly reference the *same* image part; if we
         // moved the bytes out at the first reader the second reader
         // would silently drop the image.
-        if let Some(img_data) = package.get_part(&img_path).map(<[u8]>::to_vec) {
+        if let Some(img_data) = package.get_part(&img_path).map(Arc::<[u8]>::from) {
             let fmt = ImageFormat::detect(&img_rel.target, &img_data);
             let unique_id = RelId::new(format!("{}::{}", part_path, img_rel.id.as_str()));
             media.insert(unique_id.clone(), (img_data, fmt));

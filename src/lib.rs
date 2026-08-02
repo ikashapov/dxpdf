@@ -22,7 +22,7 @@ pub fn convert_with_options(docx_bytes: &[u8], options: &RenderOptions) -> Resul
     log::debug!("Parse:  {:?}", t0.elapsed());
 
     let t1 = Instant::now();
-    let pdf_bytes = crate::render::render(&document, options)?;
+    let pdf_bytes = crate::render::render(document, options)?;
     log::debug!("Render: {:?}", t1.elapsed());
 
     log::debug!("Total:  {:?}", t0.elapsed());

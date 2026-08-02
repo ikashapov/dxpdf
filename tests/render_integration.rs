@@ -30,7 +30,7 @@ fn parse_docx(filename: &str) -> dxpdf::model::Document {
 fn all_files_resolve_without_error() {
     for filename in test_docx_files() {
         let doc = parse_docx(filename);
-        let resolved = dxpdf::render::resolve::resolve(&doc);
+        let resolved = dxpdf::render::resolve::resolve(doc);
         assert!(
             !resolved.sections.is_empty(),
             "{filename}: should have at least one section"
@@ -42,7 +42,7 @@ fn all_files_resolve_without_error() {
 fn all_files_layout_without_error() {
     for filename in test_docx_files() {
         let doc = parse_docx(filename);
-        let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+        let (_, pages) = dxpdf::render::resolve_and_layout(doc);
         assert!(
             !pages.is_empty(),
             "{filename}: should produce at least one page"
@@ -56,7 +56,7 @@ fn all_files_render_to_pdf() {
     for filename in test_docx_files() {
         let doc = parse_docx(filename);
         let pdf_bytes =
-            dxpdf::render::render_with_font_mgr(&doc, &font_mgr, &dxpdf::RenderOptions::default())
+            dxpdf::render::render_with_font_mgr(doc, &font_mgr, &dxpdf::RenderOptions::default())
                 .unwrap_or_else(|e| panic!("{filename}: render failed: {e}"));
         assert!(
             pdf_bytes.len() > 100,
@@ -74,7 +74,7 @@ fn all_files_render_to_pdf() {
 fn resolve_collects_fonts_from_real_docs() {
     for filename in test_docx_files() {
         let doc = parse_docx(filename);
-        let resolved = dxpdf::render::resolve::resolve(&doc);
+        let resolved = dxpdf::render::resolve::resolve(doc);
         assert!(
             !resolved.font_families.is_empty(),
             "{filename}: should have at least one font family"
@@ -98,7 +98,7 @@ fn font_subsetting_shrinks_pdf_with_embedded_fonts() {
         "test precondition: sample1 must contain embedded fonts"
     );
     let pdf_with_subset =
-        dxpdf::render::render_with_font_mgr(&doc, &font_mgr, &dxpdf::RenderOptions::default())
+        dxpdf::render::render_with_font_mgr(doc, &font_mgr, &dxpdf::RenderOptions::default())
             .expect("subset-on render must succeed");
 
     // Sanity: still a valid PDF, has actual content.
@@ -130,7 +130,7 @@ fn subsetted_pdf_is_well_formed() {
     let font_mgr = skia_safe::FontMgr::new();
     let doc = parse_docx("sample-docx-files-sample1.docx");
     let pdf_bytes =
-        dxpdf::render::render_with_font_mgr(&doc, &font_mgr, &dxpdf::RenderOptions::default())
+        dxpdf::render::render_with_font_mgr(doc, &font_mgr, &dxpdf::RenderOptions::default())
             .unwrap();
 
     let parsed =
@@ -180,7 +180,7 @@ fn font_scaling_docx_carries_text_scale_through_layout() {
     use dxpdf::render::layout::draw_command::DrawCommand;
 
     let doc = parse_docx("font_scaling.docx");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     let mut scales: Vec<f32> = Vec::new();
     for page in &pages {
@@ -216,7 +216,7 @@ fn font_scaling_docx_renders_to_pdf() {
     let font_mgr = skia_safe::FontMgr::new();
     let doc = parse_docx("font_scaling.docx");
     let pdf_bytes =
-        dxpdf::render::render_with_font_mgr(&doc, &font_mgr, &dxpdf::RenderOptions::default())
+        dxpdf::render::render_with_font_mgr(doc, &font_mgr, &dxpdf::RenderOptions::default())
             .expect("font_scaling.docx must render");
     assert!(pdf_bytes.starts_with(b"%PDF"));
     assert!(
@@ -236,7 +236,7 @@ fn font_scaling_compresses_line_width() {
     use dxpdf::render::layout::draw_command::DrawCommand;
 
     let doc = parse_docx("font_scaling.docx");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     // Find the rightmost x extent of text on each line we encounter. Group by
     // the y coordinate (one line per y value). The scaled line must have a
@@ -271,7 +271,7 @@ fn font_scaling_compresses_line_width() {
 fn layout_produces_text_commands() {
     for filename in test_docx_files() {
         let doc = parse_docx(filename);
-        let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+        let (_, pages) = dxpdf::render::resolve_and_layout(doc);
         let total_text_cmds: usize = pages
             .iter()
             .map(|p| {
@@ -382,7 +382,7 @@ fn endnotes_are_not_duplicated_across_sections() {
         ("3 sections", three_sections, 3),
     ] {
         let doc = dxpdf::docx::parse(&docx_with_endnotes(&body)).unwrap();
-        let (resolved, pages) = dxpdf::render::resolve_and_layout(&doc);
+        let (resolved, pages) = dxpdf::render::resolve_and_layout(doc);
         assert_eq!(resolved.sections.len(), sections, "{label}: section count");
         assert_eq!(
             count_text_occurrences(&pages, "Zqxwmarker"),
@@ -483,7 +483,7 @@ fn footnote_nested_in_hyperlink_gets_a_body_and_keeps_numbering_aligned() {
 
     for (label, body) in cases {
         let doc = dxpdf::docx::parse(&docx_with_footnotes(&body)).unwrap();
-        let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+        let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
         assert_eq!(
             count_text_occurrences(&pages, "Nestedbodyqx"),

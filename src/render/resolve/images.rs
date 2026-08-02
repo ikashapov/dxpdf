@@ -1,6 +1,6 @@
 //! Image extraction — navigate DrawingML hierarchy to extract image RelIds.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::model::dimension::{Dimension, ThousandthPercent};
 use crate::model::{GraphicContent, Image, ImageFormat, RelId, RelativeRect};
@@ -9,11 +9,13 @@ use crate::render::geometry::PtRect;
 
 /// Resolved image entry — shared bytes with detected format.
 ///
-/// All references to the same image share one `Rc<[u8]>` allocation,
-/// enabling pointer-based deduplication in the painter cache.
+/// All references to the same image share one `Arc<[u8]>` allocation — the very
+/// one the parser read out of the package, since resolve moves the handle
+/// rather than copying the bytes. That identity is load-bearing: the painter's
+/// bitmap cache keys on the pointer, so two placements of one image decode once.
 #[derive(Clone, Debug)]
 pub struct MediaEntry {
-    pub data: Rc<[u8]>,
+    pub data: Arc<[u8]>,
     pub format: ImageFormat,
 }
 

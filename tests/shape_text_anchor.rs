@@ -105,7 +105,7 @@ fn boxed_text_y(pages: &[LayoutedPage]) -> f32 {
 fn y_for(anchor: &str) -> f32 {
     let bytes = make_docx(&shape_document(anchor));
     let doc = dxpdf::docx::parse(&bytes).expect("fixture parses");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     boxed_text_y(&pages)
 }
 
@@ -147,7 +147,7 @@ fn an_omitted_anchor_is_top() {
         assert!(!xml.contains("anchor="), "the attribute is gone: {xml}");
         let bytes = make_docx(&xml);
         let doc = dxpdf::docx::parse(&bytes).expect("fixture parses");
-        let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+        let (_, pages) = dxpdf::render::resolve_and_layout(doc);
         boxed_text_y(&pages)
     };
     assert!(

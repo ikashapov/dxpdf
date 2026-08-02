@@ -101,7 +101,7 @@ fn layout(
     styles_xml: &str,
 ) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
     let doc = dxpdf::docx::parse(&make_docx(document_xml, styles_xml)).expect("parse");
-    dxpdf::render::resolve_and_layout(&doc).1
+    dxpdf::render::resolve_and_layout(doc).1
 }
 
 fn shading_rects(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> Vec<(u8, u8, u8)> {
