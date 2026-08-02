@@ -202,8 +202,11 @@ pub(super) fn build_paragraph_block(
         return None;
     }
 
-    let mut style =
-        paragraph_style_from_props(&merged_props, Pt::from(ctx.resolved.default_tab_stop));
+    let mut style = paragraph_style_from_props(
+        &merged_props,
+        Pt::from(ctx.resolved.default_tab_stop),
+        state.shape_auto_fit,
+    );
     style.style_id = p.style_id.clone();
 
     // Attach pending drop cap to this paragraph.
@@ -321,8 +324,11 @@ pub(super) fn build_note_content(
                     },
                 );
             }
-            let style =
-                paragraph_style_from_props(&merged_props, Pt::from(ctx.resolved.default_tab_stop));
+            let style = paragraph_style_from_props(
+                &merged_props,
+                Pt::from(ctx.resolved.default_tab_stop),
+                state.shape_auto_fit,
+            );
             results.push((display_num.to_string(), frags, style));
         }
     }
@@ -432,6 +438,7 @@ pub(super) fn build_fragments(
         paragraph_run_defaults: Some(&run_defaults),
         theme: ctx.resolved.theme.as_ref(),
         measurer: Some(ctx.measurer),
+        auto_fit: state.shape_auto_fit,
     };
     let mut fragments = collect_fragments(
         &para.content,

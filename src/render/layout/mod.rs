@@ -46,6 +46,97 @@ pub(crate) fn choices_render_wps_shape(choices: &[crate::model::McChoice]) -> bo
     choices.iter().any(|c| walk(&c.content))
 }
 
+/// §20.1.2.1.18: the uniform shrink `a:normAutofit` applies to one shape's text
+/// body — a multiplier on every font size in it, and one on every paragraph's
+/// line spacing.
+///
+/// Lives here rather than beside `BuildState` because both the block builder
+/// and the fragment layer apply it, and `fragment` must not depend on `build`.
+///
+/// [`ShapeAutoFit::NONE`] is the identity and is what every call site outside a
+/// shape text body passes. The functions that resolve a font size or a line
+/// spacing take it as an explicit *parameter* rather than reaching for a
+/// default, so that a new call site has to say which it is — a silently
+/// inherited `1.0` is how these attributes came to be dropped in the first
+/// place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeAutoFit {
+    font_scale: f32,
+    line_spacing_scale: f32,
+}
+
+impl Default for ShapeAutoFit {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl ShapeAutoFit {
+    /// No shrink: the identity for both factors.
+    pub const NONE: Self = Self {
+        font_scale: 1.0,
+        line_spacing_scale: 1.0,
+    };
+
+    /// Read the shrink off a shape's `a:bodyPr`.
+    ///
+    /// Total over [`TextAutoFit`](crate::model::TextAutoFit) on purpose. Only
+    /// `normAutofit` carries a shrink: §20.1.2.1.16 `noAutofit` is the explicit
+    /// "do not", and §20.1.2.1.20 `spAutoFit` resizes the *shape* to its text,
+    /// which this sub-layout cannot do — it lays a body out inside an extent
+    /// the host already fixed. `spAutoFit` therefore degrades to no shrink,
+    /// which draws the text at its authored size rather than inventing a fit.
+    pub fn from_body(auto_fit: Option<crate::model::TextAutoFit>) -> Self {
+        use crate::model::TextAutoFit;
+
+        let Some(TextAutoFit::NormalAutoFit(na)) = auto_fit else {
+            return Self::NONE;
+        };
+        // Absent `@fontScale` is 100%; absent `@lnSpcReduction` is 0% *off*,
+        // hence a factor of 1. A negative or absurd value would invert or
+        // explode the layout, so both are clamped to a sane band rather than
+        // trusted — the file is untrusted input.
+        let font_scale = na
+            .font_scale
+            .map_or(1.0, |p| p.to_fraction())
+            .clamp(0.01, 10.0);
+        let line_spacing_scale =
+            (1.0 - na.line_spacing_reduction.map_or(0.0, |p| p.to_fraction())).clamp(0.01, 10.0);
+        Self {
+            font_scale,
+            line_spacing_scale,
+        }
+    }
+
+    /// Apply `@fontScale` to a resolved font size.
+    pub fn scale_font(self, size: Pt) -> Pt {
+        if self.font_scale == 1.0 {
+            size
+        } else {
+            Pt::new(size.raw() * self.font_scale)
+        }
+    }
+
+    /// Apply `@lnSpcReduction` to a line height that has already been resolved
+    /// against the paragraph's own §17.3.1.33 spacing rule.
+    ///
+    /// It must land *after* that resolution, not inside it. Folding the
+    /// reduction into an `Auto` multiplier looks equivalent and is not:
+    /// `resolve_line_height` floors `Auto` at the line's natural height, so a
+    /// multiplier below 1 is swallowed whole. That floor exists to stop a
+    /// user-authored multiplier from colliding glyph boxes — but crossing it is
+    /// precisely what `lnSpcReduction` is for. Word has already laid the body
+    /// out and decided the tightened text fits; the reduction is most of how it
+    /// made it fit.
+    pub fn scale_line_height(self, height: Pt) -> Pt {
+        if self.line_spacing_scale == 1.0 {
+            height
+        } else {
+            Pt::new(height.raw() * self.line_spacing_scale)
+        }
+    }
+}
+
 /// Box constraints passed from parent to child during layout.
 ///
 /// Encodes the range of permissible widths and heights.

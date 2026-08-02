@@ -129,7 +129,7 @@ pub(super) fn compute_line_placements(
         } else {
             default_line_height
         };
-        let lh = resolve_line_height(natural, text_h, &style.line_spacing);
+        let lh = resolve_line_height(natural, text_h, &style.line_spacing, style.auto_fit);
 
         frag_idx = fitted_line.end;
         placements.push(LinePlacement {
@@ -307,7 +307,12 @@ pub(super) fn emit_line_commands(
         } else {
             default_line_height
         };
-        let line_height = resolve_line_height(natural_height, text_height, &style.line_spacing);
+        let line_height = resolve_line_height(
+            natural_height,
+            text_height,
+            &style.line_spacing,
+            style.auto_fit,
+        );
 
         // Alignment offset — computed relative to the line's available width.
         let float_reduction = lp.float_left + lp.float_right;
@@ -885,7 +890,7 @@ fn resolve_zone_anchor(
         // `bar` (§17.18.85) draws a vertical rule at the stop and `clear`
         // removes the stop; neither shifts the following content, so both
         // position it exactly as `left` does. The bar rule itself is not
-        // drawn — recorded in `plans/open-work.md` as Unit 3.
+        // drawn — recorded in `plans/open-work.md` as Unit 2.
         TabAlignment::Left | TabAlignment::Bar | TabAlignment::Clear => ZoneAnchor::Start,
         TabAlignment::Right => ZoneAnchor::End,
         TabAlignment::Center => ZoneAnchor::Middle,
@@ -1025,8 +1030,22 @@ pub(super) fn emit_tab_leader(
 /// For Auto mode, the multiplier applies only to text metrics — inline
 /// images use their natural height without scaling. The final line height
 /// is `max(text_height * multiplier, total_height)`.
-pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpacingRule) -> Pt {
-    match rule {
+/// §17.3.1.33 line height for one line, then §20.1.2.1.18 `@lnSpcReduction`.
+///
+/// `auto_fit` is a parameter rather than something callers apply afterwards
+/// because four separate places resolve a line height — fitting, emission,
+/// the border box and the empty-paragraph path — and they must agree to the
+/// point. Owning the reduction here is what makes forgetting it impossible;
+/// applying it *after* the match is what lets it cross the `Auto` floor below,
+/// which is the whole point of the attribute (see
+/// [`ShapeAutoFit::scale_line_height`](crate::render::layout::ShapeAutoFit::scale_line_height)).
+pub(super) fn resolve_line_height(
+    natural: Pt,
+    text_height: Pt,
+    rule: &LineSpacingRule,
+    auto_fit: crate::render::layout::ShapeAutoFit,
+) -> Pt {
+    let resolved = match rule {
         LineSpacingRule::Auto(multiplier) => {
             let scaled_text = text_height * *multiplier;
             // Use the scaled text height or the full natural height (which
@@ -1035,7 +1054,8 @@ pub(super) fn resolve_line_height(natural: Pt, text_height: Pt, rule: &LineSpaci
         }
         LineSpacingRule::Exact(h) => *h,
         LineSpacingRule::AtLeast(min) => natural.max(*min),
-    }
+    };
+    auto_fit.scale_line_height(resolved)
 }
 
 #[cfg(test)]

@@ -29,6 +29,14 @@ pub struct ParagraphStyle {
     pub indent_right: Pt,
     pub indent_first_line: Pt,
     pub line_spacing: LineSpacingRule,
+    /// §20.1.2.1.18: the enclosing shape text body's `a:normAutofit` shrink.
+    /// [`ShapeAutoFit::NONE`](crate::render::layout::ShapeAutoFit::NONE) for
+    /// every paragraph outside one.
+    ///
+    /// Its `@lnSpcReduction` half is applied to the *resolved* line height, not
+    /// to `line_spacing` above; the reason is on
+    /// [`ShapeAutoFit::scale_line_height`](crate::render::layout::ShapeAutoFit::scale_line_height).
+    pub auto_fit: crate::render::layout::ShapeAutoFit,
     /// §17.3.1.38: custom tab stops.
     pub tabs: Vec<TabStopDef>,
     /// §17.15.1.25: the default tab-stop interval, used when no custom tab stop
@@ -119,6 +127,7 @@ impl ParagraphStyle {
             indent_right: self.indent_right,
             indent_first_line: self.indent_first_line,
             line_spacing: self.line_spacing,
+            auto_fit: self.auto_fit,
             tabs: self.tabs.clone(),
             default_tab_stop: self.default_tab_stop,
             drop_cap: self.drop_cap.clone(),
@@ -147,6 +156,7 @@ impl Default for ParagraphStyle {
             indent_left: Pt::ZERO,
             indent_right: Pt::ZERO,
             indent_first_line: Pt::ZERO,
+            auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             line_spacing: LineSpacingRule::Auto(1.0),
             tabs: Vec::new(),
             // §17.15.1.25: 720 twips = 36pt is the OOXML default interval.

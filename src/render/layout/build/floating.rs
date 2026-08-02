@@ -1219,11 +1219,12 @@ impl BodyAnchor {
     ///
     /// The slack is floored at zero, so a body taller than its box anchors to
     /// the top and overflows *downward* whatever the attribute says.
-    /// §20.1.10.85 `vertOverflow` defaults to `overflow` — Word draws
-    /// overflowing shape text rather than clipping it — and centring a body
-    /// that does not fit would put its first lines above the shape, over
-    /// whatever sits there. So the choice here is only ever about where the
-    /// spare room goes.
+    /// `@vertOverflow` defaults to `overflow` — Word draws overflowing shape
+    /// text rather than clipping it — and centring a body that does not fit
+    /// would put its first lines above the shape, over whatever sits there. So
+    /// the choice here is only ever about where the spare room goes. A body
+    /// that asks for `clip` is trimmed afterwards, in `overflow_keeps`, not by
+    /// moving it.
     fn offset(self, box_height: Pt, text_height: Pt) -> Pt {
         let slack = (box_height - text_height).max(Pt::ZERO);
         match self {
@@ -1300,10 +1301,19 @@ pub(super) fn build_shape_text_commands(
         None => (None, None),
     };
 
+    // §20.1.2.1.18: the shrink Word already computed for this body. Read once
+    // here and carried on the sub-state, so every size the cascade resolves
+    // inside the body — runs, list labels, field substitutions, blank lines —
+    // goes through it.
+    let auto_fit = crate::render::layout::ShapeAutoFit::from_body(
+        wsp.body_pr.as_ref().and_then(|bp| bp.auto_fit),
+    );
+
     // Sub-state with the host's page dimensions and field context. Counters
     // are reset so a footnote/list inside a shape body doesn't bump the
     // outer counters.
     let mut sub_state = BuildState {
+        shape_auto_fit: auto_fit,
         page_config: state.page_config.clone(),
         footnotes: Default::default(),
         endnote_counter: 0,
@@ -1321,7 +1331,10 @@ pub(super) fn build_shape_text_commands(
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
-    let line_height = super::default_line_height(ctx);
+    // §20.1.2.1.18: the body's own shrink also applies to the fallback line
+    // height, which is what an empty paragraph and an image-only line fall back
+    // to — otherwise a shrunk body would keep full-size blank lines.
+    let line_height = auto_fit.scale_font(super::default_line_height(ctx));
     // Shape text is laid out at *build* time, before the shape is placed on a
     // page, so a §20.4.3.1 `inside`/`outside` float nested inside a shape's
     // text box has no parity to resolve against and takes the odd-page
@@ -1342,12 +1355,59 @@ pub(super) fn build_shape_text_commands(
     let anchor = BodyAnchor::resolve(wsp.body_pr.as_ref().and_then(|bp| bp.anchor));
     let body_top = top_inset + anchor.offset(content_height, result.height);
 
+    // `@vertOverflow` decides what happens to the part of the body that does
+    // not fit. `Overflow` — the spec default, and the only value the corpus
+    // asks for — keeps everything, so the common path is untouched.
+    let overflow = wsp
+        .body_pr
+        .as_ref()
+        .and_then(|bp| bp.vert_overflow)
+        .unwrap_or_default();
+    let box_bottom = top_inset + content_height;
+
     let mut commands = Vec::with_capacity(result.commands.len());
     for mut cmd in result.commands {
         cmd.shift(left_inset, body_top);
+        if !overflow_keeps(overflow, &cmd, box_bottom) {
+            continue;
+        }
         commands.push(cmd);
     }
     commands
+}
+
+/// Whether `@vertOverflow` keeps `cmd`, given the bottom of the body's box.
+///
+/// Total over [`TextVertOverflow`] with no catch-all, so a new value of the
+/// attribute has to state its own behaviour here.
+///
+/// **This drops whole commands, which is a line-granular approximation of what
+/// Word does.** Word clips at the pixel, so a line straddling the box edge
+/// shows its top sliver; here it disappears. Real clipping needs a canvas clip
+/// that survives into paint, and draw commands are flattened into one flat
+/// per-page list with no scoping — so it would mean a new `DrawCommand`
+/// wrapper variant and an arm in every consumer. Dropping is the safe
+/// direction (`clip`'s contract is that nothing paints outside the box) and no
+/// corpus document asks for `clip` at all; the residue is recorded in
+/// `plans/open-work.md`.
+fn overflow_keeps(
+    overflow: crate::model::TextVertOverflow,
+    cmd: &crate::render::layout::draw_command::DrawCommand,
+    box_bottom: Pt,
+) -> bool {
+    use crate::model::TextVertOverflow;
+
+    match overflow {
+        TextVertOverflow::Overflow => true,
+        // `ellipsis` is `clip` plus an indicator on the last visible line.
+        // Choosing that line and refitting it around the ellipsis glyph is a
+        // decision this sub-layout does not make, so the indicator is dropped
+        // and the clipping is honoured — the same text as `clip`, which is far
+        // closer to Word than not clipping at all.
+        TextVertOverflow::Clip | TextVertOverflow::Ellipsis => cmd
+            .vertical_span()
+            .is_none_or(|(_, bottom)| bottom <= box_bottom),
+    }
 }
 
 #[cfg(test)]
@@ -1479,6 +1539,7 @@ mod tests {
     fn default_state() -> BuildState {
         BuildState {
             page_config: Default::default(),
+            shape_auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             footnotes: Default::default(),
             endnote_counter: 0,
             list_counters: Default::default(),
@@ -1632,6 +1693,7 @@ mod tests {
     fn body_pr(anchor: Option<TextAnchoringType>, inset_emu: i64) -> BodyProperties {
         BodyProperties {
             rotation: None,
+            vert_overflow: None,
             vert: None,
             wrap: None,
             left_inset: Some(Dimension::new(inset_emu)),
@@ -1758,9 +1820,9 @@ mod tests {
         );
     }
 
-    /// §20.1.10.85 `vertOverflow` defaults to `overflow` — and every `bodyPr`
-    /// in the corpus says so explicitly — so a body taller than its box is
-    /// *not* clipped. It anchors to the top and overflows downward, which is
+    /// `@vertOverflow` defaults to `overflow` — and every `bodyPr` in the
+    /// corpus that names it says so explicitly — so a body taller than its box
+    /// is *not* clipped. It anchors to the top and overflows downward, which is
     /// also what it did before anchoring existed: the change reaches only
     /// bodies that fit. Centring an overflowing body would draw it above the
     /// shape, over whatever sits there.

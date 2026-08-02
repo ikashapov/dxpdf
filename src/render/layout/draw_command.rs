@@ -259,6 +259,44 @@ impl DrawCommand {
         }
     }
 
+    /// The vertical band this command paints into, as `(top, bottom)`.
+    ///
+    /// `None` for commands that paint nothing — a link annotation covers
+    /// content that is already accounted for by the command underneath it, and
+    /// a named destination is a point.
+    ///
+    /// **Text is approximate.** A `Text` command carries a baseline and a font
+    /// size, not the ascent/descent it was measured with, so the band is taken
+    /// as `baseline ± font_size`. That is the same approximation
+    /// `render::estimate_cursor_y` already makes for the descender, kept
+    /// deliberately identical so the two cannot disagree about where a line
+    /// ends. It is generous on both sides, which is the safe direction for the
+    /// one caller that exists (`vertOverflow="clip"`): a line is dropped when
+    /// it *might* paint outside its box rather than when it certainly does.
+    pub fn vertical_span(&self) -> Option<(Pt, Pt)> {
+        match self {
+            DrawCommand::Text {
+                position,
+                font_size,
+                ..
+            } => Some((position.y - *font_size, position.y + *font_size)),
+            DrawCommand::Underline { line, .. } | DrawCommand::Line { line, .. } => {
+                Some((line.start.y.min(line.end.y), line.start.y.max(line.end.y)))
+            }
+            DrawCommand::Image { rect, .. }
+            | DrawCommand::EmojiCluster { rect, .. }
+            | DrawCommand::Rect { rect, .. } => {
+                Some((rect.origin.y, rect.origin.y + rect.size.height))
+            }
+            // `extent` is the shape's unrotated bounding box; a rotation can
+            // reach slightly past it, which is within this function's remit.
+            DrawCommand::Path { origin, extent, .. } => Some((origin.y, origin.y + extent.height)),
+            DrawCommand::LinkAnnotation { .. }
+            | DrawCommand::InternalLink { .. }
+            | DrawCommand::NamedDestination { .. } => None,
+        }
+    }
+
     /// Shift all y-coordinates by `dy`.
     pub fn shift_y(&mut self, dy: Pt) {
         self.shift(Pt::ZERO, dy);
@@ -491,6 +529,64 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    // ── `vertical_span` ──────────────────────────────────────────────────
+
+    /// Every painting variant reports a band, and it must track the command:
+    /// `one_of_each` places them all at y = 20, so shifting down by `DY` moves
+    /// each band by exactly `DY`. Catches an arm that reads the wrong field.
+    #[test]
+    fn vertical_span_follows_every_painting_variant() {
+        for (name, cmd) in one_of_each() {
+            let Some((top, bottom)) = cmd.vertical_span() else {
+                continue;
+            };
+            let mut moved = cmd;
+            moved.shift_y(Pt::new(DY));
+            let (top2, bottom2) = moved.vertical_span().expect("still paints");
+            assert_eq!(top2.raw() - top.raw(), DY, "{name} top");
+            assert_eq!(bottom2.raw() - bottom.raw(), DY, "{name} bottom");
+            assert!(top.raw() <= bottom.raw(), "{name} band is inverted");
+        }
+    }
+
+    /// The three annotation variants paint nothing of their own, so they have
+    /// no band — a clip must not drop a link whose rect happens to hang below
+    /// a box while the text it annotates is kept.
+    #[test]
+    fn annotations_have_no_vertical_span() {
+        for (name, cmd) in one_of_each() {
+            let expected_none = matches!(
+                cmd,
+                DrawCommand::LinkAnnotation { .. }
+                    | DrawCommand::InternalLink { .. }
+                    | DrawCommand::NamedDestination { .. }
+            );
+            assert_eq!(
+                cmd.vertical_span().is_none(),
+                expected_none,
+                "{name} disagrees about whether it paints",
+            );
+        }
+    }
+
+    /// A `Text` command carries a baseline, not a box: the band straddles it.
+    #[test]
+    fn a_text_span_straddles_its_baseline() {
+        let cmd = DrawCommand::Text {
+            position: PtOffset::new(Pt::new(10.0), Pt::new(20.0)),
+            text: Rc::from("x"),
+            font_family: Rc::from("Arial"),
+            char_spacing: Pt::ZERO,
+            font_size: Pt::new(12.0),
+            bold: false,
+            italic: false,
+            color: RgbColor::BLACK,
+            text_scale: 1.0,
+        };
+        let (top, bottom) = cmd.vertical_span().unwrap();
+        assert_eq!((top.raw(), bottom.raw()), (8.0, 32.0));
     }
 
     #[test]
