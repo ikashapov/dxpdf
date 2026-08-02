@@ -890,7 +890,7 @@ fn resolve_zone_anchor(
         // `bar` (§17.18.85) draws a vertical rule at the stop and `clear`
         // removes the stop; neither shifts the following content, so both
         // position it exactly as `left` does. The bar rule itself is not
-        // drawn — recorded in `plans/open-work.md` as Unit 3.
+        // drawn — recorded in `plans/open-work.md` as Unit 2.
         TabAlignment::Left | TabAlignment::Bar | TabAlignment::Clear => ZoneAnchor::Start,
         TabAlignment::Right => ZoneAnchor::End,
         TabAlignment::Center => ZoneAnchor::Middle,

@@ -214,8 +214,29 @@ pub struct BodyProperties {
     pub bottom_inset: Option<Dimension<Emu>>,
     /// §20.1.10.59 ST_TextAnchoringType: vertical anchor.
     pub anchor: Option<TextAnchoringType>,
+    /// `@vertOverflow` (ST_TextVertOverflowType): what becomes of a body taller
+    /// than its box. `None` is the spec default, [`TextVertOverflow::Overflow`].
+    pub vert_overflow: Option<TextVertOverflow>,
     /// Auto-fit mode.
     pub auto_fit: Option<TextAutoFit>,
+}
+
+/// `a:bodyPr/@vertOverflow` (ST_TextVertOverflowType) — what a text body does
+/// with the part of itself that does not fit its box.
+///
+/// The default is [`Overflow`](TextVertOverflow::Overflow), and it is not a
+/// degenerate case: Word really does draw shape text past the shape's bottom
+/// edge, and it is what every `bodyPr` in the corpus asks for. Treating a body
+/// that overflows as a bug to be clipped loses content that renders correctly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextVertOverflow {
+    /// Draw the whole body, past the box if need be. The spec default.
+    #[default]
+    Overflow,
+    /// Draw only what fits inside the box.
+    Clip,
+    /// Clip, and mark the truncation with an ellipsis on the last visible line.
+    Ellipsis,
 }
 
 /// §20.1.10.82 ST_TextVerticalType.

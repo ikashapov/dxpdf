@@ -18,8 +18,8 @@ use crate::docx::geometry::Offset;
 use crate::docx::model::{
     BlackWhiteMode, Block, BodyProperties, DrawingFill, FontCollectionIndex, FontReference,
     GeomGuide, NormalAutoFit, PresetGeometryDef, PresetShapeType, ShapeGeometry, ShapeProperties,
-    StyleMatrixRef, TextAnchoringType, TextAutoFit, TextVerticalType, TextWrappingType,
-    Transform2D, WordProcessingShape,
+    StyleMatrixRef, TextAnchoringType, TextAutoFit, TextVertOverflow, TextVerticalType,
+    TextWrappingType, Transform2D, WordProcessingShape,
 };
 use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
 
@@ -414,6 +414,8 @@ pub struct BodyPrXml {
     pub b_ins: Option<Dimension<Emu>>,
     #[serde(rename = "@anchor", default)]
     pub anchor: Option<StTextAnchoringType>,
+    #[serde(rename = "@vertOverflow", default)]
+    pub vert_overflow: Option<StTextVertOverflowType>,
     // Auto-fit choice — at most one present.
     #[serde(rename = "noAutofit", default)]
     pub no_autofit: Option<super::fill::Empty>,
@@ -455,6 +457,7 @@ impl From<BodyPrXml> for BodyProperties {
             right_inset: x.r_ins,
             bottom_inset: x.b_ins,
             anchor: x.anchor.map(Into::into),
+            vert_overflow: x.vert_overflow.map(Into::into),
             auto_fit,
         }
     }
@@ -700,6 +703,28 @@ pub enum StTextAnchoringType {
     Dist,
 }
 
+/// ST_TextVertOverflowType. `overflow` is the spec default, so an absent
+/// attribute and an explicit `overflow` mean the same thing.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub enum StTextVertOverflowType {
+    #[serde(rename = "overflow")]
+    Overflow,
+    #[serde(rename = "ellipsis")]
+    Ellipsis,
+    #[serde(rename = "clip")]
+    Clip,
+}
+
+impl From<StTextVertOverflowType> for TextVertOverflow {
+    fn from(s: StTextVertOverflowType) -> Self {
+        match s {
+            StTextVertOverflowType::Overflow => Self::Overflow,
+            StTextVertOverflowType::Ellipsis => Self::Ellipsis,
+            StTextVertOverflowType::Clip => Self::Clip,
+        }
+    }
+}
+
 impl From<StTextAnchoringType> for TextAnchoringType {
     fn from(s: StTextAnchoringType) -> Self {
         match s {
@@ -896,6 +921,27 @@ mod tests {
         };
         assert_eq!(na.font_scale.unwrap().raw(), 62500);
         assert_eq!(na.line_spacing_reduction.unwrap().raw(), 20000);
+    }
+
+    /// `@vertOverflow` reaches the model for all three values, and an absent
+    /// attribute stays `None` — the model's `Default` is what supplies
+    /// `overflow`, so parse never has to invent it.
+    #[test]
+    fn vert_overflow_reaches_the_model() {
+        assert_eq!(parse_body_pr(r#"<bodyPr/>"#).vert_overflow, None);
+        assert_eq!(
+            parse_body_pr(r#"<bodyPr vertOverflow="overflow"/>"#).vert_overflow,
+            Some(TextVertOverflow::Overflow)
+        );
+        assert_eq!(
+            parse_body_pr(r#"<bodyPr vertOverflow="clip"/>"#).vert_overflow,
+            Some(TextVertOverflow::Clip)
+        );
+        assert_eq!(
+            parse_body_pr(r#"<bodyPr vertOverflow="ellipsis"/>"#).vert_overflow,
+            Some(TextVertOverflow::Ellipsis)
+        );
+        assert_eq!(TextVertOverflow::default(), TextVertOverflow::Overflow);
     }
 
     /// Each attribute is independent — Word writes `fontScale` alone whenever
