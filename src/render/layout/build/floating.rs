@@ -959,7 +959,8 @@ fn resolve_anchor_y(
                 // Word mirrors *left/right* for two-sided documents, not
                 // top/bottom — so no reading is derivable from source alone.
                 // Treated as `margin`, the long-standing fallback; the open
-                // question is filed in open-findings §3.
+                // question is filed in open-work, "Blocked on a Word
+                // reference render" (item 24).
                 AnchorRelativeFrom::InsideMargin | AnchorRelativeFrom::OutsideMargin => {
                     FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
                 }
@@ -1038,7 +1039,7 @@ fn resolve_anchor_y(
                 // document mirrors left and right, not top and bottom, so
                 // there is no reading of a vertical "inside" that source can
                 // derive. Aligned to the region's top, the long-standing
-                // fallback; the open question is filed in open-findings §3
+                // fallback; the open question is filed in open-work item 24
                 // alongside vertical `insideMargin`.
                 AnchorAlignment::Inside | AnchorAlignment::Outside => area_top,
                 // §20.4.3.1 horizontal alignments on `wp:positionV` —
