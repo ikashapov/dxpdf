@@ -121,7 +121,7 @@ fn document(grid_cols: usize, rows: &str) -> String {
 
 fn layout(document_xml: &str) -> Vec<LayoutedPage> {
     let doc = dxpdf::docx::parse(&make_docx(document_xml)).expect("parse");
-    dxpdf::render::resolve_and_layout(&doc).1
+    dxpdf::render::resolve_and_layout(doc).1
 }
 
 /// Border rects are painted thin and long. Returns the distinct positions along

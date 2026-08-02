@@ -684,12 +684,14 @@ where
                     // Preserve the external/internal kind as a closed ADT so
                     // the emitter routes external→URI and internal→GoTo without
                     // guessing from the string (§17.16.22).
+                    // One allocation per `w:hyperlink`, shared by every word
+                    // fragment inside it and every command they emit.
                     let target: Option<LinkTarget> = match &link.target {
                         crate::model::HyperlinkTarget::ExternalUrl(url) => {
-                            Some(LinkTarget::External(url.clone()))
+                            Some(LinkTarget::External(Rc::from(url.as_str())))
                         }
                         crate::model::HyperlinkTarget::Internal { anchor } => {
-                            Some(LinkTarget::Internal(anchor.clone()))
+                            Some(LinkTarget::Internal(Rc::from(anchor.as_str())))
                         }
                         // An unresolved rId (no matching relationship) has no link.
                         crate::model::HyperlinkTarget::ExternalRel(_) => None,

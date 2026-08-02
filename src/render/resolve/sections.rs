@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{Block, Document, RelId, SectionHeaderFooterRefs, SectionProperties};
+use crate::model::{Block, RelId, SectionHeaderFooterRefs, SectionProperties};
 
 use super::header_footer::HeaderFooterSet;
 
@@ -19,48 +19,60 @@ pub struct ResolvedSection {
     pub footers: HeaderFooterSet<Vec<Block>>,
 }
 
-/// Split document body into sections at `Block::SectionBreak` boundaries.
-/// The final section uses `Document.final_section`.
-/// Header/footer content is resolved from `Document.headers`/`Document.footers`.
+/// Split a document body into sections at `Block::SectionBreak` boundaries.
+/// The trailing section takes `final_section` (the last `w:sectPr` in
+/// `w:body`); header/footer content is looked up in the document's loaded
+/// `headers`/`footers` parts.
+///
+/// `body` and `final_section` are taken **by value** — every block ends up in
+/// exactly one section, so they are moved across rather than cloned. The two
+/// part maps stay borrowed: one header part may be referenced by any number of
+/// sections, directly or through the inheritance chain below, so its blocks
+/// genuinely have to be copied per use.
 ///
 /// §17.10.5 inheritance is applied **per slot independently**: if a
 /// section omits its `first` reference, it inherits the previous
 /// section's `first`, regardless of whether `default` is overridden.
 /// This mirrors Word's behavior — each header type is its own
 /// inheritance chain.
-pub fn resolve_sections(doc: &Document) -> Vec<ResolvedSection> {
+pub fn resolve_sections(
+    body: Vec<Block>,
+    final_section: SectionProperties,
+    header_parts: &HashMap<RelId, Vec<Block>>,
+    footer_parts: &HashMap<RelId, Vec<Block>>,
+) -> Vec<ResolvedSection> {
     let mut sections = Vec::new();
     let mut current_blocks = Vec::new();
     let mut prev_headers: HeaderFooterSet<Vec<Block>> = HeaderFooterSet::default();
     let mut prev_footers: HeaderFooterSet<Vec<Block>> = HeaderFooterSet::default();
 
-    for block in &doc.body {
+    for block in body {
         match block {
             Block::SectionBreak(props) => {
-                let headers = resolve_set(&props.header_refs, &doc.headers, &prev_headers);
-                let footers = resolve_set(&props.footer_refs, &doc.footers, &prev_footers);
+                let headers = resolve_set(&props.header_refs, header_parts, &prev_headers);
+                let footers = resolve_set(&props.footer_refs, footer_parts, &prev_footers);
                 prev_headers = headers.clone();
                 prev_footers = footers.clone();
                 sections.push(ResolvedSection {
                     blocks: std::mem::take(&mut current_blocks),
                     headers,
                     footers,
-                    properties: *props.clone(),
+                    properties: *props,
                 });
             }
             other => {
-                current_blocks.push(other.clone());
+                current_blocks.push(other);
             }
         }
     }
 
-    let headers = resolve_set(&doc.final_section.header_refs, &doc.headers, &prev_headers);
-    let footers = resolve_set(&doc.final_section.footer_refs, &doc.footers, &prev_footers);
+    let headers = resolve_set(&final_section.header_refs, header_parts, &prev_headers);
+    let footers = resolve_set(&final_section.footer_refs, footer_parts, &prev_footers);
     sections.push(ResolvedSection {
         blocks: current_blocks,
         headers,
         footers,
-        properties: doc.final_section.clone(),
+        properties: final_section,
     });
 
     sections
@@ -124,10 +136,16 @@ mod tests {
         }))
     }
 
+    /// How `resolve` calls this: the body and final section move out of the
+    /// document, the two part maps stay behind it.
+    fn sections_of(doc: Document) -> Vec<ResolvedSection> {
+        resolve_sections(doc.body, doc.final_section, &doc.headers, &doc.footers)
+    }
+
     #[test]
     fn empty_body_produces_one_section() {
         let doc = empty_doc();
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         assert_eq!(sections.len(), 1);
         assert!(sections[0].blocks.is_empty());
     }
@@ -136,7 +154,7 @@ mod tests {
     fn no_section_breaks_all_blocks_in_final_section() {
         let mut doc = empty_doc();
         doc.body = vec![para("a"), para("b"), para("c")];
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
 
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].blocks.len(), 3);
@@ -155,7 +173,7 @@ mod tests {
             para("after"),
         ];
 
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].blocks.len(), 1, "first section has 'before'");
         assert_eq!(sections[1].blocks.len(), 1, "second section has 'after'");
@@ -180,7 +198,7 @@ mod tests {
         };
         doc.body = vec![para("body")];
 
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         assert_eq!(sections.len(), 1);
         assert!(sections[0].headers.default.is_some());
         assert_eq!(sections[0].headers.default.as_ref().unwrap().len(), 1);
@@ -201,7 +219,7 @@ mod tests {
         };
         doc.body = vec![para("body")];
 
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         assert!(sections[0].footers.default.is_some());
     }
 
@@ -217,7 +235,7 @@ mod tests {
         };
         doc.body = vec![para("body")];
 
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         assert!(sections[0].headers.default.is_none());
     }
 
@@ -243,7 +261,7 @@ mod tests {
             ..Default::default()
         };
 
-        let s = &resolve_sections(&doc)[0];
+        let s = &sections_of(doc)[0];
         assert!(s.headers.default.is_some());
         assert!(s.headers.first.is_some());
         assert!(s.headers.even.is_some());
@@ -264,7 +282,7 @@ mod tests {
             ..Default::default()
         };
 
-        let s = &resolve_sections(&doc)[0];
+        let s = &sections_of(doc)[0];
         assert!(s.headers.default.is_some());
         assert!(s.headers.first.is_none());
         assert!(s.headers.even.is_none());
@@ -309,7 +327,7 @@ mod tests {
             para("section 2 body"),
         ];
 
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         let s2 = &sections[1];
         assert_eq!(
             s2.headers.default.as_ref().map(|b| b.len()),
@@ -363,7 +381,7 @@ mod tests {
             para("S3"),
         ];
 
-        let sections = resolve_sections(&doc);
+        let sections = sections_of(doc);
         assert_eq!(sections.len(), 3);
         let s3 = &sections[2];
         assert!(s3.headers.default.is_none());
@@ -397,7 +415,7 @@ mod tests {
             para("S2"),
         ];
 
-        let s2 = &resolve_sections(&doc)[1];
+        let s2 = &sections_of(doc)[1];
         assert!(s2.footers.default.is_some(), "S2 inherits default footer");
         assert!(s2.footers.first.is_some(), "S2 inherits first footer");
         assert!(s2.footers.even.is_none());

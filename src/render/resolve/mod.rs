@@ -14,12 +14,11 @@ pub mod shape_visuals;
 pub mod styles;
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::model::dimension::{Dimension, Twips};
 use crate::model::{
-    Block, Document, NoteId, NumId, NumPicBullet, NumPicBulletId, ParagraphProperties, RelId,
-    RunProperties, StyleId, Theme,
+    Block, Document, EmbeddedFont, NoteId, NumId, NumPicBullet, NumPicBulletId,
+    ParagraphProperties, RelId, RunProperties, StyleId, Theme,
 };
 
 use self::images::MediaEntry;
@@ -42,6 +41,10 @@ pub struct ResolvedDocument {
     pub font_families: Vec<String>,
     /// Embedded media (images) — shared bytes with detected format, keyed by relationship ID.
     pub media: HashMap<RelId, MediaEntry>,
+    /// §17.8.3: embedded fonts, carried through so the font registry can be
+    /// built from the resolved document alone. They belong here rather than
+    /// being read back off the `Document` because [`resolve`] consumes it.
+    pub embedded_fonts: Vec<EmbeddedFont>,
     /// §17.9.21: picture bullet definitions keyed by numPicBulletId.
     pub pic_bullets: HashMap<NumPicBulletId, NumPicBullet>,
     /// Theme (for color resolution during paint).
@@ -68,13 +71,22 @@ pub struct ResolvedDocument {
 }
 
 /// Transform a raw parsed Document into a layout-ready ResolvedDocument.
-pub fn resolve(doc: &Document) -> ResolvedDocument {
+///
+/// Takes the document **by value**. Resolve is the parse output's last reader —
+/// nothing downstream can reach a `Document` — so every part it carries forward
+/// unchanged (body blocks, note bodies, theme, picture bullets, embedded fonts,
+/// media handles) is *moved*. Borrowing instead forced a deep clone of the
+/// entire block tree plus a second copy of every image, which on a large or
+/// image-heavy document was the largest allocation in the pipeline outside
+/// paint.
+///
+/// The two derived maps — resolved styles and flattened numbering — still read
+/// their sources by reference, because each produces a new value rather than
+/// re-homing the old one.
+pub fn resolve(doc: Document) -> ResolvedDocument {
     use crate::model::StyleType;
 
-    let styles = styles::resolve_styles(&doc.styles, doc.theme.as_ref());
-    let numbering = numbering::resolve_numbering(&doc.numbering);
-    let sections = sections::resolve_sections(doc);
-    let font_families = fonts::collect_font_families(doc);
+    let font_families = fonts::collect_font_families(&doc);
 
     // §17.7.4.17: find the default paragraph style.
     let default_paragraph_style_id = doc
@@ -84,33 +96,47 @@ pub fn resolve(doc: &Document) -> ResolvedDocument {
         .find(|(_, s)| s.is_default && s.style_type == StyleType::Paragraph)
         .map(|(id, _)| id.clone());
 
-    ResolvedDocument {
-        sections,
+    // Destructured rather than field-by-field so that adding a field to
+    // `Document` breaks this build: an unhandled part is a silently dropped
+    // one.
+    let Document {
+        settings,
+        theme,
         styles,
         numbering,
+        body,
+        final_section,
+        headers,
+        footers,
+        footnotes,
+        endnotes,
+        media,
+        embedded_fonts,
+    } = doc;
+
+    let resolved_styles = styles::resolve_styles(&styles, theme.as_ref());
+    let resolved_numbering = numbering::resolve_numbering(&numbering);
+    let sections = sections::resolve_sections(body, final_section, &headers, &footers);
+
+    ResolvedDocument {
+        sections,
+        styles: resolved_styles,
+        numbering: resolved_numbering,
         font_families,
-        media: doc
-            .media
-            .iter()
-            .map(|(k, (bytes, fmt))| {
-                (
-                    k.clone(),
-                    MediaEntry {
-                        data: Rc::from(bytes.as_slice()),
-                        format: *fmt,
-                    },
-                )
-            })
+        media: media
+            .into_iter()
+            .map(|(id, (data, format))| (id, MediaEntry { data, format }))
             .collect(),
-        pic_bullets: doc.numbering.pic_bullets.clone(),
-        doc_defaults_paragraph: doc.styles.doc_defaults_paragraph.clone(),
-        doc_defaults_run: doc.styles.doc_defaults_run.clone(),
+        pic_bullets: numbering.pic_bullets,
+        doc_defaults_paragraph: styles.doc_defaults_paragraph,
+        doc_defaults_run: styles.doc_defaults_run,
         default_paragraph_style_id,
-        theme: doc.theme.clone(),
-        footnotes: doc.footnotes.clone(),
-        endnotes: doc.endnotes.clone(),
-        even_and_odd_headers: doc.settings.even_and_odd_headers,
-        default_tab_stop: doc.settings.default_tab_stop,
+        theme,
+        footnotes,
+        endnotes,
+        embedded_fonts,
+        even_and_odd_headers: settings.even_and_odd_headers,
+        default_tab_stop: settings.default_tab_stop,
     }
 }
 
@@ -161,7 +187,7 @@ mod tests {
     #[test]
     fn resolve_empty_doc() {
         let doc = empty_doc();
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
 
         assert_eq!(resolved.sections.len(), 1);
         assert!(resolved.sections[0].blocks.is_empty());
@@ -177,7 +203,7 @@ mod tests {
         let mut doc = empty_doc();
         doc.body = vec![para("hello"), para("world")];
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         assert_eq!(resolved.sections.len(), 1);
         assert_eq!(resolved.sections[0].blocks.len(), 2);
     }
@@ -191,7 +217,7 @@ mod tests {
             para("second"),
         ];
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         assert_eq!(resolved.sections.len(), 2);
         assert_eq!(resolved.sections[0].blocks.len(), 1);
         assert_eq!(resolved.sections[1].blocks.len(), 1);
@@ -221,7 +247,7 @@ mod tests {
             },
         );
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         let normal = resolved.styles.get(&StyleId::new("Normal")).unwrap();
         assert_eq!(normal.paragraph.alignment, Some(Alignment::Start));
         assert_eq!(
@@ -236,7 +262,7 @@ mod tests {
         let mut doc = empty_doc();
         doc.body = vec![para("text")];
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         assert!(resolved.font_families.contains(&"TestFont".to_string()));
     }
 
@@ -268,7 +294,7 @@ mod tests {
             },
         );
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         let levels = resolved.numbering.get(&NumId::new(1)).unwrap();
         assert_eq!(levels.len(), 1);
         assert_eq!(levels[0].format, NumberFormat::Decimal);
@@ -280,14 +306,38 @@ mod tests {
         use crate::model::ImageFormat;
         doc.media.insert(
             RelId::new("rId1"),
-            (vec![0xFF, 0xD8, 0xFF], ImageFormat::Jpeg),
+            (
+                std::sync::Arc::from(&[0xFF_u8, 0xD8, 0xFF][..]),
+                ImageFormat::Jpeg,
+            ),
         );
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         assert!(resolved.media.contains_key(&RelId::new("rId1")));
         let entry = &resolved.media[&RelId::new("rId1")];
         assert_eq!(&*entry.data, &[0xFF_u8, 0xD8, 0xFF][..]);
         assert_eq!(entry.format, ImageFormat::Jpeg);
+    }
+
+    /// Media crosses the resolve boundary as a *handle*. Copying instead is
+    /// invisible in the rendered output — every assertion above still holds —
+    /// but it doubles the resident cost of every image, so nothing else can
+    /// catch a regression here.
+    #[test]
+    fn resolve_shares_media_bytes_rather_than_copying_them() {
+        use crate::model::ImageFormat;
+        use std::sync::Arc;
+
+        let bytes: Arc<[u8]> = Arc::from(&[0xFF_u8, 0xD8, 0xFF][..]);
+        let mut doc = empty_doc();
+        doc.media
+            .insert(RelId::new("rId1"), (Arc::clone(&bytes), ImageFormat::Jpeg));
+
+        let resolved = resolve(doc);
+        assert!(
+            Arc::ptr_eq(&resolved.media[&RelId::new("rId1")].data, &bytes),
+            "resolve must pass the parser's allocation through, not a copy of it",
+        );
     }
 
     #[test]
@@ -301,7 +351,7 @@ mod tests {
             ..Default::default()
         });
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         assert!(resolved.theme.is_some());
         assert_eq!(resolved.theme.unwrap().color_scheme.accent1, 0x4472C4);
     }
@@ -320,7 +370,7 @@ mod tests {
         };
         doc.body = vec![para("body")];
 
-        let resolved = resolve(&doc);
+        let resolved = resolve(doc);
         assert!(resolved.sections[0].headers.default.is_some());
     }
 }

@@ -144,7 +144,7 @@ mod tests {
     fn floating_image(wrap_mode: WrapMode, height: f32) -> FloatingImage {
         FloatingImage {
             image_data: MediaEntry {
-                data: Rc::from([]),
+                data: std::sync::Arc::from([]),
                 format: crate::model::ImageFormat::Png,
             },
             size: PtSize::new(Pt::new(80.0), Pt::new(height)),
@@ -3219,7 +3219,7 @@ mod tests {
             footnotes: vec![],
             floating_images: vec![FloatingImage {
                 image_data: crate::render::resolve::images::MediaEntry {
-                    data: std::rc::Rc::from(&[][..]),
+                    data: std::sync::Arc::from(&[][..]),
                     format: crate::model::ImageFormat::Png,
                 },
                 size: PtSize::new(Pt::new(fw), Pt::new(fh)),

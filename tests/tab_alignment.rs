@@ -87,7 +87,7 @@ fn decimal_stop_aligns_separators_across_paragraphs() {
     // the stop — so a column of figures aligns on its decimal points.
     let bytes = make_docx(&decimal_tab_document(&["1.5", "22.75", "333.125"]));
     let doc = dxpdf::docx::parse(&bytes).expect("fixture parses");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     let texts = xs_of_texts(&pages);
     assert_eq!(texts.len(), 3, "one text command per entry: {texts:?}");
@@ -114,7 +114,7 @@ fn decimal_stop_right_aligns_an_entry_with_no_separator() {
     // left-aligning it, so a whole number stays flush with the column.
     let bytes = make_docx(&decimal_tab_document(&["1234", "1.5"]));
     let doc = dxpdf::docx::parse(&bytes).expect("fixture parses");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     let texts = xs_of_texts(&pages);
     assert_eq!(texts.len(), 2, "{texts:?}");
@@ -167,7 +167,7 @@ fn a_ptab_anchor_behind_the_pen_advances_to_the_next_line() {
     // than clamping — which drew the trailing run past the right margin.
     let bytes = make_docx(&two_ptab_document("L", &"m".repeat(34), &"m".repeat(19)));
     let doc = dxpdf::docx::parse(&bytes).expect("fixture parses");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     let placed: Vec<(String, f32, f32)> = pages
         .iter()

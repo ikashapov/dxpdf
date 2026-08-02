@@ -63,7 +63,7 @@ fn count_emoji_commands(commands: &[DrawCommand]) -> usize {
 #[test]
 fn e1_digits_are_not_rasterized() {
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     assert!(!pages.is_empty(), "fixture must produce at least one page");
 
     let all_commands: Vec<&DrawCommand> = pages.iter().flat_map(|p| p.commands.iter()).collect();
@@ -109,7 +109,7 @@ fn e2_real_emojis_reach_rasterizer() {
         return;
     }
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     let n_emoji: usize = pages
         .iter()
@@ -156,7 +156,7 @@ fn e3_emoji_command_rects_are_non_degenerate() {
         return;
     }
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     let mut checked = 0;
     for cmd in pages.iter().flat_map(|p| p.commands.iter()) {
         if let DrawCommand::EmojiCluster { rect, text, .. } = cmd {
@@ -193,7 +193,7 @@ fn e4_full_pdf_round_trip() {
     let font_mgr = skia_safe::FontMgr::new();
     let doc = parse_fixture();
     let pdf_bytes =
-        dxpdf::render::render_with_font_mgr(&doc, &font_mgr, &dxpdf::RenderOptions::default())
+        dxpdf::render::render_with_font_mgr(doc, &font_mgr, &dxpdf::RenderOptions::default())
             .expect("render must succeed for fixture");
 
     let parsed =
@@ -234,7 +234,7 @@ fn e4_full_pdf_round_trip() {
 #[test]
 fn e5_emoji_paragraph_prefix_intact() {
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     let all_commands: Vec<&DrawCommand> = pages.iter().flat_map(|p| p.commands.iter()).collect();
     let text_spans: Vec<String> = all_commands
         .iter()
@@ -261,7 +261,7 @@ fn e5_emoji_paragraph_prefix_intact() {
 #[test]
 fn underline_explicit_none_emits_no_underline_commands() {
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     let underline_count: usize = pages
         .iter()
         .flat_map(|p| p.commands.iter())
@@ -288,7 +288,7 @@ fn e_keycap_1_reassembles_into_one_emoji_command() {
         return;
     }
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     let mut saw_keycap = false;
     for cmd in pages.iter().flat_map(|p| p.commands.iter()) {
@@ -316,7 +316,7 @@ fn e_keycap_2_no_constituent_text_remains() {
         return;
     }
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
     for cmd in pages.iter().flat_map(|p| p.commands.iter()) {
         if let DrawCommand::Text { text, .. } = cmd {
@@ -349,7 +349,7 @@ fn e_keycap_3_pdf_image_count() {
     let font_mgr = skia_safe::FontMgr::new();
     let doc = parse_fixture();
     let pdf_bytes =
-        dxpdf::render::render_with_font_mgr(&doc, &font_mgr, &dxpdf::RenderOptions::default())
+        dxpdf::render::render_with_font_mgr(doc, &font_mgr, &dxpdf::RenderOptions::default())
             .expect("render");
 
     let parsed = lopdf::Document::load_mem(&pdf_bytes).expect("load_mem");
@@ -384,7 +384,7 @@ fn e_keycap_3_pdf_image_count() {
 #[test]
 fn explicit_nil_borders_emit_no_line_commands() {
     let doc = parse_fixture();
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     let line_count: usize = pages
         .iter()
         .flat_map(|p| p.commands.iter())

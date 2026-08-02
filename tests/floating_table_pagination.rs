@@ -88,7 +88,7 @@ fn floating_table_docx(rows: usize, overlap: &str) -> Vec<u8> {
 
 fn layout_page_count(bytes: &[u8]) -> usize {
     let doc = dxpdf::docx::parse(bytes).expect("parse");
-    let (_, pages) = dxpdf::render::resolve_and_layout(&doc);
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
     pages.len()
 }
 

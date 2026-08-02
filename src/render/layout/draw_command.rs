@@ -71,14 +71,19 @@ pub enum DrawCommand {
         rect: PtRect,
         color: RgbColor,
     },
+    /// One annotation rect per word of a `w:hyperlink`, so the target is
+    /// shared with the fragment it came from (see
+    /// [`LinkTarget`](crate::render::layout::fragment::LinkTarget)) rather
+    /// than copied per word.
     LinkAnnotation {
         rect: PtRect,
-        url: String,
+        url: Rc<str>,
     },
-    /// Internal link to a named destination (bookmark).
+    /// Internal link to a named destination (bookmark). Shared for the same
+    /// reason as [`DrawCommand::LinkAnnotation`]'s `url`.
     InternalLink {
         rect: PtRect,
-        destination: String,
+        destination: Rc<str>,
     },
     /// Named destination marker (bookmark target).
     NamedDestination {
@@ -203,7 +208,7 @@ pub enum ResolvedGradientKind {
 /// Painter-ready image fill — pointer to decoded bytes + source crop.
 #[derive(Clone, Debug)]
 pub struct ResolvedBlip {
-    pub data: Rc<[u8]>,
+    pub data: std::sync::Arc<[u8]>,
     pub format: crate::model::ImageFormat,
     /// Fraction of the source to crop: values in `[0, 1]` relative to the
     /// blip's natural extent. Derive this from the blip's `a:srcRect` via
@@ -444,7 +449,7 @@ mod tests {
                 DrawCommand::Image {
                     rect,
                     image_data: crate::render::resolve::images::MediaEntry {
-                        data: Rc::from(&[0u8][..]),
+                        data: std::sync::Arc::from(&[0u8][..]),
                         format: crate::model::ImageFormat::Png,
                     },
                     src_rect: None,

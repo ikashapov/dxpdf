@@ -321,6 +321,7 @@ mod tests {
             numbering: HashMap::new(),
             font_families: Vec::new(),
             media: HashMap::new(),
+            embedded_fonts: Vec::new(),
             pic_bullets: HashMap::new(),
             theme: None,
             doc_defaults_paragraph: model::ParagraphProperties::default(),

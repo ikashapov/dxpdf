@@ -1,7 +1,6 @@
 //! Paint phase — iterate DrawCommands and emit Skia PDF canvas operations.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use skia_safe::{
@@ -296,7 +295,7 @@ fn render_page(
                     // `srcRect` each cache their own bitmap.
                     let (target_w, target_h) = downsample_target(draw_rect, image_dpi);
                     let key = (
-                        Rc::as_ptr(&image_data.data),
+                        std::sync::Arc::as_ptr(&image_data.data),
                         target_w,
                         target_h,
                         crop.as_ref().map(quantize_crop),
@@ -1131,7 +1130,7 @@ mod tests {
         use crate::render::resolve::images::MediaEntry;
 
         let media = MediaEntry {
-            data: Rc::from(textured_png(1200).into_boxed_slice()),
+            data: std::sync::Arc::from(textured_png(1200).into_boxed_slice()),
             format: ImageFormat::Png,
         };
         let page = || LayoutedPage {
@@ -1166,7 +1165,7 @@ mod tests {
         use crate::render::resolve::images::MediaEntry;
 
         let media = MediaEntry {
-            data: Rc::from(textured_png(1200).into_boxed_slice()),
+            data: std::sync::Arc::from(textured_png(1200).into_boxed_slice()),
             format: ImageFormat::Png,
         };
         let page = || LayoutedPage {

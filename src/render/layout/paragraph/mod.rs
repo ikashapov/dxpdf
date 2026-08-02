@@ -567,7 +567,7 @@ mod tests {
     fn hyperlink_frag(text: &str, width: f32, url: &str) -> Fragment {
         let mut fragment = text_frag(text, width);
         if let Fragment::Text { hyperlink_url, .. } = &mut fragment {
-            *hyperlink_url = Some(LinkTarget::External(url.to_string()));
+            *hyperlink_url = Some(LinkTarget::External(std::rc::Rc::from(url)));
         }
         fragment
     }
@@ -833,7 +833,9 @@ mod tests {
             .commands
             .iter()
             .find_map(|command| match command {
-                DrawCommand::LinkAnnotation { rect, url } if url == "https://example.invalid" => {
+                DrawCommand::LinkAnnotation { rect, url }
+                    if &**url == "https://example.invalid" =>
+                {
                     Some(*rect)
                 }
                 _ => None,
@@ -863,7 +865,7 @@ mod tests {
         assert!(
             result.commands.iter().any(|c| matches!(
                 c,
-                DrawCommand::LinkAnnotation { url, .. } if url == "file://server/report.docx"
+                DrawCommand::LinkAnnotation { url, .. } if &**url == "file://server/report.docx"
             )),
             "file:// external link must be a URI annotation"
         );
@@ -892,7 +894,7 @@ mod tests {
         assert!(
             result.commands.iter().any(|c| matches!(
                 c,
-                DrawCommand::InternalLink { destination, .. } if destination == "_Toc123"
+                DrawCommand::InternalLink { destination, .. } if &**destination == "_Toc123"
             )),
             "internal bookmark link must be a GoTo destination"
         );
@@ -971,7 +973,7 @@ mod tests {
             .iter()
             .find_map(|command| match command {
                 DrawCommand::LinkAnnotation { rect, url }
-                    if url == "https://example.invalid/distributed" =>
+                    if &**url == "https://example.invalid/distributed" =>
                 {
                     Some(*rect)
                 }
@@ -1285,7 +1287,7 @@ mod tests {
             .iter()
             .find_map(|command| match command {
                 DrawCommand::LinkAnnotation { rect, url }
-                    if url == "https://example.invalid/stretched" =>
+                    if &**url == "https://example.invalid/stretched" =>
                 {
                     Some(*rect)
                 }

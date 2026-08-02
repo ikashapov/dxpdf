@@ -55,7 +55,7 @@ fn doc(body: &str) -> Vec<u8> {
 
 fn layout(bytes: &[u8]) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
     let parsed = dxpdf::docx::parse(bytes).expect("parse");
-    dxpdf::render::resolve_and_layout(&parsed).1
+    dxpdf::render::resolve_and_layout(parsed).1
 }
 
 /// y of the first text command whose content equals `needle`.

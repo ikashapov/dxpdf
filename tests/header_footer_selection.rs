@@ -100,7 +100,7 @@ fn title_page_uses_first_header_on_page_one_default_after() {
     };
     doc.body = vec![para("body p1"), para_after_page_break("body p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert_eq!(pages.len(), 2, "expected 2 pages, got {}", pages.len());
 
     let p1 = page_text(&pages[0]);
@@ -146,7 +146,7 @@ fn title_page_without_first_slot_blanks_page_one() {
     };
     doc.body = vec![para("body p1"), para_after_page_break("body p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     let p1 = page_text(&pages[0]);
     assert!(
         !p1.contains("DEFAULT_HEADER_TEXT"),
@@ -181,7 +181,7 @@ fn title_page_flag_off_keeps_default_on_page_one() {
     };
     doc.body = vec![para("body p1"), para_after_page_break("body p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     for (i, page) in pages.iter().enumerate() {
         let t = page_text(page);
         assert!(
@@ -222,7 +222,7 @@ fn even_and_odd_alternates_headers_across_three_pages() {
         para_after_page_break("p3"),
     ];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert_eq!(pages.len(), 3);
 
     let p1 = page_text(&pages[0]);
@@ -268,7 +268,7 @@ fn even_and_odd_disabled_keeps_default_on_every_page() {
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     for (i, page) in pages.iter().enumerate() {
         let t = page_text(page);
         assert!(
@@ -302,7 +302,7 @@ fn even_and_odd_with_no_even_slot_blanks_even_pages() {
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     let p1 = page_text(&pages[0]);
     assert!(p1.contains("ODD_HEADER"));
     let p2 = page_text(&pages[1]);
@@ -342,7 +342,7 @@ fn title_page_takes_precedence_over_even_and_odd_on_page_one() {
         para_after_page_break("p3"),
     ];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert_eq!(pages.len(), 3);
 
     let p1 = page_text(&pages[0]);
@@ -401,7 +401,7 @@ fn pg_num_type_start_two_makes_first_page_even_for_selection() {
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert_eq!(pages.len(), 2);
     let p1 = page_text(&pages[0]);
     assert!(
@@ -456,7 +456,7 @@ fn pg_num_type_start_renders_in_page_field_in_header() {
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     let p1 = page_text(&pages[0]);
     let p2 = page_text(&pages[1]);
     assert!(
@@ -509,7 +509,7 @@ fn pg_num_type_continues_across_sections_without_start() {
         para_after_page_break("S2 p2"),
     ];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert_eq!(pages.len(), 3, "expected 3 pages, got {}", pages.len());
     assert!(page_text(&pages[0]).contains("ODD"), "logical 1 → odd");
     assert!(
@@ -563,7 +563,7 @@ fn pg_num_type_start_resets_on_second_section() {
         para("S2 p1"),
     ];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert_eq!(pages.len(), 2);
     let p1 = page_text(&pages[0]);
     assert!(
@@ -599,7 +599,7 @@ fn vorlage_baustellenkoordinator_v12_page_one_header_is_blank() {
     }
     let bytes = std::fs::read(path).expect("read fixture");
     let doc = dxpdf::docx::parse(&bytes).expect("parse fixture");
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     assert!(
         pages.len() >= 2,
         "expected at least 2 pages, got {}",
@@ -710,7 +710,7 @@ fn footer_selection_follows_same_rules_as_header() {
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
 
-    let (_, pages) = resolve_and_layout(&doc);
+    let (_, pages) = resolve_and_layout(doc);
     let p1 = page_text(&pages[0]);
     assert!(p1.contains("FIRST_FOOTER"), "page 1 footer; got {p1:?}");
     assert!(!p1.contains("DEFAULT_FOOTER"));

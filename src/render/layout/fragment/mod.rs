@@ -107,12 +107,18 @@ pub struct FragmentBorder {
 /// closed ADT so the emitter routes each to the right PDF annotation
 /// (external → URI action, internal → GoTo a named destination) instead of
 /// re-deriving it from a URL-scheme string check.
+///
+/// The string is shared, for the same reason [`Fragment::Text`]'s `text` and
+/// `font` are: a `w:hyperlink` fragments into one `Fragment::Text` per *word*,
+/// each of which then emits its own annotation command. Owning the target
+/// would copy the URL once per word and again per command; sharing it copies
+/// once per link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkTarget {
     /// A resolved external URI (`http:`, `mailto:`, `file:`, …).
-    External(String),
+    External(Rc<str>),
     /// An internal bookmark name (`w:hyperlink/@w:anchor`).
-    Internal(String),
+    Internal(Rc<str>),
 }
 
 /// A measured fragment — the atomic unit for line fitting.
