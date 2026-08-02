@@ -64,61 +64,7 @@ pub(super) enum ShapeAnchorClass {
 ///
 /// Positions are resolved in the coordinate system implied by `frame`
 /// (see [`AnchorFrame`]).
-/// MCE §M.1.2: the branch of an `<mc:AlternateContent>` this renderer selects.
-///
-/// Exactly one branch is live. A consumer takes the first `<mc:Choice>` whose
-/// requirements it can meet and otherwise the `<mc:Fallback>`; it never takes
-/// both, because both describe the *same* object — the Choice in DrawingML,
-/// the Fallback in VML for clients that predate it.
-enum McBranch<'a> {
-    /// The `<mc:Choice>` elements, in document order.
-    Choices(&'a [crate::model::McChoice]),
-    /// The `<mc:Fallback>`, reached only when no Choice carries anything we
-    /// can draw.
-    Fallback(&'a [crate::model::Inline]),
-    /// Choices we cannot draw, and no Fallback to fall back to.
-    Neither,
-}
-
-/// Pick the live branch of `ac`.
-///
-/// The test is **content-based**, not a `Requires` namespace check: a Choice
-/// may declare a namespace we nominally support and still hold nothing this
-/// renderer turns into geometry, and the honest question is whether we will
-/// actually draw it. `choices_render_wps_shape` asks a narrower version of the
-/// same question for the fallback-suppression decisions in `fragment::collect`
-/// and `find_vml_absolute_position`; here the anchor is what matters, whether
-/// its graphic is a shape or a picture.
-///
-/// Both DrawingML anchor walkers go through this. They are two halves of one
-/// extraction split by graphic type, so a branch selected by one and not the
-/// other means the paragraph contains different objects depending on which you
-/// ask — which is how a Choice's shape and a Fallback's picture both ended up
-/// on the page.
-fn live_mc_branch(ac: &crate::model::AlternateContent) -> McBranch<'_> {
-    use crate::model::{ImagePlacement, Inline};
-
-    fn draws_an_anchor(inlines: &[Inline]) -> bool {
-        inlines.iter().any(|inline| match inline {
-            Inline::Image(img) => matches!(img.placement, ImagePlacement::Anchor(_)),
-            Inline::Hyperlink(link) => draws_an_anchor(&link.content),
-            Inline::Field(f) => draws_an_anchor(&f.content),
-            Inline::AlternateContent(inner) => {
-                matches!(live_mc_branch(inner), McBranch::Choices(_))
-            }
-            _ => false,
-        })
-    }
-
-    if ac.choices.iter().any(|c| draws_an_anchor(&c.content)) {
-        McBranch::Choices(&ac.choices)
-    } else {
-        match ac.fallback {
-            Some(ref fallback) => McBranch::Fallback(fallback),
-            None => McBranch::Neither,
-        }
-    }
-}
+use crate::render::layout::{live_mc_branch, McBranch};
 
 fn find_anchor_images<'a>(
     inlines: &'a [crate::model::Inline],
@@ -365,9 +311,8 @@ pub(super) fn extract_floating_shapes(
 /// Walk inlines for VML primitives that resolve to images
 /// (`<v:image>` or a `<v:shape type="#_x0000_t75">` whose only child
 /// is `<v:imagedata>`). Both forms reach this code path through
-/// `Inline::Pict.primitives`. AlternateContent fallbacks are skipped
-/// — DrawingML in the Choice wins, just like for VML rect (see
-/// `extract_vml_primitive_shapes`).
+/// `Inline::Pict.primitives`, including the `Inline::Pict` a live
+/// `<mc:Fallback>` carries — see [`live_mc_branch`].
 fn extract_vml_floating_images(
     inlines: &[crate::model::Inline],
     state: &BuildState,
@@ -387,7 +332,22 @@ fn extract_vml_floating_images(
                 extract_vml_floating_images(&link.content, state, frame, ctx, out)
             }
             Inline::Field(f) => extract_vml_floating_images(&f.content, state, frame, ctx, out),
-            Inline::AlternateContent(_) => {}
+            // §M.1.2: exactly one branch is live and [`live_mc_branch`] is the
+            // only thing that decides which. This arm used to be `{}` — a
+            // third answer, given by not answering — so a Choice we could not
+            // draw plus a Fallback holding a VML image left the anchor with no
+            // geometry at all while its text still reached the page.
+            Inline::AlternateContent(ac) => match live_mc_branch(ac) {
+                McBranch::Choices(choices) => {
+                    for choice in choices {
+                        extract_vml_floating_images(&choice.content, state, frame, ctx, out);
+                    }
+                }
+                McBranch::Fallback(fallback) => {
+                    extract_vml_floating_images(fallback, state, frame, ctx, out)
+                }
+                McBranch::Neither => {}
+            },
             _ => {}
         }
     }
@@ -482,17 +442,25 @@ fn extract_vml_primitive_shapes(
                 extract_vml_primitive_shapes(&link.content, state, frame, out)
             }
             Inline::Field(f) => extract_vml_primitive_shapes(&f.content, state, frame, out),
-            // §M.1.2: `<mc:AlternateContent>` carries the same shape
-            // twice — modern DrawingML in `<mc:Choice>` and a VML
-            // fallback in `<mc:Fallback>` — for older clients. As a
-            // modern renderer we honor the Choice (the DrawingML
-            // walker `find_anchor_shapes` already extracts it
-            // alongside us in `extract_floating_shapes`) and skip the
-            // Fallback. Walking it would emit a duplicate shape for
-            // the same logical rectangle. If a future case needs the
-            // Fallback (e.g. Choice that fails our `Requires`
-            // namespace test), we can add a Choice-fed signal here.
-            Inline::AlternateContent(_) => {}
+            // §M.1.2: `<mc:AlternateContent>` carries the same shape twice —
+            // modern DrawingML in `<mc:Choice>`, a VML fallback in
+            // `<mc:Fallback>` — so drawing both emits one rectangle twice.
+            // Skipping the element outright avoided that and created the
+            // opposite bug: a Choice we cannot draw left the Fallback's rect
+            // unrendered, which is the "future case" the note here used to
+            // anticipate. [`live_mc_branch`] is now that Choice-fed signal,
+            // and the same one `find_anchor_shapes` asks.
+            Inline::AlternateContent(ac) => match live_mc_branch(ac) {
+                McBranch::Choices(choices) => {
+                    for choice in choices {
+                        extract_vml_primitive_shapes(&choice.content, state, frame, out);
+                    }
+                }
+                McBranch::Fallback(fallback) => {
+                    extract_vml_primitive_shapes(fallback, state, frame, out)
+                }
+                McBranch::Neither => {}
+            },
             _ => {}
         }
     }
@@ -1064,23 +1032,18 @@ fn resolve_anchor_y(
 pub(super) fn find_vml_absolute_position(inline: &model::Inline) -> Option<(Pt, Pt)> {
     match inline {
         model::Inline::Pict(pict) => find_vml_pos_in_pict(pict),
-        model::Inline::AlternateContent(ac) => {
-            // Only the VML fallback carries an absolute position, and it is
-            // meaningful only when we actually render that fallback. When the
-            // Choice is a DrawingML shape we render instead, ignore the
-            // fallback so its position doesn't become the header's origin.
-            if crate::render::layout::choices_render_wps_shape(&ac.choices) {
-                return None;
+        // Only the VML fallback carries an absolute position, and it is
+        // meaningful only when the fallback is the branch we render. A
+        // drawable Choice makes it inert, and consuming it anyway turns the
+        // fallback's origin into the header's and pushes paragraph-anchored
+        // content off-page.
+        model::Inline::AlternateContent(ac) => match crate::render::layout::live_mc_branch(ac) {
+            crate::render::layout::McBranch::Fallback(fallback) => {
+                fallback.iter().find_map(find_vml_absolute_position)
             }
-            if let Some(ref fallback) = ac.fallback {
-                for inner in fallback {
-                    if let Some(pos) = find_vml_absolute_position(inner) {
-                        return Some(pos);
-                    }
-                }
-            }
-            None
-        }
+            crate::render::layout::McBranch::Choices(_)
+            | crate::render::layout::McBranch::Neither => None,
+        },
         _ => None,
     }
 }
@@ -1420,7 +1383,7 @@ mod tests {
         GraphicContent, Image, ImagePlacement, Inline, McChoice, McRequires, TextWrap,
         WordProcessingShape,
     };
-    use crate::render::layout::choices_render_wps_shape;
+    use crate::render::layout::{live_mc_branch, McBranch};
 
     /// A minimally-populated anchored `wps:wsp` shape (as `Inline::Image`).
     fn anchored_wps_image() -> Image {
@@ -1485,25 +1448,64 @@ mod tests {
     }
 
     #[test]
-    fn choices_render_wps_shape_detects_anchored_shape() {
-        assert!(choices_render_wps_shape(&ac_with_wps_choice().choices));
+    fn an_anchored_shape_in_a_choice_makes_that_choice_live() {
+        assert!(matches!(
+            live_mc_branch(&ac_with_wps_choice()),
+            McBranch::Choices(_)
+        ));
+    }
+
+    /// A Choice whose `Requires` we meet but whose content yields no anchored
+    /// object is not drawable. Liveness is a question about content: widening
+    /// it to a namespace check would light up this Choice and strand a
+    /// Fallback that is the only branch with anything to draw.
+    #[test]
+    fn a_choice_with_nothing_anchored_yields_to_the_fallback() {
+        let ac = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wps],
+                content: vec![Inline::InstrText(String::new())],
+            }],
+            fallback: Some(vec![Inline::InstrText(String::new())]),
+        };
+        assert!(matches!(live_mc_branch(&ac), McBranch::Fallback(_)));
     }
 
     #[test]
-    fn choices_render_wps_shape_false_without_shape() {
-        let choices = vec![McChoice {
-            requires: vec![McRequires::Wps],
-            content: vec![Inline::InstrText(String::new())],
-        }];
-        assert!(!choices_render_wps_shape(&choices));
+    fn no_drawable_choice_and_no_fallback_is_neither() {
+        let ac = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wps],
+                content: vec![Inline::InstrText(String::new())],
+            }],
+            fallback: None,
+        };
+        assert!(matches!(live_mc_branch(&ac), McBranch::Neither));
     }
 
-    /// The shared gate must see through a nested `mc:AlternateContent` so it
-    /// agrees with `extract_floating_shapes` (which recurses) about whether a
-    /// wps shape is rendered — otherwise the fallback would still be consulted
-    /// and its position could hijack the header origin.
+    /// An anchored *picture* is as live as an anchored shape. The suppression
+    /// sites used to ask a narrower question — "does a Choice hold a `wps:wsp`
+    /// shape?" — so a picture Choice was drawn as a float while its Fallback's
+    /// text was *also* collected inline: two branches of one element on one
+    /// page, which §M.1.2 does not allow.
     #[test]
-    fn choices_render_wps_shape_recurses_into_nested_alternate_content() {
+    fn an_anchored_picture_in_a_choice_is_just_as_live_as_a_shape() {
+        let ac = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wpg],
+                content: vec![Inline::Image(Box::new(anchored_picture()))],
+            }],
+            fallback: Some(vec![Inline::InstrText(String::new())]),
+        };
+        assert!(matches!(live_mc_branch(&ac), McBranch::Choices(_)));
+    }
+
+    /// §M.1.2's content model for a branch is `drawing | pict`, so this shape
+    /// cannot come from a document — but the recursion has to be right anyway,
+    /// because every walker reads the same answer and an outer element that
+    /// disagreed with its inner one would put the two on different branches.
+    #[test]
+    fn a_nested_alternate_content_resolves_innermost_first() {
         let nested = AlternateContent {
             choices: vec![McChoice {
                 requires: vec![McRequires::Wps],
@@ -1511,20 +1513,103 @@ mod tests {
             }],
             fallback: None,
         };
-        let outer = vec![McChoice {
-            requires: vec![McRequires::Wps],
-            content: vec![Inline::AlternateContent(nested)],
-        }];
-        assert!(choices_render_wps_shape(&outer));
+        let outer = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wps],
+                content: vec![Inline::AlternateContent(nested)],
+            }],
+            fallback: Some(vec![Inline::InstrText(String::new())]),
+        };
+        assert!(matches!(live_mc_branch(&outer), McBranch::Choices(_)));
+    }
+
+    /// …and the converse: an inner element that draws nothing leaves the outer
+    /// Choice undrawable, so the outer Fallback goes live.
+    #[test]
+    fn a_nested_alternate_content_that_draws_nothing_frees_the_outer_fallback() {
+        let nested = AlternateContent {
+            choices: vec![],
+            fallback: Some(vec![Inline::InstrText(String::new())]),
+        };
+        let outer = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wps],
+                content: vec![Inline::AlternateContent(nested)],
+            }],
+            fallback: Some(vec![Inline::InstrText(String::new())]),
+        };
+        assert!(matches!(live_mc_branch(&outer), McBranch::Fallback(_)));
+    }
+
+    /// A `<w:pict>` holding one absolutely-positioned VML text box at
+    /// (100pt, 40pt) — a position `find_vml_absolute_position` will find, so a
+    /// test that expects `None` fails for the right reason rather than because
+    /// there was nothing to find.
+    fn positioned_vml_text_box() -> Inline {
+        use crate::model::{
+            CssPosition, Pict, VmlCommonAttrs, VmlLength, VmlLengthUnit, VmlPrimitive, VmlShape,
+            VmlStyle, VmlTextBox,
+        };
+
+        let pt = |value| {
+            Some(VmlLength {
+                value,
+                unit: VmlLengthUnit::Pt,
+            })
+        };
+        Inline::Pict(Pict {
+            shape_type: None,
+            primitives: vec![VmlPrimitive::Shape(VmlShape {
+                common: VmlCommonAttrs {
+                    style: VmlStyle {
+                        position: Some(CssPosition::Absolute),
+                        margin_left: pt(100.0),
+                        margin_top: pt(40.0),
+                        ..VmlStyle::default()
+                    },
+                    text_box: Some(VmlTextBox {
+                        style: VmlStyle::default(),
+                        inset: None,
+                        content: vec![],
+                    }),
+                    ..VmlCommonAttrs::default()
+                },
+                shape_type_ref: None,
+                vml_path: None,
+            })],
+        })
+    }
+
+    /// The probe finds a position when the pict is what the paragraph holds —
+    /// the precondition every suppression assertion below rests on.
+    #[test]
+    fn a_positioned_vml_text_box_has_an_absolute_position() {
+        assert!(find_vml_absolute_position(&positioned_vml_text_box()).is_some());
     }
 
     /// Regression: when the Choice is a DrawingML shape we render, the VML
     /// fallback's absolute position must be ignored — otherwise it hijacks
     /// the header origin and pushes paragraph-anchored content off-page.
     #[test]
-    fn wps_choice_suppresses_fallback_absolute_position() {
-        let inline = Inline::AlternateContent(ac_with_wps_choice());
-        assert!(find_vml_absolute_position(&inline).is_none());
+    fn a_drawable_choice_suppresses_its_fallbacks_absolute_position() {
+        let mut ac = ac_with_wps_choice();
+        ac.fallback = Some(vec![positioned_vml_text_box()]);
+        assert!(find_vml_absolute_position(&Inline::AlternateContent(ac)).is_none());
+    }
+
+    /// …and when no Choice is drawable the fallback *is* the document, so its
+    /// position is the one to use. Suppressing here would leave a legacy
+    /// VML-only header with no origin at all.
+    #[test]
+    fn a_live_fallbacks_absolute_position_is_the_one_that_counts() {
+        let ac = AlternateContent {
+            choices: vec![McChoice {
+                requires: vec![McRequires::Wps],
+                content: vec![Inline::InstrText(String::new())],
+            }],
+            fallback: Some(vec![positioned_vml_text_box()]),
+        };
+        assert!(find_vml_absolute_position(&Inline::AlternateContent(ac)).is_some());
     }
 
     // ── §20.4.2.10 vertical anchor resolution ────────────────────────────
