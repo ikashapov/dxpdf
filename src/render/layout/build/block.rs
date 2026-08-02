@@ -206,6 +206,7 @@ pub(super) fn build_paragraph_block(
         &merged_props,
         Pt::from(ctx.resolved.default_tab_stop),
         state.shape_auto_fit,
+        super::convert::paragraph_locale(p, ctx.resolved),
     );
     style.style_id = p.style_id.clone();
 
@@ -328,6 +329,7 @@ pub(super) fn build_note_content(
                 &merged_props,
                 Pt::from(ctx.resolved.default_tab_stop),
                 state.shape_auto_fit,
+                super::convert::paragraph_locale(p, ctx.resolved),
             );
             results.push((display_num.to_string(), frags, style));
         }

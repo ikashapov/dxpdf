@@ -104,6 +104,49 @@ pub(super) fn resolve_paragraph_defaults(
     )
 }
 
+/// §17.3.2.20 / §17.7.2: the language in effect for a paragraph's own layout
+/// decisions.
+///
+/// The cascade is the paragraph **mark**'s `w:rPr`, then the paragraph style's
+/// run defaults, then `docDefaults` — the same order §17.7.2 resolves any other
+/// run property in, minus the runs themselves.
+///
+/// Leaving the runs out is deliberate, and is the one judgement call in
+/// threading locale. The decisions this answers belong to the *paragraph*: a
+/// §17.18.85 `decimal` stop is declared in `w:pPr/w:tabs`, and its zone may span
+/// several runs that each declare a different `w:lang` — there is no single
+/// run to ask. The paragraph mark is the nearest thing the file offers to
+/// "the language of this paragraph", and it is already what the §17.9.22 list
+/// label reads its formatting from, so the two agree.
+///
+/// Word itself is reported to take a decimal tab's separator from the host's
+/// regional settings rather than from the document at all, which a converter
+/// cannot reproduce and should not want to: the same file would render
+/// differently on two machines. This reading is deterministic and keyed to the
+/// document, and is recorded in `docs/position-tabs.md` as the assumption it
+/// is — it has not been checked against a Word render.
+pub(super) fn paragraph_locale(
+    para: &model::Paragraph,
+    resolved: &ResolvedDocument,
+) -> crate::render::resolve::locale::Locale {
+    let style_run = para
+        .style_id
+        .as_ref()
+        .or(resolved.default_paragraph_style_id.as_ref())
+        .and_then(|id| resolved.styles.get(id))
+        .map(|s| &s.run);
+
+    crate::render::resolve::locale::Locale::from_cascade(
+        [
+            para.mark_run_properties.as_ref(),
+            style_run,
+            Some(&resolved.doc_defaults_run),
+        ]
+        .into_iter()
+        .flatten(),
+    )
+}
+
 pub(super) fn doc_font_family(ctx: &BuildContext) -> String {
     ctx.resolved
         .theme
@@ -134,6 +177,7 @@ pub(super) fn paragraph_style_from_props(
     props: &model::ParagraphProperties,
     default_tab_stop: Pt,
     auto_fit: crate::render::layout::ShapeAutoFit,
+    locale: crate::render::resolve::locale::Locale,
 ) -> ParagraphStyle {
     let indent_left = props
         .indentation
@@ -210,6 +254,7 @@ pub(super) fn paragraph_style_from_props(
         line_spacing,
         tabs,
         default_tab_stop,
+        locale,
         drop_cap: None,
         borders: resolve_paragraph_borders(props),
         shading: props

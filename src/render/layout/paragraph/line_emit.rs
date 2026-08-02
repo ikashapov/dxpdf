@@ -593,8 +593,13 @@ pub(super) fn emit_line_commands(
                         // which point of that zone lands on the stop.
                         let end = zone_end(fragments, frag_idx, line.end);
                         let zone = &fragments[frag_idx + 1..end];
-                        let offset = resolve_zone_anchor(ts.alignment, zone, measure_text)
-                            .offset(|| zone_width(fragments, frag_idx + 1, end));
+                        let offset = resolve_zone_anchor(
+                            ts.alignment,
+                            zone,
+                            measure_text,
+                            style.locale.decimal_separator(),
+                        )
+                        .offset(|| zone_width(fragments, frag_idx + 1, end));
                         // Never move the pen backwards: a zone wider than the
                         // space before its stop overflows to the right rather
                         // than overprinting what precedes it.
@@ -854,16 +859,6 @@ pub fn resolve_ptab(
     }
 }
 
-/// §17.18.85 `decimal`: the character a decimal tab stop aligns on.
-///
-/// Word uses the decimal separator of the document's language — `,` across
-/// much of Europe — but no locale reaches layout today (the same gap that
-/// leaves §17.9 `ordinal`/`cardinalText` numbering English-only). Fixed to
-/// `.` until locale is threaded. A comma-decimal document falls through to
-/// the no-separator branch and right-aligns, which keeps a numeric column
-/// flush rather than aligning on the wrong character.
-const DECIMAL_TAB_SEPARATOR: char = '.';
-
 /// §17.18.85: which point of a tab's *zone* — the content from the tab to the
 /// next tab or the line end — lands on the stop.
 ///
@@ -997,6 +992,7 @@ fn resolve_zone_anchor(
     alignment: crate::model::TabAlignment,
     zone: &[Fragment],
     measure_text: MeasureTextFn<'_>,
+    separator: char,
 ) -> ZoneAnchor {
     use crate::model::TabAlignment;
     match alignment {
@@ -1005,7 +1001,7 @@ fn resolve_zone_anchor(
         TabAlignment::Left | TabAlignment::Clear => ZoneAnchor::Start,
         TabAlignment::Right => ZoneAnchor::End,
         TabAlignment::Center => ZoneAnchor::Middle,
-        TabAlignment::Decimal => decimal_anchor(zone, measure_text),
+        TabAlignment::Decimal => decimal_anchor(zone, measure_text, separator),
         // Unreachable in practice: `find_next_tab_stop` never hands back a
         // rule stop, so no zone is ever anchored against one. Kept so the
         // match stays total, and answering `Start` is the harmless reading if
@@ -1020,14 +1016,18 @@ fn resolve_zone_anchor(
 /// right-aligns a separator-less decimal zone, which is what keeps a column of
 /// figures flush when one entry is a whole number. Left-aligning it instead
 /// would make that one entry stick out by its full width.
-fn decimal_anchor(zone: &[Fragment], measure_text: MeasureTextFn<'_>) -> ZoneAnchor {
+fn decimal_anchor(
+    zone: &[Fragment],
+    measure_text: MeasureTextFn<'_>,
+    separator: char,
+) -> ZoneAnchor {
     let mut before = Pt::ZERO;
     for fragment in zone {
         if let Fragment::Text {
             text, font, width, ..
         } = fragment
         {
-            if let Some(byte_idx) = text.find(DECIMAL_TAB_SEPARATOR) {
+            if let Some(byte_idx) = text.find(separator) {
                 let prefix = &text[..byte_idx];
                 let prefix_width = match measure_text {
                     Some(measure) => measure(prefix, font).0,
@@ -1289,7 +1289,7 @@ mod tests {
             (Center, ZoneAnchor::Middle),
         ] {
             assert_eq!(
-                resolve_zone_anchor(alignment, &[], None),
+                resolve_zone_anchor(alignment, &[], None, '.'),
                 expected,
                 "{alignment:?}"
             );
@@ -1316,7 +1316,7 @@ mod tests {
     fn a_decimal_zone_with_no_separator_anchors_at_its_end() {
         let zone = [text_fragment("1234", 40.0)];
         assert_eq!(
-            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None),
+            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None, '.'),
             ZoneAnchor::End,
             "right-align rather than left-align, so a whole number stays flush"
         );
@@ -1327,7 +1327,7 @@ mod tests {
         // "12.5" is 4 chars, 40pt wide; the 2-char prefix is half of it.
         let zone = [text_fragment("12.5", 40.0)];
         assert_eq!(
-            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None),
+            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None, '.'),
             ZoneAnchor::At(Pt::new(20.0))
         );
     }
@@ -1338,7 +1338,7 @@ mod tests {
         // still counts toward the offset.
         let zone = [text_fragment("12", 20.0), text_fragment(".5", 20.0)];
         assert_eq!(
-            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None),
+            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None, '.'),
             ZoneAnchor::At(Pt::new(20.0)),
             "20pt of leading fragment + 0pt before the separator in the second"
         );

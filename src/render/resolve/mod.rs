@@ -6,6 +6,7 @@ pub mod drawing_color;
 pub mod fonts;
 pub mod header_footer;
 pub mod images;
+pub mod locale;
 pub mod numbering;
 pub mod properties;
 pub mod sections;

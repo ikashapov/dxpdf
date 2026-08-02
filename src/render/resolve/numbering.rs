@@ -6,6 +6,7 @@ use crate::model::{
     Alignment, Indentation, LevelSuffix, NumId, NumPicBulletId, NumberFormat, NumberingDefinitions,
     NumberingLevelDefinition, RunProperties,
 };
+use crate::render::resolve::locale::Locale;
 
 /// A resolved numbering level — ready for label generation.
 #[derive(Clone, Debug)]
@@ -90,6 +91,7 @@ pub fn format_list_label(
     level: u8,
     counters: &HashMap<(NumId, u8), u32>,
     num_id: NumId,
+    locale: Locale,
 ) -> Option<String> {
     let lvl = levels.get(level as usize)?;
     if lvl.format == NumberFormat::None {
@@ -115,24 +117,175 @@ pub fn format_list_label(
                     .map(|l| l.format)
                     .unwrap_or(NumberFormat::Decimal)
             };
-            let formatted = format_number(count, fmt);
+            let formatted = format_number(count, fmt, locale);
             result = result.replace(&placeholder, &formatted);
         }
     }
     Some(result)
 }
 
-/// Format a number according to the OOXML number format.
-fn format_number(n: u32, fmt: NumberFormat) -> String {
+/// §17.18.59 `ST_NumberFormat`: render one counter.
+///
+/// Total over `NumberFormat` — the `_ =>` arm this replaced answered
+/// `n.to_string()` for every format it did not implement, which is right for
+/// none of them: it printed a digit where `none` asks for nothing, and it hid
+/// `cardinalText` and `ordinalText` behind an answer that looked deliberate.
+///
+/// `locale` decides only the three language-dependent formats; the rest are
+/// the same in every language, which is why they take it without using it.
+fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
     match fmt {
         NumberFormat::Decimal => n.to_string(),
         NumberFormat::LowerLetter => to_letter_lower(n),
         NumberFormat::UpperLetter => to_letter_upper(n),
         NumberFormat::LowerRoman => to_roman_lower(n),
         NumberFormat::UpperRoman => to_roman_upper(n),
-        NumberFormat::Ordinal => format_ordinal(n),
-        _ => n.to_string(),
+
+        // §17.9.27: the three formats that are written differently in every
+        // language. This engine spells one of them; for the rest the digits
+        // are the honest answer — see `Locale::spells_numbers`.
+        NumberFormat::Ordinal if locale.spells_numbers() => format_ordinal(n),
+        NumberFormat::CardinalText if locale.spells_numbers() => to_cardinal_text(n),
+        NumberFormat::OrdinalText if locale.spells_numbers() => to_ordinal_text(n),
+        NumberFormat::Ordinal | NumberFormat::CardinalText | NumberFormat::OrdinalText => {
+            n.to_string()
+        }
+
+        // §17.18.59: `bullet` renders the level text, `none` renders nothing —
+        // neither renders the counter. `format_list_label` returns before
+        // reaching either, so these are unreachable in practice; answering with
+        // the digit would be wrong if a future caller did reach them.
+        NumberFormat::Bullet | NumberFormat::None => String::new(),
     }
+}
+
+/// §17.9.27 `cardinalText`: the number in English words, e.g. `1234` →
+/// "One Thousand Two Hundred Thirty-Four".
+///
+/// US English convention, which is what Word writes: tens and units joined by a
+/// hyphen, scale groups by a space, and **no** "and" before the final group.
+/// Each word capitalised. Unverified against a Word render; recorded here
+/// rather than guessed at each call site.
+fn to_cardinal_text(n: u32) -> String {
+    const UNITS: [&str; 20] = [
+        "Zero",
+        "One",
+        "Two",
+        "Three",
+        "Four",
+        "Five",
+        "Six",
+        "Seven",
+        "Eight",
+        "Nine",
+        "Ten",
+        "Eleven",
+        "Twelve",
+        "Thirteen",
+        "Fourteen",
+        "Fifteen",
+        "Sixteen",
+        "Seventeen",
+        "Eighteen",
+        "Nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety",
+    ];
+    /// Groups of a thousand, smallest first. `u32::MAX` needs three.
+    const SCALES: [&str; 4] = ["", "Thousand", "Million", "Billion"];
+
+    /// 1..=999 — never called with 0, so it never emits a stray "Zero".
+    fn under_thousand(n: u32) -> String {
+        match n {
+            0 => String::new(),
+            1..=19 => UNITS[n as usize].to_string(),
+            20..=99 => {
+                let (tens, unit) = (TENS[(n / 10) as usize], n % 10);
+                if unit == 0 {
+                    tens.to_string()
+                } else {
+                    format!("{tens}-{}", UNITS[unit as usize])
+                }
+            }
+            _ => {
+                let (hundreds, rest) = (UNITS[(n / 100) as usize], n % 100);
+                if rest == 0 {
+                    format!("{hundreds} Hundred")
+                } else {
+                    format!("{hundreds} Hundred {}", under_thousand(rest))
+                }
+            }
+        }
+    }
+
+    if n == 0 {
+        return UNITS[0].to_string();
+    }
+
+    // Split into thousand-groups, then emit largest-first.
+    let mut groups = Vec::new();
+    let mut rest = n;
+    while rest > 0 {
+        groups.push(rest % 1000);
+        rest /= 1000;
+    }
+    let mut words = Vec::new();
+    for (i, group) in groups.iter().enumerate().rev() {
+        if *group == 0 {
+            continue;
+        }
+        let scale = SCALES[i];
+        words.push(if scale.is_empty() {
+            under_thousand(*group)
+        } else {
+            format!("{} {scale}", under_thousand(*group))
+        });
+    }
+    words.join(" ")
+}
+
+/// §17.9.27 `ordinalText`: the number as an English ordinal in words, e.g.
+/// `21` → "Twenty-First".
+///
+/// Only the **final word** takes the ordinal form — "One Thousand Two Hundred
+/// Thirty-Four" becomes "…Thirty-Fourth", not "First Thousandth …" — so this
+/// spells the cardinal and rewrites its last word. The separator before that
+/// word (space or hyphen) is preserved exactly.
+fn to_ordinal_text(n: u32) -> String {
+    let cardinal = to_cardinal_text(n);
+    // ASCII throughout, so a byte index from `rfind` is a char boundary.
+    match cardinal.rfind([' ', '-']) {
+        Some(i) => format!("{}{}", &cardinal[..=i], ordinal_word(&cardinal[i + 1..])),
+        None => ordinal_word(&cardinal),
+    }
+}
+
+/// The ordinal form of one English number word.
+///
+/// The irregulars are listed; everything else — "Four", "Six", "Seven", "Ten",
+/// the teens, and the scale words "Hundred"/"Thousand"/"Million"/"Billion" —
+/// takes a plain `th`.
+fn ordinal_word(word: &str) -> String {
+    match word {
+        "One" => "First",
+        "Two" => "Second",
+        "Three" => "Third",
+        "Five" => "Fifth",
+        "Eight" => "Eighth",
+        "Nine" => "Ninth",
+        "Twelve" => "Twelfth",
+        "Twenty" => "Twentieth",
+        "Thirty" => "Thirtieth",
+        "Forty" => "Fortieth",
+        "Fifty" => "Fiftieth",
+        "Sixty" => "Sixtieth",
+        "Seventy" => "Seventieth",
+        "Eighty" => "Eightieth",
+        "Ninety" => "Ninetieth",
+        other => return format!("{other}th"),
+    }
+    .to_string()
 }
 
 fn to_letter_lower(n: u32) -> String {
@@ -392,7 +545,8 @@ mod tests {
         let mut counters = HashMap::new();
         counters.insert((NumId::new(1), 0u8), 3u32); // would be "III" un-legal
         counters.insert((NumId::new(1), 1u8), 2u32); // would be "b" un-legal
-        let label = format_list_label(&levels, 1, &counters, NumId::new(1)).unwrap();
+        let label =
+            format_list_label(&levels, 1, &counters, NumId::new(1), Locale::English).unwrap();
         assert_eq!(
             label, "3.2",
             "isLgl forces decimal for every referenced level"
@@ -429,27 +583,176 @@ mod tests {
     #[test]
     fn lower_letter_repeats_on_overflow() {
         // §17.9 lowerLetter: a…z then aa, bb, … (repeating, not bijective).
-        assert_eq!(format_number(1, NumberFormat::LowerLetter), "a");
-        assert_eq!(format_number(26, NumberFormat::LowerLetter), "z");
-        assert_eq!(format_number(27, NumberFormat::LowerLetter), "aa");
-        assert_eq!(format_number(28, NumberFormat::LowerLetter), "bb");
-        assert_eq!(format_number(52, NumberFormat::LowerLetter), "zz");
-        assert_eq!(format_number(53, NumberFormat::LowerLetter), "aaa");
+        assert_eq!(
+            format_number(1, NumberFormat::LowerLetter, Locale::English),
+            "a"
+        );
+        assert_eq!(
+            format_number(26, NumberFormat::LowerLetter, Locale::English),
+            "z"
+        );
+        assert_eq!(
+            format_number(27, NumberFormat::LowerLetter, Locale::English),
+            "aa"
+        );
+        assert_eq!(
+            format_number(28, NumberFormat::LowerLetter, Locale::English),
+            "bb"
+        );
+        assert_eq!(
+            format_number(52, NumberFormat::LowerLetter, Locale::English),
+            "zz"
+        );
+        assert_eq!(
+            format_number(53, NumberFormat::LowerLetter, Locale::English),
+            "aaa"
+        );
     }
 
     #[test]
     fn upper_letter_matches_lower_uppercased() {
-        assert_eq!(format_number(27, NumberFormat::UpperLetter), "AA");
+        assert_eq!(
+            format_number(27, NumberFormat::UpperLetter, Locale::English),
+            "AA"
+        );
     }
 
     #[test]
     fn roman_and_ordinal_formats() {
-        assert_eq!(format_number(4, NumberFormat::LowerRoman), "iv");
-        assert_eq!(format_number(2026, NumberFormat::UpperRoman), "MMXXVI");
-        assert_eq!(format_number(1, NumberFormat::Ordinal), "1st");
-        assert_eq!(format_number(2, NumberFormat::Ordinal), "2nd");
-        assert_eq!(format_number(11, NumberFormat::Ordinal), "11th");
-        assert_eq!(format_number(23, NumberFormat::Ordinal), "23rd");
-        assert_eq!(format_number(111, NumberFormat::Ordinal), "111th");
+        assert_eq!(
+            format_number(4, NumberFormat::LowerRoman, Locale::English),
+            "iv"
+        );
+        assert_eq!(
+            format_number(2026, NumberFormat::UpperRoman, Locale::English),
+            "MMXXVI"
+        );
+        assert_eq!(
+            format_number(1, NumberFormat::Ordinal, Locale::English),
+            "1st"
+        );
+        assert_eq!(
+            format_number(2, NumberFormat::Ordinal, Locale::English),
+            "2nd"
+        );
+        assert_eq!(
+            format_number(11, NumberFormat::Ordinal, Locale::English),
+            "11th"
+        );
+        assert_eq!(
+            format_number(23, NumberFormat::Ordinal, Locale::English),
+            "23rd"
+        );
+        assert_eq!(
+            format_number(111, NumberFormat::Ordinal, Locale::English),
+            "111th"
+        );
+    }
+
+    // ── §17.9.27 number words ────────────────────────────────────────────
+
+    #[test]
+    fn cardinal_text_spells_each_decade_boundary() {
+        for (n, want) in [
+            (0, "Zero"),
+            (1, "One"),
+            (12, "Twelve"),
+            (19, "Nineteen"),
+            (20, "Twenty"),
+            (21, "Twenty-One"),
+            (99, "Ninety-Nine"),
+            (100, "One Hundred"),
+            (101, "One Hundred One"),
+            (115, "One Hundred Fifteen"),
+            (999, "Nine Hundred Ninety-Nine"),
+        ] {
+            assert_eq!(to_cardinal_text(n), want, "{n}");
+        }
+    }
+
+    /// A zero group is skipped rather than spelled: 1,000,007 has no "Thousand"
+    /// in it at all. Getting this wrong yields "One Million Zero Thousand …".
+    #[test]
+    fn cardinal_text_skips_empty_scale_groups() {
+        assert_eq!(to_cardinal_text(1_000), "One Thousand");
+        assert_eq!(to_cardinal_text(1_000_007), "One Million Seven");
+        assert_eq!(
+            to_cardinal_text(1_234_567),
+            "One Million Two Hundred Thirty-Four Thousand Five Hundred Sixty-Seven",
+        );
+    }
+
+    /// The largest counter the type admits, so the scale table cannot run off
+    /// its end.
+    #[test]
+    fn cardinal_text_spells_the_whole_u32_range() {
+        assert_eq!(
+            to_cardinal_text(u32::MAX),
+            "Four Billion Two Hundred Ninety-Four Million Nine Hundred Sixty-Seven \
+             Thousand Two Hundred Ninety-Five",
+        );
+    }
+
+    /// §17.9.27 `ordinalText` changes the **last word only**, and the irregular
+    /// forms are where a naive `+ "th"` breaks.
+    #[test]
+    fn ordinal_text_rewrites_only_the_final_word() {
+        for (n, want) in [
+            (1, "First"),
+            (2, "Second"),
+            (3, "Third"),
+            (4, "Fourth"),
+            (5, "Fifth"),
+            (8, "Eighth"),
+            (9, "Ninth"),
+            (12, "Twelfth"),
+            (13, "Thirteenth"),
+            (20, "Twentieth"),
+            (21, "Twenty-First"),
+            (40, "Fortieth"),
+            (100, "One Hundredth"),
+            (101, "One Hundred First"),
+            (1_000, "One Thousandth"),
+            (1_021, "One Thousand Twenty-First"),
+        ] {
+            assert_eq!(to_ordinal_text(n), want, "{n}");
+        }
+    }
+
+    /// §17.18.59: neither `bullet` nor `none` renders the counter. The `_ =>`
+    /// arm this replaced printed the digit for both.
+    #[test]
+    fn formats_that_render_no_counter_render_nothing() {
+        assert_eq!(format_number(7, NumberFormat::Bullet, Locale::English), "");
+        assert_eq!(format_number(7, NumberFormat::None, Locale::English), "");
+    }
+
+    /// A language whose number words this engine cannot spell gets the digits —
+    /// for all three text formats, not just the one that was implemented.
+    #[test]
+    fn a_non_spelling_locale_gets_digits_for_every_text_format() {
+        for fmt in [
+            NumberFormat::Ordinal,
+            NumberFormat::CardinalText,
+            NumberFormat::OrdinalText,
+        ] {
+            assert_eq!(format_number(3, fmt, Locale::CommaDecimal), "3", "{fmt:?}");
+            assert_eq!(format_number(3, fmt, Locale::PointDecimal), "3", "{fmt:?}");
+        }
+    }
+
+    /// …and the formats that are the same in every language are untouched by it.
+    #[test]
+    fn language_independent_formats_ignore_the_locale() {
+        for locale in [
+            Locale::English,
+            Locale::CommaDecimal,
+            Locale::PointDecimal,
+            Locale::Unrecognised,
+        ] {
+            assert_eq!(format_number(4, NumberFormat::Decimal, locale), "4");
+            assert_eq!(format_number(4, NumberFormat::LowerRoman, locale), "iv");
+            assert_eq!(format_number(4, NumberFormat::UpperLetter, locale), "D");
+        }
     }
 }
