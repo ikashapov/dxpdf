@@ -143,6 +143,8 @@ fn estimate_cursor_y(
             // `extent` is the shape's unrotated bounding box; a rotation can
             // reach slightly past it, which is within this function's remit.
             DrawCommand::Path { origin, extent, .. } => origin.y + extent.height,
+            // §17.3.1.19: draws nothing, so it consumes no vertical space.
+            DrawCommand::Outline(_) => continue,
             // Annotations mark content that is already accounted for by the
             // command underneath them, and a named destination is a point.
             // Neither adds extent of its own.
