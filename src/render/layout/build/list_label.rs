@@ -454,6 +454,404 @@ mod tests {
     use crate::model::dimension::{Dimension, HalfPoints, Twips};
     use crate::model::{FontSet, FontSlot, RunProperties, TextScale, UnderlineStyle};
 
+    // ── §17.9.22 label emission ──────────────────────────────────────────
+    //
+    // The 16 tests below this block all exercise the property cascade. These
+    // exercise the path that *uses* it: counter arithmetic, the §17.9.29
+    // separator switch, §17.9.7 justification, and the hanging indent.
+
+    use crate::model::{
+        Alignment, FirstLineIndent, Indentation, LevelSuffix, NumId, NumberFormat,
+        NumberingReference,
+    };
+    use crate::render::fonts::FontRegistry;
+    use crate::render::layout::measurer::TextMeasurer;
+    use crate::render::resolve::numbering::ResolvedNumberingLevel;
+    use crate::render::resolve::ResolvedDocument;
+    use std::collections::HashMap;
+
+    fn level(format: NumberFormat, level_text: &str) -> ResolvedNumberingLevel {
+        ResolvedNumberingLevel {
+            format,
+            level_text: level_text.into(),
+            start: 1,
+            run_properties: None,
+            indentation: None,
+            justification: None,
+            lvl_pic_bullet_id: None,
+            suffix: LevelSuffix::Tab,
+            is_legal: false,
+        }
+    }
+
+    /// A decimal level whose label is just its own counter.
+    fn decimal_level() -> ResolvedNumberingLevel {
+        level(NumberFormat::Decimal, "%1")
+    }
+
+    fn resolved_with(levels: Vec<ResolvedNumberingLevel>) -> ResolvedDocument {
+        let mut numbering = HashMap::new();
+        numbering.insert(NumId::new(7), levels);
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: HashMap::new(),
+            numbering,
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: ParagraphProperties::default(),
+            doc_defaults_run: RunProperties::default(),
+            default_paragraph_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn numbered_para() -> model::Paragraph {
+        model::Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: Vec::new(),
+            rsids: model::ParagraphRevisionIds::default(),
+        }
+    }
+
+    fn props_at(level: u8) -> ParagraphProperties {
+        ParagraphProperties {
+            numbering: Some(NumberingReference { num_id: 7, level }),
+            ..Default::default()
+        }
+    }
+
+    /// Run `inject_list_label` over a live measurer, returning the fragments it
+    /// prepended and the properties it rewrote.
+    fn inject(
+        resolved: &ResolvedDocument,
+        state: &mut BuildState,
+        level: u8,
+    ) -> (Vec<Fragment>, ParagraphProperties) {
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved,
+        };
+        let mut fragments = Vec::new();
+        let mut props = props_at(level);
+        inject_list_label(&numbered_para(), &mut fragments, &mut props, &ctx, state);
+        (fragments, props)
+    }
+
+    fn label_text(fragments: &[Fragment]) -> String {
+        match fragments.first() {
+            Some(Fragment::Text { text, .. }) => text.to_string(),
+            other => panic!("expected a label fragment, got {other:?}"),
+        }
+    }
+
+    /// §17.9.22: the counter seeds at `start` on the first item and advances by
+    /// one thereafter. Seeding `start - 1` and adding one is the shape that
+    /// underflows on `w:start="0"`, so this pins the seed as well as the step.
+    #[test]
+    fn the_counter_seeds_at_start_then_increments() {
+        let resolved = resolved_with(vec![decimal_level()]);
+        let mut state = BuildState::default();
+        let labels: Vec<String> = (0..3)
+            .map(|_| label_text(&inject(&resolved, &mut state, 0).0))
+            .collect();
+        assert_eq!(labels, ["1", "2", "3"]);
+    }
+
+    /// §17.9.28 permits `w:start="0"`, which the seed must survive — it
+    /// underflows `u32` if the counter is seeded one below `start`.
+    #[test]
+    fn a_zero_start_does_not_underflow() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            start: 0,
+            ..decimal_level()
+        }]);
+        let mut state = BuildState::default();
+        let labels: Vec<String> = (0..2)
+            .map(|_| label_text(&inject(&resolved, &mut state, 0).0))
+            .collect();
+        assert_eq!(labels, ["0", "1"]);
+    }
+
+    /// §17.9.22: an item at one level restarts every level *below* it, so a
+    /// nested list numbers `1 / 1 / 2 / 1` rather than carrying the sub-counter
+    /// across. Levels *above* are untouched.
+    #[test]
+    fn a_deeper_level_restarts_when_its_parent_advances() {
+        // `%N` names level N−1's counter, not "this level's" — so the level-1
+        // template has to be `%2` to show its own number. With `%1` the test
+        // reads level 0's counter and passes against a broken reset.
+        let resolved = resolved_with(vec![decimal_level(), level(NumberFormat::Decimal, "%2")]);
+        let mut state = BuildState::default();
+
+        // Evaluated in order, each call advancing `state` — the sequence is
+        // the assertion.
+        let seen = vec![
+            label_text(&inject(&resolved, &mut state, 0).0), // "1"
+            label_text(&inject(&resolved, &mut state, 1).0), // "1" — first sub-item
+            label_text(&inject(&resolved, &mut state, 1).0), // "2"
+            label_text(&inject(&resolved, &mut state, 0).0), // "2" — resets level 1
+            label_text(&inject(&resolved, &mut state, 1).0), // "1" again
+        ];
+
+        assert_eq!(seen, ["1", "1", "2", "2", "1"]);
+    }
+
+    /// §17.9.29: `Tab` (the default) puts a tab after the label, `Space` a
+    /// literal space, `Nothing` neither.
+    #[test]
+    fn the_suffix_switch_picks_the_separator() {
+        for (suffix, expect) in [
+            (LevelSuffix::Tab, "tab"),
+            (LevelSuffix::Space, "space"),
+            (LevelSuffix::Nothing, "none"),
+        ] {
+            let resolved = resolved_with(vec![ResolvedNumberingLevel {
+                suffix,
+                ..decimal_level()
+            }]);
+            let (fragments, _) = inject(&resolved, &mut BuildState::default(), 0);
+            assert_eq!(label_text(&fragments), "1", "{suffix:?}");
+
+            let got = match fragments.get(1) {
+                None => "none",
+                Some(Fragment::Tab { .. }) => "tab",
+                Some(Fragment::Text { text, .. }) if &**text == " " => "space",
+                other => panic!("{suffix:?} emitted {other:?}"),
+            };
+            assert_eq!(got, expect, "{suffix:?}");
+        }
+    }
+
+    /// §17.9.29: only the `Tab` suffix installs the implicit tab stop at the
+    /// level's `start` indent — a `Space`/`Nothing` label has no tab to land.
+    #[test]
+    fn only_a_tab_suffix_installs_the_implicit_tab_stop() {
+        for (suffix, expect_stop) in [
+            (LevelSuffix::Tab, true),
+            (LevelSuffix::Space, false),
+            (LevelSuffix::Nothing, false),
+        ] {
+            let resolved = resolved_with(vec![ResolvedNumberingLevel {
+                suffix,
+                indentation: Some(Indentation {
+                    start: Some(Dimension::new(720)),
+                    ..Default::default()
+                }),
+                ..decimal_level()
+            }]);
+            let (_, props) = inject(&resolved, &mut BuildState::default(), 0);
+            assert_eq!(
+                props.tabs.iter().any(|t| t.position == Dimension::new(720)),
+                expect_stop,
+                "{suffix:?}"
+            );
+        }
+    }
+
+    /// §17.9.7 `lvlJc`: the label is placed by shifting it within the hanging
+    /// indent area — `start` not at all, `end` by its whole width, `center` by
+    /// half. Expressed as a ratio so the host font's metrics cancel.
+    #[test]
+    fn lvl_jc_offsets_the_label_by_its_own_width() {
+        let offset_for = |jc: Option<Alignment>| {
+            let resolved = resolved_with(vec![ResolvedNumberingLevel {
+                justification: jc,
+                ..decimal_level()
+            }]);
+            let (fragments, _) = inject(&resolved, &mut BuildState::default(), 0);
+            match fragments.first() {
+                Some(Fragment::Text {
+                    text_offset, width, ..
+                }) => (text_offset.raw(), width.raw()),
+                other => panic!("expected a label, got {other:?}"),
+            }
+        };
+
+        let (start, w) = offset_for(Some(Alignment::Start));
+        assert_eq!(start, 0.0, "start-justified labels are not shifted");
+        assert!(w > 0.0, "the label has a measured width");
+
+        let (end, _) = offset_for(Some(Alignment::End));
+        assert!((end + w).abs() < 1e-3, "end shifts left by the full width");
+
+        let (centre, _) = offset_for(Some(Alignment::Center));
+        assert!((centre + w * 0.5).abs() < 1e-3, "center shifts by half");
+
+        let (absent, _) = offset_for(None);
+        assert_eq!(absent, 0.0, "an absent lvlJc behaves as start");
+    }
+
+    /// §17.9.3: the tab after the label is asked to span the hanging indent
+    /// *less* what the label already occupies, so the body text lands at the
+    /// level's indent rather than one label-width past it.
+    #[test]
+    fn the_separator_tab_spans_the_hanging_indent_less_the_label() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(Indentation {
+                start: Some(Dimension::new(720)),
+                first_line: Some(FirstLineIndent::Hanging(Dimension::new(360))), // 18pt
+                ..Default::default()
+            }),
+            ..decimal_level()
+        }]);
+        let (fragments, _) = inject(&resolved, &mut BuildState::default(), 0);
+
+        let label_width = match &fragments[0] {
+            Fragment::Text { width, .. } => width.raw(),
+            other => panic!("expected a label, got {other:?}"),
+        };
+        match &fragments[1] {
+            Fragment::Tab { fitting_width, .. } => {
+                let got = fitting_width
+                    .expect("the label tab carries a fitting width")
+                    .raw();
+                assert!(
+                    (got - (18.0 - label_width)).abs() < 1e-3,
+                    "18pt hanging indent less a {label_width}pt label, got {got}"
+                );
+            }
+            other => panic!("expected the separator tab, got {other:?}"),
+        }
+    }
+
+    /// `extract_hanging` reads only the hanging case: a *first-line* indent is
+    /// not a hanging indent, and neither is an absent one. Reached through the
+    /// tab's fitting width, which is the only thing that consumes it.
+    #[test]
+    fn only_a_hanging_first_line_indent_is_a_hanging_indent() {
+        let fitting_for = |first_line: Option<FirstLineIndent>| {
+            let resolved = resolved_with(vec![ResolvedNumberingLevel {
+                indentation: Some(Indentation {
+                    first_line,
+                    ..Default::default()
+                }),
+                ..decimal_level()
+            }]);
+            let (fragments, _) = inject(&resolved, &mut BuildState::default(), 0);
+            match &fragments[1] {
+                Fragment::Tab { fitting_width, .. } => fitting_width.unwrap().raw(),
+                other => panic!("expected the separator tab, got {other:?}"),
+            }
+        };
+
+        // A hanging indent gives the tab something to span; the other two
+        // clamp to zero, because `hanging - label_width` goes negative.
+        assert!(fitting_for(Some(FirstLineIndent::Hanging(Dimension::new(720)))) > 0.0);
+        assert_eq!(
+            fitting_for(Some(FirstLineIndent::FirstLine(Dimension::new(720)))),
+            0.0
+        );
+        assert_eq!(fitting_for(Some(FirstLineIndent::None)), 0.0);
+        assert_eq!(fitting_for(None), 0.0);
+    }
+
+    /// §17.9.22: a paragraph with no numbering reference is left completely
+    /// alone — no label, no rewritten indentation, no counter touched.
+    #[test]
+    fn a_paragraph_without_numbering_is_untouched() {
+        let resolved = resolved_with(vec![decimal_level()]);
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let mut state = BuildState::default();
+        let mut fragments = Vec::new();
+        let mut props = ParagraphProperties::default();
+        inject_list_label(
+            &numbered_para(),
+            &mut fragments,
+            &mut props,
+            &ctx,
+            &mut state,
+        );
+
+        assert!(fragments.is_empty(), "no label injected");
+        assert!(props.indentation.is_none(), "indentation untouched");
+        assert!(state.list_counters.is_empty(), "no counter advanced");
+    }
+
+    /// §17.9.2: a `numId` with no definition is a dangling reference. It must
+    /// not inject a label *or* advance a counter — the paragraph simply is not
+    /// numbered.
+    #[test]
+    fn an_unknown_num_id_injects_nothing() {
+        let resolved = resolved_with(vec![decimal_level()]);
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let mut state = BuildState::default();
+        let mut fragments = Vec::new();
+        let mut props = ParagraphProperties {
+            numbering: Some(NumberingReference {
+                num_id: 999,
+                level: 0,
+            }),
+            ..Default::default()
+        };
+        inject_list_label(
+            &numbered_para(),
+            &mut fragments,
+            &mut props,
+            &ctx,
+            &mut state,
+        );
+
+        assert!(fragments.is_empty(), "no label injected");
+        assert!(state.list_counters.is_empty(), "no counter advanced");
+    }
+
+    /// §17.9.23: the level's indentation replaces the paragraph's, but the
+    /// paragraph's *direct* indentation still wins field by field.
+    #[test]
+    fn direct_paragraph_indentation_beats_the_level() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(Indentation {
+                start: Some(Dimension::new(720)),
+                end: Some(Dimension::new(100)),
+                ..Default::default()
+            }),
+            ..decimal_level()
+        }]);
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let mut para = numbered_para();
+        para.properties.indentation = Some(Indentation {
+            start: Some(Dimension::new(1440)),
+            ..Default::default()
+        });
+        let mut fragments = Vec::new();
+        let mut props = props_at(0);
+        inject_list_label(
+            &para,
+            &mut fragments,
+            &mut props,
+            &ctx,
+            &mut BuildState::default(),
+        );
+
+        let ind = props.indentation.expect("the level supplies indentation");
+        assert_eq!(ind.start, Some(Dimension::new(1440)), "direct start wins");
+        assert_eq!(ind.end, Some(Dimension::new(100)), "level end survives");
+    }
+
     fn rp_with_bold(b: bool) -> RunProperties {
         RunProperties {
             bold: Some(b),
