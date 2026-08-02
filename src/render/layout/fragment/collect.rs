@@ -806,19 +806,23 @@ where
                     }
                 }
                 Inline::AlternateContent(ac) => {
-                    // §M.2.1 / §17.17.1: when a Choice carries a DrawingML wsp
-                    // shape, that shape's `txbx` contents are laid out into
-                    // shape-local commands by the floating-shape extractor and
-                    // emitted on top of the shape's path. Walking the VML
-                    // fallback here would duplicate the text into the host
-                    // paragraph at the wrong y. Skip the fallback for that case.
+                    use crate::render::layout::{live_mc_branch, McBranch};
+                    // §M.1.2 / §17.17.1: only the live branch contributes, and
+                    // `live_mc_branch` is the one place that decides which.
                     //
-                    // For Choices without a wsp shape (e.g. a Choice we don't
-                    // extract yet) we fall back to the legacy inline path so the
-                    // user still sees the text — it lands at the host paragraph
-                    // y as a Tier 0 placeholder.
-                    if !crate::render::layout::choices_render_wps_shape(&ac.choices) {
-                        if let Some(ref fallback) = ac.fallback {
+                    // A drawable Choice is drawn as float geometry by the
+                    // floating extractor — and for a wps shape, its `txbx`
+                    // contents are laid out into shape-local commands emitted
+                    // on top of the shape's path. Walking the Fallback here as
+                    // well would duplicate that text into the host paragraph at
+                    // the wrong y.
+                    //
+                    // A live Fallback does come through here, and must: its VML
+                    // geometry goes to the float walkers, its text box to this
+                    // collector, landing at the host paragraph y as the Tier 0
+                    // placeholder it has always been.
+                    match live_mc_branch(ac) {
+                        McBranch::Fallback(fallback) => {
                             let mut sub = collect_fragments(
                                 fallback,
                                 ctx,
@@ -830,6 +834,7 @@ where
                             );
                             fragments.append(&mut sub);
                         }
+                        McBranch::Choices(_) | McBranch::Neither => {}
                     }
                 }
                 Inline::Symbol(sym) => {

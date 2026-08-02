@@ -18,32 +18,76 @@ pub mod table;
 use crate::render::dimension::Pt;
 use crate::render::geometry::{PtEdgeInsets, PtSize};
 
-/// MCE §M.2: true when a `<mc:Choice>` in `choices` carries a DrawingML
-/// `wps:wsp` shape we render (an anchored `WordProcessingShape`). In that
-/// case the AlternateContent's `<mc:Fallback>` — the VML equivalent — is
-/// inert: neither its textbox text nor its absolute position may be consumed
-/// (doing so double-renders the text or hijacks the header origin). Recurses
-/// through `Hyperlink`/`Field` wrappers and nested `AlternateContent`, so it
-/// agrees with the branch `build::floating::extract_floating_shapes` actually
-/// renders. Shared by every fallback-suppression decision (`fragment::collect`
-/// text collection and `build::floating` absolute-position probing) so they
-/// can't drift apart.
-pub(crate) fn choices_render_wps_shape(choices: &[crate::model::McChoice]) -> bool {
-    use crate::model::{GraphicContent, ImagePlacement, Inline};
+/// MCE §M.1.2: the branch of an `<mc:AlternateContent>` this renderer draws.
+///
+/// Exactly one branch is live. A consumer takes the first `<mc:Choice>` whose
+/// requirements it can meet and otherwise the `<mc:Fallback>`; it never takes
+/// both, because both describe the *same* object — the Choice in DrawingML,
+/// the Fallback in VML for clients that predate it.
+///
+/// Every walker that meets the element consults [`live_mc_branch`], so the
+/// answer is a property of the element rather than of who asked. Two
+/// predicates over one element is what produced the original double render,
+/// and a third walker that answered neither is what produced the *missing*
+/// render after it.
+///
+/// The `Fallback` arm deliberately does **not** split "float" from "inline".
+/// One VML fallback is routinely both, and by design: `extract_vml_primitive`
+/// draws a `<v:rect>`'s geometry and leaves its `text_commands` empty,
+/// `extract_vml_primitive_image` skips any shape that also hosts text, and the
+/// inline collector picks the text box up at the host paragraph. That division
+/// is by graphic role, not by branch, and it is exactly how a bare `<w:pict>`
+/// already renders — so a live Fallback goes to all of them and each takes the
+/// part it owns. Naming an owner per variant would look tidier and would drop
+/// the text of every VML rect that has one.
+pub(crate) enum McBranch<'a> {
+    /// The `<mc:Choice>` elements, in document order.
+    Choices(&'a [crate::model::McChoice]),
+    /// The `<mc:Fallback>`, reached only when no Choice carries anything we
+    /// can draw.
+    Fallback(&'a [crate::model::Inline]),
+    /// Choices we cannot draw, and no Fallback to fall back to.
+    Neither,
+}
 
-    fn walk(inlines: &[Inline]) -> bool {
+/// Pick the live branch of `ac`.
+///
+/// The test is **content-based**, not a `Requires` namespace check: a Choice
+/// may declare a namespace we nominally support and still hold nothing this
+/// renderer turns into geometry, and the honest question is whether we will
+/// actually draw it. What counts is an *anchor* — an anchored `wps:wsp` shape
+/// and an anchored picture are both `Inline::Image` with
+/// `ImagePlacement::Anchor`, so one question covers shapes and pictures alike
+/// and no walker has to ask a narrower version of it for itself.
+///
+/// Recurses through `Hyperlink`/`Field` wrappers and nested elements. §M.1.2's
+/// content model for a branch is `drawing | pict`, so a nested
+/// `<mc:AlternateContent>` cannot come from a document — but it can be built,
+/// and resolving it innermost-first is the only reading under which the outer
+/// answer stays consistent with the inner one.
+pub(crate) fn live_mc_branch(ac: &crate::model::AlternateContent) -> McBranch<'_> {
+    use crate::model::{ImagePlacement, Inline};
+
+    fn draws_an_anchor(inlines: &[Inline]) -> bool {
         inlines.iter().any(|inline| match inline {
-            Inline::Image(img) => {
-                matches!(img.placement, ImagePlacement::Anchor(_))
-                    && matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_)))
+            Inline::Image(img) => matches!(img.placement, ImagePlacement::Anchor(_)),
+            Inline::Hyperlink(link) => draws_an_anchor(&link.content),
+            Inline::Field(f) => draws_an_anchor(&f.content),
+            Inline::AlternateContent(inner) => {
+                matches!(live_mc_branch(inner), McBranch::Choices(_))
             }
-            Inline::Hyperlink(link) => walk(&link.content),
-            Inline::Field(f) => walk(&f.content),
-            Inline::AlternateContent(inner) => choices_render_wps_shape(&inner.choices),
             _ => false,
         })
     }
-    choices.iter().any(|c| walk(&c.content))
+
+    if ac.choices.iter().any(|c| draws_an_anchor(&c.content)) {
+        McBranch::Choices(&ac.choices)
+    } else {
+        match ac.fallback {
+            Some(ref fallback) => McBranch::Fallback(fallback),
+            None => McBranch::Neither,
+        }
+    }
 }
 
 /// §20.1.2.1.18: the uniform shrink `a:normAutofit` applies to one shape's text
