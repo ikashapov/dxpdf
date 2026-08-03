@@ -670,3 +670,113 @@ fn text_after_the_break_wraps_around_a_float_registered_before_it() {
          but starts at x={x} (left margin {left_margin})"
     );
 }
+
+// ── §17.6.4 column changes across a continuous break (issue #83, plan §4) ────
+
+/// A `sectPr` with an explicit column count. `w:space` matches [`PG`]'s gutter
+/// so the derived x positions below are predictable.
+fn sect_pr_cols(rel: &str, continuous: bool, cols: u32) -> String {
+    let ty = if continuous {
+        r#"<w:type w:val="continuous"/>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<w:sectPr>{ty}<w:headerReference w:type="default" r:id="{rel}" {R_NS}/>{PG}<w:cols w:num="{cols}" w:space="720"/></w:sectPr>"#
+    )
+}
+
+/// Every x a `FILL*` line was drawn at, deduplicated to the nearest point.
+fn fill_columns(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> Vec<i32> {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    let mut xs: Vec<i32> = pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            DrawCommand::Text { text, position, .. } if text.starts_with("FILL") => {
+                Some(position.x.raw().round() as i32)
+            }
+            _ => None,
+        })
+        .collect();
+    xs.sort_unstable();
+    xs.dedup();
+    xs
+}
+
+/// §17.6.4: changing the column count is the main reason a continuous break
+/// exists. Text after a 1 → 2 break must flow in two columns.
+///
+/// Left margin is 1134tw = 56.7pt and the content width 481.9pt, so with
+/// `w:space="720"` (36pt) each column is 222.95pt and the second starts at
+/// 56.7 + 222.95 + 36 ≈ 315.6.
+#[test]
+fn continuous_break_can_increase_the_column_count() {
+    let filler: String = (0..90).map(|i| para(&format!("FILL{i}"))).collect();
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{filler}{}",
+        para("BODYBEFORE"),
+        sect_pr_cols("rIdH1", false, 1),
+        sect_pr_cols("rIdH1", true, 2),
+    ));
+
+    let xs = fill_columns(&pages);
+    assert!(
+        xs.iter().any(|&x| (x - 57).abs() <= 1),
+        "the first column starts at the left margin: {xs:?}"
+    );
+    assert!(
+        xs.iter().any(|&x| (x - 316).abs() <= 2),
+        "content must reach the second column at x≈316: {xs:?}"
+    );
+}
+
+/// The converse, and the reason the incoming column index is **not** carried:
+/// the succeeding section may have fewer columns than the index it would
+/// inherit.
+///
+/// This is a panic guard, not a preference. Seeding the continuation with a
+/// stale index — 3 columns before the break, 1 after — makes this fixture fail
+/// with `index out of bounds: the len is 1 but the index is 2`, from the
+/// `config.columns[state.current_col]` in `layout_section_with_clearance`.
+/// Restarting at column 0 is what the change means *and* what keeps this a
+/// layout question.
+#[test]
+fn continuous_break_can_decrease_the_column_count() {
+    let filler: String = (0..90).map(|i| para(&format!("FILL{i}"))).collect();
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{filler}{}",
+        para("BODYBEFORE"),
+        sect_pr_cols("rIdH1", false, 3),
+        sect_pr_cols("rIdH1", true, 1),
+    ));
+
+    let xs = fill_columns(&pages);
+    assert_eq!(
+        xs.len(),
+        1,
+        "single-column content occupies exactly one x: {xs:?}"
+    );
+    assert!(
+        (xs[0] - 57).abs() <= 1,
+        "and that x is the left margin: {xs:?}"
+    );
+}
+
+/// §17.6.4: the new column set starts at the shared cursor, not at the page
+/// top — the preceding section's content is still above it on this page.
+#[test]
+fn a_new_column_set_starts_below_the_preceding_sections_content() {
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr_cols("rIdH1", false, 1),
+        para("FILL0"),
+        sect_pr_cols("rIdH1", true, 2),
+    ));
+
+    assert!(
+        y_of(&pages, "FILL0") > y_of(&pages, "BODYBEFORE"),
+        "the two-column area begins below the single-column content it follows"
+    );
+}

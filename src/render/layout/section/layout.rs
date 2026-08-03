@@ -138,9 +138,18 @@ impl<'doc> PageLayoutState<'doc> {
                 page_top: bounds.top,
                 // §17.6.4: a continuous break is the usual way to *change* the
                 // column count, so the incoming index may not exist in this
-                // section's config. Restarting at column 0 from the shared
-                // cursor is both safe and what the change means. Balancing the
-                // preceding columns (which Word does) is not implemented.
+                // section's config — carrying it panics the `config.columns
+                // [state.current_col]` below (3 columns before the break, 1
+                // after: "len is 1 but the index is 2"). Restarting at column 0
+                // from the shared cursor is both safe and what the change
+                // means.
+                //
+                // Word additionally *balances* the preceding section's columns
+                // at such a break, so its content is spread evenly above the
+                // new column set rather than left as it fell. That is not
+                // implemented: it needs the preceding section's last page
+                // re-flowed to an equal-height target, which is a different
+                // problem from the clearance relayout around it.
                 current_col: 0,
                 bottom: c.bottom,
                 page_footnotes: Vec::new(),
