@@ -10,6 +10,7 @@ use crate::render::dimension::Pt;
 use crate::render::emoji::resolve::{EmojiFamily, EmojiResolver, EmojiTypeface, RegistryLookup};
 use crate::render::emoji::shape::ClusterShaper;
 use crate::render::fonts::{self, FontRegistry, TypefaceEntry, TypefaceId};
+use crate::render::spacing;
 
 use super::fragment::{FontProps, TextMetrics};
 
@@ -126,10 +127,12 @@ impl<'r> TextMeasurer<'r> {
         let scaled_width = Pt::new(width * font_props.text_scale);
 
         // §17.3.2.35: include character spacing in the measured width so line
-        // fitting accounts for the extra inter-character space. Skip the
-        // char-count scan entirely in the common no-spacing case.
+        // fitting accounts for the extra inter-character space. The unit is a
+        // grapheme cluster, not a scalar, and is shared with the painter so the
+        // two cannot disagree — see [`crate::render::spacing`]. Skip the scan
+        // entirely in the common no-spacing case.
         let spacing_extra = if font_props.char_spacing != Pt::ZERO {
-            font_props.char_spacing * (text.chars().count() as f32)
+            font_props.char_spacing * (spacing::unit_count(text) as f32)
         } else {
             Pt::ZERO
         };
@@ -342,6 +345,35 @@ mod tests {
             w2.raw(),
             expected_glyph_w1,
             observed_glyph_delta,
+        );
+    }
+
+    /// §17.3.2.35: spacing is added once per *grapheme cluster*, not once per
+    /// scalar. `e` + `U+0301` is one cluster, so it earns one helping of
+    /// spacing — and the painter, counting the same way, draws it as one unit.
+    /// Counting scalars would over-measure the run by one full spacing step and
+    /// wedge that step between the letter and its accent.
+    #[test]
+    fn measure_char_spacing_counts_grapheme_clusters_not_scalars() {
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+
+        let accented = "e\u{301}";
+        assert_eq!(accented.chars().count(), 2, "fixture must be two scalars");
+
+        let mut spaced = fp_at_scale(1.0);
+        spaced.char_spacing = Pt::new(2.0);
+
+        let (unspaced_w, _) = measurer.measure(accented, &fp_at_scale(1.0));
+        let (spaced_w, _) = measurer.measure(accented, &spaced);
+        if unspaced_w.raw() <= 0.0 {
+            return; // headless host that can't measure text
+        }
+
+        let extra = spaced_w.raw() - unspaced_w.raw();
+        assert!(
+            (extra - 2.0).abs() < 0.01,
+            "one cluster must add one 2pt step, not two: extra={extra}",
         );
     }
 }

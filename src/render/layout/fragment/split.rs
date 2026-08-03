@@ -1,14 +1,20 @@
-//! Character-level splitting of over-wide text fragments.
+//! Cluster-level splitting of over-wide text fragments.
 //!
 //! A word wider than the space available can't be broken at a normal break
-//! opportunity, so it is split into one fragment per character and the
+//! opportunity, so it is split into one fragment per grapheme cluster and the
 //! line-fitter breaks between them. Used for narrow table cells and deep
 //! indents.
+//!
+//! The unit is the same one spacing is inserted between
+//! ([`crate::render::spacing`]) — and for the same reason. Splitting per
+//! *scalar*, which this module used to do, let the line-fitter break between a
+//! letter and its own combining mark and carry the accent to the next line.
 
 use std::rc::Rc;
 
 use super::{FontProps, Fragment, TextMetrics};
 use crate::render::dimension::Pt;
+use crate::render::spacing;
 
 /// Text measurement callback. Structurally identical to
 /// `paragraph::MeasureTextFn`, restated here so this module doesn't depend on
@@ -17,26 +23,27 @@ pub type MeasureFn<'a> = Option<&'a dyn Fn(&str, &FontProps) -> (Pt, TextMetrics
 
 /// True for a text fragment that is both too wide and actually splittable.
 ///
-/// The character *count* is what matters: a single character cannot be split
-/// however many bytes it occupies. An earlier byte-length (`text.len() > 1`)
-/// spelling of this test disagreed with the split itself for any non-ASCII
-/// single character — it reported "needs split", then split nothing, and the
-/// caller paid for a full clone of the fragment vector.
+/// The *cluster* count is what matters: a single cluster cannot be split
+/// however many scalars or bytes it occupies. An earlier byte-length
+/// (`text.len() > 1`) spelling of this test disagreed with the split itself for
+/// any non-ASCII single character — it reported "needs split", then split
+/// nothing, and the caller paid for a full clone of the fragment vector. A
+/// scalar count has the same disagreement for a one-cluster accented letter.
 fn needs_split(fragment: &Fragment, max_width: Pt) -> bool {
     matches!(
         fragment,
-        Fragment::Text { width, text, .. } if *width > max_width && text.chars().count() > 1
+        Fragment::Text { width, text, .. } if *width > max_width && spacing::unit_count(text) > 1
     )
 }
 
-/// Split text fragments wider than `max_width` into per-character fragments.
+/// Split text fragments wider than `max_width` into per-cluster fragments.
 ///
 /// Returns `None` when nothing needs splitting — the common case. That lets a
 /// caller holding an owned `Vec` keep it untouched, and a caller holding a
 /// slice hand back `Cow::Borrowed`; neither pays for a copy on the fast path.
 ///
-/// Per-character widths come from `measure` when one is supplied. Without a
-/// measurer the fragment's width is divided evenly across its characters,
+/// Per-cluster widths come from `measure` when one is supplied. Without a
+/// measurer the fragment's width is divided evenly across its clusters,
 /// which is only a positioning approximation — the total is preserved.
 pub fn split_oversized_fragments(
     fragments: &[Fragment],
@@ -53,9 +60,6 @@ pub fn split_oversized_fragments(
     }
 
     let mut result = Vec::with_capacity(fragments.len());
-    // Reusable buffer for single-character measurement (avoids a per-character
-    // heap allocation).
-    let mut ch_buf = [0u8; 4];
     for frag in fragments {
         let Fragment::Text {
             text,
@@ -78,27 +82,26 @@ pub fn split_oversized_fragments(
             continue;
         }
 
-        let char_count = text.chars().count();
-        let per_char_fallback = *width / char_count as f32;
-        for ch in text.chars() {
-            let ch_str = ch.encode_utf8(&mut ch_buf);
-            let (w, char_metrics) = match measure {
-                Some(m) => m(ch_str, font),
-                None => (per_char_fallback, *metrics),
+        let unit_count = spacing::unit_count(text);
+        let per_unit_fallback = *width / unit_count as f32;
+        for unit in spacing::units(text) {
+            let (w, unit_metrics) = match measure {
+                Some(m) => m(unit, font),
+                None => (per_unit_fallback, *metrics),
             };
             result.push(Fragment::Text {
-                text: Rc::from(&*ch_str),
+                text: Rc::from(unit),
                 font: font.clone(),
                 color: *color,
                 shading: *shading,
                 border: *border,
                 width: w,
                 trimmed_width: w,
-                metrics: char_metrics,
+                metrics: unit_metrics,
                 hyperlink_url: hyperlink_url.clone(),
                 baseline_offset: *baseline_offset,
                 text_offset: Pt::ZERO,
-                // Per-character split of an over-wide word — not a mark.
+                // Per-cluster split of an over-wide word — not a mark.
                 is_footnote_ref: false,
             });
         }
@@ -246,5 +249,33 @@ mod tests {
         ];
         let result = split_oversized_fragments(&frags, Pt::new(20.0), None).expect("splits");
         assert_eq!(texts(&result), ["a", "b", "ok"]);
+    }
+
+    /// A combining mark must travel with its base. Splitting per scalar put the
+    /// accent in its own fragment, which the line-fitter is then free to break
+    /// before — carrying a bare `U+0301` to the start of the next line.
+    #[test]
+    fn split_never_separates_a_combining_mark_from_its_base() {
+        let frags = vec![text_frag("e\u{301}x", 60.0)];
+        let result = split_oversized_fragments(&frags, Pt::new(20.0), None).expect("splits");
+        assert_eq!(
+            texts(&result),
+            ["e\u{301}", "x"],
+            "the accent stays in the same fragment as its base letter"
+        );
+    }
+
+    /// The cluster count decides splittability, so a single accented letter is
+    /// as unsplittable as a single plain one — `needs_split` must not report
+    /// work it cannot then do.
+    #[test]
+    fn multi_scalar_single_cluster_is_never_split() {
+        for text in ["e\u{301}", "1\u{FE0F}\u{20E3}", "\u{1F1E9}\u{1F1EA}"] {
+            let frags = vec![text_frag(text, 200.0)];
+            assert!(
+                split_oversized_fragments(&frags, Pt::new(10.0), None).is_none(),
+                "{text:?} is one grapheme cluster regardless of its scalar count"
+            );
+        }
     }
 }

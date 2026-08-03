@@ -20,6 +20,7 @@ pub mod layout;
 pub mod painter;
 pub mod resolve;
 pub mod skia_conv;
+pub mod spacing;
 #[cfg(feature = "subset-fonts")]
 pub mod subset;
 

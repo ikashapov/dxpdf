@@ -20,6 +20,7 @@ use crate::render::resolve::drawing_color::Rgba;
 use crate::render::resolve::images::MediaEntry;
 use crate::render::resolve::shape_geometry::{PathVerb, SubPath};
 use crate::render::skia_conv::{to_color4f, to_line, to_point, to_rect, to_size};
+use crate::render::spacing;
 use crate::render::RenderOptions;
 
 /// PDF user-space units per inch — the fixed 1 pt = 1/72 in conversion used to
@@ -294,15 +295,22 @@ fn render_page(
                 text_paint.set_color4f(to_color4f(*color), None);
 
                 if char_spacing.abs() > Pt::ZERO {
-                    // §17.3.2.35 w:spacing — draw each character with
-                    // explicit spacing to match the measured fragment width.
-                    let char_count = text.chars().count();
+                    // §17.3.2.35 w:spacing / §17.3.1.13 distribute — draw one
+                    // spacing unit at a time with explicit spacing between
+                    // them, matching the measured fragment width. The unit is
+                    // a grapheme cluster, and comes from the same module the
+                    // measurer counts with, so the width laid out and the width
+                    // painted are the same number — see
+                    // [`crate::render::spacing`].
+                    let unit_count = spacing::unit_count(text);
                     let glyphs = font.text_to_glyphs_vec(&**text);
                     // Batch path: use text_to_glyphs + get_widths when glyph
-                    // count matches char count (common Latin/CJK text).
-                    // Fallback to per-char measure_str for ligatures or
-                    // complex scripts where counts diverge.
-                    let batch_widths = if glyphs.len() == char_count {
+                    // count matches unit count (common Latin/CJK text).
+                    // A multi-codepoint cluster maps to more glyphs than units,
+                    // so it falls to per-unit measure_str below and is drawn
+                    // whole — the mark composes over its base because its own
+                    // advance is zero.
+                    let batch_widths = if glyphs.len() == unit_count {
                         let mut widths = vec![0f32; glyphs.len()];
                         font.get_widths(&glyphs, &mut widths);
                         Some(widths)
@@ -311,9 +319,7 @@ fn render_page(
                     };
 
                     let mut cursor = *position;
-                    let mut buf = [0u8; 4];
-                    for (i, ch) in text.chars().enumerate() {
-                        let s = ch.encode_utf8(&mut buf);
+                    for (i, unit) in spacing::units(text).enumerate() {
                         // Per-glyph widths from `get_widths` already include
                         // scale_x — they're advances of the scaled font.
                         // measure_str on the scaled font likewise returns the
@@ -322,9 +328,9 @@ fn render_page(
                         let w = if let Some(ref widths) = batch_widths {
                             widths[i]
                         } else {
-                            font.measure_str(&*s, None).0
+                            font.measure_str(unit, None).0
                         };
-                        canvas.draw_str(&*s, to_point(cursor), font, &text_paint);
+                        canvas.draw_str(unit, to_point(cursor), font, &text_paint);
                         cursor.x += Pt::new(w) + *char_spacing;
                     }
                 } else if let Some(slot) = blob_slot {
@@ -1016,6 +1022,72 @@ mod tests {
             .expect("render_to_pdf must succeed");
         assert!(pdf_bytes.len() > 100);
         assert_eq!(&pdf_bytes[..5], b"%PDF-");
+    }
+
+    /// §17.3.2.35 with a multi-scalar cluster. The spaced path draws one unit
+    /// at a time, so a run whose cluster spans two scalars must still paint —
+    /// and must reach the per-unit `measure_str` branch, not the batched
+    /// per-glyph one (see the companion test below).
+    #[test]
+    fn render_combining_mark_with_char_spacing_produces_pdf() {
+        let registry = test_registry();
+        let page = LayoutedPage {
+            commands: vec![DrawCommand::Text {
+                position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
+                text: "e\u{301}cole\u{301}".into(),
+                font_family: Rc::from("Helvetica"),
+                char_spacing: Pt::new(3.0),
+                font_size: Pt::new(14.0),
+                bold: false,
+                italic: false,
+                color: RgbColor::BLACK,
+                text_scale: 1.0,
+            }],
+            page_size: PtSize::new(Pt::new(612.0), Pt::new(792.0)),
+        };
+
+        let pdf_bytes = render_to_pdf(&[page], &registry, &RenderOptions::default())
+            .expect("render_to_pdf must succeed");
+        assert!(pdf_bytes.len() > 100);
+        assert_eq!(&pdf_bytes[..5], b"%PDF-");
+    }
+
+    /// The batch fast path is gated on `glyphs.len() == spacing::unit_count`,
+    /// and that equality is exactly what must fail for a cluster that spans
+    /// more than one scalar: `e` + `U+0301` is two glyphs but one unit, so the
+    /// painter falls back to measuring and drawing the cluster whole. Were the
+    /// gate still a scalar count the two would agree, the batch path would be
+    /// taken, and the accent would be drawn a spacing step away from its base.
+    #[test]
+    fn multi_scalar_cluster_falls_out_of_the_batched_width_path() {
+        let registry = test_registry();
+        let mut cache = fonts::FontCache::new();
+        let (_, font) = cache.get_indexed(&registry, "Helvetica", Pt::new(14.0), false, false);
+
+        let accented = "e\u{301}";
+        let glyphs = font.text_to_glyphs_vec(accented);
+        if glyphs.is_empty() {
+            return; // headless host with no usable typeface
+        }
+        assert_eq!(
+            spacing::unit_count(accented),
+            1,
+            "one grapheme cluster is one spacing unit"
+        );
+        assert_ne!(
+            glyphs.len(),
+            spacing::unit_count(accented),
+            "glyph count must not match unit count, or the cluster would be \
+             split across the batched per-glyph width path"
+        );
+
+        // Plain ASCII still takes the batch path — the fallback is for clusters,
+        // not a blanket slowdown.
+        let plain = "abc";
+        assert_eq!(
+            font.text_to_glyphs_vec(plain).len(),
+            spacing::unit_count(plain)
+        );
     }
 
     #[test]

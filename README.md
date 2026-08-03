@@ -242,7 +242,7 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | Underline | ✅ font-proportional stroke width |
 | Font size, family, color | ✅ |
 | Superscript/subscript | ✅ |
-| Character spacing | ✅ |
+| Character spacing | ✅ §17.3.2.35 applied per UAX #29 grapheme cluster, so a combining mark is never separated from its base |
 | Character scaling (`w:w` horizontal compression/expansion) | ✅ |
 | Run shading | ✅ |
 | Strikethrough | ⚠️ parsed, not yet rendered |
@@ -258,7 +258,7 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 |---|---|
 | Alignment (left, center, right) | ✅ |
 | Alignment (justify) | ✅ |
-| Alignment (distribute) | ⚠️ scalar-based: combining marks and contextual scripts such as Arabic and Indic are not shaping-safe |
+| Alignment (distribute) | ✅ §17.3.1.13 spare width shared between UAX #29 grapheme clusters, never inside one; contextual scripts render as unshaped as they do everywhere else (see *Complex-script shaping*) |
 | Spacing before/after, line spacing | ✅ auto/exact/atLeast |
 | Indentation (left, right, first-line, hanging) | ✅ |
 | Tab stops (left) | ✅ |
