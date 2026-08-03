@@ -209,8 +209,13 @@ fn justification_extra_after(
 /// §17.3.1.13: how many distributable units a fragment contributes.
 ///
 /// The unit is a grapheme cluster, shared with the painter and with `w:spacing`
-/// measurement (see [`crate::render::spacing`]) — counting scalars instead
+/// measurement — see [`crate::render::spacing`], which explains why it is a
+/// cluster and not a scalar (nor, yet, a shaped cluster). Counting scalars
 /// would allocate a gap between a letter and its own combining mark.
+///
+/// An image or emoji cluster is one indivisible unit; everything else — tabs,
+/// breaks, bookmarks — contributes none, so a line of them has nothing to
+/// distribute between.
 fn distribution_unit_count(fragment: &Fragment, terminal: bool) -> usize {
     match fragment {
         Fragment::Text { text, .. } => {
@@ -222,6 +227,14 @@ fn distribution_unit_count(fragment: &Fragment, terminal: bool) -> usize {
     }
 }
 
+/// §17.3.1.13: how many *gaps* this fragment opens — one after each of its
+/// units, except that the last unit on a line gets no trailing space.
+///
+/// So a fragment contributes `units` gaps when something visible follows it on
+/// the line and `units - 1` when nothing does. A line holding a single unit has
+/// zero gaps by construction, which is what stops
+/// [`distribution_extra_per_gap`] dividing by zero rather than a guard bolted
+/// on afterwards.
 fn distribution_gap_count_after(fragments: &[Fragment], frag_idx: usize, line_end: usize) -> usize {
     let has_following_unit = fragments[frag_idx + 1..line_end]
         .iter()
@@ -234,6 +247,17 @@ fn distribution_gap_count_after(fragments: &[Fragment], frag_idx: usize, line_en
     }
 }
 
+/// §17.3.1.13: the amount each gap on this line grows by.
+///
+/// Distribution is skipped — the line keeps its natural width — in four cases:
+/// the paragraph is not `distribute`; the line carries a justification tab
+/// (which places content itself, so stretching around it would fight the stop);
+/// there is no slack left; or the line has no gaps to fill. Unlike
+/// [`justification_extra_after`] there is no last-line exemption: §17.3.1.13
+/// distributes every line, which is what distinguishes it from `both`.
+///
+/// `w:spacing` (§17.3.2.35) has none of these conditions — it applies wherever
+/// it is authored, and is added to this value in the emitted command.
 fn distribution_extra_per_gap(
     fragments: &[Fragment],
     line: &super::super::line::FittedLine,

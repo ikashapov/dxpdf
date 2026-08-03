@@ -1,28 +1,73 @@
 //! §17.3.2.35 / §17.3.1.13: the unit that inter-character spacing is applied
 //! *between*.
 //!
-//! Two features insert horizontal space inside a run: `w:spacing` (§17.3.2.35)
-//! adds a fixed amount everywhere, and `w:jc="distribute"` (§17.3.1.13) shares
-//! a line's spare width out at the same positions. Both need one answer to the
-//! same question — *where may space go?* — and layout and paint must give the
-//! same answer, or a run measures to one width and paints at another.
+//! Two unrelated features insert horizontal space inside a run:
 //!
-//! That answer is the **UAX #29 extended grapheme cluster**, not the Unicode
-//! scalar. `e` + `U+0301` is one unit, so no space is wedged between a letter
-//! and its accent; a keycap, a variation-selector pair, a ZWJ sequence and a
-//! regional-indicator flag are each one unit for the same reason. Splitting on
-//! scalars — what this module replaced — detached every combining mark it met.
+//! ```xml
+//! <w:rPr><w:spacing w:val="40"/></w:rPr>     <!-- §17.3.2.35: +2pt everywhere -->
+//! <w:pPr><w:jc w:val="distribute"/></w:pPr>  <!-- §17.3.1.13: share the line's slack -->
+//! ```
+//!
+//! They differ in where the amount comes from — `w:spacing` is authored, while
+//! `distribute` is derived per line from the width left over — but they land in
+//! the same place, add up (`font.char_spacing + distribution_extra`), and reach
+//! the painter as the single `char_spacing` field of `DrawCommand::Text`.
+//!
+//! So both need one answer to one question: **where may space go?**
+//!
+//! # The unit is a grapheme cluster
+//!
+//! This module owns that answer, and it is the UAX #29 extended grapheme
+//! cluster. [`unit_count`] says how many helpings of spacing a run earns;
+//! [`units`] says which substrings the painter draws between them. Layout and
+//! paint call the same two functions, which is the whole reason the module
+//! exists — a run that measures to one width and paints at another leaves its
+//! underline, its run border and its hyperlink rect behind.
+//!
+//! Counting Unicode **scalars** instead, which is what this code did until
+//! issue #82, breaks any cluster spelled with more than one:
+//!
+//! | Text | Scalars | Clusters | Scalar counting drew |
+//! |---|---|---|---|
+//! | `e` + `U+0301` | 2 | 1 | the acute accent a spacing step right of its `e` |
+//! | `1` `U+FE0F` `U+20E3` | 3 | 1 | a digit, a gap, and a bare keycap ring |
+//! | `U+1F1E9` `U+1F1EA` | 2 | 1 | two lettered squares instead of a German flag |
+//! | `U+0915` `U+094D` `U+0937` | 3 | 1 | a conjunct pulled apart at its virama |
+//!
+//! # Who asks
+//!
+//! | Caller | Uses it for |
+//! |---|---|
+//! | `layout::measurer::measure` | §17.3.2.35 — adds `char_spacing × unit_count` to the measured width |
+//! | `layout::paragraph::line_emit::distribution_unit_count` | §17.3.1.13 — how many units a fragment contributes, hence how many gaps a line has to fill |
+//! | `render::painter`, the `char_spacing != 0` arm | draws one unit at a time, advancing by the unit's own advance plus `char_spacing` |
+//! | `layout::fragment::split` | per-unit fragments for an over-wide word |
+//!
+//! The last is not spacing at all, and is governed here for the same reason:
+//! splitting an over-wide word per *scalar* gave the line-fitter permission to
+//! break between a letter and its own accent and carry the mark to the next
+//! line.
 //!
 //! # Why not the shaped cluster
 //!
-//! A shaping engine reports finer, script-aware boundaries, and #82 asks for
-//! them. They would be boundaries the painter cannot honour: `draw_str` and
-//! `TextBlob::from_str` map codepoints through the cmap only, with no GSUB, so
-//! body text is never shaped in the first place (README's *Complex-script
-//! shaping* row). Promising shaped boundaries while painting unshaped glyphs
-//! would buy nothing and hide the real gap. When the paint path does shape,
-//! this module is the seam that changes: the unit becomes the shaped cluster
-//! and every caller below stays as it is.
+//! A shaping engine reports finer, script-aware boundaries, and issue #82 asks
+//! for them. They would be boundaries the painter cannot honour: `draw_str` and
+//! `TextBlob::from_str` map codepoints to glyphs through the cmap alone, with no
+//! GSUB, so body text is never shaped anywhere in this pipeline — only emoji
+//! clusters are, by `render::emoji`, which needs ligated glyphs to rasterize.
+//! That is the README's *Complex-script shaping* row: a gap in its own right,
+//! not a consequence of spacing.
+//!
+//! Which has a consequence worth stating plainly, because the table above
+//! otherwise invites more than is delivered. An Arabic word already paints in
+//! isolated forms whether or not it is distributed, because it was never
+//! joined. Splitting it into clusters takes nothing away — but cluster-safe
+//! spacing does not give joining back either, and the same holds for ligatures
+//! and Indic reordering. Promising shaped boundaries here while painting
+//! unshaped glyphs would buy nothing and hide which gap is which.
+//!
+//! When the paint path does shape, this module is the seam that changes: the
+//! unit becomes the shaped cluster, and every caller above stays as it is.
 
 use unicode_segmentation::UnicodeSegmentation;
 
