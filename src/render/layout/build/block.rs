@@ -202,11 +202,13 @@ pub(super) fn build_paragraph_block(
         return None;
     }
 
+    let outline = super::convert::paragraph_outline(p, &merged_props, state);
     let mut style = paragraph_style_from_props(
         &merged_props,
         Pt::from(ctx.resolved.default_tab_stop),
         state.shape_auto_fit,
         super::convert::paragraph_locale(p, ctx.resolved),
+        outline,
     );
     style.style_id = p.style_id.clone();
 
@@ -273,6 +275,30 @@ pub(super) fn build_note_content(
     Vec<Fragment>,
     crate::render::layout::paragraph::ParagraphStyle,
 )> {
+    // §17.3.1.19: a footnote or endnote body is not the document's main story,
+    // so nothing in it is an outline position. Suspended for the whole call and
+    // restored, for the same reason `build_header_footer_content` does it there
+    // rather than at the paragraph — a `Block::Table` in a note reaches the
+    // ordinary body builders.
+    let outer = std::mem::replace(
+        &mut state.outline,
+        crate::render::layout::build::OutlineCollector::Excluded,
+    );
+    let results = build_note_blocks(display_num, content, ctx, state);
+    state.outline = outer;
+    results
+}
+
+fn build_note_blocks(
+    display_num: &str,
+    content: &[Block],
+    ctx: &BuildContext,
+    state: &mut BuildState,
+) -> Vec<(
+    String,
+    Vec<Fragment>,
+    crate::render::layout::paragraph::ParagraphStyle,
+)> {
     let mut results = Vec::new();
     for (i, block) in content.iter().enumerate() {
         if let model::Block::Paragraph(p) = block {
@@ -330,6 +356,10 @@ pub(super) fn build_note_content(
                 Pt::from(ctx.resolved.default_tab_stop),
                 state.shape_auto_fit,
                 super::convert::paragraph_locale(p, ctx.resolved),
+                // §17.3.1.19: always `None` — the collector is suspended for
+                // this whole call. Asking rather than passing `None` keeps the
+                // heading decision in one place for every path.
+                super::convert::paragraph_outline(p, &merged_props, state),
             );
             results.push((display_num.to_string(), frags, style));
         }

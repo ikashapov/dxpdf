@@ -405,6 +405,7 @@ impl PlacedParagraph<'_> {
             self.style,
             &self.params,
             self.measure_text,
+            true,
         );
 
         // §17.3.1.24: paragraph border and shading coordinate system.
@@ -482,6 +483,7 @@ impl PlacedParagraph<'_> {
             self.style,
             &self.params,
             self.measure_text,
+            is_first_segment,
         );
 
         // §17.3.1.24/§17.3.1.31: per-segment border/shading box; the top edge and

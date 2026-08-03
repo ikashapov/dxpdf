@@ -63,6 +63,8 @@ pub struct BuildState {
     pub endnote_counter: u32,
     /// Per-(numId, level) running counters for list labels.
     pub list_counters: HashMap<(model::NumId, u8), u32>,
+    /// §17.3.1.19: the document outline being accumulated.
+    pub outline: OutlineCollector,
     /// Field evaluation context (page number, total pages).
     pub field_ctx: crate::render::layout::fragment::FieldContext,
     /// §20.1.4.1.17: default text color for the current shape text box (from
@@ -174,7 +176,30 @@ pub struct HeaderFooterContent {
 /// Produces `LayoutBlock` entries for both paragraphs and tables, and
 /// extracts floating images separately (they are positioned page-relative
 /// rather than stack-relative).
+/// Lay out content that is **not** the document's main story: a header, a
+/// footer, or a shape text body.
+///
+/// §17.3.1.19: the outline collector is suspended for the whole call and
+/// restored after. Doing it here rather than at each paragraph is what makes it
+/// correct — a `Block::Table` in a header is handed to the *body* table
+/// builder, so its cell paragraphs reach the ordinary paragraph builder with
+/// the document's state. Guarding only the paragraph arm let a heading in a
+/// header table into the outline once per page the header was drawn on.
+///
+/// Save-and-restore rather than a fresh flag because the call nests: a shape
+/// text body inside a header goes through here twice.
 pub fn build_header_footer_content(
+    blocks: &[Block],
+    ctx: &BuildContext,
+    state: &mut BuildState,
+) -> HeaderFooterContent {
+    let outer = std::mem::replace(&mut state.outline, OutlineCollector::Excluded);
+    let content = build_non_story_content(blocks, ctx, state);
+    state.outline = outer;
+    content
+}
+
+fn build_non_story_content(
     blocks: &[Block],
     ctx: &BuildContext,
     state: &mut BuildState,
@@ -200,6 +225,11 @@ pub fn build_header_footer_content(
                     Pt::from(ctx.resolved.default_tab_stop),
                     state.shape_auto_fit,
                     convert::paragraph_locale(p, ctx.resolved),
+                    // §17.3.1.19: always `None` here — the collector is
+                    // suspended for this whole call. Asking rather than passing
+                    // `None` keeps one rule: whether a paragraph is a heading is
+                    // decided in one place, for every path.
+                    convert::paragraph_outline(p, &props, state),
                 );
 
                 // Check for VML absolute positioning in Pict inlines.
@@ -422,5 +452,48 @@ mod tests {
         let blocks = vec![Block::SectionBreak(Box::default()), empty_para()];
         let hf = build_header_footer_content(&blocks, &ctx, &mut state);
         assert_eq!(hf.blocks.len(), 1, "only the paragraph survives");
+    }
+}
+
+/// §17.3.1.19: whether a build contributes to the PDF document outline.
+///
+/// A PDF structure node ID must be unique across the whole document, so the
+/// counter is document-wide — like `list_counters`, and for the same reason.
+/// The variant matters because a shape text body is laid out by a **fresh**
+/// `BuildState`: left `Collecting`, its counter would restart at 1 and hand out
+/// IDs already owned by body headings, silently retargeting their outline
+/// entries at the shape.
+///
+/// It is also the right answer independently. A heading inside a text box is
+/// not a position in the document's main story, which is what an outline
+/// enumerates — Word's own navigation pane leaves them out too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutlineCollector {
+    /// The document body. Holds how many headings it has taken IDs for.
+    Collecting(i32),
+    /// A sub-layout whose headings are not document positions.
+    Excluded,
+}
+
+impl Default for OutlineCollector {
+    fn default() -> Self {
+        Self::Collecting(0)
+    }
+}
+
+impl BuildState {
+    /// §17.3.1.19: reserve the next PDF structure node ID, or `None` when this
+    /// build contributes nothing to the outline.
+    pub fn next_outline_node_id(&mut self) -> Option<i32> {
+        match &mut self.outline {
+            OutlineCollector::Collecting(count) => {
+                // 1-based: `skia_safe::pdf::node_id` reserves 0 for "no node"
+                // and every negative value for artifacts, so a 0-based counter
+                // would silently leave the first heading unmarked.
+                *count += 1;
+                Some(*count)
+            }
+            OutlineCollector::Excluded => None,
+        }
     }
 }

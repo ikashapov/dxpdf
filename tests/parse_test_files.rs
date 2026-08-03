@@ -392,6 +392,7 @@ fn sample4_image_extents() {
 // ── Cross-cutting tests ──────────────────────────────────────────────────────
 
 const ALL_FILES: &[&str] = &[
+    "document_outline.docx",
     "sample-docx-files-sample1.docx",
     "sample-docx-files-sample2.docx",
     "sample-docx-files-sample3.docx",
@@ -503,6 +504,52 @@ fn table_cells_have_content() {
             );
         }
     }
+}
+
+/// §17.3.1.19: the outline-level fixture from issue #90 declares `w:outlineLvl`
+/// on its heading *styles*, not on the paragraphs, so the level only exists
+/// after the §17.7.2 cascade. This pins the parse half — that the styles carry
+/// it at all — because a fixture that silently stopped declaring it would make
+/// every outline test pass for the wrong reason.
+#[test]
+fn the_outline_fixture_declares_heading_levels_on_its_styles() {
+    let doc = load("document_outline.docx");
+
+    let level_of = |style_id: &str| {
+        doc.styles
+            .styles
+            .get(&StyleId::new(style_id))
+            .unwrap_or_else(|| panic!("{style_id} is defined"))
+            .paragraph_properties
+            .as_ref()
+            .and_then(|p| p.outline_level)
+    };
+
+    assert_eq!(level_of("Heading1"), OutlineLevel::from_ooxml(0));
+    assert_eq!(level_of("Heading2"), OutlineLevel::from_ooxml(1));
+    assert_eq!(level_of("Normal"), None, "body text has no outline level");
+}
+
+/// The six headings the reference PDF's outline has, in document order. Their
+/// paragraphs carry no `w:outlineLvl` of their own — only `w:pStyle`.
+#[test]
+fn the_outline_fixture_has_six_heading_paragraphs() {
+    let doc = load("document_outline.docx");
+
+    let styles: Vec<String> = doc
+        .body
+        .iter()
+        .filter_map(|b| match b {
+            Block::Paragraph(p) => p.style_id.as_ref().map(|s| s.as_str().to_string()),
+            _ => None,
+        })
+        .filter(|s| s.starts_with("Heading"))
+        .collect();
+
+    assert_eq!(
+        styles,
+        ["Heading1", "Heading1", "Heading2", "Heading1", "Heading1", "Heading2"],
+    );
 }
 
 #[test]

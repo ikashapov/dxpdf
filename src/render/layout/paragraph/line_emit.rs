@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::super::draw_command::DrawCommand;
+use super::super::draw_command::{DrawCommand, OutlineMark};
 use super::super::fragment::{Fragment, LinkTarget};
 use super::types::{LineSpacingRule, MeasureTextFn, ParagraphStyle, TabStopDef};
 use super::{LineLayoutParams, LinePlacement, LEADER_CHAR_WIDTH_FALLBACK};
@@ -267,6 +267,10 @@ pub(super) fn emit_line_commands(
     style: &ParagraphStyle,
     params: &LineLayoutParams,
     measure_text: MeasureTextFn<'_>,
+    // §17.3.1.14: false for the continuation of a paragraph split across pages.
+    // The caller knows; it cannot be inferred from `line_range`, because a
+    // continuation is re-fitted against its own page and starts again at 0.
+    is_first_segment: bool,
 ) {
     let content_width = params.content_width;
     let first_line_adjustment = params.first_line_adjustment;
@@ -288,6 +292,23 @@ pub(super) fn emit_line_commands(
     // first-line indent (§17.3.1.12), drop caps (§17.3.1.11), and last-line
     // justification (§17.3.1.13) resolve correctly when a paragraph is split
     // across pages and only a sub-range of its lines is emitted here.
+    // §17.3.1.19: bracket this paragraph's commands so the PDF outline can point
+    // at it. Emitted here, around the whole emitted run, rather than per line:
+    // Skia derives an entry's destination from the union of the marks under its
+    // node, so one pair spanning the heading gives the top-left of its first
+    // line — exactly the point a reader expects to land on.
+    //
+    // Only the first segment emits it. `emit_line_commands` runs once per
+    // page-slice of a paragraph (§17.3.1.14), so a heading that splits across
+    // pages would otherwise open a second entry for its continuation — the
+    // entry belongs to the page the heading starts on. This rides the same
+    // `is_first_segment` flag that already decides `space_before` and the drop
+    // cap, for the same reason.
+    let outline = style.outline.as_ref().filter(|_| is_first_segment);
+    if let Some(heading) = outline {
+        commands.push(DrawCommand::Outline(OutlineMark::Begin(heading.clone())));
+    }
+
     for line_idx in line_range {
         let lp = &line_placements[line_idx];
         let line = &lp.line;
@@ -700,6 +721,10 @@ pub(super) fn emit_line_commands(
         }
 
         *cursor_y += line_height;
+    }
+
+    if outline.is_some() {
+        commands.push(DrawCommand::Outline(OutlineMark::End));
     }
 }
 

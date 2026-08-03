@@ -12,6 +12,47 @@ use crate::render::resolve::drawing_color::Rgba;
 use crate::render::resolve::images::MediaEntry;
 use crate::render::resolve::shape_geometry::SubPath;
 
+/// §17.3.1.19: one heading, as it will appear in the PDF outline.
+///
+/// `node_id` is assigned at **layout** time and carried here rather than
+/// recomputed at paint. The painter and the structure-tree builder both walk
+/// the same command stream, and two counters that agree only by argument is
+/// exactly the shape that produced this codebase's MCE double-render and then
+/// the missing render after it. One field, read twice.
+#[derive(Debug, Clone)]
+pub struct OutlineHeading {
+    /// PDF structure node ID. Unique per document and **1-based**:
+    /// `skia_safe::pdf::node_id` reserves 0 for "no node" and every negative
+    /// value for artifacts.
+    pub node_id: i32,
+    /// §17.3.1.19 level, 1-based (`w:outlineLvl` 0 → 1).
+    pub level: crate::model::OutlineLevel,
+    /// The paragraph's own text, **without** its §17.9.22 list label — which
+    /// is what Word and LibreOffice both put in the outline, even for a
+    /// numbered heading that renders with its number on the page.
+    pub title: Rc<str>,
+}
+
+/// §17.3.1.19: the boundaries of a heading's marked content.
+///
+/// A *pair* rather than a single marker because the PDF destination is the
+/// union of the marks under the node — leaving the node ID set past the
+/// heading would drag its destination down onto the body text below. This is
+/// the same shape as the `BDC`/`EMC` operator pair it ultimately becomes.
+///
+/// The balance invariant is held by a single emitter
+/// (`paragraph::line_emit::emit_line_commands`) rather than by the type: the
+/// alternative — a variant owning a `Vec<DrawCommand>` — would need an arm in
+/// every one of the twenty files that match on `DrawCommand`, for a nesting
+/// the flat per-page command list does not otherwise have.
+#[derive(Debug, Clone)]
+pub enum OutlineMark {
+    /// Opens the heading's marked content.
+    Begin(OutlineHeading),
+    /// Closes it, restoring "no node".
+    End,
+}
+
 /// A positioned drawing command — absolute page coordinates.
 #[derive(Debug, Clone)]
 pub enum DrawCommand {
@@ -90,6 +131,9 @@ pub enum DrawCommand {
         position: PtOffset,
         name: String,
     },
+    /// §17.3.1.19: brackets one heading paragraph's commands so the PDF
+    /// outline can point at it. Draws nothing.
+    Outline(OutlineMark),
     /// §20.1.8 shape draw command — a resolved geometry with fill, stroke,
     /// and optional effects. `paths` are in shape-local Pt; the painter
     /// applies the placement transform (origin/rotation/flip).
@@ -256,6 +300,10 @@ impl DrawCommand {
                 origin.x += dx;
                 origin.y += dy;
             }
+            // A marked-content boundary has no coordinates of its own — the
+            // destination is derived from the commands it brackets, which do
+            // get shifted.
+            DrawCommand::Outline(_) => {}
         }
     }
 
@@ -293,7 +341,8 @@ impl DrawCommand {
             DrawCommand::Path { origin, extent, .. } => Some((origin.y, origin.y + extent.height)),
             DrawCommand::LinkAnnotation { .. }
             | DrawCommand::InternalLink { .. }
-            | DrawCommand::NamedDestination { .. } => None,
+            | DrawCommand::NamedDestination { .. }
+            | DrawCommand::Outline(_) => None,
         }
     }
 
@@ -433,6 +482,31 @@ mod tests {
             | DrawCommand::LinkAnnotation { rect, .. }
             | DrawCommand::InternalLink { rect, .. } => (rect.origin.x.raw(), rect.origin.y.raw()),
             DrawCommand::Path { origin, .. } => (origin.x.raw(), origin.y.raw()),
+            // §17.3.1.19: a marked-content boundary has no coordinates, so
+            // there is nothing for `shift` to move. `shift_leaves_a_marker_be`
+            // asserts that directly rather than through this helper.
+            DrawCommand::Outline(_) => unreachable!("markers are tested separately"),
+        }
+    }
+
+    /// The only variant `one_of_each` cannot carry, because it has no origin to
+    /// compare. Shifting it must leave it alone — the destination its outline
+    /// entry gets is derived from the commands it brackets, which *are* shifted.
+    #[test]
+    fn shift_leaves_a_marker_be() {
+        let heading = OutlineHeading {
+            node_id: 7,
+            level: crate::model::OutlineLevel::new(1),
+            title: Rc::from("Title"),
+        };
+        for mut cmd in [
+            DrawCommand::Outline(OutlineMark::Begin(heading)),
+            DrawCommand::Outline(OutlineMark::End),
+        ] {
+            let before = format!("{cmd:?}");
+            cmd.shift(Pt::new(DX), Pt::new(DY));
+            assert_eq!(format!("{cmd:?}"), before);
+            assert_eq!(cmd.vertical_span(), None, "a marker occupies no band");
         }
     }
 

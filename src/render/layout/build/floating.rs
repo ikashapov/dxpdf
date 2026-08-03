@@ -1278,6 +1278,9 @@ pub(super) fn build_shape_text_commands(
     // are reset so a footnote/list inside a shape body doesn't bump the
     // outer counters.
     let mut sub_state = BuildState {
+        // §17.3.1.19: a heading inside a text box is not a position in the
+        // document's main story — see `OutlineCollector`.
+        outline: crate::render::layout::build::OutlineCollector::Excluded,
         shape_auto_fit: auto_fit,
         page_config: state.page_config.clone(),
         footnotes: Default::default(),
@@ -1627,6 +1630,7 @@ mod tests {
     fn default_state() -> BuildState {
         BuildState {
             page_config: Default::default(),
+            outline: Default::default(),
             shape_auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             footnotes: Default::default(),
             endnote_counter: 0,
