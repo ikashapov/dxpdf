@@ -1348,16 +1348,6 @@ pub(crate) struct SectionStart<'a> {
     pub logical_page_base: usize,
 }
 
-/// §17.6.22: the body bounds one page of a section must use because a following
-/// `Continuous` section shares it.
-///
-/// A page holding a continuous break is drawn with the header and footer of the
-/// **last** section on it — see the ownership rule at `render::render_to_pages`,
-/// which is where it is decided.
-///
-/// Index and bounds travel as one value because they are one decision: an
-/// index without bounds, or bounds without an index, cannot be acted on, and as
-/// two `Option`s they could disagree.
 /// §17.6.22: who owns a section's last page.
 ///
 /// One decision, one type. As a `bool` beside an `Option<FinalPageBounds>` the
@@ -1383,6 +1373,16 @@ impl LastPageOwner {
     }
 }
 
+/// §17.6.22: the body bounds one page of a section must use because a following
+/// `Continuous` section shares it.
+///
+/// A page holding a continuous break is drawn with the header and footer of the
+/// **last** section on it — see the ownership rule at `render::render_to_pages`,
+/// which is where it is decided.
+///
+/// Index and bounds travel as one value because they are one decision: an index
+/// without bounds, or bounds without an index, cannot be acted on, and as two
+/// `Option`s they could disagree.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FinalPageBounds {
     /// 0-based physical page index within the section.

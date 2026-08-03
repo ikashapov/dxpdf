@@ -147,6 +147,11 @@ re-fits against each column's own width.
 pages with differently-sized headers get correct body bounds. See
 [Headers and Footers](headers-footers.md).
 
+§17.6.22 continuous breaks — where one page carries two sections, and the column
+reset, shared-page ownership and relayout that follow from it — are documented in
+the `src/render/layout/section` module doc rather than here, next to the types
+that implement them.
+
 ### Floating tables
 
 `floating_table.rs` (§17.4.58) assigns the slices produced by

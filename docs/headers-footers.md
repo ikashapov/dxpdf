@@ -73,6 +73,8 @@ Headers/footers are built **per-page** to evaluate PAGE and NUMPAGES fields corr
 
 `SectionHfInfo` stores the page range and raw block references for each section. Phase 2 iterates these, setting `field_ctx_cell` per-page before building content.
 
+§17.6.22: a page shared with a following `Continuous` section falls in the **succeeding** section's `page_range` — the last section on a page owns its header and footer. The rule, and the fact that ECMA-376 does not settle it, is stated at the decision site in `render::render_to_pages`.
+
 ```rust
 ctx.field_ctx_cell.set(FieldContext {
     page_number: Some(page_base + page_idx + 1),
