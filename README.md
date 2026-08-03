@@ -130,22 +130,24 @@ dxpdf handles the most common DOCX features found in real-world business documen
 | **Shapes & text boxes** | DrawingML and VML shapes, shape text bodies with insets, anchoring and autofit, custom geometry with guide formulas |
 | **Headers & footers** | Text, images, page numbers via PAGE/NUMPAGES field codes |
 | **Lists** | Multi-level numbering — bullets, decimal, lower/upper letter, lower/upper roman, ordinal and spelled-out text — with counter tracking and picture bullets |
-| **Hyperlinks** | Clickable PDF link annotations with URL resolution, plus bookmarks and internal cross-references as named destinations |
+| **Navigation** | Clickable PDF link annotations with URL resolution, bookmarks and internal cross-references as named destinations, and a PDF outline built from heading levels |
 | **Page layout** | Multiple page sizes/margins, section breaks, multi-column sections, portrait and landscape orientation |
 | **Pagination** | Automatic page breaking, paragraph splitting across pages with keep-lines and widow/orphan control, word wrapping, line spacing modes, footnotes, endnotes, floating image text flow |
 | **Internationalisation** | `w:lang`-driven decimal separator for decimal tab stops and number-word spelling |
 
 ## Performance Benchmarks
 
-Measured on Apple M3 Max with `hyperfine` (20 runs, 3 warmup) at **v0.3.1**,
-against fixtures committed in `test-files/` so the numbers are reproducible:
+Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.3.1**,
+against fixtures committed in `test-files/` so the numbers are reproducible.
+Times are rounded to 5 ms — run-to-run spread on a normally loaded machine is
+around ±10 ms, so smaller differences are not meaningful:
 
 | Fixture | Pages | Input | Conversion time | Peak RSS |
 |---|---|---|---|---|
-| `sample-docx-files-sample3` | 3 | 34 KB | **147 ms** | 50 MB |
-| `sample-docx-files-sample-4` | 7 | 10 KB | **132 ms** | 47 MB |
-| `sample-docx-files-sample1` | 9 | 1.3 MB | **141 ms** | 60 MB |
-| `sample-docx-files-sample4` | 173 | 14 MB | **377 ms** | 162 MB |
+| `sample-docx-files-sample3` | 3 | 34 KB | **135 ms** | 50 MB |
+| `sample-docx-files-sample-4` | 7 | 10 KB | **135 ms** | 48 MB |
+| `sample-docx-files-sample1` | 9 | 1.3 MB | **165 ms** | 61 MB |
+| `sample-docx-files-sample4` | 173 | 14 MB | **370 ms** | 161 MB |
 
 **A fixed font-registry build dominates small documents.** Enumerating the
 host's fonts and indexing their PostScript/style names costs a flat 90–110 ms
@@ -227,7 +229,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **68 entries fully implemented, 12 partial, 9 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 12 partial, 8 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -368,7 +370,7 @@ Validated against ISO 29500 (Office Open XML). **68 entries fully implemented, 1
 | Text boxes (shape text bodies) | ✅ insets, vertical anchoring, `vertOverflow` clipping, `normAutofit` shrink |
 | SmartArt, charts | ❌ |
 | Bookmarks and internal cross-references | ✅ `w:bookmarkStart` → PDF named destinations; internal hyperlinks → GoTo link annotations |
-| PDF outline sidebar (`/Outlines`) | ❌ `w:outlineLvl` parsed, no outline tree emitted |
+| PDF outline sidebar (`/Outlines`) | ✅ §17.3.1.19 `w:outlineLvl` → structure-element headers; levels 7–9 clamp to `H6` (ISO 32000-1 stops there) and headings in headers, footers and notes are excluded |
 | RTL text, automatic hyphenation | ❌ |
 
 </details>
@@ -405,9 +407,9 @@ Yes. In Rust, add `dxpdf` as a dependency and call `dxpdf::convert(&docx_bytes)`
 
 ### What DOCX features are supported?
 
-dxpdf supports text formatting, paragraphs, tables (including nested, merged and floating tables with conditional formatting), inline and floating images, shapes and text boxes, styles with inheritance, headers/footers, multi-level lists, hyperlinks, footnotes and endnotes, section breaks, and automatic pagination. See the full [feature matrix](#ooxml-feature-coverage) above.
+dxpdf supports text formatting, paragraphs, tables (including nested, merged and floating tables with conditional formatting), inline and floating images, shapes and text boxes, styles with inheritance, headers/footers, multi-level lists, hyperlinks and a navigable PDF outline, footnotes and endnotes, section breaks, and automatic pagination. See the full [feature matrix](#ooxml-feature-coverage) above.
 
-Notable gaps: complex-script shaping (Arabic joining, Indic reordering), RTL text, automatic hyphenation, tracked changes and comments, SmartArt and charts, and the PDF outline sidebar.
+Notable gaps: complex-script shaping (Arabic joining, Indic reordering), RTL text, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
 
 ### How fast is dxpdf?
 
