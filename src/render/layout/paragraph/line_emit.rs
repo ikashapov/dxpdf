@@ -206,14 +206,16 @@ fn justification_extra_after(
     }
 }
 
+/// §17.3.1.13: how many distributable units a fragment contributes.
+///
+/// The unit is a grapheme cluster, shared with the painter and with `w:spacing`
+/// measurement (see [`crate::render::spacing`]) — counting scalars instead
+/// would allocate a gap between a letter and its own combining mark.
 fn distribution_unit_count(fragment: &Fragment, terminal: bool) -> usize {
     match fragment {
         Fragment::Text { text, .. } => {
-            if terminal {
-                text.trim_end().chars().count()
-            } else {
-                text.chars().count()
-            }
+            let text = if terminal { text.trim_end() } else { text };
+            crate::render::spacing::unit_count(text)
         }
         Fragment::Image { .. } | Fragment::Emoji { .. } => 1,
         _ => 0,

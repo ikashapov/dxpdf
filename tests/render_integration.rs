@@ -510,3 +510,93 @@ fn footnote_nested_in_hyperlink_gets_a_body_and_keeps_numbering_aligned() {
         }
     }
 }
+
+/// Minimal single-part DOCX around `body` — no notes, no styles.
+fn docx_with_body(body: &str) -> Vec<u8> {
+    use std::io::Write;
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let o = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip.start_file("[Content_Types].xml", o).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#).unwrap();
+
+    zip.start_file("_rels/.rels", o).unwrap();
+    zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#).unwrap();
+
+    zip.start_file("word/document.xml", o).unwrap();
+    zip.write_all(
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>{body}</w:body>
+</w:document>"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+
+    zip.finish().unwrap().into_inner()
+}
+
+/// The `char_spacing` of every text command on the page, in emission order.
+fn text_char_spacings(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> Vec<f32> {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            DrawCommand::Text { char_spacing, .. } => Some(char_spacing.raw()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// §17.3.1.13 end to end: spare width is shared between grapheme clusters, so
+/// the *same word* spelled precomposed (`é`, one scalar) and decomposed
+/// (`e` + `U+0301`, two scalars) distributes across the same number of gaps and
+/// therefore gets the same spacing.
+///
+/// The assertion is deliberately metric-free — it compares the two spellings
+/// against each other rather than against a number, so it holds on any host
+/// font. Under the scalar counting this replaced, the decomposed spelling saw
+/// 5 gaps where the precomposed one saw 2, and its spacing collapsed to ~40% —
+/// with two of those five gaps opening between a letter and its own accent.
+#[test]
+fn distribute_shares_width_between_clusters_not_scalars() {
+    let paragraph = |text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:jc w:val="distribute"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+
+    let spacing_for = |text: &str| {
+        let doc = dxpdf::docx::parse(&docx_with_body(&paragraph(text))).expect("parse");
+        let (_, pages) = dxpdf::render::resolve_and_layout(doc);
+        let spacings = text_char_spacings(&pages);
+        assert_eq!(spacings.len(), 1, "one run, one text command: {spacings:?}");
+        spacings[0]
+    };
+
+    let precomposed = spacing_for("ééé");
+    let decomposed = spacing_for("e\u{301}e\u{301}e\u{301}");
+
+    assert!(
+        precomposed > 1.0,
+        "the fixture must actually distribute — got {precomposed}pt of spare width per gap"
+    );
+    assert!(
+        (precomposed - decomposed).abs() < 0.5,
+        "both spellings are three clusters and must distribute alike: \
+         precomposed={precomposed}pt/gap, decomposed={decomposed}pt/gap"
+    );
+}

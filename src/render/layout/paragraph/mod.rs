@@ -985,6 +985,44 @@ mod tests {
         assert!(((link.origin.x + link.size.width).raw() - 60.0).abs() < 0.01);
     }
 
+    /// §17.3.1.13: spare width is shared between *grapheme clusters*, never
+    /// inside one. Two accented letters are four scalars but two units, so
+    /// there is exactly one gap to fill — the scalar count would invent three
+    /// and drop two of them between a letter and its own accent.
+    #[test]
+    fn distribute_alignment_counts_grapheme_clusters_not_scalars() {
+        let accented = "e\u{301}e\u{301}";
+        assert_eq!(accented.chars().count(), 4, "fixture must be four scalars");
+
+        let result = layout_paragraph(
+            &[text_frag(accented, 20.0)],
+            &body_constraints(60.0),
+            &ParagraphStyle {
+                alignment: Alignment::Distribute,
+                ..Default::default()
+            },
+            Pt::new(14.0),
+            None,
+        );
+
+        let spacings = result
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { char_spacing, .. } => Some(char_spacing.raw()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        // 40pt spare over 1 inter-cluster gap. Over 3 inter-scalar gaps it
+        // would have been 13.33.
+        assert_eq!(spacings.len(), 1);
+        assert!(
+            (spacings[0] - 40.0).abs() < 0.01,
+            "one gap between two clusters, not three between four scalars: {spacings:?}",
+        );
+    }
+
     #[test]
     fn distribute_alignment_adds_to_existing_character_spacing() {
         let mut first = text_frag("A", 10.0);

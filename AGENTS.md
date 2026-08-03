@@ -75,6 +75,7 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 - [Style Cascade](docs/style-cascade.md) — §17.7.2 property resolution, doc defaults, table style interaction
 - [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
 - [Line Spacing](docs/line-spacing.md) — §17.3.1.33 line/lineRule, Auto/Exact/AtLeast modes
+- [Character Spacing](docs/character-spacing.md) — §17.3.2.35 `w:spacing` and §17.3.1.13 `distribute` share one unit — the UAX #29 grapheme cluster — and why it is not the shaped cluster
 - [Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab` alignment derived at layout time; §17.18.85 `bar` stops (a rule, invisible to a tab character) and `decimal` stops
 - [Internationalisation](docs/i18n.md) — §17.3.2.20 `w:lang`, the `Locale` type and its language table, and the ICU-shaped gap it is a stopgap for (number spelling, UAX #14 line breaking, bidi, date pictures)
 - [Section Stacking](docs/section-stacking.md) — §17.6 block stacking, page/column breaks, keepNext chains, §17.3.1.14/§17.3.1.44 across-page paragraph splitting with widow/orphan control, footnote reservation
