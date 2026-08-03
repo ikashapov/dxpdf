@@ -122,10 +122,12 @@ Both are named at their call site rather than hidden in a default.
 **Not applied vertically.** §20.4.3.2 `inside`/`outside` and §20.4.3.5
 `insideMargin`/`outsideMargin` exist on the vertical axis too, but a two-sided
 document mirrors left and right, not top and bottom — there is no reading of a
-vertical "inside" that source alone can derive. Both align to the region's top,
-and the open question is filed in
-[open-work](../plans/open-work.md), "Blocked on a Word reference
-render" (item 24).
+vertical "inside" that source alone can derive. Both align to the region's top.
+
+Settling it needs a Word render of a two-sided document with a float anchored
+`inside`/`outside` vertically, on both an odd and an even page. All four values
+resolve through named arms in `resolve_anchor_y`, and `FloatingImageX` with its
+`PageParity` variant is already in place should the answer be "it mirrors".
 
 ## `mc:AlternateContent` — MCE §M.1.2
 
@@ -239,7 +241,9 @@ list with no scoping — the three `text_commands` emitters shift each command
 and push it straight onto the page — so expressing it would mean a new
 `DrawCommand` wrapper variant plus an arm in every consumer. Dropping is the
 safe direction, because `clip`'s contract is that nothing paints outside the
-box. Residue recorded in [open-work](../plans/open-work.md).
+box — and it is unexercised: the corpus holds 4 explicit `vertOverflow="overflow"`,
+10 `bodyPr` with the attribute absent, and zero `clip` or `ellipsis` (checked,
+not assumed). Worth revisiting only once a real document needs the sliver.
 
 The extent test itself, `DrawCommand::vertical_span`, is exhaustive over the
 variants. A `Text` command carries a baseline and a font size but not the
