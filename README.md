@@ -14,14 +14,14 @@ Built by [nerdy.pro](https://nerdy.pro).
 
 ## Key Features
 
-- **Blazing fast** — converts typical business documents in well under a second, most in tens of milliseconds
-- **High fidelity** — parse → resolve → layout → paint pipeline with pixel-accurate baseline positioning
+- **Fast** — typical business documents convert in ~150 ms, a 173-page document in under 400 ms
+- **High fidelity** — parse → resolve → layout → subset → paint pipeline with pixel-accurate baseline positioning
 - **Compact output** — embedded fonts are subsetted to the glyphs actually used, so PDFs stay small
 - **Type-safe** — compile-time dimensional type system (`Twips`, `Pt`, `Emu`) prevents unit mixing bugs
 - **Standalone** — no Office installation, no LibreOffice, no external services needed
 - **Cross-platform** — runs natively on macOS, Linux, and Windows
 - **Three interfaces** — use as a CLI tool, Rust library (`use dxpdf;`), or Python package (`import dxpdf`)
-- **Unicode-aware** — complex-script shaping via HarfBuzz, plus full-color emoji including ZWJ, skin-tone, keycap and flag sequences
+- **Unicode-aware** — grapheme-correct segmentation, plus full-color emoji including ZWJ, skin-tone, keycap and flag sequences shaped through Skia's HarfBuzz
 - **ISO 29500 compliant** — validated against the Office Open XML specification
 
 ## Installation
@@ -95,7 +95,7 @@ for block in &document.body {
     }
 }
 
-let pdf_bytes = render::render(&document, &dxpdf::RenderOptions::default())?;
+let pdf_bytes = render::render(document, &dxpdf::RenderOptions::default())?;
 ```
 
 ### Python — Convert DOCX to PDF in Python
@@ -120,35 +120,47 @@ dxpdf handles the most common DOCX features found in real-world business documen
 
 | Category | Features |
 |---|---|
-| **Text formatting** | Bold, italic, underline, highlighting, font size/family/color, character spacing, superscript/subscript, run shading |
-| **Paragraphs** | Alignment (left/center/right/justify/distribute), spacing (before/after/line with auto/exact/atLeast), indentation, tab stops incl. absolute-position tabs, paragraph borders, paragraph shading |
-| **Tables** | Column widths, cell margins (3-level cascade), merged cells (gridSpan + vMerge), row heights, borders, cell shading, nested tables, row splitting across pages |
-| **Images** | Inline images (PNG, JPEG, BMP, WebP, EMF), floating/anchored images with alignment, wrapping and percentage-based positioning |
+| **Text formatting** | Bold, italic, underline, highlighting, font size/family/color, character spacing, character scaling, superscript/subscript, run shading, run borders |
+| **Paragraphs** | Alignment (left/center/right/justify/distribute), spacing (before/after/line with auto/exact/atLeast), indentation, tab stops (left/center/right/decimal/bar) incl. absolute-position tabs, paragraph borders, paragraph shading |
+| **Tables** | Column widths, cell margins (3-level cascade), merged cells (gridSpan + vMerge), row heights, borders (single and double), cell shading, table styles with conditional formatting, nested tables, floating tables, row splitting across pages |
+| **Images** | Inline images (PNG, JPEG, GIF, BMP, WebP, and single-bitmap EMF), floating/anchored images with alignment, wrapping, cropping and percentage-based positioning |
 | **Styles** | Paragraph and character styles, `basedOn` inheritance, document defaults, theme fonts |
 | **Fonts** | Embedded DOCX fonts, metric-compatible substitution, and subsetting so only used glyphs are embedded |
-| **Text & emoji** | HarfBuzz shaping for complex scripts; full-color emoji including ZWJ, modifier, keycap and flag sequences |
+| **Text & emoji** | Grapheme-correct segmentation; full-color emoji including ZWJ, modifier, keycap and flag sequences, GSUB-shaped through Skia's HarfBuzz |
+| **Shapes & text boxes** | DrawingML and VML shapes, shape text bodies with insets, anchoring and autofit, custom geometry with guide formulas |
 | **Headers & footers** | Text, images, page numbers via PAGE/NUMPAGES field codes |
-| **Lists** | Bullets, decimal, lower/upper letter, lower/upper roman numbering with counter tracking |
-| **Hyperlinks** | Clickable PDF link annotations with URL resolution |
+| **Lists** | Multi-level numbering — bullets, decimal, lower/upper letter, lower/upper roman, ordinal and spelled-out text — with counter tracking and picture bullets |
+| **Navigation** | Clickable PDF link annotations with URL resolution, bookmarks and internal cross-references as named destinations, and a PDF outline built from heading levels |
 | **Page layout** | Multiple page sizes/margins, section breaks, multi-column sections, portrait and landscape orientation |
-| **Pagination** | Automatic page breaking, paragraph splitting across pages with keep-lines and widow/orphan control, word wrapping, line spacing modes, footnotes, floating image text flow |
+| **Pagination** | Automatic page breaking, paragraph splitting across pages with keep-lines and widow/orphan control, word wrapping, line spacing modes, footnotes, endnotes, floating image text flow |
+| **Internationalisation** | `w:lang`-driven decimal separator for decimal tab stops and number-word spelling |
 
 ## Performance Benchmarks
 
-Measured on Apple M3 Max with `hyperfine` (20 runs, 3 warmup) at **v0.1.5**:
+Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.3.1**,
+against fixtures committed in `test-files/` so the numbers are reproducible.
+Times are rounded to 5 ms — run-to-run spread on a normally loaded machine is
+around ±10 ms, so smaller differences are not meaningful:
 
-| Document type | Pages | Conversion time | Memory usage |
-|---|---|---|---|
-| Short form with tables and images | 2 | **48 ms** | 20 MB |
-| Multi-page report | 7 | **52 ms** | 24 MB |
-| Image-heavy document (60+ images) | 24 | **353 ms** | 76 MB |
+| Fixture | Pages | Input | Conversion time | Peak RSS |
+|---|---|---|---|---|
+| `sample-docx-files-sample3` | 3 | 34 KB | **135 ms** | 50 MB |
+| `sample-docx-files-sample-4` | 7 | 10 KB | **135 ms** | 48 MB |
+| `sample-docx-files-sample1` | 9 | 1.3 MB | **165 ms** | 61 MB |
+| `sample-docx-files-sample4` | 173 | 14 MB | **370 ms** | 161 MB |
 
-These figures predate later pipeline work (font subsetting, emoji rendering,
-paragraph splitting) and have not been re-measured since. Treat them as an
-order-of-magnitude guide rather than current numbers. To measure your own
-workload, run `cargo bench` for the Criterion suites, or use the release binary
-with `RUST_LOG=debug` for a per-phase breakdown of parse, resolve, layout,
-subset and paint.
+**A fixed font-registry build dominates small documents.** Enumerating the
+host's fonts and indexing their PostScript/style names costs a flat 90–110 ms
+on every render regardless of input size — on the 7-page fixture that is ~70%
+of total runtime, against 1.7 ms to parse and 12 ms to lay out. Conversion
+scales well with document size (173 pages costs under 3× a 7-page document),
+but there is a floor of roughly 130 ms per process that no small document
+beats. For batch work, that cost is per render rather than per process, so it
+is the single biggest lever available and is tracked as known work.
+
+To measure your own workload, run `cargo bench` for the Criterion suites, or
+use the release binary with `RUST_LOG=debug` for a per-phase breakdown of
+parse, resolve, registry, layout, subset and paint.
 
 dxpdf is designed for batch processing, server-side conversion, and CI/CD
 pipelines.
@@ -191,7 +203,7 @@ DOCX (ZIP) → Parse → Document Model → Resolve → Layout → Subset → Pa
              Twips/Emu/HalfPoints        ←──── Pt throughout ────→      Skia
 ```
 
-Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Emu`, `HalfPoints`) in the parsed model, `Pt` (typographic points) in layout, and `f32` only at the Skia rendering boundary.
+Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Emu`, `HalfPoints`) are `i64`-backed in the parsed model so they round-trip losslessly, layout works in `Pt` (typographic points), and raw `f32` appears only at the Skia rendering boundary.
 
 1. **Parse** — declarative serde schemas over the DOCX XML parts, producing an immutable document model
 2. **Resolve** — flatten the style cascade, split sections, pre-load images, generate shape geometry
@@ -203,21 +215,21 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 | Module | Purpose |
 |---|---|
-| `model::dimension` | Type-safe dimensional units (`Twips`, `HalfPoints`, `EighthPoints`, `Emu`, `Pt`) with compile-time unit safety |
-| `model::geometry` | Spatial types (`Offset`, `Size`, `Rect`, `EdgeInsets`, `LineSegment`) — generic over unit, with Skia interop |
+| `model::dimension` | Type-safe OOXML units (`Twips`, `HalfPoints`, `EighthPoints`, `Emu`, `ThousandthPercent`) with compile-time unit safety; the `Pt` rendering unit lives in `render::dimension` |
+| `model::geometry` | Spatial types (`Offset`, `Size`, `Rect`, `EdgeInsets`, `PartialEdgeInsets`) — generic over unit, and free of any Skia dependency; `render::geometry` holds the `Pt`-specialized equivalents incl. `PtLineSegment` |
 | `model` | Algebraic data types representing the full document tree (`Document`, `Block`, `Inline`, etc.) |
 | `docx` | DOCX ZIP extraction, declarative serde-based XML parser for document, styles, numbering, theme, VML and DrawingML parts |
 | `field` | OOXML field instruction parser (PAGE, NUMPAGES, HYPERLINK, TOC, …) |
 | `render/resolve` | Style-cascade flattening, section splitting, image pre-loading, DrawingML shape geometry |
 | `render/layout` | Fragment-based line fitting, paragraph layout, three-pass table layout, section stacking and pagination, header/footer handling |
 | `render/subset` | Codepoint collection and per-typeface font subsetting before paint |
-| `render/emoji` | Color-emoji pipeline — cluster classification, host typeface resolution, rasterization |
+| `render/emoji` | Color-emoji pipeline — cluster classification, host typeface resolution, GSUB shaping through Skia's HarfBuzz, rasterization |
 | `render/fonts` | Font resolution with embedded-font priority and metric-compatible substitution (e.g., Calibri → Carlito, Cambria → Caladea) |
 | `render/painter` | Skia canvas operations for PDF output |
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 10 partial, 10 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 12 partial, 8 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -237,7 +249,8 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 | Highlighting | ✅ full ST_HighlightColor palette |
 | Caps, smallCaps | ⚠️ parsed, not applied at layout |
 | Shadow, outline, emboss, imprint | ❌ |
-| Hidden text | ❌ |
+| Hidden text (`w:vanish`) | ⚠️ parsed, not applied — hidden runs still paint |
+| Run borders (`w:bdr`) | ✅ |
 
 ### Paragraph Properties (w:pPr)
 
@@ -250,7 +263,9 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 | Indentation (left, right, first-line, hanging) | ✅ |
 | Tab stops (left) | ✅ |
 | Tab stops (center, right) | ✅ |
-| Tab stops (decimal) | ⚠️ rendered as left-aligned |
+| Tab stops (decimal) | ✅ §17.18.85 zone anchored on the separator, which follows `w:lang` |
+| Tab stops (bar) | ✅ §17.18.85 draws a vertical rule; does not position text |
+| Tab leaders | ✅ §17.3.1.38 drawn in the formatting in effect at the tab |
 | Absolute position tabs (`w:ptab`) | ✅ §17.3.1.30 left/center/right, margin-relative |
 | Paragraph shading | ✅ |
 | Paragraph borders | ✅ with adjacent border merging, `w:space` offset |
@@ -275,12 +290,14 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 | Cell widths (pct, auto) | ⚠️ fall back to grid |
 | Cell margins (3-level cascade) | ✅ |
 | Merged cells (gridSpan, vMerge) | ✅ |
-| Row heights | ✅ min / ⚠️ exact as min |
-| Table borders (per-cell, per-table) | ✅ |
-| Border styles (single) | ✅ |
-| Border styles (double, dashed, dotted) | ⚠️ render as single |
+| Row heights (atLeast, exact) | ✅ §17.4.81 both rules honored |
+| Table borders (per-cell, per-table) | ✅ incl. §17.4.66 conflict resolution |
+| Border styles (single, double) | ✅ §17.4.38 double drawn as two sub-rules |
+| Border styles (the other 24) | ⚠️ approximated by a solid line of the declared width and colour; warned once per style |
 | Cell shading (solid) | ✅ |
-| Cell shading (patterns) | ❌ |
+| Cell shading (patterns) | ❌ parsed, fill colour only |
+| Table styles, conditional formatting | ✅ §17.7.6 wholeTable, row/column bands, first/last row and column |
+| Floating tables (`tblpPr`) | ✅ §17.4.58 anchors, spillover, `tblOverlap` |
 | Vertical alignment (top / center / bottom) | ✅ incl. vMerge-aware bottom alignment |
 | Row splitting across page breaks | ✅ §17.4.1 row content split at legal cut points; `cantSplit` honored |
 | Repeating header rows | ✅ §17.4.49 |
@@ -290,10 +307,15 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 
 | Feature | Status |
 |---|---|
-| Inline images | ✅ PNG, JPEG, BMP, WebP |
-| Floating images | ✅ offset, align, wp14:pctPos |
-| Wrap modes | ✅ none/square/tight/through |
-| VML images | ❌ |
+| Inline images | ✅ PNG, JPEG, GIF, BMP, WebP via Skia |
+| EMF images | ⚠️ single embedded bitmap (`EMR_STRETCHDIBITS`/`EMR_BITBLT`); full GDI record replay unsupported |
+| WMF, SVG images | ❌ detected, not decoded |
+| Image cropping (`a:srcRect`) | ✅ §20.1.10.48 |
+| Floating images | ✅ offset, align, wp14:pctPos, page-parity mirroring |
+| Wrap modes (none, square, topAndBottom) | ✅ |
+| Wrap modes (tight, through) | ⚠️ approximated by the bounding box; no polygon-aware line fitting |
+| VML images and shapes (`w:pict`) | ✅ inline and floating |
+| `mc:AlternateContent` branch selection | ✅ MCE §M.1.2 |
 
 ### Page Layout
 
@@ -303,7 +325,7 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 | Page margins (all 6) | ✅ |
 | Section breaks (nextPage) | ✅ |
 | Section breaks (continuous) | ✅ continues on current page |
-| Section breaks (even, odd) | ⚠️ treated as nextPage |
+| Section breaks (even, odd, nextColumn) | ⚠️ treated as nextPage |
 | Multi-column sections | ✅ incl. splitting across unequal-width columns |
 | Page borders, doc grid | ❌ doc grid parsed, not applied |
 
@@ -319,30 +341,36 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 | Feature | Status |
 |---|---|
 | Bullet, decimal, letter, roman | ✅ |
-| Multi-level lists | ⚠️ levels parsed, nesting limited |
+| Ordinal, cardinalText, ordinalText | ✅ §17.9.27 spelled out in English; other languages fall back to digits |
+| Picture bullets | ✅ §17.9.21 |
+| Multi-level lists | ✅ `%1`–`%9` templates, per-level counters and resets, §17.9.8 `isLgl` |
 
 ### Fields
 
 | Feature | Status |
 |---|---|
-| PAGE, NUMPAGES | ✅ |
+| PAGE, NUMPAGES | ✅ evaluated per page |
 | Hyperlinks | ✅ clickable PDF annotations |
-| Unknown fields | ✅ cached value fallback |
-| TOC, MERGEFIELD, DATE | ❌ |
+| All other fields | ✅ Word's cached result text is rendered, so a TOC, DATE or MERGEFIELD written by Word displays correctly but is not recomputed |
+| Field instruction parser (`dxpdf::field`) | ✅ ~20 instructions parsed and evaluable as a library — DATE, TIME, REF, PAGEREF, SEQ, IF, MERGEFIELD, DOCPROPERTY, SYMBOL and more — but only PAGE/NUMPAGES are wired into rendering |
 
 ### Other
 
 | Feature | Status |
 |---|---|
 | Footnotes | ✅ §17.11.23 separator, per-page reservation, split-aware |
-| Endnotes | ❌ |
-| Color emoji (ZWJ, modifier, keycap, flag sequences) | ✅ host-resolved color typeface, cross-run cluster reassembly |
-| Complex-script shaping | ✅ via HarfBuzz (`rustybuzz`) |
+| Endnotes | ✅ §17.11.2 roman superscript marks, collected at document end |
+| Color emoji (ZWJ, modifier, keycap, flag sequences) | ✅ host-resolved color typeface, cross-run cluster reassembly, GSUB-shaped via Skia's HarfBuzz |
+| Complex-script shaping (Arabic joining, Indic reordering) | ❌ body text is mapped cmap-level without GSUB; only emoji clusters are shaped |
+| Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator and number-word spelling; no CLDR/ICU, so regional overrides and non-English number words are out of scope |
 | Font subsetting | ✅ codepoint-driven, with shapeability validation |
-| Comments, tracked changes | ❌ / ⚠️ |
-| DrawingML fills, strokes, outer shadow | ⚠️ Tier 0-1 coverage |
+| Comments, tracked changes | ❌ |
+| DrawingML fills, strokes, outer shadow | ⚠️ solid fills, strokes incl. dash patterns, and outer shadow; gradient and blip fills, blur, glow, reflection and soft edge are not rendered |
 | DrawingML preset geometry | ⚠️ `line` and `rect`; `custGeom` fully evaluated incl. guide formulas |
-| Text boxes, SmartArt, charts | ❌ |
+| Text boxes (shape text bodies) | ✅ insets, vertical anchoring, `vertOverflow` clipping, `normAutofit` shrink |
+| SmartArt, charts | ❌ |
+| Bookmarks and internal cross-references | ✅ `w:bookmarkStart` → PDF named destinations; internal hyperlinks → GoTo link annotations |
+| PDF outline sidebar (`/Outlines`) | ✅ §17.3.1.19 `w:outlineLvl` → structure-element headers; levels 7–9 clamp to `H6` (ISO 32000-1 stops there) and headings in headers, footers and notes are excluded |
 | RTL text, automatic hyphenation | ❌ |
 
 </details>
@@ -353,8 +381,7 @@ Validated against ISO 29500 (Office Open XML). **53 entries fully implemented, 1
 |---|---|
 | [`quick-xml`](https://crates.io/crates/quick-xml) + [`serde`](https://crates.io/crates/serde) | Declarative XML parsing via serde deserializers |
 | [`zip`](https://crates.io/crates/zip) | DOCX ZIP archive reading |
-| [`skia-safe`](https://crates.io/crates/skia-safe) | PDF rendering, text measurement, link annotations |
-| [`rustybuzz`](https://crates.io/crates/rustybuzz) | HarfBuzz-port text shaping for complex scripts |
+| [`skia-safe`](https://crates.io/crates/skia-safe) | PDF rendering, text measurement, link annotations, and HarfBuzz emoji shaping via the `textlayout` feature |
 | [`unicode-segmentation`](https://crates.io/crates/unicode-segmentation), [`unicode-properties`](https://crates.io/crates/unicode-properties), [`unicode-normalization`](https://crates.io/crates/unicode-normalization) | Grapheme clusters, emoji properties, NFC normalization |
 | [`fontcull`](https://crates.io/crates/fontcull) (optional) | Font subsetting — `subset-fonts` feature, on by default |
 | [`clap`](https://crates.io/crates/clap) | CLI argument parsing |
@@ -380,11 +407,13 @@ Yes. In Rust, add `dxpdf` as a dependency and call `dxpdf::convert(&docx_bytes)`
 
 ### What DOCX features are supported?
 
-dxpdf supports text formatting, paragraphs, tables (including nested and merged cells), inline and floating images, styles with inheritance, headers/footers, lists, hyperlinks, section breaks, and automatic pagination. See the full [feature matrix](#ooxml-feature-coverage) above.
+dxpdf supports text formatting, paragraphs, tables (including nested, merged and floating tables with conditional formatting), inline and floating images, shapes and text boxes, styles with inheritance, headers/footers, multi-level lists, hyperlinks and a navigable PDF outline, footnotes and endnotes, section breaks, and automatic pagination. See the full [feature matrix](#ooxml-feature-coverage) above.
+
+Notable gaps: complex-script shaping (Arabic joining, Indic reordering), RTL text, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
 
 ### How fast is dxpdf?
 
-Fast enough that conversion is rarely the bottleneck: on an Apple M3 Max a typical multi-page business document converts in tens of milliseconds, and a 24-page image-heavy document in a few hundred. See [Performance Benchmarks](#performance-benchmarks) for measured figures and how to benchmark your own workload.
+On an Apple M3 Max a typical multi-page business document converts in about 150 ms, and a 173-page, 14 MB document in under 400 ms. Most of the cost on small documents is a fixed 90–110 ms font-registry build rather than the document itself, so runtime is fairly flat until documents get large. See [Performance Benchmarks](#performance-benchmarks) for measured figures and how to benchmark your own workload.
 
 ### What platforms does dxpdf support?
 

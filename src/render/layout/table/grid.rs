@@ -108,13 +108,37 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
 /// **evenly** over the spanned rows.
 ///
 /// Even distribution is a choice, not a spec rule, and ECMA-376 cannot settle
-/// it — §17.4.85 defines which cells merge and says nothing about height, and
+/// it. All three places a rule would have to live were checked: §17.4.85
+/// `vMerge` defines which cells merge and carries no height language at all;
 /// §17.4.81 `trHeight`/`auto` defers to "the height required by its contents"
-/// without defining "contents" for a cell that spans rows. See
-/// `docs/table-layout.md` for the full analysis and the experiment that would
-/// settle it. Pinned by
-/// `expand_spreads_overflow_across_the_merge_span`, so it cannot change
-/// silently. Tracked as E5a#6.
+/// without ever defining "contents" for a cell that spans rows; and §17.4.21
+/// `hideMark` — the spec's only row-height *rule* — says a row's height is
+/// "determined by the height of all glyphs in all cells in that row", without
+/// mentioning `vMerge`.
+///
+/// §17.4.21 constrains the answer without giving it. The model it describes is
+/// a **per-row maximum** over that row's cells, not a budget divided among
+/// rows, and even distribution (`overflow / rows`) is not expressible as a
+/// per-row maximum of anything — so of the candidates it is the one the spec's
+/// own sentence structurally disfavours. It does *not* follow that the restart
+/// row takes the excess: applied literally to a span, §17.4.21 sizes the
+/// restart row to the whole content while each `continue` row still carries its
+/// own end-of-cell mark, making the merged box taller than its content by the
+/// sum of the continue rows. No implementation does that, which is the tell
+/// that the sentence was written without merged cells in mind. The spec is
+/// silent by omission, not by implication.
+///
+/// So even distribution is disfavoured and last-row and first-row both remain
+/// open; last-row has the better structural argument (a single-pass
+/// top-to-bottom sizer can only enforce a span's total once the span closes)
+/// but no spec text. The choice is *observable* — it changes rendered output on
+/// one real corpus document — so settling it needs a Word-exported PDF of a
+/// two-row vertical merge whose restart cell overflows both rows. Until then
+/// the behaviour is pinned by `expand_spreads_overflow_across_the_merge_span`,
+/// so it cannot change silently.
+///
+/// A lone `Restart` with no `Continue` below it is not a span, and is sized by
+/// the normal row-height path in `measure_table_rows` instead.
 pub(super) fn expand_rows_for_vmerge(
     rows: &[TableRowInput],
     row_cell_layouts: &[Vec<CellLayoutEntry>],
@@ -497,11 +521,12 @@ mod tests {
     /// The core §17.4.85 behaviour: when a `Restart` cell's content exceeds the
     /// rows it spans, the shortfall is spread across them.
     ///
-    /// Note this pins **even distribution**, which is what the code does. It is
-    /// not obviously what Word does — `docs/table-layout.md` claims the *last*
-    /// row absorbs the overflow, and that disagreement is open as E5a#6. This
-    /// test will need updating if #6 resolves in the doc's favour; it exists to
-    /// make that a deliberate change rather than a silent one.
+    /// Note this pins **even distribution**, which is what the code does and
+    /// not obviously what Word does — see `expand_rows_for_vmerge` for why
+    /// ECMA-376 cannot settle it and why even distribution is in fact the
+    /// candidate §17.4.21 structurally disfavours. This test will need updating
+    /// if a Word reference render settles it the other way; it exists to make
+    /// that a deliberate change rather than a silent one.
     #[test]
     fn expand_spreads_overflow_across_the_merge_span() {
         let rows = vec![
