@@ -38,7 +38,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dxpdf = "0.3.1"
+dxpdf = "0.4.0"
 ```
 
 ### Python Package
@@ -137,7 +137,7 @@ dxpdf handles the most common DOCX features found in real-world business documen
 
 ## Performance Benchmarks
 
-Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.3.1**,
+Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.4.0**,
 against fixtures committed in `test-files/` so the numbers are reproducible.
 Times are rounded to 5 ms — run-to-run spread on a normally loaded machine is
 around ±10 ms, so smaller differences are not meaningful:
