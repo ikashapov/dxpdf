@@ -718,3 +718,237 @@ fn footer_selection_follows_same_rules_as_header() {
     assert!(p2.contains("DEFAULT_FOOTER"), "page 2 footer; got {p2:?}");
     assert!(!p2.contains("FIRST_FOOTER"));
 }
+
+// ── §17.6.22 — the shared page of a continuous section break ────────────────
+//
+// A page holding a continuous break belongs to two sections, and ECMA-376 does
+// not say whose header it wears. These pin this engine's answer — the **last**
+// section on the page — and, more importantly, that the answer is applied
+// through the *same* §17.10 slot selection as any other page, rather than by a
+// second rule that could drift from it. Issue #83.
+
+/// Body + a continuous break, with `before` in the first section and `after` in
+/// the second. Both land on one physical page.
+fn continuous_break_doc(first: SectionProperties, second: SectionProperties) -> Document {
+    let mut doc = empty_document();
+    doc.body = vec![
+        para("BEFORE_BREAK"),
+        Block::SectionBreak(Box::new(first)),
+        para("AFTER_BREAK"),
+    ];
+    doc.final_section = second;
+    doc
+}
+
+fn continuous(props: SectionProperties) -> SectionProperties {
+    SectionProperties {
+        section_type: Some(SectionType::Continuous),
+        ..props
+    }
+}
+
+fn header_refs(
+    default: Option<&str>,
+    first: Option<&str>,
+    even: Option<&str>,
+) -> SectionHeaderFooterRefs {
+    SectionHeaderFooterRefs {
+        default: default.map(RelId::new),
+        first: first.map(RelId::new),
+        even: even.map(RelId::new),
+    }
+}
+
+/// §17.6.22: the shared page wears the **succeeding** section's header. Both
+/// sections have content on it, so a rule is needed; this is the one.
+#[test]
+fn shared_page_wears_the_succeeding_sections_header() {
+    let mut doc = continuous_break_doc(
+        SectionProperties {
+            header_refs: header_refs(Some("rA"), None, None),
+            ..Default::default()
+        },
+        continuous(SectionProperties {
+            header_refs: header_refs(Some("rB"), None, None),
+            ..Default::default()
+        }),
+    );
+    doc.headers
+        .insert(RelId::new("rA"), vec![para("PRECEDING_HEADER")]);
+    doc.headers
+        .insert(RelId::new("rB"), vec![para("SUCCEEDING_HEADER")]);
+
+    let (_, pages) = resolve_and_layout(doc);
+    assert_eq!(pages.len(), 1, "a continuous break shares one page");
+    let p1 = page_text(&pages[0]);
+    assert!(
+        p1.contains("BEFORE_BREAK") && p1.contains("AFTER_BREAK"),
+        "both sections put content on this page; got: {p1:?}"
+    );
+    assert!(
+        p1.contains("SUCCEEDING_HEADER"),
+        "the last section on the page owns its header; got: {p1:?}"
+    );
+    assert!(
+        !p1.contains("PRECEDING_HEADER"),
+        "and only one header is drawn; got: {p1:?}"
+    );
+}
+
+/// §17.10.6: the shared page is the succeeding section's *first* page, so
+/// `titlePg` selects that section's `first` slot there — the ownership rule
+/// hands the page over to ordinary slot selection rather than special-casing
+/// it.
+#[test]
+fn shared_page_uses_the_succeeding_sections_first_slot_under_title_pg() {
+    let mut doc = continuous_break_doc(
+        SectionProperties {
+            header_refs: header_refs(Some("rA"), None, None),
+            ..Default::default()
+        },
+        continuous(SectionProperties {
+            header_refs: header_refs(Some("rB"), Some("rBFirst"), None),
+            title_page: Some(true),
+            ..Default::default()
+        }),
+    );
+    doc.headers
+        .insert(RelId::new("rA"), vec![para("PRECEDING_HEADER")]);
+    doc.headers
+        .insert(RelId::new("rB"), vec![para("SUCCEEDING_DEFAULT")]);
+    doc.headers
+        .insert(RelId::new("rBFirst"), vec![para("SUCCEEDING_FIRST")]);
+
+    let (_, pages) = resolve_and_layout(doc);
+    let p1 = page_text(&pages[0]);
+    assert!(
+        p1.contains("SUCCEEDING_FIRST"),
+        "the shared page is the succeeding section's page 1; got: {p1:?}"
+    );
+    assert!(
+        !p1.contains("SUCCEEDING_DEFAULT") && !p1.contains("PRECEDING_HEADER"),
+        "no other slot may also draw; got: {p1:?}"
+    );
+}
+
+/// §17.10.1: even/odd selection keys on the *logical* page number, which the
+/// shared page inherits from the document's running count — not from the
+/// succeeding section's position in the section list. A shared page that is
+/// logically page 2 wears the even header.
+#[test]
+fn shared_page_uses_the_even_slot_when_its_logical_number_is_even() {
+    let mut doc = empty_document();
+    doc.settings.even_and_odd_headers = true;
+    // Page 1 ends with a hard break, so the shared page is logical page 2.
+    doc.body = vec![
+        para("page one"),
+        Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![run_with(vec![
+                RunElement::PageBreak,
+                RunElement::Text("BEFORE_BREAK".to_string()),
+            ])],
+            rsids: ParagraphRevisionIds::default(),
+        })),
+        Block::SectionBreak(Box::new(SectionProperties {
+            header_refs: header_refs(Some("rA"), None, Some("rAEven")),
+            ..Default::default()
+        })),
+        para("AFTER_BREAK"),
+    ];
+    doc.final_section = continuous(SectionProperties {
+        header_refs: header_refs(Some("rB"), None, Some("rBEven")),
+        ..Default::default()
+    });
+    doc.headers
+        .insert(RelId::new("rA"), vec![para("PRECEDING_DEFAULT")]);
+    doc.headers
+        .insert(RelId::new("rAEven"), vec![para("PRECEDING_EVEN")]);
+    doc.headers
+        .insert(RelId::new("rB"), vec![para("SUCCEEDING_DEFAULT")]);
+    doc.headers
+        .insert(RelId::new("rBEven"), vec![para("SUCCEEDING_EVEN")]);
+
+    let (_, pages) = resolve_and_layout(doc);
+    assert_eq!(pages.len(), 2, "page 1, then the shared page 2");
+    let shared = page_text(&pages[1]);
+    assert!(
+        shared.contains("BEFORE_BREAK") && shared.contains("AFTER_BREAK"),
+        "page 2 is the shared one; got: {shared:?}"
+    );
+    assert!(
+        shared.contains("SUCCEEDING_EVEN"),
+        "logical page 2 wears the succeeding section's even slot; got: {shared:?}"
+    );
+    assert!(
+        !shared.contains("SUCCEEDING_DEFAULT"),
+        "not its default slot; got: {shared:?}"
+    );
+}
+
+/// §17.10.6: the shared page is counted once. It is committed into the
+/// succeeding section's page range, and the preceding section's page count
+/// excludes it — so `PAGE` runs 1, 2, 3 across the break with neither a repeat
+/// nor a gap.
+///
+/// Parity alone (the even/odd test above) cannot see an off-by-two, so this
+/// reads the numbers.
+#[test]
+fn page_numbering_counts_a_shared_page_exactly_once() {
+    let page_field = || {
+        Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![Inline::Field(Field {
+                instruction: dxpdf::field::FieldInstruction::Page {
+                    switches: Default::default(),
+                },
+                content: vec![],
+            })],
+            rsids: ParagraphRevisionIds::default(),
+        }))
+    };
+    let mut doc = empty_document();
+    doc.headers.insert(RelId::new("rD"), vec![page_field()]);
+    // Page 1, then a hard break onto page 2, where the continuous break falls.
+    doc.body = vec![
+        para("page one"),
+        para_after_page_break("BEFORE_BREAK"),
+        Block::SectionBreak(Box::new(SectionProperties {
+            header_refs: header_refs(Some("rD"), None, None),
+            ..Default::default()
+        })),
+        para("AFTER_BREAK"),
+        para_after_page_break("page three"),
+    ];
+    doc.final_section = continuous(SectionProperties {
+        header_refs: header_refs(Some("rD"), None, None),
+        ..Default::default()
+    });
+
+    let (_, pages) = resolve_and_layout(doc);
+    assert_eq!(pages.len(), 3, "page 1, the shared page 2, then page 3");
+
+    // The header on each page is just the PAGE field, so the first text drawn
+    // on a page is its number.
+    let numbers: Vec<String> = pages
+        .iter()
+        .map(|p| {
+            p.commands
+                .iter()
+                .find_map(|c| match c {
+                    DrawCommand::Text { text, .. } => Some(text.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(
+        numbers,
+        vec!["1", "2", "3"],
+        "PAGE must not repeat or skip across the shared page"
+    );
+}

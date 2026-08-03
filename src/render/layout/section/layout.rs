@@ -1352,12 +1352,8 @@ pub(crate) struct SectionStart<'a> {
 /// `Continuous` section shares it.
 ///
 /// A page holding a continuous break is drawn with the header and footer of the
-/// **last** section on it (`render_to_pages` commits the shared page into the
-/// succeeding section's page range). ECMA-376 §17.6 does not settle which
-/// section owns such a page; this is the engine's answer, and it matches what
-/// Word draws for the same file. A *Word reference render* showing the
-/// preceding section's header winning would revisit it — and would move only
-/// this rule, not the relayout it drives.
+/// **last** section on it — see the ownership rule at `render::render_to_pages`,
+/// which is where it is decided.
 ///
 /// Index and bounds travel as one value because they are one decision: an
 /// index without bounds, or bounds without an index, cannot be acted on, and as

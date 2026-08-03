@@ -434,6 +434,30 @@ pub fn layout_document(
         last_config = config.clone();
 
         let mut pages = layout.pages;
+        // ─── §17.6.22 shared-page ownership ─────────────────────────────────
+        //
+        // A page holding a continuous break carries content from two sections,
+        // and only one header and footer can be drawn on it. **The last section
+        // on the page owns it**: the shared page stays out of this section's
+        // committed `pages` and is appended by the succeeding section instead,
+        // so it falls inside *that* section's `page_range` and is measured,
+        // selected and rendered by the ordinary §17.10 path — no second rule to
+        // drift from the first. That is what makes `titlePg` pick the
+        // succeeding section's `first` slot there (it genuinely is that
+        // section's page 1) and `evenAndOddHeaders` key on the running logical
+        // number. Covered in `tests/header_footer_selection.rs`.
+        //
+        // ECMA-376 §17.6 does not settle this. It says a continuous break
+        // starts the next section on the same page, and §17.10 says a header is
+        // selected per section, but nothing resolves the case where one page
+        // belongs to two. **Word reference render**: the rule here is a
+        // reasoned choice, not an observed one — no reference render was
+        // available while it was written. A render showing the *preceding*
+        // section's header winning would move this line and the page range it
+        // feeds, and nothing else: the relayout in `fit_shared_page` takes its
+        // bounds from whoever owns the page, so it follows the rule rather than
+        // encoding it.
+        //
         // The shared page never entered `pages` — `finalize` put it in the tail
         // so it cannot be committed here and appended by the succeeding section
         // as well.
