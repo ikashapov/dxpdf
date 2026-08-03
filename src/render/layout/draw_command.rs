@@ -315,10 +315,8 @@ impl DrawCommand {
     ///
     /// **Text is approximate.** A `Text` command carries a baseline and a font
     /// size, not the ascent/descent it was measured with, so the band is taken
-    /// as `baseline ± font_size`. That is the same approximation
-    /// `render::estimate_cursor_y` already makes for the descender, kept
-    /// deliberately identical so the two cannot disagree about where a line
-    /// ends. It is generous on both sides, which is the safe direction for the
+    /// as `baseline ± font_size`. It is generous on both sides, which is the
+    /// safe direction for the
     /// one caller that exists (`vertOverflow="clip"`): a line is dropped when
     /// it *might* paint outside its box rather than when it certainly does.
     pub fn vertical_span(&self) -> Option<(Pt, Pt)> {

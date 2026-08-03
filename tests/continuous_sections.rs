@@ -22,6 +22,7 @@ fn docx(body: &str) -> Vec<u8> {
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
   <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/header2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
 </Types>"#).unwrap();
 
     zip.start_file("_rels/.rels", o).unwrap();
@@ -35,6 +36,7 @@ fn docx(body: &str) -> Vec<u8> {
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdNum" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
   <Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/>
 </Relationships>"#).unwrap();
 
     // A single decimal list, so §17.9 label counters are observable in output.
@@ -62,7 +64,21 @@ fn docx(body: &str) -> Vec<u8> {
     zip.write_all(
         br#"<?xml version="1.0" encoding="UTF-8"?>
 <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:p><w:r><w:t>HeaderText</w:t></w:r></w:p>
+  <w:p><w:r><w:t>HDRSHORT</w:t></w:r></w:p>
+</w:hdr>"#,
+    )
+    .unwrap();
+
+    // §17.10.1: a deliberately *taller* header — four 20pt lines. Reserving it
+    // pushes the body top far below where the short header would.
+    zip.start_file("word/header2.xml", o).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>HDRTALL1</w:t></w:r></w:p>
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>HDRTALL2</w:t></w:r></w:p>
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>HDRTALL3</w:t></w:r></w:p>
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>HDRTALL4</w:t></w:r></w:p>
 </w:hdr>"#,
     )
     .unwrap();
@@ -202,5 +218,163 @@ fn continuous_break_shares_one_physical_page() {
         pages.len(),
         1,
         "two short sections joined by a continuous break occupy one page"
+    );
+}
+
+// ── §17.10 header/footer clearance on a shared page (issue #83, plan §2) ─────
+
+const R_NS: &str =
+    r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+
+/// A `sectPr` referencing header `rel`, optionally as a continuous break.
+fn sect_pr(rel: &str, continuous: bool) -> String {
+    let ty = if continuous {
+        r#"<w:type w:val="continuous"/>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<w:sectPr>{ty}<w:headerReference w:type="default" r:id="{rel}" {R_NS}/>{PG}</w:sectPr>"#
+    )
+}
+
+fn para(text: &str) -> String {
+    format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+}
+
+/// The y of the first draw command whose text is exactly `needle`.
+fn y_of(pages: &[dxpdf::render::layout::draw_command::LayoutedPage], needle: &str) -> f32 {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .find_map(|c| match c {
+            DrawCommand::Text { text, position, .. } if text.contains(needle) => {
+                Some(position.y.raw())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{needle:?} was never drawn"))
+}
+
+/// Two sections sharing one page: the first uses `first_hdr`, the second
+/// continues on the same page under `second_hdr`.
+fn shared_page(
+    first_hdr: &str,
+    second_hdr: &str,
+) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
+    layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr(first_hdr, false),
+        para("BODYAFTER"),
+        sect_pr(second_hdr, true),
+    ))
+}
+
+/// One section, so `hdr` governs the whole page — the reference layout the
+/// shared page must reproduce.
+///
+/// The empty paragraph is not padding: in [`shared_page`] the section break
+/// rides on a `w:p`'s `w:pPr`, and that paragraph mark is real content that
+/// renders as a blank line. Without it here the two documents differ by a line
+/// and the comparison measures the fixture rather than the engine.
+fn single_section(hdr: &str) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
+    layout(&format!(
+        "{}<w:p/>{}{}",
+        para("BODYBEFORE"),
+        para("BODYAFTER"),
+        sect_pr(hdr, false),
+    ))
+}
+
+/// §17.6 / §17.10: ECMA-376 does not say which section owns the header of a
+/// page holding a continuous break. This pins the engine's answer — the **last
+/// section on the page** — so the clearance rule below has a stated premise
+/// rather than an implicit one.
+#[test]
+fn shared_page_renders_the_succeeding_sections_header() {
+    let pages = shared_page("rIdH1", "rIdH2");
+    assert_eq!(pages.len(), 1, "the sections share one physical page");
+
+    let texts = drawn_text(&pages);
+    assert!(
+        texts.iter().any(|t| t.contains("HDRTALL")),
+        "the succeeding section's header is the one drawn: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("HDRSHORT")),
+        "the preceding section's header must not also be drawn: {texts:?}"
+    );
+}
+
+/// §17.10.1: the shared page is drawn with the succeeding section's header, so
+/// **all** body content on it — including the preceding section's — must clear
+/// that header. Laying the preceding section out against its own shorter
+/// header leaves its content underneath the taller one that is actually drawn.
+#[test]
+fn taller_succeeding_header_does_not_overlap_preceding_content() {
+    let shared = shared_page("rIdH1", "rIdH2");
+    let reference = single_section("rIdH2");
+
+    assert_eq!(
+        y_of(&shared, "BODYBEFORE"),
+        y_of(&reference, "BODYBEFORE"),
+        "content preceding the break must sit where the tall header puts it, \
+         not where the short header it was laid out against did"
+    );
+}
+
+/// The converse, and the reason this is not simply "take the larger of the
+/// two": a *shorter* succeeding header must reclaim the band the preceding
+/// section's taller one reserved, rather than leaving it blank.
+#[test]
+fn shorter_succeeding_header_reclaims_the_band() {
+    let shared = shared_page("rIdH2", "rIdH1");
+    let reference = single_section("rIdH1");
+
+    assert_eq!(
+        y_of(&shared, "BODYBEFORE"),
+        y_of(&reference, "BODYBEFORE"),
+        "a shorter succeeding header must not retain the preceding section's \
+         clearance"
+    );
+}
+
+/// Equal slots are the no-op case: the relayout must not perturb a document
+/// whose sections agree.
+#[test]
+fn equal_headers_leave_the_shared_page_unchanged() {
+    let shared = shared_page("rIdH1", "rIdH1");
+    let reference = single_section("rIdH1");
+
+    assert_eq!(
+        y_of(&shared, "BODYBEFORE"),
+        y_of(&reference, "BODYBEFORE"),
+        "the shared page's own bounds are unchanged"
+    );
+    assert_eq!(
+        y_of(&shared, "BODYAFTER"),
+        y_of(&reference, "BODYAFTER"),
+        "§17.6.22: a continuous break inserts no vertical space — content after \
+         it flows exactly where it would have without the break. This fails on \
+         the *continuation cursor*, not the bounds: reconstructing it from draw \
+         commands as `baseline + font_size` overshoots the true line bottom."
+    );
+}
+
+/// §17.6.11: the resolved body bounds are a *floor* on the configured margin,
+/// never a reduction of it. A header shorter than `w:pgMar/@top` leaves the
+/// margin standing.
+#[test]
+fn shared_page_bounds_never_reduce_the_configured_margin() {
+    // 1134tw = 56.7pt top margin; HDRSHORT is one 10pt line from 567tw
+    // (28.35pt), so it ends well above the margin.
+    const TOP_MARGIN_PT: f32 = 56.7;
+    let shared = shared_page("rIdH1", "rIdH1");
+    assert!(
+        y_of(&shared, "BODYBEFORE") >= TOP_MARGIN_PT,
+        "body must start at or below the configured top margin, got {}",
+        y_of(&shared, "BODYBEFORE")
     );
 }

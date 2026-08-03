@@ -12,6 +12,7 @@ mod types;
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
 pub(crate) use layout::SectionStart;
+pub(crate) use layout::{FinalPageBounds, SectionLayout};
 pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
 
@@ -311,10 +312,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                final_page: None,
                 clearance: &clearance,
                 logical_page_base: 2,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(
             image_xs(&pages[0]),
@@ -860,10 +863,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                final_page: None,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2, "page 2 must use the shorter default slots");
         let page_texts = pages
@@ -934,10 +939,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                final_page: None,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2);
         let moved_last_y = pages[1]
@@ -1009,10 +1016,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                final_page: None,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2);
         let first_moved_x = pages[1]
@@ -1737,10 +1746,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                final_page: None,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2);
         assert!(
@@ -1809,10 +1820,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                final_page: None,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
         let separator_y = pages[0]
             .commands
             .iter()

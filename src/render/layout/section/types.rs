@@ -294,6 +294,10 @@ pub enum LayoutBlock {
 
 /// §17.6.22: continuation state for `Continuous` section breaks.
 /// Allows a new section to continue on the current page.
+///
+/// `Clone` because fitting a shared page may lay its section out more than
+/// once (`fit_shared_page`), and each pass consumes the state it starts from.
+#[derive(Clone)]
 pub struct ContinuationState {
     pub page: LayoutedPage,
     pub cursor_y: Pt,

@@ -37,6 +37,7 @@ use crate::render::geometry::PtRect;
 struct LayoutCtx<'cx> {
     config: &'cx PageConfig,
     clearance: &'cx HeaderFooterClearance,
+    final_page: Option<FinalPageBounds>,
     measure_text: super::super::paragraph::MeasureTextFn<'cx>,
     separator_indent: Pt,
     default_line_height: Pt,
@@ -44,7 +45,16 @@ struct LayoutCtx<'cx> {
 
 impl LayoutCtx<'_> {
     fn page_bounds(&self, section_page_index: usize) -> PageBodyBounds {
-        self.clearance.for_page(section_page_index)
+        match self.final_page {
+            // §17.6.22: this page is shared with a following Continuous
+            // section, which owns its header and footer (see `SectionStart`).
+            // Every *other* page keeps this section's own clearance — which is
+            // why the override is indexed rather than applied to "the last
+            // page seen so far": content that spills off the shared page must
+            // not drag the override along with it.
+            Some(FinalPageBounds { index, bounds }) if index == section_page_index => bounds,
+            _ => self.clearance.for_page(section_page_index),
+        }
     }
 }
 
@@ -179,11 +189,22 @@ impl<'doc> PageLayoutState<'doc> {
         self.page_floats.clear();
     }
 
-    /// Flush any remaining footnotes, push the last page, and return all pages.
-    fn finalize(mut self, ctx: &LayoutCtx<'_>) -> Vec<LayoutedPage> {
+    /// Flush any remaining footnotes, push the last page, and return all pages
+    /// together with the cursor the section left off at.
+    ///
+    /// The cursor is *returned* rather than recovered from the emitted commands
+    /// because the two disagree: the last command's extent is not the flow
+    /// position — trailing `space_after`, an empty final paragraph and a
+    /// footnote block at the page bottom all move one without the other. A
+    /// §17.6.22 continuation resumes at the flow position.
+    fn finalize(mut self, ctx: &LayoutCtx<'_>) -> SectionLayout {
         self.flush_footnotes(ctx);
+        let cursor_y = self.cursor_y;
         self.pages.push(self.current_page);
-        self.pages
+        SectionLayout {
+            pages: self.pages,
+            cursor_y,
+        }
     }
 
     /// The floats affecting text at the current cursor on the current
@@ -1225,9 +1246,35 @@ pub(crate) struct SectionStart<'a> {
     pub continuation: Option<ContinuationState>,
     /// Header/footer clearances, selected per physical page in the section.
     pub clearance: &'a HeaderFooterClearance,
+    /// §17.6.22: bounds forced onto one page of this section because a
+    /// following `Continuous` section shares it. `None` when nothing follows on
+    /// the section's last page.
+    pub final_page: Option<FinalPageBounds>,
     /// §17.10.6: logical number of the section's first page, with
     /// `w:pgNumType/@start` applied. Drives §20.4.3.1 float mirroring.
     pub logical_page_base: usize,
+}
+
+/// §17.6.22: the body bounds one page of a section must use because a following
+/// `Continuous` section shares it.
+///
+/// A page holding a continuous break is drawn with the header and footer of the
+/// **last** section on it (`render_to_pages` commits the shared page into the
+/// succeeding section's page range). ECMA-376 §17.6 does not settle which
+/// section owns such a page; this is the engine's answer, and it matches what
+/// Word draws for the same file. A *Word reference render* showing the
+/// preceding section's header winning would revisit it — and would move only
+/// this rule, not the relayout it drives.
+///
+/// Index and bounds travel as one value because they are one decision: an
+/// index without bounds, or bounds without an index, cannot be acted on, and as
+/// two `Option`s they could disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FinalPageBounds {
+    /// 0-based physical page index within the section.
+    pub index: usize,
+    /// The succeeding section's `for_page(0)` bounds.
+    pub bounds: PageBodyBounds,
 }
 
 /// Lay out a sequence of blocks into pages.
@@ -1252,11 +1299,22 @@ pub fn layout_section(
         SectionStart {
             continuation,
             clearance: &clearance,
+            // Laid out on its own, nothing follows on the last page.
+            final_page: None,
             // A section laid out on its own starts at page 1 — the §17.10.6
             // renumbering only exists across a document's section list.
             logical_page_base: 1,
         },
     )
+    .pages
+}
+
+/// One section's laid-out pages, plus where its content flow stopped.
+pub(crate) struct SectionLayout {
+    pub pages: Vec<LayoutedPage>,
+    /// §17.6.22: the y a `Continuous` section continuing on the last page
+    /// resumes at — the flow position, not the extent of the last command.
+    pub cursor_y: Pt,
 }
 
 /// Lay out a sequence of blocks using header/footer clearances selected for
@@ -1268,10 +1326,11 @@ pub(crate) fn layout_section_with_clearance(
     separator_indent: Pt,
     default_line_height: Pt,
     start: SectionStart<'_>,
-) -> Vec<LayoutedPage> {
+) -> SectionLayout {
     let SectionStart {
         continuation,
         clearance,
+        final_page,
         logical_page_base,
     } = start;
     let content_width = config.content_width();
@@ -1280,16 +1339,13 @@ pub(crate) fn layout_section_with_clearance(
     let ctx = LayoutCtx {
         config,
         clearance,
+        final_page,
         measure_text,
         separator_indent,
         default_line_height,
     };
-    let mut state = PageLayoutState::new(
-        config,
-        continuation,
-        clearance.for_page(0),
-        logical_page_base,
-    );
+    let mut state =
+        PageLayoutState::new(config, continuation, ctx.page_bounds(0), logical_page_base);
 
     // Column-aware constraints and x-offset for the current column.
     let col_constraints = |col: usize, page_height: Pt| -> BoxConstraints {
