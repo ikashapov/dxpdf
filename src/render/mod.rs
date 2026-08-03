@@ -160,19 +160,17 @@ fn fit_shared_page(
     input: FitSharedPage<'_>,
     ctx: &layout::build::BuildContext,
     state: &mut BuildState,
-    mut relayout: impl FnMut(
-        &mut BuildState,
-        Option<layout::section::FinalPageBounds>,
-    ) -> layout::section::SectionLayout,
+    mut relayout: impl FnMut(Option<layout::section::FinalPageBounds>) -> layout::section::SectionLayout,
 ) -> SharedPageFit {
     let mut seen: Vec<usize> = Vec::new();
     let mut passes = 0u8;
 
     loop {
-        if layout.pages.is_empty() {
-            return SharedPageFit::NotNeeded;
-        }
-        let index = layout.pages.len() - 1;
+        // The shared page is *not* in `pages` — `finalize` puts it in the tail
+        // so it cannot be committed twice — so its index within the section is
+        // one past the committed ones, and `pages` being empty just means the
+        // section's only page is the shared one.
+        let index = layout.pages.len();
 
         // §17.10.6: the succeeding section's first logical page number depends
         // on how many pages this one committed — which excludes the shared
@@ -213,16 +211,14 @@ fn fit_shared_page(
         }
         seen.push(index);
 
-        *layout = relayout(
-            state,
-            Some(layout::section::FinalPageBounds { index, bounds }),
-        );
+        *layout = relayout(Some(layout::section::FinalPageBounds { index, bounds }));
         passes += 1;
 
-        // The override is pinned to `index`; if the re-run still ends there,
-        // the page now *has* the shared bounds and the loop's equality test
-        // above would compare against the section's own clearance and spin.
-        if layout.pages.len().saturating_sub(1) == index {
+        // The override is pinned to `index`; if the re-run's shared page is
+        // still there, it now *has* the shared bounds and the loop's equality
+        // test above — which compares against the section's own clearance —
+        // would spin.
+        if layout.pages.len() == index {
             return SharedPageFit::Converged { passes };
         }
     }
@@ -372,19 +368,36 @@ pub fn layout_document(
             measurer.measure(text, font)
         };
 
-        // §17.6.22: continuous sections continue on the current page.
+        // §17.6.22: a Continuous section resumes on the page the preceding one
+        // left behind; any other section starts on a fresh one.
+        //
+        // The `else` arm used to also clear `pending_continuation` defensively.
+        // That is now unreachable: a section produces
+        // `SectionTail::SharedWithNext` only when the *next* section is
+        // continuous, so a page can never be left pending for a section that
+        // would not take it.
         let continuation =
             if section.properties.section_type == Some(crate::model::SectionType::Continuous) {
                 pending_continuation.take()
             } else {
-                pending_continuation = None;
                 None
             };
 
-        let lay_out = |state: &mut BuildState,
-                       continuation: Option<layout::section::ContinuationState>,
-                       final_page: Option<layout::section::FinalPageBounds>| {
-            let _ = &state;
+        // §17.6.22: does a `Continuous` section follow, sharing this section's
+        // last page?
+        let next_continuous = resolved.sections.get(section_idx + 1).filter(|next| {
+            next.properties.section_type == Some(crate::model::SectionType::Continuous)
+        });
+        let owner = |bounds| {
+            if next_continuous.is_some() {
+                layout::section::LastPageOwner::SharedWithNext { bounds }
+            } else {
+                layout::section::LastPageOwner::Own
+            }
+        };
+
+        let lay_out = |continuation: Option<layout::section::ContinuationState>,
+                       bounds: Option<layout::section::FinalPageBounds>| {
             layout_section_with_clearance(
                 &built.blocks,
                 &config,
@@ -394,19 +407,13 @@ pub fn layout_document(
                 layout::section::SectionStart {
                     continuation,
                     clearance: &clearance,
-                    final_page,
+                    last_page: owner(bounds),
                     logical_page_base,
                 },
             )
         };
 
-        // §17.6.22: does a `Continuous` section follow, sharing this section's
-        // last page?
-        let next_continuous = resolved.sections.get(section_idx + 1).filter(|next| {
-            next.properties.section_type == Some(crate::model::SectionType::Continuous)
-        });
-
-        let mut layout = lay_out(&mut state, continuation.clone(), None);
+        let mut layout = lay_out(continuation.clone(), None);
         if let Some(next) = next_continuous {
             let outcome = fit_shared_page(
                 &mut layout,
@@ -419,7 +426,7 @@ pub fn layout_document(
                 },
                 &ctx,
                 &mut state,
-                |state, final_page| lay_out(state, continuation.clone(), final_page),
+                |bounds| lay_out(continuation.clone(), bounds),
             );
             log::debug!("[section {section_idx}] shared-page fit: {outcome:?}");
         }
@@ -427,16 +434,13 @@ pub fn layout_document(
         last_config = config.clone();
 
         let mut pages = layout.pages;
-        if next_continuous.is_some() && !pages.is_empty() {
-            // The shared page is not committed here: it is handed to the
-            // succeeding section, which owns its header and footer and appends
-            // it to *its* page range.
-            let last_page = pages.pop().unwrap();
-            pending_continuation = Some(layout::section::ContinuationState {
-                page: last_page,
-                cursor_y: layout.cursor_y,
-            });
-        }
+        // The shared page never entered `pages` — `finalize` put it in the tail
+        // so it cannot be committed here and appended by the succeeding section
+        // as well.
+        pending_continuation = match layout.tail {
+            layout::section::SectionTail::Complete => None,
+            layout::section::SectionTail::SharedWithNext(c) => Some(c),
+        };
 
         let page_start = all_pages.len();
         all_pages.append(&mut pages);

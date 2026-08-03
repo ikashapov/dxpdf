@@ -23,6 +23,7 @@ fn docx(body: &str) -> Vec<u8> {
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
   <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
   <Override PartName="/word/header2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
 </Types>"#).unwrap();
 
     zip.start_file("_rels/.rels", o).unwrap();
@@ -37,6 +38,7 @@ fn docx(body: &str) -> Vec<u8> {
   <Relationship Id="rIdNum" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
   <Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
   <Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/>
+  <Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
 </Relationships>"#).unwrap();
 
     // A single decimal list, so §17.9 label counters are observable in output.
@@ -83,11 +85,28 @@ fn docx(body: &str) -> Vec<u8> {
     )
     .unwrap();
 
+    // §17.11.23: two notes, one referenced on each side of the break.
+    zip.start_file("word/footnotes.xml", o).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:type="separator" w:id="0"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+  <w:footnote w:type="continuationSeparator" w:id="1"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
+  <w:footnote w:id="2"><w:p><w:r><w:t>NOTEBEFORE</w:t></w:r></w:p></w:footnote>
+  <w:footnote w:id="3"><w:p><w:r><w:t>NOTEAFTER</w:t></w:r></w:p></w:footnote>
+</w:footnotes>"#,
+    )
+    .unwrap();
+
     zip.start_file("word/document.xml", o).unwrap();
     zip.write_all(
         format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
   <w:body>{body}</w:body>
 </w:document>"#
         )
@@ -376,5 +395,278 @@ fn shared_page_bounds_never_reduce_the_configured_margin() {
         y_of(&shared, "BODYBEFORE") >= TOP_MARGIN_PT,
         "body must start at or below the configured top margin, got {}",
         y_of(&shared, "BODYBEFORE")
+    );
+}
+
+// ── §17.6.22 continuation fidelity (issue #83, plan §3) ─────────────────────
+
+/// Content width for [`PG`]: 11906 − 1134 − 1134 twips.
+const CONTENT_WIDTH_PT: f32 = (11906.0 - 1134.0 - 1134.0) / 20.0;
+
+/// §17.11.23: the separator is drawn at one third of the content width, which
+/// is distinctive enough to count in a fixture with no borders or tables.
+fn footnote_separator_count(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> usize {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    let want = CONTENT_WIDTH_PT * 0.33;
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter(|c| match c {
+            DrawCommand::Line { line, .. } => {
+                ((line.end.x - line.start.x).raw() - want).abs() < 0.5
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// The y of the footnote separator on `page`, if one was drawn.
+fn footnote_separator_y(page: &dxpdf::render::layout::draw_command::LayoutedPage) -> Option<f32> {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    let want = CONTENT_WIDTH_PT * 0.33;
+    page.commands.iter().find_map(|c| match c {
+        DrawCommand::Line { line, .. }
+            if ((line.end.x - line.start.x).raw() - want).abs() < 0.5 =>
+        {
+            Some(line.start.y.raw())
+        }
+        _ => None,
+    })
+}
+
+/// A paragraph carrying a footnote reference.
+fn para_with_note(text: &str, id: u32) -> String {
+    format!(
+        r#"<w:p><w:r><w:t>{text}</w:t></w:r><w:r><w:footnoteReference w:id="{id}"/></w:r></w:p>"#
+    )
+}
+
+/// §17.11.23: a page carries **one** separator, above all the notes on it. Two
+/// sections contributing notes to the same physical page is still one page.
+///
+/// Each section flushing its own notes draws a second separator, and positions
+/// it from the page's unreduced bottom — so the second block is laid over the
+/// first rather than above it.
+#[test]
+fn footnotes_from_both_sections_share_one_separator() {
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para_with_note("BODYBEFORE", 2),
+        sect_pr("rIdH1", false),
+        para_with_note("BODYAFTER", 3),
+        sect_pr("rIdH1", true),
+    ));
+
+    assert_eq!(pages.len(), 1, "one shared physical page");
+    let texts = drawn_text(&pages);
+    assert!(
+        texts.iter().any(|t| t.contains("NOTEBEFORE")),
+        "the note referenced before the break must render: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("NOTEAFTER")),
+        "the note referenced after the break must render: {texts:?}"
+    );
+    assert_eq!(
+        footnote_separator_count(&pages),
+        1,
+        "§17.11.23: one separator per page, not one per section"
+    );
+}
+
+/// §17.11.23: notes reserve space at the page bottom, and content after the
+/// break must respect that reservation — the succeeding section inherits a
+/// bottom already reduced by what the preceding one reserved, not the page's
+/// unreduced bottom.
+#[test]
+fn content_after_the_break_clears_footnotes_reserved_before_it() {
+    // The succeeding section must fill past the page bottom for the
+    // reservation to bite: a couple of short paragraphs never reach it, and the
+    // test would pass without anything being carried.
+    let filler: String = (0..120).map(|i| para(&format!("FILL{i}"))).collect();
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para_with_note("BODYBEFORE", 2),
+        sect_pr("rIdH1", false),
+        filler,
+        sect_pr("rIdH1", true),
+    ));
+
+    // The separator is the top of the reserved block — comparing against the
+    // note's own baseline instead would call a line drawn *between* separator
+    // and note a pass.
+    let separator_y = footnote_separator_y(&pages[0]).expect("a separator on the shared page");
+    let last_body_y = {
+        use dxpdf::render::layout::draw_command::DrawCommand;
+        pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if text.starts_with("FILL") => {
+                    Some(position.y.raw())
+                }
+                _ => None,
+            })
+            .fold(f32::MIN, f32::max)
+    };
+    assert!(
+        last_body_y > f32::MIN,
+        "the succeeding section must actually reach the shared page"
+    );
+    assert!(
+        last_body_y < separator_y,
+        "body after the break (lowest line {last_body_y}) must stay above the \
+         footnote separator ({separator_y}) reserved before it"
+    );
+}
+
+/// §17.3.1.9: `space_before` and `space_after` collapse between adjacent
+/// paragraphs. A continuous break is not a paragraph boundary of its own, so
+/// the collapse must survive it — the succeeding section must know what the
+/// preceding one's last paragraph left behind.
+#[test]
+fn paragraph_spacing_collapses_across_the_break() {
+    let spaced = |text: &str, before: u32, after: u32| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="{before}" w:after="{after}"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    // 400tw = 20pt after, 400tw = 20pt before: collapsed to 20pt, not 40pt.
+    //
+    // The break rides on BODYBEFORE's own `w:pPr` rather than a following empty
+    // paragraph: an empty paragraph is a real paragraph mark that renders a
+    // blank line *and* takes part in the collapse, so it would make the two
+    // documents incomparable.
+    let split = layout(&format!(
+        r#"<w:p><w:pPr><w:spacing w:before="0" w:after="400"/>{}</w:pPr><w:r><w:t>BODYBEFORE</w:t></w:r></w:p>{}"#,
+        sect_pr("rIdH1", false),
+        spaced("BODYAFTER", 400, 0) + &sect_pr("rIdH1", true),
+    ));
+    let joined = layout(&format!(
+        "{}{}{}",
+        spaced("BODYBEFORE", 0, 400),
+        spaced("BODYAFTER", 400, 0),
+        sect_pr("rIdH1", false),
+    ));
+
+    let gap = |p: &[dxpdf::render::layout::draw_command::LayoutedPage]| {
+        y_of(p, "BODYAFTER") - y_of(p, "BODYBEFORE")
+    };
+    assert!(
+        (gap(&split) - gap(&joined)).abs() < 0.01,
+        "collapse must survive the break: split gap {}, unbroken gap {}",
+        gap(&split),
+        gap(&joined),
+    );
+}
+
+/// §17.3.1.33: `space_before` is suppressed at the top of a page. The first
+/// paragraph *after* a continuous break is mid-page, so its `space_before`
+/// applies — treating it as a page top swallows the space.
+#[test]
+fn space_before_is_not_suppressed_after_a_mid_page_break() {
+    let with_space = |before: u32| {
+        let after_para = format!(
+            r#"<w:p><w:pPr><w:spacing w:before="{before}"/></w:pPr><w:r><w:t>BODYAFTER</w:t></w:r></w:p>"#
+        );
+        format!(
+            "{}<w:p><w:pPr>{}</w:pPr></w:p>{after_para}{}",
+            para("BODYBEFORE"),
+            sect_pr("rIdH1", false),
+            sect_pr("rIdH1", true),
+        )
+    };
+    let none = layout(&with_space(0));
+    let spaced = layout(&with_space(600)); // 30pt
+
+    let gap = |p: &[dxpdf::render::layout::draw_command::LayoutedPage]| {
+        y_of(p, "BODYAFTER") - y_of(p, "BODYBEFORE")
+    };
+    assert!(
+        gap(&spaced) - gap(&none) > 29.0,
+        "30pt of space_before must apply mid-page: {} vs {}",
+        gap(&spaced),
+        gap(&none),
+    );
+}
+
+/// §17.3.3.1: an explicit page break in the paragraph *before* a continuous
+/// break still moves the following content to a new page. The break is deferred
+/// to the start of the next block, so it has to survive the section boundary.
+#[test]
+fn an_inline_page_break_before_the_continuous_break_is_honoured() {
+    let pages = layout(&format!(
+        r#"<w:p><w:r><w:t>BODYBEFORE</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p>
+           <w:p><w:pPr>{}</w:pPr></w:p>{}{}"#,
+        sect_pr("rIdH1", false),
+        para("BODYAFTER"),
+        sect_pr("rIdH1", true),
+    ));
+
+    assert_eq!(
+        pages.len(),
+        2,
+        "the page break before the section break must still start a new page"
+    );
+}
+
+/// §20.4.2.17 `wrapSquare` — a left-hand floating shape 200pt wide, anchored to
+/// its paragraph, that text must flow to the right of.
+const FLOAT_PARA: &str = r#"<w:p><w:r><w:drawing>
+  <wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0"
+             relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
+    <wp:simplePos x="0" y="0"/>
+    <wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH>
+    <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+    <wp:extent cx="2540000" cy="2540000"/>
+    <wp:wrapSquare wrapText="bothSides"/>
+    <wp:docPr id="1" name="Box"/>
+    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+      <wps:wsp>
+        <wps:cNvSpPr/>
+        <wps:spPr>
+          <a:xfrm><a:off x="0" y="0"/><a:ext cx="2540000" cy="2540000"/></a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+          <a:solidFill><a:srgbClr val="DDDDDD"/></a:solidFill>
+        </wps:spPr>
+      </wps:wsp>
+    </a:graphicData></a:graphic>
+  </wp:anchor>
+</w:drawing></w:r></w:p>"#;
+
+/// §20.4.2: a float is a property of the *page*, not of the section that
+/// registered it. Text after a continuous break shares the page, so it must
+/// wrap around a float placed before the break — dropping the float set at the
+/// boundary lets that text run straight through the shape.
+#[test]
+fn text_after_the_break_wraps_around_a_float_registered_before_it() {
+    let x_of = |pages: &[dxpdf::render::layout::draw_command::LayoutedPage], needle: &str| {
+        use dxpdf::render::layout::draw_command::DrawCommand;
+        pages
+            .iter()
+            .flat_map(|p| &p.commands)
+            .find_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if text.contains(needle) => {
+                    Some(position.x.raw())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{needle:?} was never drawn"))
+    };
+
+    let pages = layout(&format!(
+        "{FLOAT_PARA}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        sect_pr("rIdH1", false),
+        para("BODYAFTER"),
+        sect_pr("rIdH1", true),
+    ));
+
+    // 2540000 EMU = 200pt, anchored at the left margin (56.7pt).
+    let left_margin = 1134.0 / 20.0;
+    let x = x_of(&pages, "BODYAFTER");
+    assert!(
+        x > left_margin + 100.0,
+        "text after the break must clear the 200pt float registered before it, \
+         but starts at x={x} (left margin {left_margin})"
     );
 }

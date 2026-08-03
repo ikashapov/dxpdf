@@ -37,7 +37,7 @@ use crate::render::geometry::PtRect;
 struct LayoutCtx<'cx> {
     config: &'cx PageConfig,
     clearance: &'cx HeaderFooterClearance,
-    final_page: Option<FinalPageBounds>,
+    last_page: LastPageOwner,
     measure_text: super::super::paragraph::MeasureTextFn<'cx>,
     separator_indent: Pt,
     default_line_height: Pt,
@@ -45,7 +45,7 @@ struct LayoutCtx<'cx> {
 
 impl LayoutCtx<'_> {
     fn page_bounds(&self, section_page_index: usize) -> PageBodyBounds {
-        match self.final_page {
+        match self.last_page.bounds_override() {
             // §17.6.22: this page is shared with a following Continuous
             // section, which owns its header and footer (see `SectionStart`).
             // Every *other* page keeps this section's own clearance — which is
@@ -110,6 +110,10 @@ struct PageLayoutState<'doc> {
     /// §17.3.3.1: an inline page break at the end of a paragraph defers the
     /// page break to the start of the next block.
     pending_page_break: bool,
+    /// §17.11.23: notes reserved by a *previous* section on this same page,
+    /// carried across a continuous break unflushed so one separator covers
+    /// them all. Owned, because the blocks they came from are gone.
+    carried_footnotes: Vec<(Vec<super::super::fragment::Fragment>, ParagraphStyle)>,
 }
 
 impl<'doc> PageLayoutState<'doc> {
@@ -119,32 +123,65 @@ impl<'doc> PageLayoutState<'doc> {
         bounds: PageBodyBounds,
         logical_page_base: usize,
     ) -> Self {
-        let (current_page, cursor_y) = match continuation {
-            Some(c) => (c.page, c.cursor_y),
-            None => (LayoutedPage::new(config.page_size), bounds.top),
-        };
-        PageLayoutState {
-            pages: Vec::new(),
-            column_top: cursor_y,
-            last_para_start_y: cursor_y,
-            current_page,
-            cursor_y,
-            page_index: 0,
-            logical_page_base,
-            page_top: bounds.top,
-            current_col: 0,
-            bottom: bounds.bottom,
-            page_footnotes: Vec::new(),
-            first_on_section_page: true,
-            prev_space_after: Pt::ZERO,
-            prev_style_id: None,
-            prev_borders: None,
-            page_floats: Vec::new(),
-            current_page_abs_floats: Vec::new(),
-            abs_floats_dirty: true,
-            page_start_block: 0,
-            prev_table_style_id: None,
-            pending_page_break: false,
+        // §17.6.22: a continuation resumes *inside* a page, so it inherits
+        // that page's in-progress state rather than a fresh page's defaults.
+        // Columns are the deliberate exception — see below.
+        match continuation {
+            Some(c) => PageLayoutState {
+                pages: Vec::new(),
+                column_top: c.cursor_y,
+                last_para_start_y: c.last_para_start_y,
+                current_page: c.page,
+                cursor_y: c.cursor_y,
+                page_index: 0,
+                logical_page_base,
+                page_top: bounds.top,
+                // §17.6.4: a continuous break is the usual way to *change* the
+                // column count, so the incoming index may not exist in this
+                // section's config. Restarting at column 0 from the shared
+                // cursor is both safe and what the change means. Balancing the
+                // preceding columns (which Word does) is not implemented.
+                current_col: 0,
+                bottom: c.bottom,
+                page_footnotes: Vec::new(),
+                carried_footnotes: c.page_footnotes,
+                // §17.3.1.33: the page top is above the preceding section's
+                // content, not here — space_before must not be suppressed.
+                first_on_section_page: false,
+                prev_space_after: c.prev_space_after,
+                prev_style_id: c.prev_style_id,
+                prev_borders: c.prev_borders,
+                page_floats: c.page_floats,
+                current_page_abs_floats: Vec::new(),
+                abs_floats_dirty: true,
+                page_start_block: 0,
+                prev_table_style_id: c.prev_table_style_id,
+                pending_page_break: c.pending_page_break,
+            },
+            None => PageLayoutState {
+                pages: Vec::new(),
+                column_top: bounds.top,
+                last_para_start_y: bounds.top,
+                current_page: LayoutedPage::new(config.page_size),
+                cursor_y: bounds.top,
+                page_index: 0,
+                logical_page_base,
+                page_top: bounds.top,
+                current_col: 0,
+                bottom: bounds.bottom,
+                page_footnotes: Vec::new(),
+                carried_footnotes: Vec::new(),
+                first_on_section_page: true,
+                prev_space_after: Pt::ZERO,
+                prev_style_id: None,
+                prev_borders: None,
+                page_floats: Vec::new(),
+                current_page_abs_floats: Vec::new(),
+                abs_floats_dirty: true,
+                page_start_block: 0,
+                prev_table_style_id: None,
+                pending_page_break: false,
+            },
         }
     }
 
@@ -154,19 +191,36 @@ impl<'doc> PageLayoutState<'doc> {
         PageParity::of_page(self.logical_page_base + self.page_index)
     }
 
+    /// §17.11.23: render every note owed by this page under **one** separator.
+    ///
+    /// Notes carried across a continuous break are rendered together with this
+    /// section's own, because a separator belongs to a page, not to a section:
+    /// flushing per section draws a second rule and positions the second block
+    /// from the page's unreduced bottom, laying it over the first.
+    ///
+    /// The vectors are taken out first so the borrow of `current_page` and the
+    /// borrows of the note fragments do not overlap; both are cleared by the
+    /// flush regardless.
     fn flush_footnotes(&mut self, ctx: &LayoutCtx<'_>) {
-        if !self.page_footnotes.is_empty() {
-            render_page_footnotes(
-                &mut self.current_page,
-                ctx.config,
-                &self.page_footnotes,
-                ctx.default_line_height,
-                ctx.measure_text,
-                ctx.separator_indent,
-                ctx.page_bounds(self.page_index).bottom,
-            );
-            self.page_footnotes.clear();
+        if self.page_footnotes.is_empty() && self.carried_footnotes.is_empty() {
+            return;
         }
+        let carried = std::mem::take(&mut self.carried_footnotes);
+        let own = std::mem::take(&mut self.page_footnotes);
+        let mut all: Vec<(&[super::super::fragment::Fragment], &ParagraphStyle)> = carried
+            .iter()
+            .map(|(frags, style)| (frags.as_slice(), style))
+            .collect();
+        all.extend(own.iter().copied());
+        render_page_footnotes(
+            &mut self.current_page,
+            ctx.config,
+            &all,
+            ctx.default_line_height,
+            ctx.measure_text,
+            ctx.separator_indent,
+            ctx.page_bounds(self.page_index).bottom,
+        );
     }
 
     /// Commit the current page and start a fresh one, resetting all per-page state.
@@ -198,12 +252,44 @@ impl<'doc> PageLayoutState<'doc> {
     /// footnote block at the page bottom all move one without the other. A
     /// §17.6.22 continuation resumes at the flow position.
     fn finalize(mut self, ctx: &LayoutCtx<'_>) -> SectionLayout {
-        self.flush_footnotes(ctx);
-        let cursor_y = self.cursor_y;
-        self.pages.push(self.current_page);
-        SectionLayout {
-            pages: self.pages,
-            cursor_y,
+        match ctx.last_page {
+            LastPageOwner::Own => {
+                self.flush_footnotes(ctx);
+                self.pages.push(self.current_page);
+                SectionLayout {
+                    pages: self.pages,
+                    tail: SectionTail::Complete,
+                }
+            }
+            // §17.6.22: the last page belongs to the section that follows. It
+            // is handed over *unfinished* — footnotes deliberately unflushed,
+            // so the succeeding section's flush covers both under one
+            // separator — and stays out of `pages` so no caller can commit it
+            // twice.
+            LastPageOwner::SharedWithNext { .. } => {
+                let carried = std::mem::take(&mut self.carried_footnotes);
+                let own: Vec<_> = self
+                    .page_footnotes
+                    .iter()
+                    .map(|(frags, style)| (frags.to_vec(), (*style).clone()))
+                    .collect();
+                SectionLayout {
+                    pages: self.pages,
+                    tail: SectionTail::SharedWithNext(ContinuationState {
+                        page: self.current_page,
+                        cursor_y: self.cursor_y,
+                        bottom: self.bottom,
+                        page_footnotes: carried.into_iter().chain(own).collect(),
+                        page_floats: self.page_floats,
+                        prev_space_after: self.prev_space_after,
+                        prev_style_id: self.prev_style_id,
+                        prev_borders: self.prev_borders,
+                        prev_table_style_id: self.prev_table_style_id,
+                        last_para_start_y: self.last_para_start_y,
+                        pending_page_break: self.pending_page_break,
+                    }),
+                }
+            }
         }
     }
 
@@ -1246,10 +1332,8 @@ pub(crate) struct SectionStart<'a> {
     pub continuation: Option<ContinuationState>,
     /// Header/footer clearances, selected per physical page in the section.
     pub clearance: &'a HeaderFooterClearance,
-    /// §17.6.22: bounds forced onto one page of this section because a
-    /// following `Continuous` section shares it. `None` when nothing follows on
-    /// the section's last page.
-    pub final_page: Option<FinalPageBounds>,
+    /// §17.6.22: what becomes of this section's last page.
+    pub last_page: LastPageOwner,
     /// §17.10.6: logical number of the section's first page, with
     /// `w:pgNumType/@start` applied. Drives §20.4.3.1 float mirroring.
     pub logical_page_base: usize,
@@ -1269,6 +1353,31 @@ pub(crate) struct SectionStart<'a> {
 /// Index and bounds travel as one value because they are one decision: an
 /// index without bounds, or bounds without an index, cannot be acted on, and as
 /// two `Option`s they could disagree.
+/// §17.6.22: who owns a section's last page.
+///
+/// One decision, one type. As a `bool` beside an `Option<FinalPageBounds>` the
+/// two could disagree — "shared but no bounds", "bounds but not shared" — and
+/// both spellings mean something different to `finalize`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LastPageOwner {
+    /// Committed to the document like any other page.
+    Own,
+    /// A following `Continuous` section shares it and owns its header and
+    /// footer. `bounds` is that section's `for_page(0)`, known only once this
+    /// section's page count is — so it is `None` on the first pass and `Some`
+    /// on any relayout.
+    SharedWithNext { bounds: Option<FinalPageBounds> },
+}
+
+impl LastPageOwner {
+    fn bounds_override(self) -> Option<FinalPageBounds> {
+        match self {
+            LastPageOwner::SharedWithNext { bounds } => bounds,
+            LastPageOwner::Own => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FinalPageBounds {
     /// 0-based physical page index within the section.
@@ -1300,7 +1409,7 @@ pub fn layout_section(
             continuation,
             clearance: &clearance,
             // Laid out on its own, nothing follows on the last page.
-            final_page: None,
+            last_page: LastPageOwner::Own,
             // A section laid out on its own starts at page 1 — the §17.10.6
             // renumbering only exists across a document's section list.
             logical_page_base: 1,
@@ -1309,12 +1418,29 @@ pub fn layout_section(
     .pages
 }
 
-/// One section's laid-out pages, plus where its content flow stopped.
+/// One section's laid-out pages, plus what happened to its last one.
 pub(crate) struct SectionLayout {
+    /// Pages this section commits. When `tail` is
+    /// [`SectionTail::SharedWithNext`] the shared page is **not** here — it
+    /// lives inside the tail, so "popped off `pages` and stashed elsewhere" is
+    /// not a state a caller can construct or forget to handle.
     pub pages: Vec<LayoutedPage>,
-    /// §17.6.22: the y a `Continuous` section continuing on the last page
-    /// resumes at — the flow position, not the extent of the last command.
-    pub cursor_y: Pt,
+    pub tail: SectionTail,
+}
+
+/// §17.6.22: what became of a section's last page.
+///
+/// `SharedWithNext` is much larger than `Complete` — it carries a whole page.
+/// Boxing it would add an allocation per section to shrink a value that exists
+/// once per section and is immediately destructured, so the size difference is
+/// accepted for the same reason [`LayoutBlock`]'s is.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum SectionTail {
+    /// Nothing follows on it; every page is in `pages`.
+    Complete,
+    /// A `Continuous` section continues on it. Carries the page and the
+    /// in-progress state that section resumes from.
+    SharedWithNext(ContinuationState),
 }
 
 /// Lay out a sequence of blocks using header/footer clearances selected for
@@ -1330,7 +1456,7 @@ pub(crate) fn layout_section_with_clearance(
     let SectionStart {
         continuation,
         clearance,
-        final_page,
+        last_page,
         logical_page_base,
     } = start;
     let content_width = config.content_width();
@@ -1339,7 +1465,7 @@ pub(crate) fn layout_section_with_clearance(
     let ctx = LayoutCtx {
         config,
         clearance,
-        final_page,
+        last_page,
         measure_text,
         separator_indent,
         default_line_height,

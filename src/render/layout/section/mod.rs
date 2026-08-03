@@ -12,7 +12,7 @@ mod types;
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
 pub(crate) use layout::SectionStart;
-pub(crate) use layout::{FinalPageBounds, SectionLayout};
+pub(crate) use layout::{FinalPageBounds, LastPageOwner, SectionLayout, SectionTail};
 pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
 
@@ -312,7 +312,7 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
-                final_page: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 2,
             },
@@ -863,7 +863,7 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
-                final_page: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
@@ -939,7 +939,7 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
-                final_page: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
@@ -1016,7 +1016,7 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
-                final_page: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
@@ -1746,7 +1746,7 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
-                final_page: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
@@ -1820,7 +1820,7 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
-                final_page: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
