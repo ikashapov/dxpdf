@@ -66,32 +66,31 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 
 ## OOXML Reference
 
-Two directories, split by what a document is *about*:
+**`docs/` — behavior.** How the engine works today, and WHY it makes those choices, which is generally not re-derivable from the source. Consult the relevant page before changing layout behavior, and update it in the same change when you change behavior it describes. A page here stays valid as long as the behavior does.
 
-- **`docs/` — behavior.** How the engine works today, and WHY it makes those choices, which is generally not re-derivable from the source. Consult the relevant page before changing layout behavior, and update it in the same change when you change behavior it describes. A page here stays valid as long as the behavior does.
-- **`plans/` — work.** Designs, profiling analyses and branch reviews. These describe a point in time, **not** necessarily current behavior; verify against source before acting on one. A plan whose work has fully landed and left nothing behind gets deleted, not archived.
+`docs/` is the only reference directory in the repo. Working notes — designs, profiling analyses, branch reviews — are kept **local and uncommitted** (`/plans/`, gitignored), because they describe a point in time rather than current behaviour. Nothing tracked may link to them, and no code comment may cite them: a fresh clone does not have them. Anything that must outlive the work belongs in `docs/`, or in the code it describes.
 
 ### `docs/` — current behavior
 
 - [Style Cascade](docs/style-cascade.md) — §17.7.2 property resolution, doc defaults, table style interaction
 - [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
 - [Line Spacing](docs/line-spacing.md) — §17.3.1.33 line/lineRule, Auto/Exact/AtLeast modes
-- [Position Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab`, alignment derived at layout time
+- [Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab` alignment derived at layout time; §17.18.85 `bar` stops (a rule, invisible to a tab character) and `decimal` stops
+- [Internationalisation](docs/i18n.md) — §17.3.2.20 `w:lang`, the `Locale` type and its language table, and the ICU-shaped gap it is a stopgap for (number spelling, UAX #14 line breaking, bidi, date pictures)
 - [Section Stacking](docs/section-stacking.md) — §17.6 block stacking, page/column breaks, keepNext chains, §17.3.1.14/§17.3.1.44 across-page paragraph splitting with widow/orphan control, footnote reservation
 - [Table Layout](docs/table-layout.md) — §17.4 3-pass column sizing, border conflict resolution, row splitting across pages
 - [Floating Tables](docs/floating-tables.md) — §17.4.58 tblpPr positioning, vertical anchors
 - [Floating Images](docs/floating-images.md) — §20.4.2 anchor positioning, text wrapping, forward-scan
 - [Headers and Footers](docs/headers-footers.md) — §17.10.1 rendering, table support, per-page fields
+- [Document Outline](docs/document-outline.md) — §17.3.1.19 `w:outlineLvl` → PDF `/Outlines`, the flat-structure-tree contract Skia actually implements, and where headings are deliberately not collected
 - [Fields](docs/fields.md) — §17.16.18 complex/simple fields, PAGE/NUMPAGES evaluation
 - [Font Resolution & Substitution](docs/font-substitution.md) — §17.8 the 5-step resolution chain, metric-compatible substitutes, per-render `FontRegistry` ownership
 - [Font Subsetting](docs/font-subsetting.md) — §17.8 / ISO 32000-1 §9.6 codepoint collection, `fontcull` subsetting, name-table splice, shapeability validation
 - [Shape Geometry](docs/shape-geometry.md) — §20.1.9 `prstGeom`/`custGeom` → paths, guide-formula evaluation, preset tiering
 
-### `plans/` — outstanding work
+### Known-unimplemented work
 
-- [Open Findings](plans/open-findings.md) — **the single list of everything known-unimplemented**: undocumented approximations, `w:ptab` edge cases, two ambiguities needing a Word reference render, Tier-3 performance items, and coverage gaps. Every item carries a `file:line` anchor and was verified against source. It also records what was *closed*, so stale notes elsewhere don't reopen settled work
-
-Add to that file rather than starting a new plan document. A design doc earns its own file only while it is being executed; once the work lands, its reasoning belongs in the code it describes and its residue belongs here.
+There are no open engineering units. What remains is recorded where it applies rather than in a tracked backlog: each ambiguity ECMA-376 cannot settle is stated in a comment at the site that makes the choice, saying what the choice is, why the spec does not decide it, and what evidence would. Grep for "Word reference render" to find them. Two larger questions are decisions rather than gaps — rebuilding `FaceAliasIndex` on every render (`fonts.rs`), and whether to take on a CLDR/ICU dependency for the i18n gaps [Internationalisation](docs/i18n.md) scopes.
 
 **No doc yet** — start from the module docs at these entry points: color-emoji pipeline (`src/render/emoji/mod.rs`), parse/serde schemas (`src/docx/parse/`, the `XxxXml` → domain seam), text shaping & fragments (`src/render/layout/fragment/`), paint & PDF emission (`src/render/painter.rs`), EMF images (`src/render/emf.rs`), numbering & list labels (`src/docx/parse/numbering.rs`, `src/render/layout/build/list_label.rs`), VML fallback (`src/docx/parse/vml/`).
 
@@ -151,4 +150,4 @@ The doc check catches dangling `[`links`]`, links from public docs to private
 items, and prose rustdoc reads as HTML (`Vec<Thing>` outside backticks). Link to
 a private item with a plain code span, not `[`brackets`]`.
 
-**Logging**: `RUST_LOG=debug` gives per-phase timing plus the font-resolution decision for every requested family; `RUST_LOG=warn` surfaces unsupported-feature warnings from parse and layout.
+**Logging**: `RUST_LOG=debug` gives per-phase timing — parse/render/total from `convert`, then resolve, registry, layout, subset and paint from `render_with_font_mgr` — plus the font-resolution decision for every requested family; `RUST_LOG=warn` surfaces unsupported-feature warnings from parse and layout. Prefer these numbers to intuition: on an ordinary document the registry build, not layout, is the largest cost — a fixed 78–95 ms on every render regardless of document size (65–85% of total render time on a small file), almost all of it `FaceAliasIndex::build`.
