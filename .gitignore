@@ -5,6 +5,12 @@
 # it is absent (see tests/header_footer_selection.rs).
 /test-cases/
 
+# Local-only working notes: designs, profiling analyses, branch reviews. These
+# describe a point in time rather than current behaviour, so they are kept out
+# of the repo deliberately — behaviour that outlives a plan belongs in `docs/`
+# or in the code it describes, not here.
+/plans/
+
 # Generated PDFs — scratch output from the render-and-verify loop.
 /output/
 /test-files/*.pdf

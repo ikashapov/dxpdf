@@ -10,7 +10,7 @@ documentation = "https://docs.rs/dxpdf"
 readme = "README.md"
 keywords = ["docx", "pdf", "converter", "word", "ooxml"]
 categories = ["command-line-utilities", "text-processing"]
-exclude = ["test-cases/", "test-files/", "scripts/", "output/"]
+exclude = ["test-cases/", "test-files/", "scripts/", "output/", "plans/"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
