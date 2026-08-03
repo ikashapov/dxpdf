@@ -94,6 +94,7 @@ fn docx(body: &str) -> Vec<u8> {
   <w:footnote w:type="continuationSeparator" w:id="1"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>
   <w:footnote w:id="2"><w:p><w:r><w:t>NOTEBEFORE</w:t></w:r></w:p></w:footnote>
   <w:footnote w:id="3"><w:p><w:r><w:t>NOTEAFTER</w:t></w:r></w:p></w:footnote>
+  <w:footnote w:id="4"><w:p><w:r><w:t>NOTEMIDDLE</w:t></w:r></w:p></w:footnote>
 </w:footnotes>"#,
     )
     .unwrap();
@@ -760,6 +761,212 @@ fn continuous_break_can_decrease_the_column_count() {
     assert!(
         (xs[0] - 57).abs() <= 1,
         "and that x is the left margin: {xs:?}"
+    );
+}
+
+// ── §17.6.22 chained breaks — three sections on one page (issue #83) ─────────
+
+/// Three sections on one page: `a` closes the first, then two continuous breaks
+/// carry the same physical page through `b` and `c`.
+fn chained(a: &str, b: &str, c: &str) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
+    layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr(a, false),
+        para("BODYMIDDLE"),
+        sect_pr(b, true),
+        para("BODYAFTER"),
+        sect_pr(c, true),
+    ))
+}
+
+/// The unbroken reference for [`chained`] — same content, one section, so `hdr`
+/// governs the whole page.
+///
+/// Two empty paragraphs, not none: in [`chained`] each break rides on a `w:p`'s
+/// `w:pPr`, and those paragraph marks render blank lines. Omitting them here
+/// would make the comparison measure the fixture instead of the engine.
+fn single_section_of_three(hdr: &str) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
+    layout(&format!(
+        "{}<w:p/>{}<w:p/>{}{}",
+        para("BODYBEFORE"),
+        para("BODYMIDDLE"),
+        para("BODYAFTER"),
+        sect_pr(hdr, false),
+    ))
+}
+
+/// §17.6.22: a chain of continuous breaks is still one page. Nothing about the
+/// second break makes it a page boundary that the first one was not.
+#[test]
+fn chained_continuous_breaks_share_one_page() {
+    let pages = chained("rIdH1", "rIdH1", "rIdH1");
+    assert_eq!(pages.len(), 1, "three sections, two breaks, one page");
+
+    let texts = drawn_text(&pages);
+    let at = |needle: &str| texts.iter().position(|t| t.contains(needle));
+    assert!(
+        at("BODYBEFORE") < at("BODYMIDDLE") && at("BODYMIDDLE") < at("BODYAFTER"),
+        "document order survives both breaks: {texts:?}"
+    );
+}
+
+/// §17.6 / §17.10: the ownership rule is "the last section on the page", not
+/// "the section after this one". With three sections on a page the two readings
+/// disagree, and only a chain can tell them apart.
+#[test]
+fn chained_breaks_render_only_the_last_sections_header() {
+    // Middle section takes the tall header; only the *last* one's may be drawn.
+    let pages = chained("rIdH1", "rIdH2", "rIdH1");
+    let texts = drawn_text(&pages);
+    assert_eq!(
+        texts.iter().filter(|t| t.contains("HDRSHORT")).count(),
+        1,
+        "exactly one header is drawn, and it is the last section's: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("HDRTALL")),
+        "a middle section of the chain owns nothing: {texts:?}"
+    );
+}
+
+/// §17.10.1, chained: **every** section's content on the shared page must clear
+/// the header actually drawn on it — which is the last section's.
+///
+/// This is the case a single break cannot reach. Fitting each section against
+/// its immediate successor is enough when there are two: the successor is the
+/// owner. With three it is not — the first section gets pinned to the middle
+/// section's clearance while the page is drawn with the last section's.
+#[test]
+fn chained_breaks_clear_the_last_sections_header() {
+    // Only the final section carries the tall header, so a fit that stops at
+    // the immediate successor never sees it.
+    let pages = chained("rIdH1", "rIdH1", "rIdH2");
+    let reference = single_section_of_three("rIdH2");
+
+    for needle in ["BODYBEFORE", "BODYMIDDLE", "BODYAFTER"] {
+        assert_eq!(
+            y_of(&pages, needle),
+            y_of(&reference, needle),
+            "{needle} must sit where the header drawn on the page puts it"
+        );
+    }
+}
+
+/// The converse: a chain whose last section has the *shorter* header must
+/// reclaim the band, rather than every section keeping the tall clearance it
+/// was laid out against.
+#[test]
+fn chained_breaks_reclaim_the_band_when_the_last_header_is_shorter() {
+    let pages = chained("rIdH2", "rIdH2", "rIdH1");
+    let reference = single_section_of_three("rIdH1");
+
+    for needle in ["BODYBEFORE", "BODYMIDDLE", "BODYAFTER"] {
+        assert_eq!(
+            y_of(&pages, needle),
+            y_of(&reference, needle),
+            "{needle} must not retain a preceding section's clearance"
+        );
+    }
+}
+
+/// A chain does **not** mean every section lands on the same page. A middle
+/// section that overflows commits the shared page as its own, and the sections
+/// after it start on a later one — so the search for the owner has to stop
+/// there rather than run to the end of the chain.
+///
+/// Only the final section carries the tall header, and it never appears on
+/// page 1. Taking the last section of the chain unconditionally would push
+/// page 1's content down to clear a header drawn on page 2.
+#[test]
+fn a_spilling_middle_section_owns_the_page_it_overflows() {
+    let filler: String = (0..80).map(|i| para(&format!("FILL{i}"))).collect();
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{filler}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr("rIdH1", false),
+        sect_pr("rIdH1", true),
+        para("BODYAFTER"),
+        sect_pr("rIdH2", true),
+    ));
+    assert!(
+        pages.len() >= 2,
+        "the middle section must actually overflow for this to test anything"
+    );
+
+    let texts_on = |page: &dxpdf::render::layout::draw_command::LayoutedPage| {
+        drawn_text(std::slice::from_ref(page))
+    };
+    let first = texts_on(&pages[0]);
+    assert!(
+        first.iter().any(|t| t.contains("HDRSHORT"))
+            && !first.iter().any(|t| t.contains("HDRTALL")),
+        "page 1 belongs to the section that overflows onto page 2: {first:?}"
+    );
+
+    assert_eq!(
+        y_of(&pages, "BODYBEFORE"),
+        y_of(&single_section("rIdH1"), "BODYBEFORE"),
+        "content on page 1 clears the header drawn on page 1, not the one the \
+         last section of the chain draws on page 2"
+    );
+}
+
+/// §17.11.23: one separator per page holds however many sections contribute to
+/// it. Carried notes have to chain through *two* handovers, each of which could
+/// drop or re-flush them.
+#[test]
+fn footnotes_from_three_chained_sections_share_one_separator() {
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para_with_note("BODYBEFORE", 2),
+        sect_pr("rIdH1", false),
+        para_with_note("BODYMIDDLE", 4),
+        sect_pr("rIdH1", true),
+        para_with_note("BODYAFTER", 3),
+        sect_pr("rIdH1", true),
+    ));
+
+    assert_eq!(pages.len(), 1, "one shared physical page");
+    let texts = drawn_text(&pages);
+    for note in ["NOTEBEFORE", "NOTEMIDDLE", "NOTEAFTER"] {
+        assert!(
+            texts.iter().any(|t| t.contains(note)),
+            "{note} must survive being carried across two breaks: {texts:?}"
+        );
+    }
+    assert_eq!(
+        footnote_separator_count(&pages),
+        1,
+        "§17.11.23: one separator per page, however many sections share it"
+    );
+}
+
+/// §17.6.4: a chain may change the column count at each break. The middle
+/// section's count must not leak into the last one — the reset is per break,
+/// not once per chain.
+#[test]
+fn chained_breaks_apply_each_sections_column_count() {
+    let filler: String = (0..90).map(|i| para(&format!("FILL{i}"))).collect();
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}<w:p><w:pPr>{}</w:pPr></w:p>{filler}{}",
+        para("BODYBEFORE"),
+        sect_pr_cols("rIdH1", false, 1),
+        para("BODYMIDDLE"),
+        sect_pr_cols("rIdH1", true, 3),
+        sect_pr_cols("rIdH1", true, 1),
+    ));
+
+    let xs = fill_columns(&pages);
+    assert_eq!(
+        xs.len(),
+        1,
+        "the last section is single-column; the middle section's three must not \
+         survive its break: {xs:?}"
+    );
+    assert!(
+        (xs[0] - 57).abs() <= 1,
+        "and that column is at the left margin: {xs:?}"
     );
 }
 

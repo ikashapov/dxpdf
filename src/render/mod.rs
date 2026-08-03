@@ -111,13 +111,124 @@ use crate::render::layout::section::layout_section_with_clearance;
 use crate::render::resolve::header_footer::HeaderFooterSet;
 use crate::render::resolve::ResolvedDocument;
 
-/// Inputs to [`fit_shared_page`] that describe the *following* section.
+/// Inputs to [`fit_shared_page`] that describe what follows the section being
+/// fitted.
+///
+/// The whole section list plus an index, rather than one `&ResolvedSection`,
+/// because the page's owner may be several continuous breaks away — see
+/// [`shared_page_owner_bounds`].
 struct FitSharedPage<'a> {
-    next: &'a crate::render::resolve::sections::ResolvedSection,
+    sections: &'a [crate::render::resolve::sections::ResolvedSection],
+    /// Index of the section immediately after the one being fitted.
+    next_idx: usize,
     clearance: &'a HeaderFooterClearance,
     logical_page_base: usize,
     even_and_odd: bool,
     default_line_height: dimension::Pt,
+    /// The last two are needed only to lay out the intermediate sections of a
+    /// chain speculatively; a lone break never reaches that path.
+    separator_indent: dimension::Pt,
+    measure_text: layout::paragraph::MeasureTextFn<'a>,
+}
+
+/// §17.6.22: the body bounds a shared page must use — those of the section that
+/// ends up **owning** it.
+///
+/// With a single break the owner is just the next section, and this returns its
+/// `for_page(0)` having laid out nothing. A *chain* of continuous breaks is what
+/// makes it more than a lookup: a section that fits entirely on the shared page
+/// commits no page of its own and hands the same page further along, so the
+/// owner is deeper in the chain. Stopping at the immediate successor pins the
+/// first section to a *middle* section's clearance while the page is drawn with
+/// the last section's — a taller final header then overlaps content two sections
+/// back, which is the original defect one break removed.
+///
+/// "Fits entirely" is a layout fact, not a property of the markup, so the walk
+/// lays those sections out. It is speculative in the full sense — the blocks it
+/// builds and the §17.9 / §17.11.12 numbering they advance are rolled back, and
+/// the layouts themselves are discarded, since the real ones happen when the
+/// caller's loop reaches those sections. Chains of two pay nothing: the
+/// hands-on test below returns before anything is built.
+///
+/// Terminates because `idx` strictly increases and is bounded by `sections`.
+fn shared_page_owner_bounds(
+    input: &FitSharedPage<'_>,
+    continuation: &layout::section::ContinuationState,
+    committed: usize,
+    ctx: &layout::build::BuildContext,
+    state: &mut BuildState,
+) -> layout::header_footer::PageBodyBounds {
+    let mut idx = input.next_idx;
+    let mut logical = input.logical_page_base + committed;
+    let mut cont = continuation.clone();
+
+    loop {
+        let section = &input.sections[idx];
+        let base = layout::header_footer::next_logical_page_base(
+            logical,
+            section.properties.page_number_type.as_ref(),
+        );
+        let config = PageConfig::from_section(&section.properties);
+        // §17.11.12: measuring a header is a document-order side effect, and
+        // every measurement here is a look-ahead.
+        let clearance = state.speculatively(|s| {
+            s.page_config = config.clone();
+            measure_header_footer_clearance(
+                &config,
+                section,
+                ctx,
+                s,
+                input.default_line_height,
+                input.even_and_odd,
+                base,
+            )
+        });
+
+        // Nothing after this section shares its last page, so this section owns
+        // the page it was handed. The common case, and the one that costs a
+        // clearance measurement and no layout.
+        let hands_on = input.sections.get(idx + 1).is_some_and(|after| {
+            after.properties.section_type == Some(crate::model::SectionType::Continuous)
+        });
+        if !hands_on {
+            return clearance.for_page(0);
+        }
+
+        // It does hand its last page on — but that is only *this* page if the
+        // section fits entirely within it. A section that spills commits the
+        // shared page as its own page 0 and owns it; the page it hands on is a
+        // later one, which this caller is not asking about.
+        let (spilled, tail) = state.speculatively(|s| {
+            s.page_config = config.clone();
+            let built = build_section_blocks(section, &config, ctx, s);
+            let laid = layout_section_with_clearance(
+                &built.blocks,
+                &config,
+                input.measure_text,
+                input.separator_indent,
+                input.default_line_height,
+                layout::section::SectionStart {
+                    continuation: Some(cont.clone()),
+                    clearance: &clearance,
+                    // No override: the shared page's own bounds are the best
+                    // available guess at this point, and the answer being
+                    // computed is what will replace them.
+                    last_page: layout::section::LastPageOwner::SharedWithNext { bounds: None },
+                    logical_page_base: base,
+                },
+            );
+            (!laid.pages.is_empty(), laid.tail)
+        });
+
+        match (spilled, tail) {
+            (false, layout::section::SectionTail::SharedWithNext(next_cont)) => {
+                cont = next_cont;
+                logical = base;
+                idx += 1;
+            }
+            _ => return clearance.for_page(0),
+        }
+    }
 }
 
 /// How [`fit_shared_page`] resolved a section whose last page is shared.
@@ -155,6 +266,10 @@ enum SharedPageFit {
 /// Iterates because tightening the last page's bounds can spill its content
 /// onto a new page, making a different page last. `seen` stops a flip-flop
 /// rather than trusting a pass counter.
+///
+/// Which section's bounds to use is [`shared_page_owner_bounds`]'s question,
+/// not this one's — with a chain of continuous breaks the answer is not simply
+/// "the next section".
 fn fit_shared_page(
     layout: &mut layout::section::SectionLayout,
     input: FitSharedPage<'_>,
@@ -172,32 +287,19 @@ fn fit_shared_page(
         // section's only page is the shared one.
         let index = layout.pages.len();
 
-        // §17.10.6: the succeeding section's first logical page number depends
-        // on how many pages this one committed — which excludes the shared
-        // page. It feeds even/odd slot selection, so it must be recomputed on
-        // every pass, not hoisted out of the loop.
+        // §17.10.6: the owner's first logical page number depends on how many
+        // pages this section committed — which excludes the shared page. It
+        // feeds even/odd slot selection, so it must be recomputed on every
+        // pass, not hoisted out of the loop; so must the whole walk, since a
+        // relayout also moves the cursor the chain resumes from.
         let committed = index;
-        let next_base = layout::header_footer::next_logical_page_base(
-            input.logical_page_base + committed,
-            input.next.properties.page_number_type.as_ref(),
-        );
-        let next_config = PageConfig::from_section(&input.next.properties);
-
-        // Measuring a header is a document-order side effect (§17.11.12), and
-        // this is a look-ahead — so it must not reach the document.
-        let next_clearance = state.speculatively(|s| {
-            s.page_config = next_config.clone();
-            measure_header_footer_clearance(
-                &next_config,
-                input.next,
-                ctx,
-                s,
-                input.default_line_height,
-                input.even_and_odd,
-                next_base,
-            )
-        });
-        let bounds = next_clearance.for_page(0);
+        let layout::section::SectionTail::SharedWithNext(ref cont) = layout.tail else {
+            // Unreachable from `render_to_pages`, which only calls this when a
+            // `Continuous` section follows — but a page nothing shares needs no
+            // fitting, which is a better answer than an `unwrap`.
+            return SharedPageFit::NotNeeded;
+        };
+        let bounds = shared_page_owner_bounds(&input, cont, committed, ctx, state);
 
         if input.clearance.for_page(index) == bounds {
             return if passes == 0 {
@@ -385,11 +487,11 @@ pub fn layout_document(
 
         // §17.6.22: does a `Continuous` section follow, sharing this section's
         // last page?
-        let next_continuous = resolved.sections.get(section_idx + 1).filter(|next| {
+        let next_continuous = resolved.sections.get(section_idx + 1).is_some_and(|next| {
             next.properties.section_type == Some(crate::model::SectionType::Continuous)
         });
         let owner = |bounds| {
-            if next_continuous.is_some() {
+            if next_continuous {
                 layout::section::LastPageOwner::SharedWithNext { bounds }
             } else {
                 layout::section::LastPageOwner::Own
@@ -414,15 +516,18 @@ pub fn layout_document(
         };
 
         let mut layout = lay_out(continuation.clone(), None);
-        if let Some(next) = next_continuous {
+        if next_continuous {
             let outcome = fit_shared_page(
                 &mut layout,
                 FitSharedPage {
-                    next,
+                    sections: &resolved.sections,
+                    next_idx: section_idx + 1,
                     clearance: &clearance,
                     logical_page_base,
                     even_and_odd,
                     default_line_height: dlh,
+                    separator_indent,
+                    measure_text: Some(&measure_fn),
                 },
                 &ctx,
                 &mut state,
