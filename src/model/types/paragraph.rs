@@ -135,7 +135,14 @@ impl OutlineLevel {
         Self(level)
     }
 
-    /// Create from OOXML raw value (0-based). Returns None if > 8.
+    /// Create from a §17.3.1.19 `w:outlineLvl/@w:val`, which is 0-based.
+    ///
+    /// Returns `None` for 9, and that is the spec rather than a bound: value 9
+    /// is "body text" — an explicit statement that the paragraph has **no**
+    /// outline level, not a ninth heading level. Word writes it when a
+    /// paragraph's outline level is reset to Body Text, so a heading style's
+    /// level can be overridden back off. `None` therefore means "not a
+    /// heading", whether the attribute was absent or present-and-9.
     pub fn from_ooxml(val: u8) -> Option<Self> {
         if val <= 8 {
             Some(Self(val + 1))

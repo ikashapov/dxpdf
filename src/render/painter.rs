@@ -13,8 +13,8 @@ use crate::render::emoji::raster::EmojiRasterizer;
 use crate::render::error::RenderError;
 use crate::render::fonts::{self, FontRegistry};
 use crate::render::layout::draw_command::{
-    DrawCommand, LayoutedPage, ResolvedDashPattern, ResolvedEffect, ResolvedFill, ResolvedLineCap,
-    ResolvedLineJoin, ResolvedStroke,
+    DrawCommand, LayoutedPage, OutlineMark, ResolvedDashPattern, ResolvedEffect, ResolvedFill,
+    ResolvedLineCap, ResolvedLineJoin, ResolvedStroke,
 };
 use crate::render::resolve::drawing_color::Rgba;
 use crate::render::resolve::images::MediaEntry;
@@ -70,6 +70,60 @@ fn quantize_crop(crop: &crate::render::geometry::PtRect) -> (i32, i32, i32, i32)
     )
 }
 
+/// §17.3.1.19: build the PDF structure tree the document outline is derived
+/// from, or `None` when the document has no headings.
+///
+/// **The tree is deliberately flat.** Skia derives the outline hierarchy from
+/// the heading *level digit* in each node's type string, not from the shape of
+/// this tree: nesting an `H2` node inside an `H1` node does not nest the
+/// outline entry, it concatenates the two titles into one entry. Measured
+/// against Skia m145; the obvious "mirror the heading hierarchy" design
+/// silently merges every subheading into its parent.
+///
+/// The title comes from `set_alt`, and must: this Skia has no `fTitle` field on
+/// the public node, so a node without an alt contributes **no outline entry at
+/// all** rather than an untitled one.
+fn build_outline_tree(pages: &[LayoutedPage]) -> Option<pdf::StructureElementNode<'static>> {
+    let mut root = pdf::StructureElementNode::new("Document");
+    let mut any = false;
+
+    for page in pages {
+        for cmd in &page.commands {
+            let DrawCommand::Outline(OutlineMark::Begin(heading)) = cmd else {
+                continue;
+            };
+            let mut node = pdf::StructureElementNode::new(heading_type_string(heading.level));
+            node.set_node_id(heading.node_id);
+            node.set_alt(&*heading.title);
+            root.append_child(node);
+            any = true;
+        }
+    }
+
+    any.then_some(root)
+}
+
+/// The PDF structure type for a §17.3.1.19 outline level.
+///
+/// ISO 32000-1 (PDF 1.7) defines heading structure types `H1`–`H6` only, and
+/// Skia enforces that range, while §17.3.1.19 allows nine levels. Levels 7–9
+/// clamp to `H6`: the entry survives — dropping a heading outright is a worse
+/// answer than a flattened one — and the hierarchy stops distinguishing depth
+/// there. Warned once per render, because a document that relies on nine levels
+/// should say so in the log rather than quietly lose its shape.
+fn heading_type_string(level: crate::model::OutlineLevel) -> String {
+    const DEEPEST_PDF_HEADING: u8 = 6;
+    let level = level.value();
+    if level > DEEPEST_PDF_HEADING {
+        log::warn!(
+            "outline: §17.3.1.19 level {level} has no PDF structure type \
+             (ISO 32000-1 stops at H{DEEPEST_PDF_HEADING}) — clamping, so the \
+             outline flattens below that depth"
+        );
+    }
+    format!("H{}", level.min(DEEPEST_PDF_HEADING))
+}
+
 /// Render laid-out pages to PDF bytes via Skia.
 ///
 /// `registry` owns the typeface universe for this render — paint resolves
@@ -86,8 +140,22 @@ pub fn render_to_pdf(
     options: &RenderOptions,
 ) -> Result<Vec<u8>, RenderError> {
     let mut pdf_bytes: Vec<u8> = Vec::new();
+    // §17.3.1.19: the outline is document-level, so its structure tree has to
+    // exist before the first page — `pdf::new_document` takes it by reference
+    // and holds it for the document's lifetime. Layout has already finished, so
+    // the headings are all knowable here.
+    let structure_tree = build_outline_tree(pages);
     let pdf_metadata = pdf::Metadata {
         encoding_quality: Some(85),
+        // A document with no headings gets neither, so it keeps its current
+        // output byte for byte: an empty `/Outlines`, or a `/StructTreeRoot`
+        // for a document that has no structure to describe, is worse than none.
+        outline: if structure_tree.is_some() {
+            pdf::Outline::StructureElementHeaders
+        } else {
+            pdf::Outline::None
+        },
+        structure_element_tree_root: structure_tree,
         ..Default::default()
     };
     let mut doc = pdf::new_document(&mut pdf_bytes, Some(&pdf_metadata));
@@ -174,6 +242,17 @@ fn render_page(
 
     for cmd in &page.commands {
         match cmd {
+            // §17.3.1.19: marked-content boundaries. The destination Skia gives
+            // an outline entry is the union of the marks under its node, so the
+            // ID must be set for exactly this heading's commands and cleared
+            // straight after — leaving it set would pull the destination onto
+            // whatever body text follows.
+            DrawCommand::Outline(OutlineMark::Begin(heading)) => {
+                pdf::set_node_id(canvas, heading.node_id);
+            }
+            DrawCommand::Outline(OutlineMark::End) => {
+                pdf::set_node_id(canvas, pdf::node_id::NOTHING);
+            }
             DrawCommand::Text {
                 position,
                 text,

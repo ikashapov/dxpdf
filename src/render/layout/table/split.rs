@@ -396,6 +396,11 @@ fn command_primary_y(cmd: &DrawCommand) -> Pt {
         | DrawCommand::LinkAnnotation { rect, .. }
         | DrawCommand::InternalLink { rect, .. } => rect.origin.y,
         DrawCommand::Path { origin, .. } => origin.y,
+        // §17.3.1.19: a marked-content boundary has no y of its own. It takes
+        // the top of the cell so it stays with the first half of a split — a
+        // heading whose paragraph splits keeps its outline entry on the page
+        // it starts on, which is the same rule the paragraph splitter applies.
+        DrawCommand::Outline(_) => Pt::ZERO,
     }
 }
 

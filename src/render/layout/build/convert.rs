@@ -147,6 +147,74 @@ pub(super) fn paragraph_locale(
     )
 }
 
+/// §17.3.1.19: this paragraph's PDF outline entry, if it is a heading.
+///
+/// `props` is the **cascaded** paragraph properties, so a level inherited from
+/// a heading style counts exactly as a direct `w:outlineLvl` does — which is
+/// the point: §17.3.1.19 is a paragraph property, and "is a heading" is not a
+/// question about style names. `OutlineLevel::from_ooxml` has already rejected
+/// value 9 ("body text"), so `None` here means "not a heading" for either
+/// reason.
+///
+/// Returns `None` for a heading with no text: the title is the only thing a
+/// reader can navigate by, and an untitled outline row points somewhere
+/// unnameable. Consuming a node ID for it would also leave a gap in the
+/// sequence, so the counter is only advanced once a heading is certain.
+pub(super) fn paragraph_outline(
+    para: &model::Paragraph,
+    props: &model::ParagraphProperties,
+    state: &mut BuildState,
+) -> Option<crate::render::layout::draw_command::OutlineHeading> {
+    let level = props.outline_level?;
+    let title = outline_title(&para.content);
+    if title.is_empty() {
+        return None;
+    }
+    // Reserved last, so a body-text paragraph or an untitled heading never
+    // consumes an ID and leaves a hole in the sequence.
+    let node_id = state.next_outline_node_id()?;
+    Some(crate::render::layout::draw_command::OutlineHeading {
+        node_id,
+        level,
+        title: std::rc::Rc::from(title.as_str()),
+    })
+}
+
+/// The text of a heading paragraph, as the outline should title it.
+///
+/// Runs are joined, and hyperlinks and field *results* are walked into, because
+/// all three are ordinary text as far as a reader is concerned — a title cut at
+/// the first formatting change would be wrong far more often than not.
+///
+/// The §17.9.22 list label is deliberately absent: it is injected at layout,
+/// not part of the paragraph, and both Word and LibreOffice title a numbered
+/// heading with its text alone (measured against the reference PDF attached to
+/// issue #90).
+fn outline_title(inlines: &[model::Inline]) -> String {
+    fn walk(inlines: &[model::Inline], out: &mut String) {
+        for inline in inlines {
+            match inline {
+                model::Inline::TextRun(run) => {
+                    for element in &run.content {
+                        if let model::RunElement::Text(text) = element {
+                            out.push_str(text);
+                        }
+                    }
+                }
+                model::Inline::Symbol(sym) => {
+                    out.push(char::from_u32(sym.char_code as u32).unwrap_or('\u{FFFD}'));
+                }
+                model::Inline::Hyperlink(link) => walk(&link.content, out),
+                model::Inline::Field(field) => walk(&field.content, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(inlines, &mut out);
+    out.trim().to_string()
+}
+
 pub(super) fn doc_font_family(ctx: &BuildContext) -> String {
     ctx.resolved
         .theme
@@ -178,6 +246,7 @@ pub(super) fn paragraph_style_from_props(
     default_tab_stop: Pt,
     auto_fit: crate::render::layout::ShapeAutoFit,
     locale: crate::render::resolve::locale::Locale,
+    outline: Option<crate::render::layout::draw_command::OutlineHeading>,
 ) -> ParagraphStyle {
     let indent_left = props
         .indentation
@@ -255,6 +324,7 @@ pub(super) fn paragraph_style_from_props(
         tabs,
         default_tab_stop,
         locale,
+        outline,
         drop_cap: None,
         borders: resolve_paragraph_borders(props),
         shading: props

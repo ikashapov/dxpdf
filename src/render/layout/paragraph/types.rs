@@ -50,6 +50,14 @@ pub struct ParagraphStyle {
     /// runs each declared their own `w:lang` would otherwise have no single
     /// answer. See `build::convert::paragraph_locale`.
     pub locale: crate::render::resolve::locale::Locale,
+    /// §17.3.1.19: this paragraph's PDF outline entry, when it is a heading.
+    ///
+    /// Carried on the style rather than derived at emission because the node ID
+    /// is assigned once, in document order, while the paragraph is built — see
+    /// [`OutlineHeading`](crate::render::layout::draw_command::OutlineHeading).
+    /// `None` for body text, and for every heading outside the document body
+    /// (headers, footers, notes), which are not positions in the document.
+    pub outline: Option<crate::render::layout::draw_command::OutlineHeading>,
     /// Drop cap to render at the start of this paragraph.
     pub drop_cap: Option<DropCapInfo>,
     /// §17.3.1.24: paragraph borders.
@@ -139,6 +147,7 @@ impl ParagraphStyle {
             tabs: self.tabs.clone(),
             default_tab_stop: self.default_tab_stop,
             locale: self.locale,
+            outline: self.outline.clone(),
             drop_cap: self.drop_cap.clone(),
             borders: self.borders.clone(),
             shading: self.shading,
@@ -171,6 +180,7 @@ impl Default for ParagraphStyle {
             // §17.15.1.25: 720 twips = 36pt is the OOXML default interval.
             default_tab_stop: Pt::new(36.0),
             locale: crate::render::resolve::locale::Locale::English,
+            outline: None,
             drop_cap: None,
             borders: None,
             shading: None,
