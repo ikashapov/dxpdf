@@ -971,4 +971,93 @@ mod tests {
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/Count 1"), "exactly one blank page");
     }
+
+    // ── §17.6.22 speculative clearance peek (issue #83, plan §1) ────────────
+
+    /// A header paragraph carrying a `w:footnoteReference`.
+    ///
+    /// §17.11.12: headers do not render footnote *bodies*, but the walk still
+    /// records the reference — `build_non_story_content` drains the pending
+    /// list precisely so it is not attributed to the next body paragraph. What
+    /// the drain does **not** undo is the display counter, which is why
+    /// measuring a header is a document-order side effect.
+    fn header_with_footnote_ref() -> Vec<Block> {
+        vec![Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![Inline::FootnoteRef(NoteId::new(2))],
+            rsids: ParagraphRevisionIds::default(),
+        }))]
+    }
+
+    fn section_with_header(
+        headers: Vec<Block>,
+    ) -> crate::render::resolve::sections::ResolvedSection {
+        crate::render::resolve::sections::ResolvedSection {
+            blocks: vec![para("body")],
+            properties: SectionProperties::default(),
+            headers: crate::render::resolve::header_footer::HeaderFooterSet {
+                default: Some(headers),
+                first: None,
+                even: None,
+            },
+            footers: crate::render::resolve::header_footer::HeaderFooterSet::default(),
+        }
+    }
+
+    /// §17.6.22: laying out a section needs the bounds of the page its last
+    /// page will share with a following `Continuous` section, so the following
+    /// section's header must be measured *before* the renderer reaches it.
+    ///
+    /// That measurement is a document-order side effect (see
+    /// [`header_with_footnote_ref`]). Wrapped in `BuildState::speculatively` it
+    /// must leave numbering exactly as it found it — otherwise footnote marks
+    /// would depend on how far ahead the renderer chose to look rather than on
+    /// the file.
+    #[test]
+    fn peeking_at_a_following_sections_clearance_does_not_consume_a_footnote_number() {
+        let doc = empty_doc();
+        let resolved = resolve::resolve(doc);
+        let font_mgr = skia_safe::FontMgr::new();
+        let registry = fonts::FontRegistry::build(font_mgr, &[], &[]).expect("registry");
+        let measurer = layout::measurer::TextMeasurer::new(&registry);
+        let ctx = layout::build::BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let section = section_with_header(header_with_footnote_ref());
+        let config = layout::page::PageConfig::from_section(&section.properties);
+        let dlh = crate::render::dimension::Pt::new(12.0);
+
+        let measure = |state: &mut BuildState| {
+            measure_header_footer_clearance(&config, &section, &ctx, state, dlh, false, 1)
+        };
+
+        // Direct measurement: the fixture must really consume a number, or the
+        // rollback below would be proving nothing.
+        let mut direct = BuildState::default();
+        let before_direct = format!("{:?}", direct.footnotes);
+        let _ = measure(&mut direct);
+        let after_direct = format!("{:?}", direct.footnotes);
+        assert_ne!(
+            before_direct, after_direct,
+            "fixture must actually advance §17.11.12 numbering, else this test \
+             cannot distinguish a working rollback from a no-op"
+        );
+
+        // Speculative measurement: identical state afterwards.
+        let mut peeked = BuildState::default();
+        let before_peek = format!("{:?}", peeked.footnotes);
+        let clearance = peeked.speculatively(|s| measure(s));
+        assert_eq!(
+            before_peek,
+            format!("{:?}", peeked.footnotes),
+            "a speculative clearance peek must not consume a footnote number"
+        );
+
+        // And the measurement itself still crossed the rollback boundary.
+        let bounds = clearance.for_page(0);
+        assert!(bounds.top >= config.margins.top);
+    }
 }

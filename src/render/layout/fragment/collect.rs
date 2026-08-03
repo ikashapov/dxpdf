@@ -41,7 +41,12 @@ pub struct RecordedFootnote {
 /// from a **flat** scan of the paragraph's top-level inlines. The two walkers
 /// disagreed for any nested reference: its body was never emitted, and when it
 /// preceded a top-level reference the body's number no longer matched the mark.
-#[derive(Default, Debug)]
+/// `Clone` exists for §17.6.22 speculative builds: measuring a *following*
+/// section's header to learn its clearance walks that header's content, and
+/// that walk records footnote references like any other. The peek snapshots
+/// this tracker and restores it, so those references never reach the document.
+/// See `BuildState::speculatively`.
+#[derive(Clone, Default, Debug)]
 pub struct FootnoteTracker {
     /// Display number of the most recently emitted reference.
     last_display: u32,
@@ -1681,6 +1686,38 @@ mod tests {
             texts,
             vec![("Seite ", true), ("7", true)],
             "PAGE substitution must inherit bold from empty placeholder run"
+        );
+    }
+
+    // ── §17.6.22 speculative build support (plan §1) ─────────────────────────
+
+    /// A speculative build (peeking at the next section's header to learn its
+    /// clearance) snapshots the tracker and restores it afterwards, so the
+    /// clone must be fully independent: both the display counter *and* the
+    /// pending list. Sharing either would let a peeked reference surface as a
+    /// real one, rendering a footnote body against the wrong host paragraph.
+    #[test]
+    fn clone_is_independent_in_counter_and_pending_list() {
+        let mut original = FootnoteTracker::default();
+        assert_eq!(original.record(NoteId::new(1)), 1);
+
+        let snapshot = original.clone();
+
+        assert_eq!(original.record(NoteId::new(2)), 2, "original advances");
+        assert_eq!(original.record(NoteId::new(3)), 3);
+
+        // The snapshot saw exactly one reference and still numbers from there.
+        let mut restored = snapshot;
+        assert_eq!(
+            restored.take_pending().len(),
+            1,
+            "the clone keeps only the references recorded before it was taken"
+        );
+        assert_eq!(
+            restored.record(NoteId::new(4)),
+            2,
+            "and resumes numbering where the snapshot was taken, not where the \
+             speculative walk left off"
         );
     }
 }

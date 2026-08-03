@@ -437,6 +437,90 @@ mod tests {
         assert_eq!(line_break_counts(&hf.blocks), vec![0]);
     }
 
+    // ── §17.6.22 speculative build (plan §1) ────────────────────────────────
+
+    /// A speculative build must leave every **document-order** counter exactly
+    /// as it found it. Measuring the *next* section's header to learn its
+    /// clearance builds that header's content, and
+    /// [`build_header_footer_content`] deliberately drains footnote references
+    /// and advances list counters — so without rollback, peeking ahead would
+    /// renumber §17.9 lists and §17.11.2 endnotes in document order.
+    #[test]
+    fn speculatively_rolls_back_document_order_counters() {
+        let mut state = BuildState::default();
+        let num = (model::NumId::new(1), 0u8);
+        state.endnote_counter = 7;
+        state.list_counters.insert(num, 3);
+        state.outline = OutlineCollector::Collecting(5);
+        let before_width = state.page_config.content_width();
+
+        state.speculatively(|s| {
+            s.endnote_counter += 1;
+            *s.list_counters.entry(num).or_default() += 1;
+            s.list_counters.insert((model::NumId::new(99), 0), 42);
+            s.next_outline_node_id();
+            s.page_config = crate::render::layout::page::PageConfig::default();
+            s.page_config.margins.left = Pt::new(999.0);
+        });
+
+        assert_eq!(state.endnote_counter, 7, "§17.11.2 endnote number restored");
+        assert_eq!(
+            state.list_counters.get(&num).copied(),
+            Some(3),
+            "§17.9 list counter restored"
+        );
+        assert!(
+            !state
+                .list_counters
+                .contains_key(&(model::NumId::new(99), 0)),
+            "a counter the speculative build *created* must not survive it"
+        );
+        assert_eq!(
+            state.outline,
+            OutlineCollector::Collecting(5),
+            "§17.3.1.19 node IDs must not be consumed speculatively"
+        );
+        assert_eq!(
+            state.page_config.content_width(),
+            before_width,
+            "the peek measures the *next* section's config; the current one \
+             must survive it"
+        );
+    }
+
+    /// Warn-once sets are deliberately **not** rolled back. The peek builds the
+    /// same content the real measurement will, so restoring them would report
+    /// the same unsupported feature twice — the exact duplication the
+    /// warn-once sets exist to prevent.
+    #[test]
+    fn speculatively_keeps_warn_once_state() {
+        let mut state = BuildState::default();
+        state.speculatively(|s| {
+            s.warned_row_cell_spacing = true;
+            s.warned_border_styles.insert(model::BorderStyle::Dotted);
+        });
+        assert!(
+            state.warned_row_cell_spacing,
+            "a warning already emitted must not be re-armed"
+        );
+        assert!(state
+            .warned_border_styles
+            .contains(&model::BorderStyle::Dotted));
+    }
+
+    /// The measured clearance is the whole point of the peek, so the value
+    /// crosses the rollback boundary.
+    #[test]
+    fn speculatively_returns_the_closure_value() {
+        let mut state = BuildState::default();
+        let measured = state.speculatively(|s| {
+            s.endnote_counter = 3;
+            Pt::new(61.0)
+        });
+        assert_eq!(measured, Pt::new(61.0));
+        assert_eq!(state.endnote_counter, 0, "and still rolls back");
+    }
+
     /// Section breaks inside header/footer content are structural, not laid out.
     #[test]
     fn header_section_breaks_produce_no_blocks() {
@@ -481,7 +565,97 @@ impl Default for OutlineCollector {
     }
 }
 
+/// Everything in [`BuildState`] that is a *position in the document* rather
+/// than a property of the render as a whole.
+///
+/// Captured by destructuring so the exhaustiveness is enforced by the compiler:
+/// a new `BuildState` field does not compile here until someone decides which
+/// of the two categories it belongs to.
+struct DocumentPosition {
+    page_config: crate::render::layout::page::PageConfig,
+    footnotes: crate::render::layout::fragment::FootnoteTracker,
+    endnote_counter: u32,
+    list_counters: HashMap<(model::NumId, u8), u32>,
+    outline: OutlineCollector,
+    field_ctx: crate::render::layout::fragment::FieldContext,
+    shape_default_text_color: Option<crate::render::resolve::color::RgbColor>,
+    shape_default_font_family: Option<String>,
+    shape_auto_fit: crate::render::layout::ShapeAutoFit,
+}
+
+impl DocumentPosition {
+    fn capture(state: &BuildState) -> Self {
+        let BuildState {
+            page_config,
+            footnotes,
+            endnote_counter,
+            list_counters,
+            outline,
+            field_ctx,
+            shape_default_text_color,
+            shape_default_font_family,
+            shape_auto_fit,
+            // Warn-once state is deliberately *not* position state — see
+            // `BuildState::speculatively` for why it is not rolled back.
+            warned_border_styles: _,
+            warned_row_cell_spacing: _,
+        } = state;
+        Self {
+            page_config: page_config.clone(),
+            footnotes: footnotes.clone(),
+            endnote_counter: *endnote_counter,
+            list_counters: list_counters.clone(),
+            outline: *outline,
+            field_ctx: *field_ctx,
+            shape_default_text_color: *shape_default_text_color,
+            shape_default_font_family: shape_default_font_family.clone(),
+            shape_auto_fit: *shape_auto_fit,
+        }
+    }
+
+    fn restore(self, state: &mut BuildState) {
+        state.page_config = self.page_config;
+        state.footnotes = self.footnotes;
+        state.endnote_counter = self.endnote_counter;
+        state.list_counters = self.list_counters;
+        state.outline = self.outline;
+        state.field_ctx = self.field_ctx;
+        state.shape_default_text_color = self.shape_default_text_color;
+        state.shape_default_font_family = self.shape_default_font_family;
+        state.shape_auto_fit = self.shape_auto_fit;
+    }
+}
+
 impl BuildState {
+    /// Run `f` against this state and roll back every document-order counter it
+    /// advanced, returning whatever `f` produced.
+    ///
+    /// §17.6.22: laying out a section needs to know the bounds of the page its
+    /// *last* page will share with a following `Continuous` section, which
+    /// means measuring that following section's header before reaching it.
+    /// Measuring builds the header's content, and
+    /// [`build_header_footer_content`] deliberately drains footnote references
+    /// (§17.11.12) and advances list counters (§17.9) — so an unguarded peek
+    /// renumbers the document in a way that depends on the renderer's
+    /// look-ahead rather than on the file.
+    ///
+    /// A scope rather than a `capture`/`restore` pair, so a caller cannot hold
+    /// a snapshot and forget to put it back: the only way to peek is to peek
+    /// speculatively.
+    ///
+    /// **Warn-once state is not rolled back.** `warned_border_styles` and
+    /// `warned_row_cell_spacing` record that a diagnostic has already been
+    /// emitted this render. The peek builds the same content the real
+    /// measurement will build moments later, so restoring them would report the
+    /// same unsupported feature twice — the exact duplication those sets exist
+    /// to prevent. They are render-scoped, not position-scoped.
+    pub fn speculatively<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = DocumentPosition::capture(self);
+        let result = f(self);
+        saved.restore(self);
+        result
+    }
+
     /// §17.3.1.19: reserve the next PDF structure node ID, or `None` when this
     /// build contributes nothing to the outline.
     pub fn next_outline_node_id(&mut self) -> Option<i32> {
