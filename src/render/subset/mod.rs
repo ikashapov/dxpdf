@@ -1,7 +1,7 @@
 //! Font subsetting — collect codepoint usage, subset typefaces, replace.
 //!
 //! The pass runs between layout and paint. Driven by the `subset-fonts` Cargo
-//! feature (default-on). See `docs/font-subsetting.md` for the full design.
+//! feature (default-on).
 //!
 //! Design invariants:
 //! - **Single source of truth** for typeface bytes ([`crate::render::fonts::FontRegistry`])

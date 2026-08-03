@@ -1010,7 +1010,8 @@ fn resolve_zone_anchor(
     }
 }
 
-/// Offset of the first [`DECIMAL_TAB_SEPARATOR`] in `zone`.
+/// Offset of the first `separator` in `zone` — the paragraph's decimal
+/// character, per §17.3.2.20 `w:lang`, not a constant.
 ///
 /// Falls back to [`ZoneAnchor::End`] when the zone contains none: Word
 /// right-aligns a separator-less decimal zone, which is what keeps a column of

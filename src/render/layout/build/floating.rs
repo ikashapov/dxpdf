@@ -926,9 +926,11 @@ fn resolve_anchor_y(
                 // on the vertical axis without saying which strips they are —
                 // Word mirrors *left/right* for two-sided documents, not
                 // top/bottom — so no reading is derivable from source alone.
-                // Treated as `margin`, the long-standing fallback; the open
-                // question is filed in open-work, "Blocked on a Word
-                // reference render" (item 24).
+                // Treated as `margin`, the long-standing fallback. Settling it
+                // needs a two-sided document with a float anchored
+                // inside/outside vertically, rendered by Word on both an odd
+                // and an even page; `FloatingImageX::PageParity` is already in
+                // place should the answer turn out to be "it mirrors".
                 AnchorRelativeFrom::InsideMargin | AnchorRelativeFrom::OutsideMargin => {
                     FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
                 }
@@ -1007,8 +1009,8 @@ fn resolve_anchor_y(
                 // document mirrors left and right, not top and bottom, so
                 // there is no reading of a vertical "inside" that source can
                 // derive. Aligned to the region's top, the long-standing
-                // fallback; the open question is filed in open-work item 24
-                // alongside vertical `insideMargin`.
+                // fallback. Open on the same Word reference render as vertical
+                // `insideMargin`/`outsideMargin` above.
                 AnchorAlignment::Inside | AnchorAlignment::Outside => area_top,
                 // §20.4.3.1 horizontal alignments on `wp:positionV` —
                 // malformed, the same way round as the horizontal axis.
@@ -1350,9 +1352,10 @@ pub(super) fn build_shape_text_commands(
 /// that survives into paint, and draw commands are flattened into one flat
 /// per-page list with no scoping — so it would mean a new `DrawCommand`
 /// wrapper variant and an arm in every consumer. Dropping is the safe
-/// direction (`clip`'s contract is that nothing paints outside the box) and no
-/// corpus document asks for `clip` at all; the residue is recorded in
-/// `plans/open-work.md`.
+/// direction (`clip`'s contract is that nothing paints outside the box), and
+/// no corpus document asks for `clip` at all — 4 explicit `overflow`, 10
+/// `bodyPr` with the attribute absent, zero `clip` or `ellipsis` — so this is
+/// worth revisiting only once a real document needs the sliver.
 fn overflow_keeps(
     overflow: crate::model::TextVertOverflow,
     cmd: &crate::render::layout::draw_command::DrawCommand,

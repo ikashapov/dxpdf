@@ -123,8 +123,8 @@ pub(super) fn resolve_paragraph_defaults(
 /// regional settings rather than from the document at all, which a converter
 /// cannot reproduce and should not want to: the same file would render
 /// differently on two machines. This reading is deterministic and keyed to the
-/// document, and is recorded in `docs/position-tabs.md` as the assumption it
-/// is — it has not been checked against a Word render.
+/// document instead — but it is an assumption, not a verified match, and has
+/// never been checked against a Word render.
 pub(super) fn paragraph_locale(
     para: &model::Paragraph,
     resolved: &ResolvedDocument,
