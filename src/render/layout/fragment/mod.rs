@@ -7,6 +7,7 @@ use crate::model::{PTabAlignment, PTabRelativeTo, RunProperties, TabLeader, Unde
 
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::{EmojiPresentation, EmojiStructure};
+use crate::render::fonts::Toggle;
 use crate::render::fonts::TypefaceEntry;
 use crate::render::geometry::{PtRect, PtSize};
 use crate::render::resolve::color::RgbColor;
@@ -52,8 +53,13 @@ pub(crate) const NOTE_REF_BASELINE_OFFSET_RATIO: f32 = 0.4;
 pub struct FontProps {
     pub family: Rc<str>,
     pub size: Pt,
-    pub bold: bool,
-    pub italic: bool,
+    /// §17.3.2.1 `w:b` as the §17.7.2 cascade left it — absent, explicitly off,
+    /// or on. Carried as a tri-state rather than a `bool` all the way to face
+    /// selection; see [`crate::render::fonts::request`] for why the difference
+    /// between "absent" and "off" is what lets a face name keep its own weight.
+    pub bold: Toggle,
+    /// §17.3.2.16 `w:i`, likewise.
+    pub italic: Toggle,
     pub underline: bool,
     pub char_spacing: Pt,
     /// §17.3.2.45: horizontal character scale as a multiplier (1.0 = normal,
@@ -338,8 +344,10 @@ pub fn font_props_from_run(
     FontProps {
         family: Rc::from(family),
         size,
-        bold: rp.bold.unwrap_or(false),
-        italic: rp.italic.unwrap_or(false),
+        // The model already carries all three §17.7.2 states; this used to be
+        // the single line that threw two of them away.
+        bold: Toggle::from_option(rp.bold),
+        italic: Toggle::from_option(rp.italic),
         // §17.3.2.40: an actual underline style sets the bool. The model's
         // tri-state — `None` (inherit), `Some(UnderlineStyle::None)`
         // (explicit "no underline" override), `Some(_actual_style_)` —
@@ -385,6 +393,7 @@ pub fn to_roman_lower(mut n: u32) -> String {
 mod tests {
     use super::*;
     use crate::model::UnderlineStyle;
+    use crate::render::fonts::Toggle;
 
     #[test]
     fn font_props_default_fallback() {
@@ -397,8 +406,51 @@ mod tests {
         );
         assert_eq!(&*fp.family, "Helvetica");
         assert_eq!(fp.size.raw(), 12.0);
-        assert!(!fp.bold);
-        assert!(!fp.italic);
+        assert_eq!(fp.bold, Toggle::Absent);
+        assert_eq!(fp.italic, Toggle::Absent);
+    }
+
+    // ── §17.3.2.1 / §17.3.2.16 bold and italic tri-state ───────────────────
+    //
+    // This is the seam issue #85 was about. `RunProperties::{bold, italic}`
+    // carry all three §17.7.2 states out of the cascade, and this function used
+    // to be the single line that threw two of them away with
+    // `.unwrap_or(false)` — after which resolution could not tell a document
+    // that wants Regular from one that said nothing at all.
+
+    #[test]
+    fn all_three_cascade_states_reach_font_props() {
+        let at = |bold: Option<bool>, italic: Option<bool>| {
+            font_props_from_run(
+                &RunProperties {
+                    bold,
+                    italic,
+                    ..RunProperties::default()
+                },
+                "Helvetica",
+                Pt::new(12.0),
+                crate::render::layout::ShapeAutoFit::NONE,
+            )
+        };
+
+        let absent = at(None, None);
+        assert_eq!(absent.bold, Toggle::Absent);
+        assert_eq!(absent.italic, Toggle::Absent);
+
+        // The state a `bool` could not express: the run explicitly declined the
+        // toggle, which is not the same as never having been asked.
+        let off = at(Some(false), Some(false));
+        assert_eq!(off.bold, Toggle::Off);
+        assert_eq!(off.italic, Toggle::Off);
+
+        let on = at(Some(true), Some(true));
+        assert_eq!(on.bold, Toggle::On);
+        assert_eq!(on.italic, Toggle::On);
+
+        // …and the two toggles are independent.
+        let mixed = at(Some(true), Some(false));
+        assert_eq!(mixed.bold, Toggle::On);
+        assert_eq!(mixed.italic, Toggle::Off);
     }
 
     // ── §17.3.2.40 underline tri-state ─────────────────────────────────────

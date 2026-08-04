@@ -2,10 +2,10 @@
 
 use super::super::draw_command::{LayoutedPage, ResolvedEffect, ResolvedFill, ResolvedStroke};
 use super::super::fragment::Fragment;
-use super::super::paragraph::ParagraphStyle;
+use super::super::paragraph::{ParagraphBorderStyle, ParagraphStyle};
 use super::super::table::TableRowInput;
 use crate::model::dimension::{Dimension, SixtieThousandthDeg};
-use crate::model::WrapText;
+use crate::model::{StyleId, WrapText};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
 use crate::render::resolve::images::MediaEntry;
@@ -294,9 +294,45 @@ pub enum LayoutBlock {
 
 /// §17.6.22: continuation state for `Continuous` section breaks.
 /// Allows a new section to continue on the current page.
+///
+/// Everything the succeeding section needs in order to behave as though the
+/// break were not there. A page plus a cursor is not enough: the break is not a
+/// page boundary, so the per-page state that survives *within* a page has to
+/// survive across it too. Each field below fixes a defect that a thinner
+/// version had.
+///
+/// `Clone` because fitting a shared page may lay its section out more than
+/// once (`fit_shared_page`), and each pass consumes the state it starts from.
+#[derive(Clone)]
 pub struct ContinuationState {
     pub page: LayoutedPage,
+    /// Flow position, not the extent of the last drawn command.
     pub cursor_y: Pt,
+    /// §17.11.23: the page bottom **already reduced** by footnotes reserved
+    /// before the break. Taking the page's unreduced bottom lets the succeeding
+    /// section lay text over the note block.
+    pub bottom: Pt,
+    /// §17.11.23: notes referenced before the break, deliberately **not yet
+    /// flushed**. A page carries one separator above all its notes, so they are
+    /// rendered together with whatever the succeeding section adds. Owned
+    /// rather than borrowed because the blocks they came from belong to a
+    /// section that is already finished.
+    pub page_footnotes: Vec<(Vec<Fragment>, ParagraphStyle)>,
+    /// §20.4.2: floats registered on this page. Text after the break wraps
+    /// around them like any other text on the page.
+    pub page_floats: Vec<super::super::float::ActiveFloat>,
+    /// §17.3.1.9: what the last paragraph before the break left behind, so
+    /// spacing collapses across it.
+    pub prev_space_after: Pt,
+    pub prev_style_id: Option<StyleId>,
+    pub prev_borders: Option<ParagraphBorderStyle>,
+    /// §17.4.38: for adjacent-table border collapse across the break.
+    pub prev_table_style_id: Option<StyleId>,
+    /// §17.4.58: anchor for a floating table in the succeeding section.
+    pub last_para_start_y: Pt,
+    /// §17.3.3.1: an inline page break at the end of the preceding section is
+    /// deferred to the next block — which is in the succeeding section.
+    pub pending_page_break: bool,
 }
 
 #[cfg(test)]

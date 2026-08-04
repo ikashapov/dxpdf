@@ -438,6 +438,7 @@ fn emit_border_rect(
 #[cfg(test)]
 mod tests {
     use crate::render::dimension::Pt;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::PtEdgeInsets;
     use crate::render::layout::draw_command::DrawCommand;
     use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
@@ -456,8 +457,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,

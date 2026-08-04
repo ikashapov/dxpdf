@@ -13,6 +13,7 @@ use crate::render::fonts::{self, FontRegistry, TypefaceEntry, TypefaceId};
 use crate::render::spacing;
 
 use super::fragment::{FontProps, TextMetrics};
+use crate::render::fonts::Toggle;
 
 /// Per-font measurement memo: the font's metrics (constant for the font) plus
 /// the raw Skia `measure_str` advance for each distinct word seen. Keyed inside
@@ -176,7 +177,7 @@ impl<'r> TextMeasurer<'r> {
     /// font-recommended height.
     pub fn default_line_height(&self, family: &str, size: Pt) -> Pt {
         let mut cache = self.font_cache.borrow_mut();
-        let font = cache.get(self.registry, family, size, false, false);
+        let font = cache.get(self.registry, family, size, Toggle::Absent, Toggle::Absent);
         let (_, metrics) = font.metrics();
         Pt::new(-metrics.ascent + metrics.descent + metrics.leading.max(0.0))
     }
@@ -264,14 +265,15 @@ impl<'r> TextMeasurer<'r> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
     use std::rc::Rc;
 
     fn fp_at_scale(scale: f32) -> FontProps {
         FontProps {
             family: Rc::from("Helvetica"),
             size: Pt::new(12.0),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             underline: false,
             char_spacing: Pt::ZERO,
             text_scale: scale,

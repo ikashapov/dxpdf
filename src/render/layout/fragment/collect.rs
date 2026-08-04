@@ -18,6 +18,7 @@ use super::{
     TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
     SUPERSCRIPT_FONT_SIZE_RATIO,
 };
+use crate::render::fonts::Toggle;
 
 /// §17.11.12: a footnote reference recorded while walking a paragraph's inlines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +42,12 @@ pub struct RecordedFootnote {
 /// from a **flat** scan of the paragraph's top-level inlines. The two walkers
 /// disagreed for any nested reference: its body was never emitted, and when it
 /// preceded a top-level reference the body's number no longer matched the mark.
-#[derive(Default, Debug)]
+/// `Clone` exists for §17.6.22 speculative builds: measuring a *following*
+/// section's header to learn its clearance walks that header's content, and
+/// that walk records footnote references like any other. The peek snapshots
+/// this tracker and restores it, so those references never reach the document.
+/// See `BuildState::speculatively`.
+#[derive(Clone, Default, Debug)]
 pub struct FootnoteTracker {
     /// Display number of the most recently emitted reference.
     last_display: u32,
@@ -329,8 +335,8 @@ fn emit_field_substitution<F>(
             FontProps {
                 family: Rc::from(default_family),
                 size: auto_fit.scale_font(default_size),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,
@@ -371,8 +377,8 @@ where
     let font = FontProps {
         family: Rc::from(default_family),
         size: default_size,
-        bold: false,
-        italic: false,
+        bold: Toggle::Absent,
+        italic: Toggle::Absent,
         underline: false,
         char_spacing: Pt::ZERO,
         text_scale: 1.0,
@@ -841,8 +847,8 @@ where
                     let font = FontProps {
                         family: Rc::from(sym.font.as_str()),
                         size: default_size,
-                        bold: false,
-                        italic: false,
+                        bold: Toggle::Absent,
+                        italic: Toggle::Absent,
                         underline: false,
                         char_spacing: Pt::ZERO,
                         text_scale: 1.0,
@@ -885,8 +891,8 @@ where
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
-                        bold: false,
-                        italic: false,
+                        bold: Toggle::Absent,
+                        italic: Toggle::Absent,
                         underline: false,
                         char_spacing: Pt::ZERO,
                         text_scale: 1.0,
@@ -921,8 +927,8 @@ where
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
-                        bold: false,
-                        italic: false,
+                        bold: Toggle::Absent,
+                        italic: Toggle::Absent,
                         underline: false,
                         char_spacing: Pt::ZERO,
                         text_scale: 1.0,
@@ -1001,6 +1007,7 @@ mod tests {
     use super::*;
     use crate::model::dimension::{Dimension, HalfPoints};
     use crate::model::*;
+    use crate::render::fonts::Toggle;
 
     /// Dummy measurer: width = text.len() * 6.0, ascent = 10.0, descent = 2.0
     fn dummy_measure(text: &str, _font: &FontProps) -> (Pt, TextMetrics) {
@@ -1670,7 +1677,7 @@ mod tests {
             },
         );
         // Two visible text fragments: "Seite " and the substituted "7".
-        let texts: Vec<(&str, bool)> = frags
+        let texts: Vec<(&str, Toggle)> = frags
             .iter()
             .filter_map(|f| match f {
                 Fragment::Text { text, font, .. } => Some((text.as_ref(), font.bold)),
@@ -1679,8 +1686,40 @@ mod tests {
             .collect();
         assert_eq!(
             texts,
-            vec![("Seite ", true), ("7", true)],
+            vec![("Seite ", Toggle::On), ("7", Toggle::On)],
             "PAGE substitution must inherit bold from empty placeholder run"
+        );
+    }
+
+    // ── §17.6.22 speculative build support (plan §1) ─────────────────────────
+
+    /// A speculative build (peeking at the next section's header to learn its
+    /// clearance) snapshots the tracker and restores it afterwards, so the
+    /// clone must be fully independent: both the display counter *and* the
+    /// pending list. Sharing either would let a peeked reference surface as a
+    /// real one, rendering a footnote body against the wrong host paragraph.
+    #[test]
+    fn clone_is_independent_in_counter_and_pending_list() {
+        let mut original = FootnoteTracker::default();
+        assert_eq!(original.record(NoteId::new(1)), 1);
+
+        let snapshot = original.clone();
+
+        assert_eq!(original.record(NoteId::new(2)), 2, "original advances");
+        assert_eq!(original.record(NoteId::new(3)), 3);
+
+        // The snapshot saw exactly one reference and still numbers from there.
+        let mut restored = snapshot;
+        assert_eq!(
+            restored.take_pending().len(),
+            1,
+            "the clone keeps only the references recorded before it was taken"
+        );
+        assert_eq!(
+            restored.record(NoteId::new(4)),
+            2,
+            "and resumes numbering where the snapshot was taken, not where the \
+             speculative walk left off"
         );
     }
 }

@@ -322,6 +322,7 @@ fn measure_range(fragments: &[Fragment], start: usize, end: usize) -> RangeMeasu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
     use crate::render::layout::fragment::{FontProps, TextMetrics};
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
@@ -332,8 +333,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,
@@ -461,8 +462,8 @@ mod tests {
                 font: Rc::new(FontProps {
                     family: Rc::from("Test"),
                     size: Pt::new(12.0),
-                    bold: false,
-                    italic: false,
+                    bold: Toggle::Absent,
+                    italic: Toggle::Absent,
                     underline: false,
                     char_spacing: Pt::ZERO,
                     text_scale: 1.0,
@@ -489,8 +490,8 @@ mod tests {
                 font: Rc::new(FontProps {
                     family: Rc::from("Test"),
                     size: Pt::new(10.0),
-                    bold: false,
-                    italic: false,
+                    bold: Toggle::Absent,
+                    italic: Toggle::Absent,
                     underline: false,
                     char_spacing: Pt::ZERO,
                     text_scale: 1.0,
@@ -517,8 +518,8 @@ mod tests {
                 font: Rc::new(FontProps {
                     family: Rc::from("Test"),
                     size: Pt::new(24.0),
-                    bold: false,
-                    italic: false,
+                    bold: Toggle::Absent,
+                    italic: Toggle::Absent,
                     underline: false,
                     char_spacing: Pt::ZERO,
                     text_scale: 1.0,

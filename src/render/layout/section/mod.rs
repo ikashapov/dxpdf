@@ -2,6 +2,53 @@
 //!
 //! Takes measured blocks (paragraphs with fragments, tables with cells),
 //! fits them into pages respecting page size and margins, handles page breaks.
+//!
+//! # §17.6.22 continuous breaks — one page, two sections
+//!
+//! Every other kind of section start is also a page start, so "section" and
+//! "page" coincide and the two words can be used interchangeably. A
+//! `Continuous` break is the case where they come apart: the succeeding section
+//! begins partway down a page the preceding one is still filling. Most of the
+//! machinery below exists for that one case, and this is the map into it.
+//!
+//! **Who owns the shared page.** Only one header and footer can be drawn on it,
+//! and the *last* section on the page wins — so the page is committed by the
+//! succeeding section and falls inside its page range. ECMA-376 §17.6 does not
+//! settle this; the rule, and what evidence would revisit it, is stated where it
+//! is decided, in `render::render_to_pages`. The consequence to hold onto is
+//! that the shared page is the succeeding section's *page 0*, which is why
+//! `HeaderFooterClearance::for_page(0)` selects the right `first` / `even` /
+//! `default` slot there without a special case.
+//!
+//! **How it is handed over.** `SectionLayout` separates the pages a section
+//! commits from what became of its last one (`SectionTail`). A shared page is
+//! deliberately **not** in `pages`: it travels inside
+//! `SectionTail::SharedWithNext` as a [`ContinuationState`], so "committed by
+//! both sections" and "committed by neither" are states a caller cannot
+//! construct rather than mistakes it must remember not to make.
+//!
+//! **What crosses the break.** A page plus a cursor is not enough. The break is
+//! not a page boundary, so the per-page state that survives *within* a page has
+//! to survive across it too — footnotes reserved before the break and the bottom
+//! they already reduced, registered floats, the §17.3.1.9 spacing-collapse
+//! trail, a deferred page break. Each field of [`ContinuationState`] records the
+//! defect a thinner version of it had.
+//!
+//! **What deliberately does not.** Columns reset to 0. A continuous break is the
+//! usual way to *change* the column count, so an inherited index may not exist
+//! in the succeeding section at all; Word additionally balances the preceding
+//! columns at such a break, which is not implemented. Both are argued at the
+//! reset site in `PageLayoutState::new`.
+//!
+//! **Why the page may be laid out twice.** The preceding section's content on
+//! the shared page was placed against the preceding section's bounds, but the
+//! page is drawn with the succeeding section's header and footer — a taller one
+//! overlaps that content, a shorter one leaves the band it reserved blank. A
+//! cursor adjustment cannot repair content already placed, so
+//! `render::fit_shared_page` re-runs the section with the succeeding bounds
+//! pinned to that page's index (`FinalPageBounds`). Pinning by index is the
+//! point: content that spills off the shared page must not drag the override
+//! onto a page that nothing shares.
 
 mod floating_table;
 mod helpers;
@@ -12,6 +59,7 @@ mod types;
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
 pub(crate) use layout::SectionStart;
+pub(crate) use layout::{FinalPageBounds, LastPageOwner, SectionLayout, SectionTail};
 pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
 
@@ -39,6 +87,7 @@ const FLOAT_DEDUP_EPSILON_PT: f32 = 0.1;
 mod tests {
     use super::*;
     use crate::render::dimension::Pt;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::{PtEdgeInsets, PtSize};
     use crate::render::layout::draw_command::DrawCommand;
     use crate::render::layout::fragment::Fragment;
@@ -105,8 +154,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,
@@ -311,10 +360,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 2,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(
             image_xs(&pages[0]),
@@ -860,10 +911,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2, "page 2 must use the shorter default slots");
         let page_texts = pages
@@ -934,10 +987,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2);
         let moved_last_y = pages[1]
@@ -1009,10 +1064,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2);
         let first_moved_x = pages[1]
@@ -1737,10 +1794,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
 
         assert_eq!(pages.len(), 2);
         assert!(
@@ -1809,10 +1868,12 @@ mod tests {
             Pt::new(14.0),
             super::layout::SectionStart {
                 continuation: None,
+                last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
             },
-        );
+        )
+        .pages;
         let separator_y = pages[0]
             .commands
             .iter()

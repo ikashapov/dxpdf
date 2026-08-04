@@ -291,6 +291,7 @@ pub(super) fn emit_emoji_or_fallback<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
 
     // ── split_into_words ─────────────────────────────────────────────────
 
@@ -326,8 +327,8 @@ mod tests {
         FontProps {
             family: Rc::from(family),
             size: Pt::new(size),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             underline: false,
             char_spacing: Pt::ZERO,
             text_scale: 1.0,

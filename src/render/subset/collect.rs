@@ -17,9 +17,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustc_hash::FxHashMap;
-use skia_safe::FontStyle;
 
-use crate::render::fonts::{FontRegistry, TypefaceId};
+use crate::render::fonts::{FaceRequest, FontRegistry, Toggle, TypefaceId};
 use crate::render::layout::draw_command::{DrawCommand, LayoutedPage};
 
 /// Newtype around a Unicode scalar value (`char`'s underlying `u32`).
@@ -64,30 +63,19 @@ impl CodepointUsage {
     }
 }
 
-fn font_style(bold: bool, italic: bool) -> FontStyle {
-    match (bold, italic) {
-        (true, true) => FontStyle::bold_italic(),
-        (true, false) => FontStyle::bold(),
-        (false, true) => FontStyle::italic(),
-        (false, false) => FontStyle::normal(),
-    }
-}
-
 /// Walk every `DrawCommand::Text` in `pages` and accumulate codepoint usage
 /// per resolved typeface. The resulting [`CodepointUsage`] is the input to
 /// the subsetting pass.
 pub fn collect(pages: &[LayoutedPage], registry: &FontRegistry) -> CodepointUsage {
     let mut usage = CodepointUsage::new();
 
-    // Memoize font resolution: `registry.resolve` lowercases the family, hashes,
-    // and clones a `TypefaceEntry` on every call, but the same (family, weight,
-    // slant) recurs across most of a document's 100k+ text commands. Cache the
-    // resolved `TypefaceId` per style combo — indexed `bold | italic<<1` — with
-    // the inner map probed by `&str` (`Box<str>: Borrow<str>`), so a hit
-    // allocates nothing. `resolve` is deterministic in (family, style), so this
-    // is exact.
-    let mut resolved: [FxHashMap<Box<str>, TypefaceId>; 4] =
-        std::array::from_fn(|_| FxHashMap::default());
+    // Memoize font resolution: `registry.resolve` folds the name, hashes, and
+    // clones a `TypefaceEntry` on every call, but the same request recurs across
+    // most of a document's 100k+ text commands. Keyed on the request's three
+    // components — the toggles are `Copy` and the family is boxed once — so a
+    // hit costs one hash and no allocation. `resolve` is a deterministic
+    // function of the request, so the memo is exact.
+    let mut resolved: FxHashMap<(Box<str>, Toggle, Toggle), TypefaceId> = FxHashMap::default();
 
     for page in pages {
         for cmd in &page.commands {
@@ -102,13 +90,14 @@ pub fn collect(pages: &[LayoutedPage], registry: &FontRegistry) -> CodepointUsag
                 if text.is_empty() {
                     continue;
                 }
-                let slot = usize::from(*bold) | (usize::from(*italic) << 1);
-                let typeface_id = match resolved[slot].get(&**font_family) {
+                let key = (Box::from(&**font_family), *bold, *italic);
+                let typeface_id = match resolved.get(&key) {
                     Some(&id) => id,
                     None => {
-                        let entry = registry.resolve(font_family, font_style(*bold, *italic));
+                        let entry =
+                            registry.resolve(&FaceRequest::new(font_family, *bold, *italic));
                         let id = TypefaceId::from(&entry.typeface);
-                        resolved[slot].insert(Box::from(&**font_family), id);
+                        resolved.insert(key, id);
                         id
                     }
                 };
@@ -124,12 +113,13 @@ pub fn collect(pages: &[LayoutedPage], registry: &FontRegistry) -> CodepointUsag
 mod tests {
     use super::*;
     use crate::render::dimension::Pt;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::{PtOffset, PtSize};
     use crate::render::resolve::color::RgbColor;
     use skia_safe::FontMgr;
     use std::rc::Rc;
 
-    fn page_with_text(text: &str, family: &str, font_size: Pt, bold: bool) -> LayoutedPage {
+    fn page_with_text(text: &str, family: &str, font_size: Pt, bold: Toggle) -> LayoutedPage {
         LayoutedPage {
             commands: vec![DrawCommand::Text {
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
@@ -138,7 +128,7 @@ mod tests {
                 char_spacing: Pt::ZERO,
                 font_size,
                 bold,
-                italic: false,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],
@@ -161,7 +151,12 @@ mod tests {
     #[test]
     fn collect_skips_empty_text_commands() {
         let r = registry();
-        let pages = vec![page_with_text("", "AnyFamily", Pt::new(12.0), false)];
+        let pages = vec![page_with_text(
+            "",
+            "AnyFamily",
+            Pt::new(12.0),
+            Toggle::Absent,
+        )];
         let usage = collect(&pages, &r);
         assert!(usage.is_empty());
     }
@@ -170,8 +165,8 @@ mod tests {
     fn collect_aggregates_same_typeface_across_sizes() {
         let r = registry();
         let pages = vec![
-            page_with_text("hello", "AggregateProbe", Pt::new(10.0), false),
-            page_with_text("world", "AggregateProbe", Pt::new(12.0), false),
+            page_with_text("hello", "AggregateProbe", Pt::new(10.0), Toggle::Absent),
+            page_with_text("world", "AggregateProbe", Pt::new(12.0), Toggle::Absent),
         ];
         let usage = collect(&pages, &r);
         assert_eq!(
@@ -191,8 +186,8 @@ mod tests {
         // default — same Skia typeface, same TypefaceId, one usage entry.
         let r = registry();
         let pages = vec![
-            page_with_text("alpha", "FallbackFamilyA", Pt::new(12.0), false),
-            page_with_text("beta", "FallbackFamilyB", Pt::new(12.0), false),
+            page_with_text("alpha", "FallbackFamilyA", Pt::new(12.0), Toggle::Absent),
+            page_with_text("beta", "FallbackFamilyB", Pt::new(12.0), Toggle::Absent),
         ];
         let usage = collect(&pages, &r);
         assert_eq!(
@@ -206,8 +201,8 @@ mod tests {
     fn collect_separates_bold_and_regular() {
         let r = registry();
         let pages = vec![
-            page_with_text("regular", "WeightProbe", Pt::new(12.0), false),
-            page_with_text("bold", "WeightProbe", Pt::new(12.0), true),
+            page_with_text("regular", "WeightProbe", Pt::new(12.0), Toggle::Absent),
+            page_with_text("bold", "WeightProbe", Pt::new(12.0), Toggle::On),
         ];
         let usage = collect(&pages, &r);
         assert_eq!(
@@ -220,7 +215,12 @@ mod tests {
     #[test]
     fn collect_records_codepoints_for_simple_text() {
         let r = registry();
-        let pages = vec![page_with_text("abc", "CpProbe", Pt::new(12.0), false)];
+        let pages = vec![page_with_text(
+            "abc",
+            "CpProbe",
+            Pt::new(12.0),
+            Toggle::Absent,
+        )];
         let usage = collect(&pages, &r);
         let cps = usage.per_typeface.values().next().unwrap();
         let expected: BTreeSet<Codepoint> =
@@ -237,7 +237,7 @@ mod tests {
             "日本語🎉",
             "UnicodeProbe",
             Pt::new(12.0),
-            false,
+            Toggle::Absent,
         )];
         let usage = collect(&pages, &r);
         let cps = usage.per_typeface.values().next().unwrap();
@@ -251,8 +251,8 @@ mod tests {
     fn collect_dedups_repeated_chars() {
         let r = registry();
         let pages = vec![
-            page_with_text("aaaaaaaa", "DedupProbe", Pt::new(12.0), false),
-            page_with_text("aaaa", "DedupProbe", Pt::new(14.0), false),
+            page_with_text("aaaaaaaa", "DedupProbe", Pt::new(12.0), Toggle::Absent),
+            page_with_text("aaaa", "DedupProbe", Pt::new(14.0), Toggle::Absent),
         ];
         let usage = collect(&pages, &r);
         let cps = usage.per_typeface.values().next().unwrap();

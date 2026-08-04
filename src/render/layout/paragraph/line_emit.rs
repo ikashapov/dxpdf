@@ -1234,6 +1234,7 @@ mod tests {
     };
     use crate::model;
     use crate::render::dimension::Pt;
+    use crate::render::fonts::Toggle;
     use crate::render::layout::paragraph::TabStopDef;
 
     // ── find_next_tab_stop ────────────────────────────────────────────────────
@@ -1302,8 +1303,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,

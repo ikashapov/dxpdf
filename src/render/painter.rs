@@ -284,7 +284,7 @@ fn render_page(
                         (base_font, Some(slot))
                     };
                 log::trace!(
-                    "[paint] '{}' → font='{}' size={:.1}pt bold={} italic={} scale={:.2}",
+                    "[paint] '{}' → font='{}' size={:.1}pt bold={:?} italic={:?} scale={:.2}",
                     &text[..text.len().min(30)],
                     font.typeface().family_name(),
                     font_size.raw(),
@@ -961,6 +961,7 @@ fn resolve_src_padding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::{PtOffset, PtSize};
     use crate::render::resolve::color::RgbColor;
     use skia_safe::FontMgr;
@@ -986,8 +987,8 @@ mod tests {
                 font_family: Rc::from("Helvetica"),
                 char_spacing: Pt::ZERO,
                 font_size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],
@@ -1010,8 +1011,8 @@ mod tests {
                 font_family: Rc::from("Helvetica"),
                 char_spacing: Pt::new(2.0),
                 font_size: Pt::new(14.0),
-                bold: true,
-                italic: false,
+                bold: Toggle::On,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],
@@ -1038,8 +1039,8 @@ mod tests {
                 font_family: Rc::from("Helvetica"),
                 char_spacing: Pt::new(3.0),
                 font_size: Pt::new(14.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],
@@ -1062,7 +1063,13 @@ mod tests {
     fn multi_scalar_cluster_falls_out_of_the_batched_width_path() {
         let registry = test_registry();
         let mut cache = fonts::FontCache::new();
-        let (_, font) = cache.get_indexed(&registry, "Helvetica", Pt::new(14.0), false, false);
+        let (_, font) = cache.get_indexed(
+            &registry,
+            "Helvetica",
+            Pt::new(14.0),
+            Toggle::Absent,
+            Toggle::Absent,
+        );
 
         let accented = "e\u{301}";
         let glyphs = font.text_to_glyphs_vec(accented);
@@ -1100,8 +1107,8 @@ mod tests {
                 font_family: Rc::from("Helvetica"),
                 char_spacing: Pt::ZERO,
                 font_size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],
@@ -1223,8 +1230,8 @@ mod tests {
                 font_family: Rc::from("Helvetica"),
                 char_spacing: Pt::ZERO,
                 font_size: Pt::new(11.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],

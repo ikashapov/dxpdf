@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::model::dimension::{Dimension, SixtieThousandthDeg};
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::{EmojiPresentation, EmojiStructure};
+use crate::render::fonts::Toggle;
 use crate::render::fonts::TypefaceEntry;
 use crate::render::geometry::{PtLineSegment, PtOffset, PtRect, PtSize};
 use crate::render::resolve::color::RgbColor;
@@ -62,8 +63,12 @@ pub enum DrawCommand {
         font_family: Rc<str>,
         char_spacing: Pt,
         font_size: Pt,
-        bold: bool,
-        italic: bool,
+        /// §17.3.2.1 / §17.3.2.16 as the cascade left them. Kept tri-state so
+        /// paint resolves the *same* face layout measured against — the two ask
+        /// the registry independently, and a `bool` cannot express a request
+        /// that named no weight at all.
+        bold: Toggle,
+        italic: Toggle,
         color: RgbColor,
         /// §17.3.2.45: horizontal scale factor (1.0 = normal, 0.8 = 80%,
         /// 1.5 = 150%). Painter applies via `Font::set_scale_x`.
@@ -315,10 +320,8 @@ impl DrawCommand {
     ///
     /// **Text is approximate.** A `Text` command carries a baseline and a font
     /// size, not the ascent/descent it was measured with, so the band is taken
-    /// as `baseline ± font_size`. That is the same approximation
-    /// `render::estimate_cursor_y` already makes for the descender, kept
-    /// deliberately identical so the two cannot disagree about where a line
-    /// ends. It is generous on both sides, which is the safe direction for the
+    /// as `baseline ± font_size`. It is generous on both sides, which is the
+    /// safe direction for the
     /// one caller that exists (`vertOverflow="clip"`): a line is dropped when
     /// it *might* paint outside its box rather than when it certainly does.
     pub fn vertical_span(&self) -> Option<(Pt, Pt)> {
@@ -376,6 +379,7 @@ impl LayoutedPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
 
     #[test]
     fn shift_y_moves_text() {
@@ -385,8 +389,8 @@ mod tests {
             font_family: Rc::from("Arial"),
             char_spacing: Pt::ZERO,
             font_size: Pt::new(12.0),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             color: RgbColor::BLACK,
             text_scale: 1.0,
         };
@@ -527,8 +531,8 @@ mod tests {
                     font_family: Rc::from("Arial"),
                     char_spacing: Pt::ZERO,
                     font_size: Pt::new(12.0),
-                    bold: false,
-                    italic: false,
+                    bold: Toggle::Absent,
+                    italic: Toggle::Absent,
                     color: RgbColor::BLACK,
                     text_scale: 1.0,
                 },
@@ -654,8 +658,8 @@ mod tests {
             font_family: Rc::from("Arial"),
             char_spacing: Pt::ZERO,
             font_size: Pt::new(12.0),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             color: RgbColor::BLACK,
             text_scale: 1.0,
         };

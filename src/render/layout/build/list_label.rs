@@ -474,6 +474,7 @@ mod tests {
     use super::*;
     use crate::model::dimension::{Dimension, HalfPoints, Twips};
     use crate::model::{FontSet, FontSlot, RunProperties, TextScale, UnderlineStyle};
+    use crate::render::fonts::Toggle;
 
     // ── §17.9.22 label emission ──────────────────────────────────────────
     //
@@ -1151,8 +1152,8 @@ mod tests {
             Pt::new(10.0),
             crate::render::layout::ShapeAutoFit::NONE,
         );
-        assert!(font.bold);
-        assert!(font.italic);
+        assert_eq!(font.bold, Toggle::On);
+        assert_eq!(font.italic, Toggle::On);
         assert_eq!(font.size.raw(), 12.0);
         assert_eq!(&*font.family, "Verdana");
     }

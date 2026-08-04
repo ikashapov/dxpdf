@@ -232,6 +232,7 @@ mod tests {
             .expect("system has no default typeface — cannot run test");
         let id = TypefaceId::from(&tf);
         TypefaceEntry {
+            instance: None,
             typeface: tf,
             origin: TypefaceOrigin::System { typeface_id: id },
         }
