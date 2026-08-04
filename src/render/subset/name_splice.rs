@@ -10,6 +10,11 @@
 //! The `name` table is independent of the glyph order — it stores font
 //! metadata, not per-glyph data — so substituting it cannot affect text
 //! shaping or rendering.
+//!
+//! The SFNT assembler this needs — table directory, §5.2 ordering, per-table
+//! checksums and `head.checksumAdjustment` — is also what carving one face out
+//! of a TrueType Collection needs, so `rebuild_sfnt` is shared with the
+//! `extract` module rather than written twice.
 
 const HEAD_TAG: &[u8; 4] = b"head";
 const NAME_TAG: &[u8; 4] = b"name";
@@ -100,7 +105,10 @@ fn replace_table(sfnt: &[u8], tag: &[u8; 4], new_data: &[u8]) -> Result<Vec<u8>,
 /// ascending-tag order OpenType §5.2 requires of the table directory — the sort
 /// used to sit in `replace_table`, which left this function silently producing
 /// an invalid directory for any other caller.
-fn rebuild_sfnt(version: &[u8], mut tables: Vec<([u8; 4], Vec<u8>)>) -> Result<Vec<u8>, String> {
+pub(super) fn rebuild_sfnt(
+    version: &[u8],
+    mut tables: Vec<([u8; 4], Vec<u8>)>,
+) -> Result<Vec<u8>, String> {
     // Both bounds below used to be handled inline and neither worked. An empty
     // set took an `if n == 0` branch that set `entry_selector = 0` and then
     // underflowed on `range_shift = 0*16 - 16`; a large set overflowed

@@ -531,6 +531,7 @@ pub fn layout_paragraph(
 mod tests {
     use super::*;
     use crate::model::{Alignment, PTabAlignment, PTabRelativeTo};
+    use crate::render::fonts::Toggle;
     use crate::render::layout::fragment::{FontProps, LinkTarget, TextMetrics};
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
@@ -541,8 +542,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,
@@ -2311,8 +2312,8 @@ mod tests {
         Rc::new(FontProps {
             family: Rc::from(family),
             size: Pt::new(size),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             underline: false,
             char_spacing: Pt::ZERO,
             text_scale: 1.0,

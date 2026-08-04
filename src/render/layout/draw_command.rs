@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::model::dimension::{Dimension, SixtieThousandthDeg};
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::{EmojiPresentation, EmojiStructure};
+use crate::render::fonts::Toggle;
 use crate::render::fonts::TypefaceEntry;
 use crate::render::geometry::{PtLineSegment, PtOffset, PtRect, PtSize};
 use crate::render::resolve::color::RgbColor;
@@ -62,8 +63,12 @@ pub enum DrawCommand {
         font_family: Rc<str>,
         char_spacing: Pt,
         font_size: Pt,
-        bold: bool,
-        italic: bool,
+        /// §17.3.2.1 / §17.3.2.16 as the cascade left them. Kept tri-state so
+        /// paint resolves the *same* face layout measured against — the two ask
+        /// the registry independently, and a `bool` cannot express a request
+        /// that named no weight at all.
+        bold: Toggle,
+        italic: Toggle,
         color: RgbColor,
         /// §17.3.2.45: horizontal scale factor (1.0 = normal, 0.8 = 80%,
         /// 1.5 = 150%). Painter applies via `Font::set_scale_x`.
@@ -374,6 +379,7 @@ impl LayoutedPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
 
     #[test]
     fn shift_y_moves_text() {
@@ -383,8 +389,8 @@ mod tests {
             font_family: Rc::from("Arial"),
             char_spacing: Pt::ZERO,
             font_size: Pt::new(12.0),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             color: RgbColor::BLACK,
             text_scale: 1.0,
         };
@@ -525,8 +531,8 @@ mod tests {
                     font_family: Rc::from("Arial"),
                     char_spacing: Pt::ZERO,
                     font_size: Pt::new(12.0),
-                    bold: false,
-                    italic: false,
+                    bold: Toggle::Absent,
+                    italic: Toggle::Absent,
                     color: RgbColor::BLACK,
                     text_scale: 1.0,
                 },
@@ -652,8 +658,8 @@ mod tests {
             font_family: Rc::from("Arial"),
             char_spacing: Pt::ZERO,
             font_size: Pt::new(12.0),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             color: RgbColor::BLACK,
             text_scale: 1.0,
         };

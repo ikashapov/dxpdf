@@ -112,6 +112,7 @@ pub fn split_oversized_fragments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
     use crate::render::resolve::color::RgbColor;
 
     fn text_frag(text: &str, width: f32) -> Fragment {
@@ -120,8 +121,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,

@@ -17,6 +17,7 @@ use super::convert::{
 use super::floating::{extract_floating_images, AnchorFrame};
 use super::table::build_table;
 use super::{BuildContext, BuildState};
+use crate::render::fonts::Toggle;
 
 /// Recursively process a single model block into a layout block.
 ///
@@ -317,8 +318,8 @@ fn build_note_blocks(
                 let font = frags[0].font_props().cloned().unwrap_or_else(|| FontProps {
                     family: std::rc::Rc::from(super::SPEC_FALLBACK_FONT),
                     size: super::SPEC_DEFAULT_FONT_SIZE,
-                    bold: false,
-                    italic: false,
+                    bold: Toggle::Absent,
+                    italic: Toggle::Absent,
                     underline: false,
                     char_spacing: Pt::ZERO,
                     text_scale: 1.0,

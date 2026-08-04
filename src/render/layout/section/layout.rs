@@ -2419,6 +2419,7 @@ mod keep_next_chain_tests {
 #[cfg(test)]
 mod paragraph_breakable_tests {
     use super::*;
+    use crate::render::fonts::Toggle;
     use crate::render::layout::paragraph::ParagraphStyle;
 
     fn footnote() -> (Vec<Fragment>, ParagraphStyle) {
@@ -2484,8 +2485,8 @@ mod paragraph_breakable_tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,

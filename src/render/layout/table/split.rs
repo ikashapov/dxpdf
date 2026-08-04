@@ -408,6 +408,7 @@ fn command_primary_y(cmd: &DrawCommand) -> Pt {
 mod tests {
     use super::super::borders::CellEdge;
     use super::*;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::PtEdgeInsets;
     use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
     use crate::render::layout::paragraph::ParagraphStyle;
@@ -422,8 +423,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,

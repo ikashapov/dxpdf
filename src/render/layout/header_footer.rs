@@ -499,6 +499,7 @@ fn emit_page_anchored_shapes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::{PtEdgeInsets, PtOffset, PtSize};
     use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
     use crate::render::layout::paragraph::ParagraphStyle;
@@ -526,8 +527,8 @@ mod tests {
         let font = FontProps {
             family: Rc::from("Test"),
             size: Pt::new(12.0),
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             underline: false,
             char_spacing: Pt::ZERO,
             text_scale: 1.0,
@@ -580,8 +581,8 @@ mod tests {
             font_family: Rc::from("T"),
             font_size: Pt::new(12.0),
             char_spacing: Pt::ZERO,
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             color: RgbColor::BLACK,
             text_scale: 1.0,
         });
@@ -626,8 +627,8 @@ mod tests {
             font_family: Rc::from("T"),
             font_size: Pt::new(12.0),
             char_spacing: Pt::ZERO,
-            bold: false,
-            italic: false,
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
             color: RgbColor::BLACK,
             text_scale: 1.0,
         });

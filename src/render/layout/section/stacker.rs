@@ -430,6 +430,7 @@ mod tests {
     use super::*;
     use crate::model::ImageFormat;
     use crate::model::WrapText;
+    use crate::render::fonts::Toggle;
     use crate::render::geometry::PtSize;
     use crate::render::layout::paragraph::ParagraphStyle;
     use crate::render::layout::section::{FloatingImage, FloatingImageX, WrapMode};
@@ -471,8 +472,8 @@ mod tests {
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,

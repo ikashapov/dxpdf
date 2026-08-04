@@ -12,10 +12,10 @@ use std::fmt;
 
 use skia_safe::Data;
 
+use crate::render::fonts::opentype::FontFormat;
 use crate::render::fonts::{FontRegistry, TypefaceId, TypefaceOrigin};
 use crate::render::subset::collect::CodepointUsage;
 use crate::render::subset::extract::{extract, ExtractionError};
-use crate::render::subset::format::FontFormat;
 
 /// Single source of truth for "what happened to each typeface?" — one variant
 /// per terminal state of the apply pipeline. Exhaustive; if you add a state,
@@ -65,6 +65,36 @@ pub enum SubsetOutcome {
         codepoints_kept: usize,
         regressed: usize,
         shapeable_before: usize,
+    },
+    /// The selected face is a **variable-font named instance**, and the bytes
+    /// available to embed are the font's *default* location, not the instance's.
+    ///
+    /// Layout and on-screen painting are correct: resolution applied the
+    /// coordinates through `Typeface::clone_with_arguments`, so metrics and the
+    /// Skia canvas both draw the right weight. What cannot be made correct here
+    /// is the embedded font program — `fontcull` 2.0.1 exposes no instancing
+    /// API (its `klippa` still carries `TODO: instancing`), and neither
+    /// `to_font_data` nor a table copy can bake a design-space location into
+    /// `glyf`/`gvar`. A conforming PDF viewer therefore draws the default
+    /// instance's outlines against advances taken from the instanced font.
+    ///
+    /// Selection avoids this wherever it can: where a static face fits a request
+    /// as well as an instance does, [`crate::render::fonts::resolve`] prefers
+    /// the static one precisely because it survives the round trip. This outcome
+    /// is what remains when a family ships *only* as a variable font.
+    ///
+    /// The original typeface is left in place, so the PDF embeds a complete
+    /// font rather than a subset carved at the wrong location.
+    ///
+    /// Baking the location is issue #113, which names the two candidate routes:
+    /// a `glyf`/`gvar` instancer over the fontations crates, or an `hb-subset`
+    /// dependency. The seam is the bail-out in `process_one`.
+    VariableInstanceNotBaked {
+        id: TypefaceId,
+        /// The instance's subfamily name, e.g. `"SemiBold"`.
+        subfamily: String,
+        /// The axes and values that could not be baked, for the log.
+        axes: Vec<(String, f32)>,
     },
 }
 
@@ -138,14 +168,15 @@ fn savings_verdict(before: usize, subsetted: usize, after: usize) -> Option<NoSa
 
 impl SubsetOutcome {
     pub fn id(&self) -> TypefaceId {
-        match *self {
+        match self {
             Self::Subsetted { id, .. }
             | Self::UnchangedNoSavings { id, .. }
             | Self::UnsupportedFormat { id, .. }
             | Self::NoBytesAvailable { id }
             | Self::SubsetterError { id, .. }
             | Self::SkiaRebuildFailed { id }
-            | Self::UnshapeableSubset { id, .. } => id,
+            | Self::UnshapeableSubset { id, .. }
+            | Self::VariableInstanceNotBaked { id, .. } => *id,
         }
     }
 
@@ -183,6 +214,17 @@ impl SubsetReport {
 }
 
 impl SubsetReport {
+    /// Faces whose variation coordinates could not be baked into the embedded
+    /// bytes. Surfaced separately because, unlike every other non-`Subsetted`
+    /// outcome, this one means the PDF is *visually* wrong rather than merely
+    /// larger than it could be.
+    pub fn variable_instance_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|o| matches!(o, SubsetOutcome::VariableInstanceNotBaked { .. }))
+            .count()
+    }
+
     pub fn unshapeable_count(&self) -> usize {
         self.outcomes
             .iter()
@@ -228,6 +270,13 @@ impl fmt::Display for SubsetReport {
         if splice_cost > 0 {
             write!(f, ", {splice_cost} outweighed by the name table")?;
         }
+        // Called out even though it is not a subsetting failure: it is the one
+        // outcome that means the embedded outlines are at the wrong design-space
+        // location, so a reader chasing a weight that looks off should see it.
+        let variable = self.variable_instance_count();
+        if variable > 0 {
+            write!(f, ", {variable} variable instance(s) not baked")?;
+        }
         write!(f, ")")
     }
 }
@@ -255,6 +304,22 @@ pub fn apply(usage: CodepointUsage, registry: &mut FontRegistry) -> SubsetReport
         };
 
         let outcome = process_one(id, &entry, cps, registry);
+        if let SubsetOutcome::VariableInstanceNotBaked {
+            subfamily, axes, ..
+        } = &outcome
+        {
+            let at = axes
+                .iter()
+                .map(|(axis, value)| format!("{axis} {value}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::warn!(
+                "[subset] '{}' is a variable instance ({at}); the embedded font \
+                 carries the default location, so the PDF will draw that instead. \
+                 Advances are still correct.",
+                subfamily
+            );
+        }
         outcomes.push(outcome);
     }
 
@@ -267,6 +332,22 @@ fn process_one(
     codepoints: &std::collections::BTreeSet<crate::render::subset::collect::Codepoint>,
     registry: &mut FontRegistry,
 ) -> SubsetOutcome {
+    // A variable instance's coordinates cannot be baked into the bytes, and a
+    // subset carved at the default location would embed the wrong outlines
+    // *and* be smaller — hiding the problem behind an apparent success. Bail
+    // before extraction so the original, complete font is what ships.
+    if let Some(instance) = &entry.instance {
+        return SubsetOutcome::VariableInstanceNotBaked {
+            id,
+            subfamily: instance.subfamily.clone(),
+            axes: instance
+                .coords
+                .iter()
+                .map(|coord| (coord.axis.to_string(), coord.value))
+                .collect(),
+        };
+    }
+
     let extracted = match extract(entry, registry) {
         Ok(e) => e,
         Err(ExtractionError::NoBytesAvailable) => return SubsetOutcome::NoBytesAvailable { id },
@@ -415,6 +496,8 @@ mod tests {
     use super::*;
     use crate::model::EmbeddedFontVariant;
     use crate::render::dimension::Pt;
+    use crate::render::fonts::opentype::fvar::{AxisTag, VariationCoord};
+    use crate::render::fonts::{FaceRequest, Toggle, VariationInstance};
     use crate::render::geometry::{PtOffset, PtSize};
     use crate::render::layout::draw_command::{DrawCommand, LayoutedPage};
     use crate::render::resolve::color::RgbColor;
@@ -457,8 +540,8 @@ mod tests {
                 font_family: Rc::from(family),
                 char_spacing: Pt::ZERO,
                 font_size: Pt::new(12.0),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 color: RgbColor::BLACK,
                 text_scale: 1.0,
             }],
@@ -511,7 +594,7 @@ mod tests {
         let mut r = FontRegistry::new(fmgr());
         r.register_embedded("ApplyProbe", EmbeddedFontVariant::Regular, bytes)
             .unwrap();
-        let original = r.resolve("ApplyProbe", FontStyle::normal());
+        let original = r.resolve(&FaceRequest::plain("ApplyProbe"));
         let original_id = TypefaceId::from(&original.typeface);
 
         let pages = vec![page_with_text("abc", "ApplyProbe")];
@@ -534,7 +617,7 @@ mod tests {
         }
 
         // Resolution now returns a different typeface — the subsetted one.
-        let after = r.resolve("ApplyProbe", FontStyle::normal());
+        let after = r.resolve(&FaceRequest::plain("ApplyProbe"));
         let after_id = TypefaceId::from(&after.typeface);
         assert_ne!(
             after_id, original_id,
@@ -549,7 +632,7 @@ mod tests {
         // Register one font but never reference it in pages.
         r.register_embedded("UnusedProbe", EmbeddedFontVariant::Regular, bytes.clone())
             .unwrap();
-        let original = r.resolve("UnusedProbe", FontStyle::normal());
+        let original = r.resolve(&FaceRequest::plain("UnusedProbe"));
         let original_id = TypefaceId::from(&original.typeface);
 
         // Pages reference a *different* typeface so usage doesn't include the
@@ -559,7 +642,7 @@ mod tests {
         let report = apply(usage, &mut r);
 
         // Unused entry retains its original id.
-        let unchanged = r.resolve("UnusedProbe", FontStyle::normal());
+        let unchanged = r.resolve(&FaceRequest::plain("UnusedProbe"));
         assert_eq!(
             TypefaceId::from(&unchanged.typeface),
             original_id,
@@ -649,7 +732,7 @@ mod tests {
         // Force the registry to cache this exact typeface so apply() picks
         // it up. The simplest path is just a normal resolve(...) — that
         // populates the typefaces cache via FontMgr.
-        let _ = r.resolve(target, FontStyle::normal());
+        let _ = r.resolve(&FaceRequest::plain(target));
 
         // Build pages whose text uses real codepoints from the font.
         let pages = vec![page_with_text("Numbers: 1, 2, 3, 4, 5", target)];
@@ -668,7 +751,7 @@ mod tests {
         // this is the post-validation rejecting the broken subset and
         // leaving the original; for fonts fontcull handles, it's the
         // subsetted version still shaping correctly.
-        let after = r.resolve(target, FontStyle::normal());
+        let after = r.resolve(&FaceRequest::plain(target));
         let font = skia_safe::Font::from_typeface(after.typeface, 12.0);
         let probe = "Numbers: 1, 2, 3, 4, 5";
         let glyphs = font.text_to_glyphs_vec(probe);
@@ -898,5 +981,94 @@ mod tests {
             spliced.size_before_splice,
             spliced.bytes.len()
         );
+    }
+
+    // ── variable instances (§85 acceptance criterion 6) ──────────────────
+
+    /// A variable instance must be reported, not subsetted. Carving a subset at
+    /// the *default* location would be smaller — and wrong — which is exactly
+    /// the failure this outcome exists to make visible rather than silent.
+    #[test]
+    fn a_variable_instance_is_reported_rather_than_subsetted_at_the_wrong_location() {
+        let mut r = FontRegistry::new(FontMgr::new());
+        let entry = r.resolve(&FaceRequest::plain("InstanceProbe"));
+        let id = TypefaceId::from(&entry.typeface);
+
+        let instanced = crate::render::fonts::TypefaceEntry {
+            instance: Some(VariationInstance {
+                subfamily: "SemiBold".into(),
+                post_script_name: None,
+                coords: vec![
+                    VariationCoord {
+                        axis: AxisTag::WEIGHT,
+                        value: 600.0,
+                    },
+                    VariationCoord {
+                        axis: AxisTag::WIDTH,
+                        value: 75.0,
+                    },
+                ],
+            }),
+            ..entry
+        };
+
+        let mut codepoints = std::collections::BTreeSet::new();
+        for c in "abc".chars() {
+            codepoints.insert(crate::render::subset::collect::Codepoint::from(c));
+        }
+
+        let outcome = process_one(id, &instanced, &codepoints, &mut r);
+        match outcome {
+            SubsetOutcome::VariableInstanceNotBaked {
+                id: reported,
+                subfamily,
+                axes,
+            } => {
+                assert_eq!(reported, id);
+                assert_eq!(subfamily, "SemiBold");
+                assert_eq!(
+                    axes,
+                    vec![("wght".to_string(), 600.0), ("wdth".to_string(), 75.0)],
+                    "the axes that could not be baked must be named"
+                );
+            }
+            other => panic!("expected VariableInstanceNotBaked, got {other:?}"),
+        }
+    }
+
+    /// …and a face that is *not* an instance must still take the ordinary path,
+    /// or the bail-out would disable subsetting wholesale.
+    #[test]
+    fn a_static_face_is_unaffected_by_the_instance_check() {
+        let mut r = FontRegistry::new(FontMgr::new());
+        let entry = r.resolve(&FaceRequest::plain("StaticProbe"));
+        assert!(entry.instance.is_none());
+        let id = TypefaceId::from(&entry.typeface);
+
+        let mut codepoints = std::collections::BTreeSet::new();
+        codepoints.insert(crate::render::subset::collect::Codepoint::from('a'));
+
+        let outcome = process_one(id, &entry, &codepoints, &mut r);
+        assert!(
+            !matches!(outcome, SubsetOutcome::VariableInstanceNotBaked { .. }),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_report_counts_and_names_unbaked_instances() {
+        let report = SubsetReport {
+            outcomes: vec![SubsetOutcome::VariableInstanceNotBaked {
+                id: TypefaceId(1),
+                subfamily: "SemiBold".into(),
+                axes: vec![("wght".into(), 600.0)],
+            }],
+        };
+        assert_eq!(report.variable_instance_count(), 1);
+        assert_eq!(report.subsetted_count(), 0);
+        assert_eq!(report.total_savings(), 0);
+        assert!(report
+            .to_string()
+            .contains("variable instance(s) not baked"));
     }
 }

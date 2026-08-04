@@ -31,10 +31,14 @@
 pub mod apply;
 pub mod collect;
 pub mod extract;
-pub mod format;
 pub mod name_splice;
 
+/// Font-format detection lives with the other OpenType readers in
+/// [`crate::render::fonts::opentype`], not here: the face catalogue has to spot
+/// a TrueType Collection to enumerate its faces, and it does that whether or not
+/// the `subset-fonts` feature — which gates this whole module — is on.
+/// Re-exported so subsetting's own callers keep their existing paths.
+pub use crate::render::fonts::opentype::{FontFormat, FormatError, SfntFlavor, WoffVersion};
 pub use apply::{apply, SubsetOutcome, SubsetReport};
 pub use collect::{collect, Codepoint, CodepointUsage};
 pub use extract::{extract, ExtractedSfnt, ExtractionError};
-pub use format::{FontFormat, FormatError, SfntFlavor, WoffVersion};

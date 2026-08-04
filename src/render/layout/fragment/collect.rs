@@ -18,6 +18,7 @@ use super::{
     TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
     SUPERSCRIPT_FONT_SIZE_RATIO,
 };
+use crate::render::fonts::Toggle;
 
 /// §17.11.12: a footnote reference recorded while walking a paragraph's inlines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,8 +335,8 @@ fn emit_field_substitution<F>(
             FontProps {
                 family: Rc::from(default_family),
                 size: auto_fit.scale_font(default_size),
-                bold: false,
-                italic: false,
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
                 underline: false,
                 char_spacing: Pt::ZERO,
                 text_scale: 1.0,
@@ -376,8 +377,8 @@ where
     let font = FontProps {
         family: Rc::from(default_family),
         size: default_size,
-        bold: false,
-        italic: false,
+        bold: Toggle::Absent,
+        italic: Toggle::Absent,
         underline: false,
         char_spacing: Pt::ZERO,
         text_scale: 1.0,
@@ -846,8 +847,8 @@ where
                     let font = FontProps {
                         family: Rc::from(sym.font.as_str()),
                         size: default_size,
-                        bold: false,
-                        italic: false,
+                        bold: Toggle::Absent,
+                        italic: Toggle::Absent,
                         underline: false,
                         char_spacing: Pt::ZERO,
                         text_scale: 1.0,
@@ -890,8 +891,8 @@ where
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
-                        bold: false,
-                        italic: false,
+                        bold: Toggle::Absent,
+                        italic: Toggle::Absent,
                         underline: false,
                         char_spacing: Pt::ZERO,
                         text_scale: 1.0,
@@ -926,8 +927,8 @@ where
                     let ref_font = FontProps {
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
-                        bold: false,
-                        italic: false,
+                        bold: Toggle::Absent,
+                        italic: Toggle::Absent,
                         underline: false,
                         char_spacing: Pt::ZERO,
                         text_scale: 1.0,
@@ -1006,6 +1007,7 @@ mod tests {
     use super::*;
     use crate::model::dimension::{Dimension, HalfPoints};
     use crate::model::*;
+    use crate::render::fonts::Toggle;
 
     /// Dummy measurer: width = text.len() * 6.0, ascent = 10.0, descent = 2.0
     fn dummy_measure(text: &str, _font: &FontProps) -> (Pt, TextMetrics) {
@@ -1675,7 +1677,7 @@ mod tests {
             },
         );
         // Two visible text fragments: "Seite " and the substituted "7".
-        let texts: Vec<(&str, bool)> = frags
+        let texts: Vec<(&str, Toggle)> = frags
             .iter()
             .filter_map(|f| match f {
                 Fragment::Text { text, font, .. } => Some((text.as_ref(), font.bold)),
@@ -1684,7 +1686,7 @@ mod tests {
             .collect();
         assert_eq!(
             texts,
-            vec![("Seite ", true), ("7", true)],
+            vec![("Seite ", Toggle::On), ("7", Toggle::On)],
             "PAGE substitution must inherit bold from empty placeholder run"
         );
     }
