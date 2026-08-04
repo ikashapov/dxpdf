@@ -80,6 +80,15 @@ struct PageLayoutState<'doc> {
     current_col: usize,
     /// §17.6.4: y at which columns start on the current page.
     column_top: Pt,
+    /// §17.6.22: true while `column_top` is a *continuation* cursor rather than
+    /// a page top — the column set inherited from a continuous break, which
+    /// starts part-way down a page the preceding section already filled.
+    ///
+    /// Such a column is strictly shorter than the ones that follow it, which
+    /// makes it the one case where being at a column's top does not mean having
+    /// as much room as anywhere else. See
+    /// [`at_full_height_column_top`](PageLayoutState::at_full_height_column_top).
+    inherited_short_columns: bool,
     /// Effective bottom boundary — reduced as footnotes are reserved.
     bottom: Pt,
     /// Footnotes accumulated for the current page.
@@ -151,6 +160,12 @@ impl<'doc> PageLayoutState<'doc> {
                 // re-flowed to an equal-height target, which is a different
                 // problem from the clearance relayout around it.
                 current_col: 0,
+                // The inherited column set starts at the shared cursor, so it
+                // is shorter than a fresh page's — *strictly* shorter, which is
+                // the property the predicate's reasoning rests on. A break
+                // landing exactly on the page top inherits a full-height column
+                // and needs no exception.
+                inherited_short_columns: c.cursor_y > bounds.top,
                 bottom: c.bottom,
                 page_footnotes: Vec::new(),
                 carried_footnotes: c.page_footnotes,
@@ -177,6 +192,7 @@ impl<'doc> PageLayoutState<'doc> {
                 logical_page_base,
                 page_top: bounds.top,
                 current_col: 0,
+                inherited_short_columns: false,
                 bottom: bounds.bottom,
                 page_footnotes: Vec::new(),
                 carried_footnotes: Vec::new(),
@@ -192,6 +208,33 @@ impl<'doc> PageLayoutState<'doc> {
                 pending_page_break: false,
             },
         }
+    }
+
+    /// True when the cursor sits at the top of a column that already offers as
+    /// much height as any column this section could move the content to — so
+    /// moving it again cannot help, and the caller must place it in-line and
+    /// let it overflow rather than loop.
+    ///
+    /// §17.6.4 makes a fresh column equivalent to a fresh page, which is why
+    /// the test is against `column_top` and not the page top. §17.6.22 is the
+    /// one exception: a continuation's column set starts at the *shared
+    /// cursor*, part-way down an inherited page, so it is strictly shorter than
+    /// the ones after it and moving content off it genuinely does help.
+    ///
+    /// Reading the raw `cursor_y <= column_top` instead strands content on the
+    /// shared page: a §17.3.1.15 `keepNext` chain that starts there is **torn**,
+    /// its head left behind while the rest moves on — which the same document
+    /// without the break does not do.
+    ///
+    /// Used at the two sites that move a whole block that does not fit. The
+    /// paragraph-*splitting* site deliberately keeps the raw test; the reason
+    /// it trades differently is recorded there.
+    ///
+    /// Termination is unaffected. The exception only ever *permits* one move,
+    /// onto a page whose own column set is full height — where the flag is
+    /// clear and the ordinary guard applies again.
+    fn at_full_height_column_top(&self) -> bool {
+        self.cursor_y <= self.column_top && !self.inherited_short_columns
     }
 
     /// Render accumulated footnotes onto the current page and clear the list.
@@ -246,6 +289,9 @@ impl<'doc> PageLayoutState<'doc> {
         self.cursor_y = bounds.top;
         self.column_top = bounds.top;
         self.current_col = 0;
+        // §17.6.22: whatever page we came from, this one starts at its own top,
+        // so the inherited short column set is behind us.
+        self.inherited_short_columns = false;
         self.bottom = bounds.bottom;
         self.page_start_block = block_idx;
         self.abs_floats_dirty = true;
@@ -421,6 +467,9 @@ struct PageReplayCheckpoint<'doc> {
     page_top: Pt,
     current_col: usize,
     column_top: Pt,
+    /// Saved with `column_top`, which it qualifies: restoring one without the
+    /// other would describe a column set that never existed.
+    inherited_short_columns: bool,
     bottom: Pt,
     page_footnotes: Vec<(
         &'doc [super::super::fragment::Fragment],
@@ -448,6 +497,7 @@ impl<'doc> PageReplayCheckpoint<'doc> {
             page_top: state.page_top,
             current_col: state.current_col,
             column_top: state.column_top,
+            inherited_short_columns: state.inherited_short_columns,
             bottom: state.bottom,
             page_footnotes: state.page_footnotes.clone(),
             first_on_section_page: state.first_on_section_page,
@@ -471,6 +521,7 @@ impl<'doc> PageReplayCheckpoint<'doc> {
         state.page_top = self.page_top;
         state.current_col = self.current_col;
         state.column_top = self.column_top;
+        state.inherited_short_columns = self.inherited_short_columns;
         state.bottom = self.bottom;
         state.page_footnotes.clone_from(&self.page_footnotes);
         state.first_on_section_page = self.first_on_section_page;
@@ -1150,6 +1201,24 @@ fn emit_split_paragraph<'doc>(
         }
 
         // §17.6.4: a fresh column offers full height, like a fresh page.
+        //
+        // §17.6.22: deliberately the raw test, *not*
+        // `at_full_height_column_top`. An inherited column really is shorter,
+        // but the branch this feeds trades differently from the two block-move
+        // sites that do use the predicate. Here `at_page_top` selects "emit the
+        // whole paragraph and let it overflow" over "move it", and the overflow
+        // is bounded and often invisible: `n_fit` charges the paragraph's
+        // trailing `space_after` against the column bottom, so a remainder
+        // whose *text* fits still counts as not fitting. Honouring the short
+        // column there abandons the rest of the column set to avoid overflowing
+        // by whitespace — on `sample-docx-files-sample3.docx`, a 6-line
+        // paragraph split 3/3 across two columns instead moves its second half
+        // to the next page and leaves column 2 empty.
+        //
+        // The real defect is that trailing spacing is charged at a column
+        // bottom where it cannot be seen; fixing that belongs with §17.3.1.33
+        // and would move output for documents that have no section break at
+        // all.
         let at_page_top = state.cursor_y <= state.column_top;
         let avail = (state.bottom - state.cursor_y).max(Pt::ZERO);
         // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are
@@ -1610,7 +1679,7 @@ pub(crate) fn layout_section_with_clearance(
                                     )
                             }
                         };
-                        if should_move && state.cursor_y > state.column_top {
+                        if should_move && !state.at_full_height_column_top() {
                             state.push_new_page(block_idx, &ctx);
                             state.prev_space_after = Pt::ZERO;
                         }
@@ -1880,7 +1949,7 @@ pub(crate) fn layout_section_with_clearance(
                             let mut para = placed.emit_full();
                             // Column/page overflow: advance column, then page.
                             if state.cursor_y + para.size.height > state.bottom
-                                && state.cursor_y > state.column_top
+                                && !state.at_full_height_column_top()
                             {
                                 // `placed` (which borrows `effective_style`) is no
                                 // longer needed; drop it before mutating the style

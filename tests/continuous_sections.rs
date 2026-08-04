@@ -23,6 +23,8 @@ fn docx(body: &str) -> Vec<u8> {
   <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
   <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
   <Override PartName="/word/header2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
+  <Override PartName="/word/footer2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
   <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
 </Types>"#).unwrap();
 
@@ -38,6 +40,8 @@ fn docx(body: &str) -> Vec<u8> {
   <Relationship Id="rIdNum" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
   <Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
   <Relationship Id="rIdH2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/>
+  <Relationship Id="rIdF1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+  <Relationship Id="rIdF2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer2.xml"/>
   <Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
 </Relationships>"#).unwrap();
 
@@ -82,6 +86,31 @@ fn docx(body: &str) -> Vec<u8> {
   <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>HDRTALL3</w:t></w:r></w:p>
   <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>HDRTALL4</w:t></w:r></w:p>
 </w:hdr>"#,
+    )
+    .unwrap();
+
+    // §17.10: the footer pair mirrors the header pair — one short slot, one
+    // four-line 20pt slot. A footer raises the page *bottom* rather than
+    // lowering the top, so the two are only symmetric if `for_page` treats them
+    // so; that is the claim these fixtures exist to test rather than assume.
+    zip.start_file("word/footer1.xml", o).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t>FTRSHORT</w:t></w:r></w:p>
+</w:ftr>"#,
+    )
+    .unwrap();
+
+    zip.start_file("word/footer2.xml", o).unwrap();
+    zip.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>FTRTALL1</w:t></w:r></w:p>
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>FTRTALL2</w:t></w:r></w:p>
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>FTRTALL3</w:t></w:r></w:p>
+  <w:p><w:pPr><w:rPr><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>FTRTALL4</w:t></w:r></w:p>
+</w:ftr>"#,
     )
     .unwrap();
 
@@ -611,6 +640,58 @@ fn an_inline_page_break_before_the_continuous_break_is_honoured() {
     );
 }
 
+/// §17.3.1.26 `pageBreakBefore` on the **first** paragraph after the break.
+///
+/// A different path from the case above: there the break is a flag deferred
+/// across the section boundary with the continuation, here it is a property of
+/// the succeeding section's own first block — reached while that section thinks
+/// it is starting, on a page it did not create.
+#[test]
+fn a_page_break_before_the_first_paragraph_after_the_break_is_honoured() {
+    let pages = layout(&format!(
+        r#"{}<w:p><w:pPr>{}</w:pPr></w:p>
+           <w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>BODYAFTER</w:t></w:r></w:p>{}"#,
+        para("BODYBEFORE"),
+        sect_pr("rIdH1", false),
+        sect_pr("rIdH1", true),
+    ));
+
+    assert_eq!(pages.len(), 2, "pageBreakBefore must start a new page");
+    let on = |i: usize| drawn_text(std::slice::from_ref(&pages[i]));
+    assert!(
+        on(0).iter().any(|t| t.contains("BODYBEFORE")),
+        "the preceding section keeps the page it was already on: {:?}",
+        on(0)
+    );
+    assert!(
+        on(1).iter().any(|t| t.contains("BODYAFTER")),
+        "and the succeeding section starts on the next one: {:?}",
+        on(1)
+    );
+}
+
+/// The same, as an inline `w:br` on the first run after the break rather than a
+/// paragraph property — §17.3.3.1 rather than §17.3.1.26. The run precedes the
+/// text, so the whole paragraph moves.
+#[test]
+fn an_inline_page_break_after_the_continuous_break_is_honoured() {
+    let pages = layout(&format!(
+        r#"{}<w:p><w:pPr>{}</w:pPr></w:p>
+           <w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>BODYAFTER</w:t></w:r></w:p>{}"#,
+        para("BODYBEFORE"),
+        sect_pr("rIdH1", false),
+        sect_pr("rIdH1", true),
+    ));
+
+    assert_eq!(pages.len(), 2, "the inline break must start a new page");
+    assert!(
+        drawn_text(std::slice::from_ref(&pages[1]))
+            .iter()
+            .any(|t| t.contains("BODYAFTER")),
+        "text after the inline break belongs on the new page"
+    );
+}
+
 /// §20.4.2.17 `wrapSquare` — a left-hand floating shape 200pt wide, anchored to
 /// its paragraph, that text must flow to the right of.
 const FLOAT_PARA: &str = r#"<w:p><w:r><w:drawing>
@@ -761,6 +842,268 @@ fn continuous_break_can_decrease_the_column_count() {
     assert!(
         (xs[0] - 57).abs() <= 1,
         "and that x is the left margin: {xs:?}"
+    );
+}
+
+// ── §17.6.22 the break changes nothing when the sections agree (issue #83) ──
+
+/// Every drawn primitive as `page kind position [text]`.
+///
+/// Coarse enough to be readable in a failure and precise enough that a lost
+/// table row, a moved border or a duplicated line shows up — where probing one
+/// line's `y` would only catch a whole-page shift.
+fn fingerprint(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> Vec<String> {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    let seg = |l: &dxpdf::render::geometry::PtLineSegment| {
+        format!(
+            "{:.2},{:.2}-{:.2},{:.2}",
+            l.start.x.raw(),
+            l.start.y.raw(),
+            l.end.x.raw(),
+            l.end.y.raw()
+        )
+    };
+    pages
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| p.commands.iter().map(move |c| (i, c)))
+        .map(|(i, c)| match c {
+            DrawCommand::Text { position, text, .. } => format!(
+                "p{i} text {:.2},{:.2} {text}",
+                position.x.raw(),
+                position.y.raw()
+            ),
+            DrawCommand::Line { line, .. } => format!("p{i} line {}", seg(line)),
+            DrawCommand::Underline { line, .. } => format!("p{i} underline {}", seg(line)),
+            other => format!("p{i} {other:?}"),
+        })
+        .collect()
+}
+
+/// §17.6.22 moves a *section* boundary, not a page boundary. Two sections whose
+/// properties agree must therefore render exactly as the same content with no
+/// break at all — every command, on every page, at the same position.
+///
+/// `<w:p/>` stands in for the break's own carrier paragraph on the unbroken
+/// side: a mid-document `sectPr` lives on the `w:pPr` of the section's last
+/// paragraph, and that paragraph mark is real content that renders a blank
+/// line. Omitting it would make the two documents differ by a line and the
+/// comparison would measure the fixture.
+#[track_caller]
+fn assert_break_changes_nothing(before: &str, after: &str, what: &str) {
+    let split = layout(&format!(
+        "{before}<w:p><w:pPr>{}</w:pPr></w:p>{after}{}",
+        sect_pr("rIdH1", false),
+        sect_pr("rIdH1", true),
+    ));
+    let joined = layout(&format!("{before}<w:p/>{after}{}", sect_pr("rIdH1", false)));
+    assert_eq!(fingerprint(&split), fingerprint(&joined), "{what}");
+}
+
+/// A paragraph bound to the one after it.
+fn keep_next(text: &str) -> String {
+    format!(r#"<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+}
+
+/// A table of `rows` single-cell rows.
+fn table(rows: usize, prefix: &str) -> String {
+    let body: String = (0..rows)
+        .map(|i| {
+            format!(
+                r#"<w:tr><w:tc><w:tcPr><w:tcW w:w="8000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>{prefix}{i}</w:t></w:r></w:p></w:tc></w:tr>"#
+            )
+        })
+        .collect();
+    format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid>{body}</w:tbl>"#
+    )
+}
+
+/// §17.3.1.15: a `keepNext` chain in the succeeding section is fitted against
+/// the bottom it *inherited*, and must still move as a unit when it does not
+/// fit. The chain is positioned near the page bottom deliberately — a chain
+/// with room to spare would pass whatever the inherited bounds were.
+#[test]
+fn a_keep_next_chain_after_the_break_still_moves_as_a_unit() {
+    // Tuned so KEEPA alone *would* fit on the shared page and KEEPB would not:
+    // the §17.3.1.15 move is then forced, rather than the whole chain simply
+    // arriving after the page was already full. 60 fillers leave both on
+    // page 1 and 63 push both off it; only this narrow window tests anything.
+    let filler: String = (0..61).map(|i| para(&format!("FILL{i}"))).collect();
+    let chain = format!("{}{}", keep_next("KEEPA"), para("KEEPB"));
+
+    // The invariant first: the break must not perturb the chain's placement.
+    assert_break_changes_nothing(
+        &filler,
+        &chain,
+        "a keepNext chain must paginate the same either side of a continuous break",
+    );
+
+    // Then confirm the fixture actually exercises the chain rather than
+    // leaving it comfortably mid-page.
+    let split = layout(&format!(
+        "{filler}<w:p><w:pPr>{}</w:pPr></w:p>{chain}{}",
+        sect_pr("rIdH1", false),
+        sect_pr("rIdH1", true),
+    ));
+    let page_of = |needle: &str| {
+        split
+            .iter()
+            .position(|p| {
+                drawn_text(std::slice::from_ref(p))
+                    .iter()
+                    .any(|t| t == needle)
+            })
+            .unwrap_or_else(|| panic!("{needle} was never drawn"))
+    };
+    assert_eq!(
+        page_of("KEEPA"),
+        page_of("KEEPB"),
+        "§17.3.1.15: the chain must not be torn across the page boundary"
+    );
+    assert_eq!(
+        page_of("KEEPA"),
+        1,
+        "the fixture must push the chain onto a second page, or it tests nothing"
+    );
+}
+
+/// §17.4.1: a table starting from the continuation cursor splits across pages
+/// against the inherited bounds, like any other block on a shared page.
+#[test]
+fn a_table_spanning_the_break_paginates_unchanged() {
+    assert_break_changes_nothing(
+        &para("BODYBEFORE"),
+        &table(60, "ROW"),
+        "a table that splits across pages must do so identically either side of \
+         a continuous break",
+    );
+}
+
+/// The preceding section ending in a table, rather than beginning with one:
+/// the handover carries `last_para_start_y` and the table-chain state, and a
+/// table is the block most likely to expose either.
+#[test]
+fn a_table_before_the_break_leaves_the_page_in_the_same_state() {
+    assert_break_changes_nothing(
+        &table(50, "ROW"),
+        &para("BODYAFTER"),
+        "content after the break must resume where a table before it left off",
+    );
+}
+
+// ── §17.10 footer clearance on a shared page (issue #83) ────────────────────
+
+/// A `sectPr` with the short header throughout and the given footer slot, so
+/// only the footer varies between the documents compared below.
+fn sect_pr_ftr(rel: &str, continuous: bool) -> String {
+    let ty = if continuous {
+        r#"<w:type w:val="continuous"/>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<w:sectPr>{ty}<w:headerReference w:type="default" r:id="rIdH1" {R_NS}/><w:footerReference w:type="default" r:id="{rel}" {R_NS}/>{PG}</w:sectPr>"#
+    )
+}
+
+/// Every `FILL*` line as `(page index, rounded y)`, in emission order — the
+/// whole distribution, so a difference anywhere shows up rather than only at
+/// whichever line a single probe happens to pick.
+fn fill_positions(
+    pages: &[dxpdf::render::layout::draw_command::LayoutedPage],
+) -> Vec<(usize, i32)> {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    pages
+        .iter()
+        .enumerate()
+        .flat_map(|(i, p)| p.commands.iter().map(move |c| (i, c)))
+        .filter_map(|(i, c)| match c {
+            DrawCommand::Text { text, position, .. } if text.starts_with("FILL") => {
+                Some((i, position.y.raw().round() as i32))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+const FOOTER_FILLER: usize = 60;
+
+/// The filler lives in the **succeeding** section, unlike the header cases.
+///
+/// A footer only becomes observable where content reaches the page bottom, and
+/// content that reaches it spills — which would make the preceding section's
+/// last page a *later* page and take the shared page out of the comparison. Put
+/// the filler after the break instead and the shared page stays page 1, while
+/// the bottom the succeeding section inherits is exactly what the fit under
+/// test produces.
+fn shared_page_footer(
+    first_ftr: &str,
+    second_ftr: &str,
+) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
+    let filler: String = (0..FOOTER_FILLER)
+        .map(|i| para(&format!("FILL{i}")))
+        .collect();
+    layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{filler}{}",
+        para("BODYBEFORE"),
+        sect_pr_ftr(first_ftr, false),
+        sect_pr_ftr(second_ftr, true),
+    ))
+}
+
+/// The unbroken reference for [`shared_page_footer`].
+fn single_section_footer(ftr: &str) -> Vec<dxpdf::render::layout::draw_command::LayoutedPage> {
+    let filler: String = (0..FOOTER_FILLER)
+        .map(|i| para(&format!("FILL{i}")))
+        .collect();
+    layout(&format!(
+        "{}<w:p/>{filler}{}",
+        para("BODYBEFORE"),
+        sect_pr_ftr(ftr, false),
+    ))
+}
+
+/// §17.10: the shared page is drawn with the succeeding section's *footer*, so
+/// the bottom the preceding section hands over must be that footer's — not the
+/// one it laid itself out against.
+#[test]
+fn taller_succeeding_footer_pulls_the_shared_page_bottom_up() {
+    // Guard the fixture before trusting the comparison: if the two footers
+    // produced the same layout, every assertion below would pass vacuously.
+    assert_ne!(
+        fill_positions(&single_section_footer("rIdF1")),
+        fill_positions(&single_section_footer("rIdF2")),
+        "the two footer slots must differ enough to move content"
+    );
+
+    assert_eq!(
+        fill_positions(&shared_page_footer("rIdF1", "rIdF2")),
+        fill_positions(&single_section_footer("rIdF2")),
+        "content on the shared page must break where the tall footer puts it, \
+         not where the short footer it was laid out against did"
+    );
+}
+
+/// The converse: a *shorter* succeeding footer must give the reserved band back
+/// to the body rather than leaving it unused.
+#[test]
+fn shorter_succeeding_footer_reclaims_the_band() {
+    assert_eq!(
+        fill_positions(&shared_page_footer("rIdF2", "rIdF1")),
+        fill_positions(&single_section_footer("rIdF1")),
+        "a shorter succeeding footer must not retain the preceding section's \
+         reservation"
+    );
+}
+
+/// Equal slots are the no-op case, for footers as for headers.
+#[test]
+fn equal_footers_leave_the_shared_page_unchanged() {
+    assert_eq!(
+        fill_positions(&shared_page_footer("rIdF1", "rIdF1")),
+        fill_positions(&single_section_footer("rIdF1")),
+        "the shared page's own bottom is unchanged"
     );
 }
 
