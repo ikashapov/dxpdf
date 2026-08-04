@@ -111,53 +111,219 @@ use crate::render::layout::section::layout_section_with_clearance;
 use crate::render::resolve::header_footer::HeaderFooterSet;
 use crate::render::resolve::ResolvedDocument;
 
-/// Estimate where the content on `page` ends, so a `Continuous` section
-/// (§17.6.22) knows where to resume on the same page.
+/// Inputs to [`fit_shared_page`] that describe what follows the section being
+/// fitted.
 ///
-/// The match is **exhaustive on purpose**: a `_ => continue` arm silently gives
-/// any unlisted variant zero height, and the following section then paints over
-/// it. That is how `EmojiCluster` and `Path` came to be ignored — a paragraph
-/// containing only an emoji resumed at `margins.top`, drawing the next
-/// section's text inside the emoji's box. Adding a variant should break this
-/// build, not the output.
-fn estimate_cursor_y(
-    page: &layout::draw_command::LayoutedPage,
-    config: &layout::page::PageConfig,
-) -> dimension::Pt {
-    use layout::draw_command::DrawCommand;
-    let mut max_y = config.margins.top;
-    for cmd in &page.commands {
-        let bottom = match cmd {
-            // Baseline plus a full font size approximates the descender.
-            DrawCommand::Text {
-                position,
-                font_size,
-                ..
-            } => position.y + *font_size,
-            // A segment may run in either direction; take the lower end.
-            DrawCommand::Underline { line, .. } | DrawCommand::Line { line, .. } => {
-                line.start.y.max(line.end.y)
+/// The whole section list plus an index, rather than one `&ResolvedSection`,
+/// because the page's owner may be several continuous breaks away — see
+/// [`shared_page_owner_bounds`].
+struct FitSharedPage<'a> {
+    sections: &'a [crate::render::resolve::sections::ResolvedSection],
+    /// Index of the section immediately after the one being fitted.
+    next_idx: usize,
+    clearance: &'a HeaderFooterClearance,
+    logical_page_base: usize,
+    even_and_odd: bool,
+    default_line_height: dimension::Pt,
+    /// The last two are needed only to lay out the intermediate sections of a
+    /// chain speculatively; a lone break never reaches that path.
+    separator_indent: dimension::Pt,
+    measure_text: layout::paragraph::MeasureTextFn<'a>,
+}
+
+/// §17.6.22: the body bounds a shared page must use — those of the section that
+/// ends up **owning** it.
+///
+/// With a single break the owner is just the next section, and this returns its
+/// `for_page(0)` having laid out nothing. A *chain* of continuous breaks is what
+/// makes it more than a lookup: a section that fits entirely on the shared page
+/// commits no page of its own and hands the same page further along, so the
+/// owner is deeper in the chain. Stopping at the immediate successor pins the
+/// first section to a *middle* section's clearance while the page is drawn with
+/// the last section's — a taller final header then overlaps content two sections
+/// back, which is the original defect one break removed.
+///
+/// "Fits entirely" is a layout fact, not a property of the markup, so the walk
+/// lays those sections out. It is speculative in the full sense — the blocks it
+/// builds and the §17.9 / §17.11.12 numbering they advance are rolled back, and
+/// the layouts themselves are discarded, since the real ones happen when the
+/// caller's loop reaches those sections. Chains of two pay nothing: the
+/// hands-on test below returns before anything is built.
+///
+/// Terminates because `idx` strictly increases and is bounded by `sections`.
+fn shared_page_owner_bounds(
+    input: &FitSharedPage<'_>,
+    continuation: &layout::section::ContinuationState,
+    committed: usize,
+    ctx: &layout::build::BuildContext,
+    state: &mut BuildState,
+) -> layout::header_footer::PageBodyBounds {
+    let mut idx = input.next_idx;
+    let mut logical = input.logical_page_base + committed;
+    let mut cont = continuation.clone();
+
+    loop {
+        let section = &input.sections[idx];
+        let base = layout::header_footer::next_logical_page_base(
+            logical,
+            section.properties.page_number_type.as_ref(),
+        );
+        let config = PageConfig::from_section(&section.properties);
+        // §17.11.12: measuring a header is a document-order side effect, and
+        // every measurement here is a look-ahead.
+        let clearance = state.speculatively(|s| {
+            s.page_config = config.clone();
+            measure_header_footer_clearance(
+                &config,
+                section,
+                ctx,
+                s,
+                input.default_line_height,
+                input.even_and_odd,
+                base,
+            )
+        });
+
+        // Nothing after this section shares its last page, so this section owns
+        // the page it was handed. The common case, and the one that costs a
+        // clearance measurement and no layout.
+        let hands_on = input.sections.get(idx + 1).is_some_and(|after| {
+            after.properties.section_type == Some(crate::model::SectionType::Continuous)
+        });
+        if !hands_on {
+            return clearance.for_page(0);
+        }
+
+        // It does hand its last page on — but that is only *this* page if the
+        // section fits entirely within it. A section that spills commits the
+        // shared page as its own page 0 and owns it; the page it hands on is a
+        // later one, which this caller is not asking about.
+        let (spilled, tail) = state.speculatively(|s| {
+            s.page_config = config.clone();
+            let built = build_section_blocks(section, &config, ctx, s);
+            let laid = layout_section_with_clearance(
+                &built.blocks,
+                &config,
+                input.measure_text,
+                input.separator_indent,
+                input.default_line_height,
+                layout::section::SectionStart {
+                    continuation: Some(cont.clone()),
+                    clearance: &clearance,
+                    // No override: the shared page's own bounds are the best
+                    // available guess at this point, and the answer being
+                    // computed is what will replace them.
+                    last_page: layout::section::LastPageOwner::SharedWithNext { bounds: None },
+                    logical_page_base: base,
+                },
+            );
+            (!laid.pages.is_empty(), laid.tail)
+        });
+
+        match (spilled, tail) {
+            (false, layout::section::SectionTail::SharedWithNext(next_cont)) => {
+                cont = next_cont;
+                logical = base;
+                idx += 1;
             }
-            DrawCommand::Image { rect, .. }
-            | DrawCommand::EmojiCluster { rect, .. }
-            | DrawCommand::Rect { rect, .. } => rect.origin.y + rect.size.height,
-            // `extent` is the shape's unrotated bounding box; a rotation can
-            // reach slightly past it, which is within this function's remit.
-            DrawCommand::Path { origin, extent, .. } => origin.y + extent.height,
-            // §17.3.1.19: draws nothing, so it consumes no vertical space.
-            DrawCommand::Outline(_) => continue,
-            // Annotations mark content that is already accounted for by the
-            // command underneath them, and a named destination is a point.
-            // Neither adds extent of its own.
-            DrawCommand::LinkAnnotation { .. }
-            | DrawCommand::InternalLink { .. }
-            | DrawCommand::NamedDestination { .. } => continue,
-        };
-        if bottom > max_y {
-            max_y = bottom;
+            _ => return clearance.for_page(0),
         }
     }
-    max_y
+}
+
+/// How [`fit_shared_page`] resolved a section whose last page is shared.
+///
+/// A variant per outcome rather than a `bool` plus a log line: `Abandoned` is
+/// recoverable but suboptimal, and a later report of a badly-filled shared page
+/// needs something to grep for.
+#[derive(Debug, PartialEq)]
+enum SharedPageFit {
+    /// The last page's own bounds already match the succeeding section's.
+    NotNeeded,
+    /// Relaid out; `passes` extra layout runs were needed.
+    Converged { passes: u8 },
+    /// The last-page index cycled between values, so no single index can carry
+    /// the override. The committed layout is the final pass — every page still
+    /// has bounds valid for *itself*; only the shared page's fill is
+    /// suboptimal.
+    Abandoned { seen: Vec<usize> },
+}
+
+/// §17.6.22: force this section's last page onto the bounds of the section that
+/// shares it.
+///
+/// A page holding a continuous break is drawn with the succeeding section's
+/// header and footer, so content the *preceding* section already placed there
+/// has to be laid out against those bounds too — a taller succeeding header
+/// otherwise overlaps it, and a shorter one leaves the band it reserved blank.
+/// Adjusting the continuation cursor cannot repair content already placed,
+/// which is why this re-runs the section rather than patching its output.
+///
+/// Re-running is safe and cheap: `LayoutBlock` is fully owned, so a pass
+/// re-borrows the same blocks and rebuilds nothing — in particular it does not
+/// re-advance §17.9 or §17.11.12 numbering, which live in block *building*.
+///
+/// Iterates because tightening the last page's bounds can spill its content
+/// onto a new page, making a different page last. `seen` stops a flip-flop
+/// rather than trusting a pass counter.
+///
+/// Which section's bounds to use is [`shared_page_owner_bounds`]'s question,
+/// not this one's — with a chain of continuous breaks the answer is not simply
+/// "the next section".
+fn fit_shared_page(
+    layout: &mut layout::section::SectionLayout,
+    input: FitSharedPage<'_>,
+    ctx: &layout::build::BuildContext,
+    state: &mut BuildState,
+    mut relayout: impl FnMut(Option<layout::section::FinalPageBounds>) -> layout::section::SectionLayout,
+) -> SharedPageFit {
+    let mut seen: Vec<usize> = Vec::new();
+    let mut passes = 0u8;
+
+    loop {
+        // The shared page is *not* in `pages` — `finalize` puts it in the tail
+        // so it cannot be committed twice — so its index within the section is
+        // one past the committed ones, and `pages` being empty just means the
+        // section's only page is the shared one.
+        let index = layout.pages.len();
+
+        // §17.10.6: the owner's first logical page number depends on how many
+        // pages this section committed — which excludes the shared page. It
+        // feeds even/odd slot selection, so it must be recomputed on every
+        // pass, not hoisted out of the loop; so must the whole walk, since a
+        // relayout also moves the cursor the chain resumes from.
+        let committed = index;
+        let layout::section::SectionTail::SharedWithNext(ref cont) = layout.tail else {
+            // Unreachable from `render_to_pages`, which only calls this when a
+            // `Continuous` section follows — but a page nothing shares needs no
+            // fitting, which is a better answer than an `unwrap`.
+            return SharedPageFit::NotNeeded;
+        };
+        let bounds = shared_page_owner_bounds(&input, cont, committed, ctx, state);
+
+        if input.clearance.for_page(index) == bounds {
+            return if passes == 0 {
+                SharedPageFit::NotNeeded
+            } else {
+                SharedPageFit::Converged { passes }
+            };
+        }
+        if seen.contains(&index) {
+            return SharedPageFit::Abandoned { seen };
+        }
+        seen.push(index);
+
+        *layout = relayout(Some(layout::section::FinalPageBounds { index, bounds }));
+        passes += 1;
+
+        // The override is pinned to `index`; if the re-run's shared page is
+        // still there, it now *has* the shared bounds and the loop's equality
+        // test above — which compares against the section's own clearance —
+        // would spin.
+        if layout.pages.len() == index {
+            return SharedPageFit::Converged { passes };
+        }
+    }
 }
 
 /// Full pipeline: resolve → preload fonts → layout → paint.
@@ -304,45 +470,106 @@ pub fn layout_document(
             measurer.measure(text, font)
         };
 
-        // §17.6.22: continuous sections continue on the current page.
+        // §17.6.22: a Continuous section resumes on the page the preceding one
+        // left behind; any other section starts on a fresh one.
+        //
+        // The `else` arm used to also clear `pending_continuation` defensively.
+        // That is now unreachable: a section produces
+        // `SectionTail::SharedWithNext` only when the *next* section is
+        // continuous, so a page can never be left pending for a section that
+        // would not take it.
         let continuation =
             if section.properties.section_type == Some(crate::model::SectionType::Continuous) {
                 pending_continuation.take()
             } else {
-                pending_continuation = None;
                 None
             };
 
-        let mut pages = layout_section_with_clearance(
-            &built.blocks,
-            &config,
-            Some(&measure_fn),
-            separator_indent,
-            dlh,
-            layout::section::SectionStart {
-                continuation,
-                clearance: &clearance,
-                logical_page_base,
-            },
-        );
+        // §17.6.22: does a `Continuous` section follow, sharing this section's
+        // last page?
+        let next_continuous = resolved.sections.get(section_idx + 1).is_some_and(|next| {
+            next.properties.section_type == Some(crate::model::SectionType::Continuous)
+        });
+        let owner = |bounds| {
+            if next_continuous {
+                layout::section::LastPageOwner::SharedWithNext { bounds }
+            } else {
+                layout::section::LastPageOwner::Own
+            }
+        };
+
+        let lay_out = |continuation: Option<layout::section::ContinuationState>,
+                       bounds: Option<layout::section::FinalPageBounds>| {
+            layout_section_with_clearance(
+                &built.blocks,
+                &config,
+                Some(&measure_fn),
+                separator_indent,
+                dlh,
+                layout::section::SectionStart {
+                    continuation,
+                    clearance: &clearance,
+                    last_page: owner(bounds),
+                    logical_page_base,
+                },
+            )
+        };
+
+        let mut layout = lay_out(continuation.clone(), None);
+        if next_continuous {
+            let outcome = fit_shared_page(
+                &mut layout,
+                FitSharedPage {
+                    sections: &resolved.sections,
+                    next_idx: section_idx + 1,
+                    clearance: &clearance,
+                    logical_page_base,
+                    even_and_odd,
+                    default_line_height: dlh,
+                    separator_indent,
+                    measure_text: Some(&measure_fn),
+                },
+                &ctx,
+                &mut state,
+                |bounds| lay_out(continuation.clone(), bounds),
+            );
+            log::debug!("[section {section_idx}] shared-page fit: {outcome:?}");
+        }
 
         last_config = config.clone();
 
-        // Check if the NEXT section is continuous — if so, save the last page
-        // as continuation state instead of appending it.
-        // (Peek ahead by checking the section index.)
-        let next_is_continuous = resolved.sections.get(section_idx + 1).is_some_and(|next| {
-            next.properties.section_type == Some(crate::model::SectionType::Continuous)
-        });
-
-        if next_is_continuous && !pages.is_empty() {
-            let last_page = pages.pop().unwrap();
-            let cursor_y = estimate_cursor_y(&last_page, &last_config);
-            pending_continuation = Some(layout::section::ContinuationState {
-                page: last_page,
-                cursor_y,
-            });
-        }
+        let mut pages = layout.pages;
+        // ─── §17.6.22 shared-page ownership ─────────────────────────────────
+        //
+        // A page holding a continuous break carries content from two sections,
+        // and only one header and footer can be drawn on it. **The last section
+        // on the page owns it**: the shared page stays out of this section's
+        // committed `pages` and is appended by the succeeding section instead,
+        // so it falls inside *that* section's `page_range` and is measured,
+        // selected and rendered by the ordinary §17.10 path — no second rule to
+        // drift from the first. That is what makes `titlePg` pick the
+        // succeeding section's `first` slot there (it genuinely is that
+        // section's page 1) and `evenAndOddHeaders` key on the running logical
+        // number. Covered in `tests/header_footer_selection.rs`.
+        //
+        // ECMA-376 §17.6 does not settle this. It says a continuous break
+        // starts the next section on the same page, and §17.10 says a header is
+        // selected per section, but nothing resolves the case where one page
+        // belongs to two. **Word reference render**: the rule here is a
+        // reasoned choice, not an observed one — no reference render was
+        // available while it was written. A render showing the *preceding*
+        // section's header winning would move this line and the page range it
+        // feeds, and nothing else: the relayout in `fit_shared_page` takes its
+        // bounds from whoever owns the page, so it follows the rule rather than
+        // encoding it.
+        //
+        // The shared page never entered `pages` — `finalize` put it in the tail
+        // so it cannot be committed here and appended by the succeeding section
+        // as well.
+        pending_continuation = match layout.tail {
+            layout::section::SectionTail::Complete => None,
+            layout::section::SectionTail::SharedWithNext(c) => Some(c),
+        };
 
         let page_start = all_pages.len();
         all_pages.append(&mut pages);
@@ -795,156 +1022,6 @@ mod tests {
         assert_eq!(pages[0].page_size.height.raw(), 792.0);
     }
 
-    // ─── estimate_cursor_y (H3#1) ─────────────────────────────────────────
-
-    mod cursor_y {
-        use super::*;
-        use crate::render::dimension::Pt;
-        use crate::render::geometry::{PtLineSegment, PtOffset, PtRect, PtSize};
-        use crate::render::layout::draw_command::{DrawCommand, LayoutedPage};
-        use crate::render::layout::page::PageConfig;
-
-        fn page_with(cmd: DrawCommand) -> (LayoutedPage, PageConfig) {
-            let config = PageConfig::default();
-            let mut page = LayoutedPage::new(config.page_size);
-            page.commands.push(cmd);
-            (page, config)
-        }
-
-        fn rect_at(y: f32, h: f32) -> PtRect {
-            PtRect::from_xywh(Pt::ZERO, Pt::new(y), Pt::new(10.0), Pt::new(h))
-        }
-
-        /// An empty page resumes at the top margin — the floor every case
-        /// below has to beat.
-        #[test]
-        fn empty_page_resumes_at_the_top_margin() {
-            let config = PageConfig::default();
-            let page = LayoutedPage::new(config.page_size);
-            assert_eq!(estimate_cursor_y(&page, &config), config.margins.top);
-        }
-
-        /// Every variant that occupies vertical space must move the cursor.
-        /// `EmojiCluster` and `Path` are H3#1: both were swallowed by a
-        /// `_ => continue`, so a section following them resumed at the top
-        /// margin and painted over them.
-        #[test]
-        fn every_extent_bearing_variant_advances_the_cursor() {
-            let below = Pt::new(400.0);
-            let cases: Vec<(&str, DrawCommand)> = vec![
-                (
-                    "Image",
-                    DrawCommand::Image {
-                        rect: rect_at(400.0, 50.0),
-                        image_data: crate::render::resolve::images::MediaEntry {
-                            data: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                            format: crate::model::ImageFormat::Png,
-                        },
-                        src_rect: None,
-                    },
-                ),
-                (
-                    "Rect",
-                    DrawCommand::Rect {
-                        rect: rect_at(400.0, 50.0),
-                        color: crate::render::resolve::color::RgbColor::BLACK,
-                    },
-                ),
-                (
-                    "Line",
-                    DrawCommand::Line {
-                        line: PtLineSegment::new(
-                            PtOffset::new(Pt::ZERO, Pt::new(450.0)),
-                            PtOffset::new(Pt::new(10.0), Pt::new(400.0)),
-                        ),
-                        color: crate::render::resolve::color::RgbColor::BLACK,
-                        width: Pt::new(1.0),
-                    },
-                ),
-                (
-                    "Path",
-                    DrawCommand::Path {
-                        origin: PtOffset::new(Pt::ZERO, Pt::new(400.0)),
-                        rotation: crate::model::dimension::Dimension::new(0),
-                        flip_h: false,
-                        flip_v: false,
-                        extent: PtSize::new(Pt::new(10.0), Pt::new(50.0)),
-                        paths: Vec::new(),
-                        fill: crate::render::layout::draw_command::ResolvedFill::None,
-                        stroke: None,
-                        effects: Vec::new(),
-                    },
-                ),
-            ];
-
-            for (label, cmd) in cases {
-                let (page, config) = page_with(cmd);
-                let y = estimate_cursor_y(&page, &config);
-                assert!(
-                    y > below,
-                    "{label} occupies y=400..450 but the cursor resumed at {y:?} — \
-                     the next section would paint over it"
-                );
-            }
-        }
-
-        /// The emoji case, kept separate because it is the one reproduced
-        /// end-to-end: a paragraph containing only an emoji, followed by a
-        /// continuous section break, resumed at exactly `margins.top`.
-        #[test]
-        fn emoji_cluster_advances_the_cursor() {
-            let (page, config) = page_with(DrawCommand::EmojiCluster {
-                rect: rect_at(36.0, 47.25),
-                text: "\u{1F4DE}".into(),
-                typeface: emoji_test_typeface(),
-                size: Pt::new(36.0),
-                presentation: crate::render::emoji::cluster::EmojiPresentation::Emoji,
-                structure: crate::render::emoji::cluster::EmojiStructure::Single,
-            });
-            assert_eq!(
-                estimate_cursor_y(&page, &config),
-                Pt::new(83.25),
-                "the cursor must clear the emoji's box, not sit inside it"
-            );
-        }
-
-        fn emoji_test_typeface() -> crate::render::fonts::TypefaceEntry {
-            use skia_safe::{FontMgr, FontStyle};
-            let tf = FontMgr::new()
-                .legacy_make_typeface(None::<&str>, FontStyle::normal())
-                .expect("system default typeface");
-            let id = crate::render::fonts::TypefaceId::from(&tf);
-            crate::render::fonts::TypefaceEntry {
-                typeface: tf,
-                origin: crate::render::fonts::TypefaceOrigin::System { typeface_id: id },
-            }
-        }
-
-        /// Annotations sit on top of content that already contributed its own
-        /// extent, and a destination is a point. Counting them would push the
-        /// cursor past content that is not there.
-        #[test]
-        fn annotations_and_destinations_contribute_nothing() {
-            for cmd in [
-                DrawCommand::LinkAnnotation {
-                    rect: rect_at(400.0, 50.0),
-                    url: "https://example.invalid".into(),
-                },
-                DrawCommand::InternalLink {
-                    rect: rect_at(400.0, 50.0),
-                    destination: "anchor".into(),
-                },
-                DrawCommand::NamedDestination {
-                    position: PtOffset::new(Pt::ZERO, Pt::new(400.0)),
-                    name: "anchor".into(),
-                },
-            ] {
-                let (page, config) = page_with(cmd);
-                assert_eq!(estimate_cursor_y(&page, &config), config.margins.top);
-            }
-        }
-    }
-
     // ─── Error surface (H3#4) ─────────────────────────────────────────────
 
     /// The only condition the pipeline cannot render its way out of. Emptiness
@@ -970,5 +1047,94 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/Count 1"), "exactly one blank page");
+    }
+
+    // ── §17.6.22 speculative clearance peek (issue #83, plan §1) ────────────
+
+    /// A header paragraph carrying a `w:footnoteReference`.
+    ///
+    /// §17.11.12: headers do not render footnote *bodies*, but the walk still
+    /// records the reference — `build_non_story_content` drains the pending
+    /// list precisely so it is not attributed to the next body paragraph. What
+    /// the drain does **not** undo is the display counter, which is why
+    /// measuring a header is a document-order side effect.
+    fn header_with_footnote_ref() -> Vec<Block> {
+        vec![Block::Paragraph(Box::new(Paragraph {
+            style_id: None,
+            properties: ParagraphProperties::default(),
+            mark_run_properties: None,
+            content: vec![Inline::FootnoteRef(NoteId::new(2))],
+            rsids: ParagraphRevisionIds::default(),
+        }))]
+    }
+
+    fn section_with_header(
+        headers: Vec<Block>,
+    ) -> crate::render::resolve::sections::ResolvedSection {
+        crate::render::resolve::sections::ResolvedSection {
+            blocks: vec![para("body")],
+            properties: SectionProperties::default(),
+            headers: crate::render::resolve::header_footer::HeaderFooterSet {
+                default: Some(headers),
+                first: None,
+                even: None,
+            },
+            footers: crate::render::resolve::header_footer::HeaderFooterSet::default(),
+        }
+    }
+
+    /// §17.6.22: laying out a section needs the bounds of the page its last
+    /// page will share with a following `Continuous` section, so the following
+    /// section's header must be measured *before* the renderer reaches it.
+    ///
+    /// That measurement is a document-order side effect (see
+    /// [`header_with_footnote_ref`]). Wrapped in `BuildState::speculatively` it
+    /// must leave numbering exactly as it found it — otherwise footnote marks
+    /// would depend on how far ahead the renderer chose to look rather than on
+    /// the file.
+    #[test]
+    fn peeking_at_a_following_sections_clearance_does_not_consume_a_footnote_number() {
+        let doc = empty_doc();
+        let resolved = resolve::resolve(doc);
+        let font_mgr = skia_safe::FontMgr::new();
+        let registry = fonts::FontRegistry::build(font_mgr, &[], &[]).expect("registry");
+        let measurer = layout::measurer::TextMeasurer::new(&registry);
+        let ctx = layout::build::BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        let section = section_with_header(header_with_footnote_ref());
+        let config = layout::page::PageConfig::from_section(&section.properties);
+        let dlh = crate::render::dimension::Pt::new(12.0);
+
+        let measure = |state: &mut BuildState| {
+            measure_header_footer_clearance(&config, &section, &ctx, state, dlh, false, 1)
+        };
+
+        // Direct measurement: the fixture must really consume a number, or the
+        // rollback below would be proving nothing.
+        let mut direct = BuildState::default();
+        let before_direct = format!("{:?}", direct.footnotes);
+        let _ = measure(&mut direct);
+        let after_direct = format!("{:?}", direct.footnotes);
+        assert_ne!(
+            before_direct, after_direct,
+            "fixture must actually advance §17.11.12 numbering, else this test \
+             cannot distinguish a working rollback from a no-op"
+        );
+
+        // Speculative measurement: identical state afterwards.
+        let mut peeked = BuildState::default();
+        let before_peek = format!("{:?}", peeked.footnotes);
+        let clearance = peeked.speculatively(|s| measure(s));
+        assert_eq!(
+            before_peek,
+            format!("{:?}", peeked.footnotes),
+            "a speculative clearance peek must not consume a footnote number"
+        );
+
+        // And the measurement itself still crossed the rollback boundary.
+        let bounds = clearance.for_page(0);
+        assert!(bounds.top >= config.margins.top);
     }
 }

@@ -37,6 +37,7 @@ use crate::render::geometry::PtRect;
 struct LayoutCtx<'cx> {
     config: &'cx PageConfig,
     clearance: &'cx HeaderFooterClearance,
+    last_page: LastPageOwner,
     measure_text: super::super::paragraph::MeasureTextFn<'cx>,
     separator_indent: Pt,
     default_line_height: Pt,
@@ -44,7 +45,16 @@ struct LayoutCtx<'cx> {
 
 impl LayoutCtx<'_> {
     fn page_bounds(&self, section_page_index: usize) -> PageBodyBounds {
-        self.clearance.for_page(section_page_index)
+        match self.last_page.bounds_override() {
+            // §17.6.22: this page is shared with a following Continuous
+            // section, which owns its header and footer (see `SectionStart`).
+            // Every *other* page keeps this section's own clearance — which is
+            // why the override is indexed rather than applied to "the last
+            // page seen so far": content that spills off the shared page must
+            // not drag the override along with it.
+            Some(FinalPageBounds { index, bounds }) if index == section_page_index => bounds,
+            _ => self.clearance.for_page(section_page_index),
+        }
     }
 }
 
@@ -70,6 +80,15 @@ struct PageLayoutState<'doc> {
     current_col: usize,
     /// §17.6.4: y at which columns start on the current page.
     column_top: Pt,
+    /// §17.6.22: true while `column_top` is a *continuation* cursor rather than
+    /// a page top — the column set inherited from a continuous break, which
+    /// starts part-way down a page the preceding section already filled.
+    ///
+    /// Such a column is strictly shorter than the ones that follow it, which
+    /// makes it the one case where being at a column's top does not mean having
+    /// as much room as anywhere else. See
+    /// [`at_full_height_column_top`](PageLayoutState::at_full_height_column_top).
+    inherited_short_columns: bool,
     /// Effective bottom boundary — reduced as footnotes are reserved.
     bottom: Pt,
     /// Footnotes accumulated for the current page.
@@ -100,6 +119,10 @@ struct PageLayoutState<'doc> {
     /// §17.3.3.1: an inline page break at the end of a paragraph defers the
     /// page break to the start of the next block.
     pending_page_break: bool,
+    /// §17.11.23: notes reserved by a *previous* section on this same page,
+    /// carried across a continuous break unflushed so one separator covers
+    /// them all. Owned, because the blocks they came from are gone.
+    carried_footnotes: Vec<(Vec<super::super::fragment::Fragment>, ParagraphStyle)>,
 }
 
 impl<'doc> PageLayoutState<'doc> {
@@ -109,33 +132,109 @@ impl<'doc> PageLayoutState<'doc> {
         bounds: PageBodyBounds,
         logical_page_base: usize,
     ) -> Self {
-        let (current_page, cursor_y) = match continuation {
-            Some(c) => (c.page, c.cursor_y),
-            None => (LayoutedPage::new(config.page_size), bounds.top),
-        };
-        PageLayoutState {
-            pages: Vec::new(),
-            column_top: cursor_y,
-            last_para_start_y: cursor_y,
-            current_page,
-            cursor_y,
-            page_index: 0,
-            logical_page_base,
-            page_top: bounds.top,
-            current_col: 0,
-            bottom: bounds.bottom,
-            page_footnotes: Vec::new(),
-            first_on_section_page: true,
-            prev_space_after: Pt::ZERO,
-            prev_style_id: None,
-            prev_borders: None,
-            page_floats: Vec::new(),
-            current_page_abs_floats: Vec::new(),
-            abs_floats_dirty: true,
-            page_start_block: 0,
-            prev_table_style_id: None,
-            pending_page_break: false,
+        // §17.6.22: a continuation resumes *inside* a page, so it inherits
+        // that page's in-progress state rather than a fresh page's defaults.
+        // Columns are the deliberate exception — see below.
+        match continuation {
+            Some(c) => PageLayoutState {
+                pages: Vec::new(),
+                column_top: c.cursor_y,
+                last_para_start_y: c.last_para_start_y,
+                current_page: c.page,
+                cursor_y: c.cursor_y,
+                page_index: 0,
+                logical_page_base,
+                page_top: bounds.top,
+                // §17.6.4: a continuous break is the usual way to *change* the
+                // column count, so the incoming index may not exist in this
+                // section's config — carrying it panics the `config.columns
+                // [state.current_col]` below (3 columns before the break, 1
+                // after: "len is 1 but the index is 2"). Restarting at column 0
+                // from the shared cursor is both safe and what the change
+                // means.
+                //
+                // Word additionally *balances* the preceding section's columns
+                // at such a break, so its content is spread evenly above the
+                // new column set rather than left as it fell. That is not
+                // implemented: it needs the preceding section's last page
+                // re-flowed to an equal-height target, which is a different
+                // problem from the clearance relayout around it.
+                current_col: 0,
+                // The inherited column set starts at the shared cursor, so it
+                // is shorter than a fresh page's — *strictly* shorter, which is
+                // the property the predicate's reasoning rests on. A break
+                // landing exactly on the page top inherits a full-height column
+                // and needs no exception.
+                inherited_short_columns: c.cursor_y > bounds.top,
+                bottom: c.bottom,
+                page_footnotes: Vec::new(),
+                carried_footnotes: c.page_footnotes,
+                // §17.3.1.33: the page top is above the preceding section's
+                // content, not here — space_before must not be suppressed.
+                first_on_section_page: false,
+                prev_space_after: c.prev_space_after,
+                prev_style_id: c.prev_style_id,
+                prev_borders: c.prev_borders,
+                page_floats: c.page_floats,
+                current_page_abs_floats: Vec::new(),
+                abs_floats_dirty: true,
+                page_start_block: 0,
+                prev_table_style_id: c.prev_table_style_id,
+                pending_page_break: c.pending_page_break,
+            },
+            None => PageLayoutState {
+                pages: Vec::new(),
+                column_top: bounds.top,
+                last_para_start_y: bounds.top,
+                current_page: LayoutedPage::new(config.page_size),
+                cursor_y: bounds.top,
+                page_index: 0,
+                logical_page_base,
+                page_top: bounds.top,
+                current_col: 0,
+                inherited_short_columns: false,
+                bottom: bounds.bottom,
+                page_footnotes: Vec::new(),
+                carried_footnotes: Vec::new(),
+                first_on_section_page: true,
+                prev_space_after: Pt::ZERO,
+                prev_style_id: None,
+                prev_borders: None,
+                page_floats: Vec::new(),
+                current_page_abs_floats: Vec::new(),
+                abs_floats_dirty: true,
+                page_start_block: 0,
+                prev_table_style_id: None,
+                pending_page_break: false,
+            },
         }
+    }
+
+    /// True when the cursor sits at the top of a column that already offers as
+    /// much height as any column this section could move the content to — so
+    /// moving it again cannot help, and the caller must place it in-line and
+    /// let it overflow rather than loop.
+    ///
+    /// §17.6.4 makes a fresh column equivalent to a fresh page, which is why
+    /// the test is against `column_top` and not the page top. §17.6.22 is the
+    /// one exception: a continuation's column set starts at the *shared
+    /// cursor*, part-way down an inherited page, so it is strictly shorter than
+    /// the ones after it and moving content off it genuinely does help.
+    ///
+    /// Reading the raw `cursor_y <= column_top` instead strands content on the
+    /// shared page: a §17.3.1.15 `keepNext` chain that starts there is **torn**,
+    /// its head left behind while the rest moves on — which the same document
+    /// without the break does not do.
+    ///
+    /// Used at the two sites that move a whole block that does not fit. The
+    /// paragraph-*splitting* site deliberately keeps the raw test; the reason
+    /// it trades differently is recorded there.
+    ///
+    /// Termination is unaffected. The exception only ever *permits* one move,
+    /// onto a page whose own column set is full height — where the flag is
+    /// clear and the ordinary guard applies again.
+    fn at_full_height_column_top(&self) -> bool {
+        self.cursor_y <= self.column_top && !self.inherited_short_columns
     }
 
     /// Render accumulated footnotes onto the current page and clear the list.
@@ -144,19 +243,36 @@ impl<'doc> PageLayoutState<'doc> {
         PageParity::of_page(self.logical_page_base + self.page_index)
     }
 
+    /// §17.11.23: render every note owed by this page under **one** separator.
+    ///
+    /// Notes carried across a continuous break are rendered together with this
+    /// section's own, because a separator belongs to a page, not to a section:
+    /// flushing per section draws a second rule and positions the second block
+    /// from the page's unreduced bottom, laying it over the first.
+    ///
+    /// The vectors are taken out first so the borrow of `current_page` and the
+    /// borrows of the note fragments do not overlap; both are cleared by the
+    /// flush regardless.
     fn flush_footnotes(&mut self, ctx: &LayoutCtx<'_>) {
-        if !self.page_footnotes.is_empty() {
-            render_page_footnotes(
-                &mut self.current_page,
-                ctx.config,
-                &self.page_footnotes,
-                ctx.default_line_height,
-                ctx.measure_text,
-                ctx.separator_indent,
-                ctx.page_bounds(self.page_index).bottom,
-            );
-            self.page_footnotes.clear();
+        if self.page_footnotes.is_empty() && self.carried_footnotes.is_empty() {
+            return;
         }
+        let carried = std::mem::take(&mut self.carried_footnotes);
+        let own = std::mem::take(&mut self.page_footnotes);
+        let mut all: Vec<(&[super::super::fragment::Fragment], &ParagraphStyle)> = carried
+            .iter()
+            .map(|(frags, style)| (frags.as_slice(), style))
+            .collect();
+        all.extend(own.iter().copied());
+        render_page_footnotes(
+            &mut self.current_page,
+            ctx.config,
+            &all,
+            ctx.default_line_height,
+            ctx.measure_text,
+            ctx.separator_indent,
+            ctx.page_bounds(self.page_index).bottom,
+        );
     }
 
     /// Commit the current page and start a fresh one, resetting all per-page state.
@@ -173,17 +289,63 @@ impl<'doc> PageLayoutState<'doc> {
         self.cursor_y = bounds.top;
         self.column_top = bounds.top;
         self.current_col = 0;
+        // §17.6.22: whatever page we came from, this one starts at its own top,
+        // so the inherited short column set is behind us.
+        self.inherited_short_columns = false;
         self.bottom = bounds.bottom;
         self.page_start_block = block_idx;
         self.abs_floats_dirty = true;
         self.page_floats.clear();
     }
 
-    /// Flush any remaining footnotes, push the last page, and return all pages.
-    fn finalize(mut self, ctx: &LayoutCtx<'_>) -> Vec<LayoutedPage> {
-        self.flush_footnotes(ctx);
-        self.pages.push(self.current_page);
-        self.pages
+    /// Flush any remaining footnotes, push the last page, and return all pages
+    /// together with the cursor the section left off at.
+    ///
+    /// The cursor is *returned* rather than recovered from the emitted commands
+    /// because the two disagree: the last command's extent is not the flow
+    /// position — trailing `space_after`, an empty final paragraph and a
+    /// footnote block at the page bottom all move one without the other. A
+    /// §17.6.22 continuation resumes at the flow position.
+    fn finalize(mut self, ctx: &LayoutCtx<'_>) -> SectionLayout {
+        match ctx.last_page {
+            LastPageOwner::Own => {
+                self.flush_footnotes(ctx);
+                self.pages.push(self.current_page);
+                SectionLayout {
+                    pages: self.pages,
+                    tail: SectionTail::Complete,
+                }
+            }
+            // §17.6.22: the last page belongs to the section that follows. It
+            // is handed over *unfinished* — footnotes deliberately unflushed,
+            // so the succeeding section's flush covers both under one
+            // separator — and stays out of `pages` so no caller can commit it
+            // twice.
+            LastPageOwner::SharedWithNext { .. } => {
+                let carried = std::mem::take(&mut self.carried_footnotes);
+                let own: Vec<_> = self
+                    .page_footnotes
+                    .iter()
+                    .map(|(frags, style)| (frags.to_vec(), (*style).clone()))
+                    .collect();
+                SectionLayout {
+                    pages: self.pages,
+                    tail: SectionTail::SharedWithNext(ContinuationState {
+                        page: self.current_page,
+                        cursor_y: self.cursor_y,
+                        bottom: self.bottom,
+                        page_footnotes: carried.into_iter().chain(own).collect(),
+                        page_floats: self.page_floats,
+                        prev_space_after: self.prev_space_after,
+                        prev_style_id: self.prev_style_id,
+                        prev_borders: self.prev_borders,
+                        prev_table_style_id: self.prev_table_style_id,
+                        last_para_start_y: self.last_para_start_y,
+                        pending_page_break: self.pending_page_break,
+                    }),
+                }
+            }
+        }
     }
 
     /// The floats affecting text at the current cursor on the current
@@ -305,6 +467,9 @@ struct PageReplayCheckpoint<'doc> {
     page_top: Pt,
     current_col: usize,
     column_top: Pt,
+    /// Saved with `column_top`, which it qualifies: restoring one without the
+    /// other would describe a column set that never existed.
+    inherited_short_columns: bool,
     bottom: Pt,
     page_footnotes: Vec<(
         &'doc [super::super::fragment::Fragment],
@@ -332,6 +497,7 @@ impl<'doc> PageReplayCheckpoint<'doc> {
             page_top: state.page_top,
             current_col: state.current_col,
             column_top: state.column_top,
+            inherited_short_columns: state.inherited_short_columns,
             bottom: state.bottom,
             page_footnotes: state.page_footnotes.clone(),
             first_on_section_page: state.first_on_section_page,
@@ -355,6 +521,7 @@ impl<'doc> PageReplayCheckpoint<'doc> {
         state.page_top = self.page_top;
         state.current_col = self.current_col;
         state.column_top = self.column_top;
+        state.inherited_short_columns = self.inherited_short_columns;
         state.bottom = self.bottom;
         state.page_footnotes.clone_from(&self.page_footnotes);
         state.first_on_section_page = self.first_on_section_page;
@@ -1034,6 +1201,24 @@ fn emit_split_paragraph<'doc>(
         }
 
         // §17.6.4: a fresh column offers full height, like a fresh page.
+        //
+        // §17.6.22: deliberately the raw test, *not*
+        // `at_full_height_column_top`. An inherited column really is shorter,
+        // but the branch this feeds trades differently from the two block-move
+        // sites that do use the predicate. Here `at_page_top` selects "emit the
+        // whole paragraph and let it overflow" over "move it", and the overflow
+        // is bounded and often invisible: `n_fit` charges the paragraph's
+        // trailing `space_after` against the column bottom, so a remainder
+        // whose *text* fits still counts as not fitting. Honouring the short
+        // column there abandons the rest of the column set to avoid overflowing
+        // by whitespace — on `sample-docx-files-sample3.docx`, a 6-line
+        // paragraph split 3/3 across two columns instead moves its second half
+        // to the next page and leaves column 2 empty.
+        //
+        // The real defect is that trailing spacing is charged at a column
+        // bottom where it cannot be seen; fixing that belongs with §17.3.1.33
+        // and would move output for documents that have no section break at
+        // all.
         let at_page_top = state.cursor_y <= state.column_top;
         let avail = (state.bottom - state.cursor_y).max(Pt::ZERO);
         // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are
@@ -1225,9 +1410,54 @@ pub(crate) struct SectionStart<'a> {
     pub continuation: Option<ContinuationState>,
     /// Header/footer clearances, selected per physical page in the section.
     pub clearance: &'a HeaderFooterClearance,
+    /// §17.6.22: what becomes of this section's last page.
+    pub last_page: LastPageOwner,
     /// §17.10.6: logical number of the section's first page, with
     /// `w:pgNumType/@start` applied. Drives §20.4.3.1 float mirroring.
     pub logical_page_base: usize,
+}
+
+/// §17.6.22: who owns a section's last page.
+///
+/// One decision, one type. As a `bool` beside an `Option<FinalPageBounds>` the
+/// two could disagree — "shared but no bounds", "bounds but not shared" — and
+/// both spellings mean something different to `finalize`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LastPageOwner {
+    /// Committed to the document like any other page.
+    Own,
+    /// A following `Continuous` section shares it and owns its header and
+    /// footer. `bounds` is that section's `for_page(0)`, known only once this
+    /// section's page count is — so it is `None` on the first pass and `Some`
+    /// on any relayout.
+    SharedWithNext { bounds: Option<FinalPageBounds> },
+}
+
+impl LastPageOwner {
+    fn bounds_override(self) -> Option<FinalPageBounds> {
+        match self {
+            LastPageOwner::SharedWithNext { bounds } => bounds,
+            LastPageOwner::Own => None,
+        }
+    }
+}
+
+/// §17.6.22: the body bounds one page of a section must use because a following
+/// `Continuous` section shares it.
+///
+/// A page holding a continuous break is drawn with the header and footer of the
+/// **last** section on it — see the ownership rule at `render::render_to_pages`,
+/// which is where it is decided.
+///
+/// Index and bounds travel as one value because they are one decision: an index
+/// without bounds, or bounds without an index, cannot be acted on, and as two
+/// `Option`s they could disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FinalPageBounds {
+    /// 0-based physical page index within the section.
+    pub index: usize,
+    /// The succeeding section's `for_page(0)` bounds.
+    pub bounds: PageBodyBounds,
 }
 
 /// Lay out a sequence of blocks into pages.
@@ -1252,11 +1482,39 @@ pub fn layout_section(
         SectionStart {
             continuation,
             clearance: &clearance,
+            // Laid out on its own, nothing follows on the last page.
+            last_page: LastPageOwner::Own,
             // A section laid out on its own starts at page 1 — the §17.10.6
             // renumbering only exists across a document's section list.
             logical_page_base: 1,
         },
     )
+    .pages
+}
+
+/// One section's laid-out pages, plus what happened to its last one.
+pub(crate) struct SectionLayout {
+    /// Pages this section commits. When `tail` is
+    /// [`SectionTail::SharedWithNext`] the shared page is **not** here — it
+    /// lives inside the tail, so "popped off `pages` and stashed elsewhere" is
+    /// not a state a caller can construct or forget to handle.
+    pub pages: Vec<LayoutedPage>,
+    pub tail: SectionTail,
+}
+
+/// §17.6.22: what became of a section's last page.
+///
+/// `SharedWithNext` is much larger than `Complete` — it carries a whole page.
+/// Boxing it would add an allocation per section to shrink a value that exists
+/// once per section and is immediately destructured, so the size difference is
+/// accepted for the same reason [`LayoutBlock`]'s is.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum SectionTail {
+    /// Nothing follows on it; every page is in `pages`.
+    Complete,
+    /// A `Continuous` section continues on it. Carries the page and the
+    /// in-progress state that section resumes from.
+    SharedWithNext(ContinuationState),
 }
 
 /// Lay out a sequence of blocks using header/footer clearances selected for
@@ -1268,10 +1526,11 @@ pub(crate) fn layout_section_with_clearance(
     separator_indent: Pt,
     default_line_height: Pt,
     start: SectionStart<'_>,
-) -> Vec<LayoutedPage> {
+) -> SectionLayout {
     let SectionStart {
         continuation,
         clearance,
+        last_page,
         logical_page_base,
     } = start;
     let content_width = config.content_width();
@@ -1280,16 +1539,13 @@ pub(crate) fn layout_section_with_clearance(
     let ctx = LayoutCtx {
         config,
         clearance,
+        last_page,
         measure_text,
         separator_indent,
         default_line_height,
     };
-    let mut state = PageLayoutState::new(
-        config,
-        continuation,
-        clearance.for_page(0),
-        logical_page_base,
-    );
+    let mut state =
+        PageLayoutState::new(config, continuation, ctx.page_bounds(0), logical_page_base);
 
     // Column-aware constraints and x-offset for the current column.
     let col_constraints = |col: usize, page_height: Pt| -> BoxConstraints {
@@ -1423,7 +1679,7 @@ pub(crate) fn layout_section_with_clearance(
                                     )
                             }
                         };
-                        if should_move && state.cursor_y > state.column_top {
+                        if should_move && !state.at_full_height_column_top() {
                             state.push_new_page(block_idx, &ctx);
                             state.prev_space_after = Pt::ZERO;
                         }
@@ -1693,7 +1949,7 @@ pub(crate) fn layout_section_with_clearance(
                             let mut para = placed.emit_full();
                             // Column/page overflow: advance column, then page.
                             if state.cursor_y + para.size.height > state.bottom
-                                && state.cursor_y > state.column_top
+                                && !state.at_full_height_column_top()
                             {
                                 // `placed` (which borrows `effective_style`) is no
                                 // longer needed; drop it before mutating the style

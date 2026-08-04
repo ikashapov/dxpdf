@@ -138,6 +138,23 @@ impl HeaderFooterClearance {
         )
     }
 
+    /// Body bounds for the section's `section_page_index`-th physical page.
+    ///
+    /// The index is *within the section*, not the document, because that is what
+    /// §17.10.6 `titlePg` and §17.10.1 `evenAndOddHeaders` select on — page 0
+    /// takes the `first` slot, and the logical number that drives even/odd is
+    /// this section's base plus the index.
+    ///
+    /// §17.6.22: a page shared with a following `Continuous` section is that
+    /// section's page 0, so `for_page(0)` on the *succeeding* section's
+    /// clearance yields the bounds the shared page must actually use — see the
+    /// ownership rule at `render::render_to_pages`, and `render::fit_shared_page`
+    /// for how those bounds get back into the preceding section's layout. It is
+    /// the one call site where a section is asked about a page it does not
+    /// commit.
+    ///
+    /// The configured `w:pgMar` top and bottom are a **floor**: a header shorter
+    /// than the margin does not pull body content up into it.
     pub(crate) fn for_page(&self, section_page_index: usize) -> PageBodyBounds {
         let first_in_section = section_page_index == 0;
         let logical_page_number = self.logical_page_base + section_page_index;
