@@ -319,9 +319,11 @@ pub enum StNumberFormat {
     Ordinal,
     CardinalText,
     OrdinalText,
+    RussianUpper,
+    RussianLower,
     None,
     /// §17.18.59 ST_NumberFormat lists ~60 values (hebrew1, japaneseCounting,
-    /// decimalZero, russianLower, hex, …); the renderer models only the common
+    /// decimalZero, hex, …); the renderer models only the common
     /// subset above. This is the **exception to the strict-enum rule**: a large,
     /// extensible value space where a legal-but-unsupported value must degrade,
     /// not fail — otherwise one exotic `<w:numFmt>` would fail the *whole*
@@ -343,6 +345,8 @@ impl From<StNumberFormat> for NumberFormat {
             StNumberFormat::Ordinal => Self::Ordinal,
             StNumberFormat::CardinalText => Self::CardinalText,
             StNumberFormat::OrdinalText => Self::OrdinalText,
+            StNumberFormat::RussianUpper => Self::RussianUpper,
+            StNumberFormat::RussianLower => Self::RussianLower,
             StNumberFormat::None => Self::None,
             StNumberFormat::Other => Self::Decimal,
         }
@@ -1080,18 +1084,24 @@ mod tests {
             de::<StNumberFormat>("bullet").unwrap(),
             StNumberFormat::Bullet
         );
+        assert_eq!(
+            de::<StNumberFormat>("russianUpper").unwrap(),
+            StNumberFormat::RussianUpper
+        );
+        assert_eq!(
+            de::<StNumberFormat>("russianLower").unwrap(),
+            StNumberFormat::RussianLower
+        );
+        assert_eq!(
+            NumberFormat::from(StNumberFormat::RussianUpper),
+            NumberFormat::RussianUpper
+        );
     }
     #[test]
     fn number_format_unsupported_legal_values_degrade_not_fail() {
         // §17.18.59 has ~60 legal values; unsupported ones must parse (→ Other)
         // and convert to Decimal rather than failing the whole document parse.
-        for v in [
-            "hex",
-            "hebrew1",
-            "japaneseCounting",
-            "decimalZero",
-            "russianLower",
-        ] {
+        for v in ["hex", "hebrew1", "japaneseCounting", "decimalZero"] {
             assert_eq!(
                 de::<StNumberFormat>(v).unwrap(),
                 StNumberFormat::Other,

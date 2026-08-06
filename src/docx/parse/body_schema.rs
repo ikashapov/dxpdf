@@ -233,6 +233,12 @@ pub(crate) enum RunChildXml {
     ContinuationSeparator,
     #[serde(rename = "AlternateContent")]
     AlternateContent(AltContentXml),
+    /// `<w:commentReference>` — comment anchor inside a run. Comments are not
+    /// rendered (matching Word's default print output); parsed only so a
+    /// commented run doesn't fail the document. The range markers
+    /// (`commentRangeStart/End`) are handled at the paragraph level above.
+    #[serde(rename = "commentReference")]
+    CommentReference(BookmarkEndXml),
     /// `<w:rPr>` captured separately; included here for serde ordering.
     #[serde(rename = "rPr")]
     RPr(Box<RPrXml>),

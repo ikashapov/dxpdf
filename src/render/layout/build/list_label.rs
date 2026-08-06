@@ -48,6 +48,15 @@ pub(super) fn inject_list_label(
     {
         use std::collections::hash_map::Entry;
         let counters = &mut state.list_counters;
+        // Word semantics: an item at level L instantiates every not-yet-active
+        // ancestor counter at its start value without consuming it — after
+        // "1.1.1"-style items, the next top-level item continues as "2.", not
+        // "1.". Only ancestors missing from the map are touched.
+        for ancestor in 0..level {
+            counters
+                .entry((num_id, ancestor))
+                .or_insert_with(|| levels.get(ancestor as usize).map(|l| l.start).unwrap_or(1));
+        }
         match counters.entry((num_id, level)) {
             Entry::Vacant(slot) => {
                 slot.insert(levels.get(level as usize).map(|l| l.start).unwrap_or(1));
@@ -65,6 +74,12 @@ pub(super) fn inject_list_label(
     }
 
     let level_def = levels.get(level as usize);
+
+    // §17.9.23: the level's indentation with the paragraph's direct overrides
+    // applied. Everything below — hanging width, implicit tab stop, merged
+    // paragraph indentation — must use this one value, or the suffix tab
+    // lands somewhere other than where the body text wraps.
+    let effective_ind = effective_indentation(para, level_def);
 
     // §17.9.10: check for picture bullet before text label.
     let pic_bullet_injected = level_def
@@ -94,7 +109,7 @@ pub(super) fn inject_list_label(
         });
 
     if let Some((label_frag, label_height)) = pic_bullet_injected {
-        let hanging = extract_hanging(level_def);
+        let hanging = extract_hanging(effective_ind.as_ref());
         // §17.9.29: `Nothing` drops the separator entirely. `Tab` and `Space`
         // both advance via a tab here — a picture bullet has no text font to emit
         // a literal space with, and image-bullet + space is vanishingly rare.
@@ -123,19 +138,7 @@ pub(super) fn inject_list_label(
         fragments.insert(0, label_frag);
 
         if !drop_separator {
-            if let Some(lvl_left) = level_def
-                .and_then(|l| l.indentation.as_ref())
-                .and_then(|ind| ind.start)
-            {
-                merged_props.tabs.insert(
-                    0,
-                    crate::model::TabStop {
-                        position: lvl_left,
-                        alignment: crate::model::TabAlignment::Left,
-                        leader: crate::model::TabLeader::None,
-                    },
-                );
-            }
+            insert_implicit_tab_stop(merged_props, effective_ind.as_ref());
         }
     } else {
         inject_text_label(
@@ -148,28 +151,55 @@ pub(super) fn inject_list_label(
             level,
             level_def,
             state.shape_auto_fit,
+            effective_ind.as_ref(),
         );
     }
 
     // §17.9.23: numbering level pPr overrides the paragraph style.
     // Only the paragraph's direct ind overrides the numbering level.
-    if let Some(lvl_ind) = levels
-        .get(level as usize)
-        .and_then(|l| l.indentation.as_ref())
-    {
-        let mut ind = *lvl_ind;
-        if let Some(direct) = para.properties.indentation {
-            if let Some(start) = direct.start {
-                ind.start = Some(start);
-            }
-            if let Some(end) = direct.end {
-                ind.end = Some(end);
-            }
-            if let Some(first_line) = direct.first_line {
-                ind.first_line = Some(first_line);
-            }
-        }
+    if let Some(ind) = effective_ind {
         merged_props.indentation = Some(ind);
+    }
+}
+
+/// §17.9.23: the numbering level's indentation with the paragraph's *direct*
+/// `w:ind` overrides applied field-by-field. `None` when the level defines no
+/// indentation at all (the paragraph then keeps its style-cascade value).
+fn effective_indentation(
+    para: &model::Paragraph,
+    level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
+) -> Option<model::Indentation> {
+    let mut ind = *level_def?.indentation.as_ref()?;
+    if let Some(direct) = para.properties.indentation {
+        if let Some(start) = direct.start {
+            ind.start = Some(start);
+        }
+        if let Some(end) = direct.end {
+            ind.end = Some(end);
+        }
+        if let Some(first_line) = direct.first_line {
+            ind.first_line = Some(first_line);
+        }
+    }
+    Some(ind)
+}
+
+/// Add the implicit tab stop at the effective text-indent position so the
+/// label's suffix tab lands where the body text wraps (Word puts an implicit
+/// stop at the paragraph's left indent for numbered paragraphs).
+fn insert_implicit_tab_stop(
+    merged_props: &mut ParagraphProperties,
+    effective_ind: Option<&model::Indentation>,
+) {
+    if let Some(left) = effective_ind.and_then(|ind| ind.start) {
+        merged_props.tabs.insert(
+            0,
+            crate::model::TabStop {
+                position: left,
+                alignment: crate::model::TabAlignment::Left,
+                leader: crate::model::TabLeader::None,
+            },
+        );
     }
 }
 
@@ -185,6 +215,7 @@ fn inject_text_label(
     level: u8,
     level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
     auto_fit: crate::render::layout::ShapeAutoFit,
+    effective_ind: Option<&model::Indentation>,
 ) {
     let num_id = model::NumId::new(merged_props.numbering.as_ref().unwrap().num_id);
 
@@ -260,7 +291,7 @@ fn inject_text_label(
     let (w, m) = ctx.measurer.measure(&label_text, &label_font);
     let h = m.height();
 
-    let hanging = extract_hanging(level_def);
+    let hanging = extract_hanging(effective_ind);
     // §17.9.7: lvlJc controls label justification within the hanging indent area.
     let jc = level_def.and_then(|l| l.justification);
     let text_offset = match jc {
@@ -269,7 +300,7 @@ fn inject_text_label(
         _ => Pt::ZERO,
     };
     let label_width = w;
-    let label_frag = Fragment::Text {
+    let mut label_frag = Fragment::Text {
         text: Rc::from(label_text.as_str()),
         font: Rc::new(label_font.clone()),
         color: label_color,
@@ -290,33 +321,39 @@ fn inject_text_label(
     use crate::model::LevelSuffix;
     match level_def.map(|l| l.suffix).unwrap_or_default() {
         LevelSuffix::Tab => {
-            let tab_fitting = (hanging - label_width).max(Pt::ZERO);
-            fragments.insert(
-                0,
-                Fragment::Tab {
-                    line_height: h,
-                    // §17.3.1.38: the label's own formatting is what a leader
-                    // on this separator is drawn in.
-                    font: Rc::new(label_font.clone()),
-                    color: label_color,
-                    fitting_width: Some(tab_fitting),
-                },
+            let gap = (hanging - label_width).max(Pt::ZERO);
+            // §17.3.1.37 suppresses paragraph alignment on lines that contain
+            // tabs, but the label's suffix tab is layout machinery, not typed
+            // content — Word still centers "1.  Heading". For centered and
+            // right-aligned paragraphs, bake the label→text gap into the label
+            // fragment's advance instead of emitting a tab: alignment then
+            // applies to the whole line, and the label→text distance stays the
+            // hanging width, exactly as in the left-aligned case.
+            let alignment_suppresses_tab = matches!(
+                merged_props.alignment,
+                Some(crate::model::Alignment::Center | crate::model::Alignment::End)
             );
-            fragments.insert(0, label_frag);
-
-            // Implicit tab stop at numLvl.left so the tab lands at body text.
-            if let Some(lvl_left) = level_def
-                .and_then(|l| l.indentation.as_ref())
-                .and_then(|ind| ind.start)
-            {
-                merged_props.tabs.insert(
+            if alignment_suppresses_tab {
+                if let Fragment::Text { width, .. } = &mut label_frag {
+                    *width = label_width + gap;
+                }
+                fragments.insert(0, label_frag);
+            } else {
+                fragments.insert(
                     0,
-                    crate::model::TabStop {
-                        position: lvl_left,
-                        alignment: crate::model::TabAlignment::Left,
-                        leader: crate::model::TabLeader::None,
+                    Fragment::Tab {
+                        line_height: h,
+                        // §17.3.1.38: the label's own formatting is what a
+                        // leader on this separator is drawn in.
+                        font: Rc::new(label_font.clone()),
+                        color: label_color,
+                        fitting_width: Some(gap),
                     },
                 );
+                fragments.insert(0, label_frag);
+
+                // Implicit tab stop so the tab lands at the body text indent.
+                insert_implicit_tab_stop(merged_props, effective_ind);
             }
         }
         LevelSuffix::Space => {
@@ -346,13 +383,9 @@ fn inject_text_label(
     }
 }
 
-/// Extract the hanging indent from a numbering level definition.
-fn extract_hanging(
-    level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
-) -> Pt {
-    level_def
-        .and_then(|l| l.indentation.as_ref())
-        .and_then(|ind| ind.first_line)
+/// Extract the hanging indent from an effective indentation.
+fn extract_hanging(ind: Option<&model::Indentation>) -> Pt {
+    ind.and_then(|ind| ind.first_line)
         .map(|fl| match fl {
             model::FirstLineIndent::Hanging(v) => Pt::from(v),
             _ => Pt::ZERO,
@@ -626,6 +659,132 @@ mod tests {
         ];
 
         assert_eq!(seen, ["1", "1", "2", "2", "1"]);
+    }
+
+    /// Like `inject`, but with a caller-supplied paragraph and properties —
+    /// for tests exercising direct `w:ind` overrides and paragraph alignment.
+    fn inject_full(
+        resolved: &ResolvedDocument,
+        state: &mut BuildState,
+        para: &model::Paragraph,
+        mut props: ParagraphProperties,
+    ) -> (Vec<Fragment>, ParagraphProperties) {
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved,
+        };
+        let mut fragments = Vec::new();
+        inject_list_label(para, &mut fragments, &mut props, &ctx, state);
+        (fragments, props)
+    }
+
+    fn ind(left: i64, hanging: i64) -> Indentation {
+        Indentation {
+            start: Some(Dimension::<Twips>::new(left)),
+            end: None,
+            first_line: Some(FirstLineIndent::Hanging(Dimension::<Twips>::new(hanging))),
+            mirror: None,
+        }
+    }
+
+    fn para_with(props: ParagraphProperties) -> model::Paragraph {
+        model::Paragraph {
+            style_id: None,
+            properties: props,
+            mark_run_properties: None,
+            content: Vec::new(),
+            rsids: model::ParagraphRevisionIds::default(),
+        }
+    }
+
+    /// §17.9.23: the paragraph's direct `w:ind` overrides the numbering
+    /// level's — for the implicit tab stop too, not just for body-text
+    /// wrapping. With level left=2631 and direct left=567, the suffix tab
+    /// must land at 567, or the first line renders with a huge gap while
+    /// continuation lines wrap at the direct indent.
+    #[test]
+    fn direct_ind_overrides_level_for_the_implicit_tab_stop() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(ind(2631, 504)),
+            ..decimal_level()
+        }]);
+        let para = para_with(ParagraphProperties {
+            indentation: Some(ind(567, 567)),
+            ..Default::default()
+        });
+        let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
+
+        assert_eq!(
+            props.tabs.first().map(|t| t.position.raw()),
+            Some(567),
+            "implicit tab stop must sit at the direct indent, not the level's"
+        );
+        let merged = props.indentation.expect("indentation merged");
+        assert_eq!(merged.start.map(|d| d.raw()), Some(567));
+        assert_eq!(
+            merged.first_line,
+            Some(FirstLineIndent::Hanging(Dimension::<Twips>::new(567)))
+        );
+    }
+
+    /// Word semantics: an item at a deep level instantiates its ancestor
+    /// counters at their start values without consuming them — after
+    /// "1.1"-style items the next top-level item continues as "2", not "1".
+    #[test]
+    fn deep_level_items_instantiate_ancestor_counters() {
+        let resolved = resolved_with(vec![decimal_level(), level(NumberFormat::Decimal, "%1.%2")]);
+        let mut state = BuildState::default();
+
+        let seen = vec![
+            label_text(&inject(&resolved, &mut state, 1).0), // "1.1"
+            label_text(&inject(&resolved, &mut state, 1).0), // "1.2"
+            label_text(&inject(&resolved, &mut state, 0).0), // "2" — not "1"
+        ];
+        assert_eq!(seen, ["1.1", "1.2", "2"]);
+    }
+
+    /// §17.3.1.37 suppresses paragraph alignment on lines with tabs, but the
+    /// label's suffix tab is layout machinery — a centered numbered heading
+    /// must stay centered. For center/end alignment the gap is baked into the
+    /// label fragment's advance (label starts at left−hanging, text at left,
+    /// so the advance is exactly the hanging width) and no tab or implicit
+    /// stop is emitted.
+    #[test]
+    fn centered_paragraph_bakes_gap_into_label_instead_of_tab() {
+        for alignment in [Alignment::Center, Alignment::End] {
+            let resolved = resolved_with(vec![ResolvedNumberingLevel {
+                indentation: Some(ind(360, 360)),
+                ..decimal_level()
+            }]);
+            let props = ParagraphProperties {
+                alignment: Some(alignment),
+                ..props_at(0)
+            };
+            let (fragments, props) = inject_full(
+                &resolved,
+                &mut BuildState::default(),
+                &numbered_para(),
+                props,
+            );
+
+            assert_eq!(fragments.len(), 1, "{alignment:?}: label only, no tab");
+            match &fragments[0] {
+                Fragment::Text { width, .. } => {
+                    // 360 twips = 18 pt.
+                    assert!(
+                        (width.raw() - 18.0).abs() < 0.01,
+                        "{alignment:?}: advance must equal the hanging width, got {width:?}"
+                    );
+                }
+                other => panic!("{alignment:?}: expected label text fragment, got {other:?}"),
+            }
+            assert!(
+                props.tabs.is_empty(),
+                "{alignment:?}: no implicit tab stop for a tab-less line"
+            );
+        }
     }
 
     /// §17.9.29: `Tab` (the default) puts a tab after the label, `Space` a

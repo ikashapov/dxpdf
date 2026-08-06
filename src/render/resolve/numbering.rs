@@ -140,6 +140,9 @@ fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
         NumberFormat::UpperLetter => to_letter_upper(n),
         NumberFormat::LowerRoman => to_roman_lower(n),
         NumberFormat::UpperRoman => to_roman_upper(n),
+        // Same in every locale: the Cyrillic sequence *is* the format.
+        NumberFormat::RussianLower => to_russian_lower(n),
+        NumberFormat::RussianUpper => to_russian_upper(n),
 
         // §17.9.27: the three formats that are written differently in every
         // language. This engine spells one of them; for the rest the digits
@@ -304,6 +307,29 @@ fn to_letter_upper(n: u32) -> String {
     to_letter_lower(n).to_uppercase()
 }
 
+/// Word's Russian alphabetic numbering sequence (§17.18.59 russianLower):
+/// 28 of the 33 Cyrillic letters — Ё, Й, Ъ, Ы, Ь are skipped.
+const RUSSIAN_LETTERS: [char; 28] = [
+    'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к', 'л', 'м', 'н', 'о', 'п', 'р', 'с', 'т', 'у',
+    'ф', 'х', 'ц', 'ч', 'ш', 'щ', 'э', 'ю', 'я',
+];
+
+fn to_russian_lower(n: u32) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    // Overflow repeats the letter, mirroring `to_letter_lower`: item 29 is
+    // "аа", not "а" again.
+    let len = RUSSIAN_LETTERS.len() as u32;
+    let idx = ((n - 1) % len) as usize;
+    let count = ((n - 1) / len) as usize + 1;
+    std::iter::repeat_n(RUSSIAN_LETTERS[idx], count).collect()
+}
+
+fn to_russian_upper(n: u32) -> String {
+    to_russian_lower(n).to_uppercase()
+}
+
 fn to_roman_lower(mut n: u32) -> String {
     const VALS: [(u32, &str); 13] = [
         (1000, "m"),
@@ -397,6 +423,30 @@ mod tests {
             suffix: LevelSuffix::default(),
             is_legal: false,
         }
+    }
+
+    #[test]
+    fn russian_letters_follow_word_sequence() {
+        assert_eq!(to_russian_lower(1), "а");
+        assert_eq!(to_russian_lower(2), "б");
+        // Ё (7th of the full alphabet) is skipped: 6 → е, 7 → ж.
+        assert_eq!(to_russian_lower(6), "е");
+        assert_eq!(to_russian_lower(7), "ж");
+        // Й is skipped: 9 → и, 10 → к.
+        assert_eq!(to_russian_lower(10), "к");
+        assert_eq!(to_russian_lower(28), "я");
+        // Overflow repeats the letter, like latin `aa`.
+        assert_eq!(to_russian_lower(29), "аа");
+        assert_eq!(to_russian_upper(1), "А");
+        assert_eq!(to_russian_upper(28), "Я");
+        assert_eq!(to_russian_lower(0), "");
+    }
+
+    #[test]
+    fn russian_format_expands_in_label_template() {
+        let locale = Locale::default();
+        assert_eq!(format_number(3, NumberFormat::RussianUpper, locale), "В");
+        assert_eq!(format_number(3, NumberFormat::RussianLower, locale), "в");
     }
 
     #[test]

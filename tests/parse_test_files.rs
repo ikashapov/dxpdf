@@ -400,6 +400,10 @@ const ALL_FILES: &[&str] = &[
     "sample-docx-files-sample-4.docx",
     "sample-docx-files-sample-5.docx",
     "sample-docx-files-sample-6.docx",
+    "comment-reference.docx",
+    "russian-numbering.docx",
+    "numbering-direct-indent.docx",
+    "centered-numbered-heading.docx",
 ];
 
 #[test]
@@ -560,4 +564,23 @@ fn media_bytes_are_nonempty() {
             assert!(!data.is_empty(), "{name}: media {rel_id:?} has empty bytes");
         }
     }
+}
+
+#[test]
+fn comment_reference_run_parses_and_keeps_text() {
+    // `<w:commentReference>` inside a run must not fail the parse; the
+    // commented text survives while the comment anchor itself is dropped.
+    let doc = load("comment-reference.docx");
+    assert!(!collect_text(&doc.body).trim().is_empty());
+}
+
+#[test]
+fn russian_number_formats_parse() {
+    let doc = load("russian-numbering.docx");
+    let has_russian_upper = doc.numbering.abstract_nums.values().any(|a| {
+        a.levels
+            .iter()
+            .any(|l| l.format == Some(NumberFormat::RussianUpper))
+    });
+    assert!(has_russian_upper, "expected a russianUpper numbering level");
 }

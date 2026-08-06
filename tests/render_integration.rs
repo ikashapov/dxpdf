@@ -600,3 +600,144 @@ fn distribute_shares_width_between_clusters_not_scalars() {
          precomposed={precomposed}pt/gap, decomposed={decomposed}pt/gap"
     );
 }
+
+/// Regression (huge first-line gap after list labels): in a numbered paragraph
+/// whose direct `w:ind` (left=567, hanging=567) overrides the numbering
+/// level's much larger indentation (left=2631, hanging=504), the label's
+/// suffix tab must land the first-line body text at the effective direct
+/// indent — 567 twips right of the label — not at the numbering level's
+/// indent (2631 twips, which rendered as a huge gap before the fix).
+#[test]
+fn numbering_direct_indent_suffix_tab_lands_at_direct_indent() {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+
+    let doc = parse_docx("numbering-direct-indent.docx");
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
+
+    // Locate the "1.1.1." label, then the first body-text command on the same
+    // line (same y). Content-independent: only the fixture's indentation
+    // geometry is asserted.
+    let mut label: Option<(f32, f32)> = None; // (x, y)
+    let mut first_text_x: Option<f32> = None;
+    'outer: for page in &pages {
+        for cmd in &page.commands {
+            if let DrawCommand::Text { text, position, .. } = cmd {
+                match label {
+                    None => {
+                        if text.trim() == "1.1.1." {
+                            label = Some((position.x.raw(), position.y.raw()));
+                        }
+                    }
+                    Some((_, label_y)) => {
+                        if !text.trim().is_empty() && (position.y.raw() - label_y).abs() < 0.5 {
+                            first_text_x = Some(position.x.raw());
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let (label_x, _) = label.expect("label 1.1.1. not found");
+    let text_x = first_text_x.expect("first-line body text not found");
+    // Direct w:ind left=567 twips = 28.35 pt; the label starts at left-hanging
+    // = 0, so the text must sit exactly 28.35 pt right of the label. Before
+    // the fix the tab jumped to the level's 2631 twips (131.55 pt).
+    let delta = text_x - label_x;
+    assert!(
+        (delta - 28.35).abs() < 0.5,
+        "suffix tab must land first-line text 567 twips (28.35 pt) right of \
+         the label (the paragraph's direct indent); got {delta} pt"
+    );
+}
+
+/// Regression (numbering off by one after deep-level items): an item at a deep
+/// list level instantiates its ancestor counters at their start values, so a
+/// later top-level item of the same list continues from there — Word renders
+/// this document's list as 1.1.1…1.1.4, then 2. 3. 4. 5., then 5.1…5.3, then
+/// 6. 7. Before the fix the tail came out one lower (1. 2. 3. 4., 4.1…, 5. 6.).
+#[test]
+fn numbering_deep_level_instantiates_ancestor_counters() {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+
+    let doc = parse_docx("numbering-direct-indent.docx");
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
+
+    // List labels are standalone text commands like "1.1.1." / "5.1." / "6.".
+    let mut labels: Vec<String> = Vec::new();
+    for page in &pages {
+        for cmd in &page.commands {
+            if let DrawCommand::Text { text, .. } = cmd {
+                let t = text.trim();
+                if !t.is_empty()
+                    && t.ends_with('.')
+                    && t.trim_end_matches('.')
+                        .split('.')
+                        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+                {
+                    labels.push(t.to_string());
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        labels,
+        [
+            "1.1.1.", "1.1.2.", "1.1.3.", "1.1.4.", "2.", "3.", "4.", "5.", "5.1.", "5.2.", "5.3.",
+            "6.", "7."
+        ],
+        "list labels must follow Word's ancestor-instantiation numbering"
+    );
+}
+
+/// Regression (centered numbered heading rendered left-aligned): the list
+/// label's suffix tab must not suppress paragraph alignment. The fixture's
+/// first paragraph is a numbered heading ("1." + text, hanging 360 twips)
+/// with a direct `jc=center`: the label must sit well right of the left
+/// margin (centering applied), and the body text must start exactly the
+/// hanging width (360 twips = 18 pt) right of the label.
+#[test]
+fn centered_numbered_heading_is_centered() {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+
+    let doc = parse_docx("centered-numbered-heading.docx");
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
+
+    let mut label: Option<(f32, f32)> = None; // (x, y)
+    let mut first_text_x: Option<f32> = None;
+    'outer: for page in &pages {
+        for cmd in &page.commands {
+            if let DrawCommand::Text { text, position, .. } = cmd {
+                match label {
+                    None => {
+                        if text.trim() == "1." {
+                            label = Some((position.x.raw(), position.y.raw()));
+                        }
+                    }
+                    Some((_, label_y)) => {
+                        if !text.trim().is_empty() && (position.y.raw() - label_y).abs() < 0.5 {
+                            first_text_x = Some(position.x.raw());
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let (label_x, _) = label.expect("heading label 1. not found");
+    let text_x = first_text_x.expect("heading text not found");
+    assert!(
+        label_x > 150.0,
+        "centered heading label must sit well right of the left margin \
+         (~85 pt before the fix); got x={label_x}"
+    );
+    let delta = text_x - label_x;
+    assert!(
+        (delta - 18.0).abs() < 0.5,
+        "heading text must start the hanging width (18 pt) right of the \
+         label; got {delta} pt"
+    );
+}

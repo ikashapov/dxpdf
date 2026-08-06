@@ -30,6 +30,8 @@ pub enum NumberFormat {
     Ordinal,
     CardinalText,
     OrdinalText,
+    RussianUpper,
+    RussianLower,
     None,
 }
 
