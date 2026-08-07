@@ -1330,3 +1330,134 @@ fn a_new_column_set_starts_below_the_preceding_sections_content() {
         "the two-column area begins below the single-column content it follows"
     );
 }
+
+// ── §17.6.22 promotion when page setup differs (issue #112) ─────────────────
+
+/// Same as [`PG`] but with a shorter bottom margin (720 vs 1134 twips) —
+/// mirrors `sample-docx-files-sample3.docx`'s reproduction (720 vs 1440
+/// there; the exact values don't matter, only that they differ).
+const PG_SHORT_BOTTOM: &str = r#"<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="720" w:left="1134" w:header="567" w:footer="567"/>"#;
+
+/// Same as [`PG`] but landscape — width and height swapped.
+const PG_LANDSCAPE: &str = r#"<w:pgSz w:w="16838" w:h="11906"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567"/>"#;
+
+/// A `sectPr` referencing header `rel` with a custom `w:pgSz`/`w:pgMar` block
+/// in place of the fixed [`PG`], optionally as a continuous break.
+fn sect_pr_pg(rel: &str, continuous: bool, pg: &str) -> String {
+    let ty = if continuous {
+        r#"<w:type w:val="continuous"/>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<w:sectPr>{ty}<w:headerReference w:type="default" r:id="{rel}" {R_NS}/>{pg}</w:sectPr>"#
+    )
+}
+
+/// Issue #112: one physical page cannot have two bottom margins, so a
+/// continuous break into a section with a different one must become a page
+/// break instead of a shared page — the direct fixture analog of
+/// `sample-docx-files-sample3.docx`.
+#[test]
+fn a_margin_difference_promotes_the_break_to_a_page_break() {
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr("rIdH1", false),
+        para("BODYAFTER"),
+        sect_pr_pg("rIdH1", true, PG_SHORT_BOTTOM),
+    ));
+
+    assert_eq!(
+        pages.len(),
+        2,
+        "a bottom-margin change makes one physical page impossible"
+    );
+    let texts_on = |page: &dxpdf::render::layout::draw_command::LayoutedPage| {
+        drawn_text(std::slice::from_ref(page))
+    };
+    assert!(
+        texts_on(&pages[0]).iter().any(|t| t.contains("BODYBEFORE")),
+        "the preceding section keeps its own page"
+    );
+    assert!(
+        texts_on(&pages[1]).iter().any(|t| t.contains("BODYAFTER")),
+        "the succeeding section starts a fresh page"
+    );
+}
+
+/// Issue #112, the other named candidate: a page-size change is just as
+/// physically impossible to share as a margin change.
+#[test]
+fn a_page_size_difference_promotes_the_break_to_a_page_break() {
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr("rIdH1", false),
+        para("BODYAFTER"),
+        sect_pr_pg("rIdH1", true, PG_LANDSCAPE),
+    ));
+
+    assert_eq!(
+        pages.len(),
+        2,
+        "a page-size change makes one physical page impossible"
+    );
+}
+
+/// The converse, explicit rather than incidental: §17.6.4 columns are the main
+/// legitimate reason a continuous break exists, and a column-only change must
+/// not be swept up by the page-setup promotion rule.
+#[test]
+fn a_column_only_change_still_shares_the_page() {
+    let filler: String = (0..90).map(|i| para(&format!("FILL{i}"))).collect();
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{filler}{}",
+        para("BODYBEFORE"),
+        sect_pr_cols("rIdH1", false, 1),
+        sect_pr_cols("rIdH1", true, 2),
+    ));
+
+    assert_eq!(
+        pages.len(),
+        1,
+        "a column-count-only change must not be promoted to a page break"
+    );
+}
+
+/// §17.6.22, chained: a chain may promote at one link and share at another.
+/// Only the second break (section 2 → section 3) changes margins, so the
+/// first break still shares a page and the second starts a fresh one — the
+/// case a single break cannot distinguish from "promote the whole chain".
+#[test]
+fn only_the_promoted_link_in_a_chain_breaks_the_page() {
+    let pages = layout(&format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        para("BODYBEFORE"),
+        sect_pr("rIdH1", false),
+        para("BODYMIDDLE"),
+        sect_pr("rIdH1", true),
+        para("BODYAFTER"),
+        sect_pr_pg("rIdH1", true, PG_SHORT_BOTTOM),
+    ));
+
+    assert_eq!(
+        pages.len(),
+        2,
+        "only the second link promotes, so the chain lands on two pages"
+    );
+    let texts_on = |page: &dxpdf::render::layout::draw_command::LayoutedPage| {
+        drawn_text(std::slice::from_ref(page))
+    };
+    let first = texts_on(&pages[0]);
+    assert!(
+        first.iter().any(|t| t.contains("BODYBEFORE"))
+            && first.iter().any(|t| t.contains("BODYMIDDLE")),
+        "the first, non-promoted break still shares page 1: {first:?}"
+    );
+    assert!(
+        texts_on(&pages[1]).iter().any(|t| t.contains("BODYAFTER")),
+        "the promoted break starts the third section on its own page: {:?}",
+        texts_on(&pages[1])
+    );
+}

@@ -131,6 +131,42 @@ struct FitSharedPage<'a> {
     measure_text: layout::paragraph::MeasureTextFn<'a>,
 }
 
+/// §17.6.22: whether a `Continuous` break must be promoted to an ordinary page
+/// break because the two sections it joins disagree about the page *itself*.
+///
+/// One physical page cannot have two page sizes or two margin sets, so a
+/// `Continuous` break whose succeeding section changes `w:pgSz` or `w:pgMar` is
+/// not something Word can share a page for either way — sharing here would be
+/// self-consistent but wrong, not merely a different reasonable answer.
+///
+/// Compares the two sections' **resolved** [`PageConfig`], not their raw
+/// `SectionProperties`: `PageConfig::from_section` already applies the app
+/// default to every unset `w:pgSz`/`w:pgMar` field, so a section that merely
+/// omits a value it would inherit anyway never spuriously promotes.
+/// `page_size` folds in `w:orient` for free — Word writes the already-swapped
+/// width/height for landscape, and nothing downstream reads
+/// `PageSize.orientation` at all — and `w:cols` is excluded by construction,
+/// since `columns` lives on a `PageConfig` field this predicate never touches;
+/// changing the column count is the main legitimate reason a continuous break
+/// exists (§17.6.4).
+///
+/// §17.6.22 does not settle this: it says only that a continuous break starts
+/// the next section on the same page, and is silent on what happens when the
+/// page setup makes that impossible. **Word reference render** (issue #112):
+/// this predicate deliberately does not compare `w:pgMar`'s `header`/`footer`
+/// distance sub-attributes (`PageConfig::header_margin`/`.footer_margin`), and
+/// does not treat a margin change too small to move the content area as a
+/// non-promotion — both are open questions the issue names but does not
+/// resolve. A render settling either would narrow or widen this function, not
+/// its call sites.
+fn continuous_break_promotes_to_page_break(
+    prev: &PageConfig,
+    next: &crate::model::SectionProperties,
+) -> bool {
+    let next = PageConfig::from_section(next);
+    prev.page_size != next.page_size || prev.margins != next.margins
+}
+
 /// §17.6.22: the body bounds a shared page must use — those of the section that
 /// ends up **owning** it.
 ///
@@ -189,6 +225,7 @@ fn shared_page_owner_bounds(
         // clearance measurement and no layout.
         let hands_on = input.sections.get(idx + 1).is_some_and(|after| {
             after.properties.section_type == Some(crate::model::SectionType::Continuous)
+                && !continuous_break_promotes_to_page_break(&config, &after.properties)
         });
         if !hands_on {
             return clearance.for_page(0);
@@ -486,9 +523,11 @@ pub fn layout_document(
             };
 
         // §17.6.22: does a `Continuous` section follow, sharing this section's
-        // last page?
+        // last page? Not if the break is promoted to a page break instead —
+        // see `continuous_break_promotes_to_page_break`.
         let next_continuous = resolved.sections.get(section_idx + 1).is_some_and(|next| {
             next.properties.section_type == Some(crate::model::SectionType::Continuous)
+                && !continuous_break_promotes_to_page_break(&config, &next.properties)
         });
         let owner = |bounds| {
             if next_continuous {
@@ -780,6 +819,7 @@ fn measure_footer_extent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::dimension::{Dimension, Twips};
     use crate::model::*;
     use std::collections::HashMap;
 
@@ -854,6 +894,73 @@ mod tests {
                 .image_dpi(),
             1.0
         );
+    }
+
+    // ── §17.6.22 continuous_break_promotes_to_page_break (issue #112) ────────
+
+    #[test]
+    fn identical_sections_do_not_promote() {
+        assert!(!continuous_break_promotes_to_page_break(
+            &PageConfig::default(),
+            &SectionProperties::default(),
+        ));
+    }
+
+    #[test]
+    fn a_margin_difference_promotes() {
+        // Mirrors sample-docx-files-sample3.docx: bottom 720 vs 1440 twips,
+        // everything else equal.
+        let next = SectionProperties {
+            page_margins: Some(PageMargins {
+                top: None,
+                right: None,
+                bottom: Some(Dimension::<Twips>::new(720)),
+                left: None,
+                header: None,
+                footer: None,
+                gutter: None,
+            }),
+            ..Default::default()
+        };
+        assert!(continuous_break_promotes_to_page_break(
+            &PageConfig::default(),
+            &next,
+        ));
+    }
+
+    #[test]
+    fn a_page_size_difference_promotes() {
+        let next = SectionProperties {
+            page_size: Some(PageSize {
+                width: Some(Dimension::<Twips>::new(16838)),
+                height: Some(Dimension::<Twips>::new(11906)),
+                orientation: None,
+            }),
+            ..Default::default()
+        };
+        assert!(continuous_break_promotes_to_page_break(
+            &PageConfig::default(),
+            &next,
+        ));
+    }
+
+    #[test]
+    fn a_column_only_difference_does_not_promote() {
+        // §17.6.4: the main legitimate reason a continuous break exists.
+        let next = SectionProperties {
+            columns: Some(Columns {
+                count: Some(2),
+                space: None,
+                equal_width: None,
+                separator: None,
+                columns: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(!continuous_break_promotes_to_page_break(
+            &PageConfig::default(),
+            &next,
+        ));
     }
 
     #[test]

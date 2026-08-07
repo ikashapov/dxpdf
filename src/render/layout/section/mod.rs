@@ -11,6 +11,15 @@
 //! begins partway down a page the preceding one is still filling. Most of the
 //! machinery below exists for that one case, and this is the map into it.
 //!
+//! **When it does not come apart.** A `Continuous` break whose succeeding
+//! section changes page size or margins cannot share a page — one physical
+//! page cannot have two page sizes or two margin sets — so it is promoted to
+//! an ordinary page break before any of the machinery below engages; none of
+//! `SectionTail`, `ContinuationState` or the ownership rule below ever sees
+//! it. The predicate is `continuous_break_promotes_to_page_break` in
+//! `render::mod`, which also has the reasoning and its open edges (issue
+//! #112).
+//!
 //! **Who owns the shared page.** Only one header and footer can be drawn on it,
 //! and the *last* section on the page wins — so the page is committed by the
 //! succeeding section and falls inside its page range. ECMA-376 §17.6 does not
