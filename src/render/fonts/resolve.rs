@@ -416,11 +416,13 @@ struct FaceScore {
     /// Then the family slot the face declares. Separates two faces at the same
     /// weight, one of which the font marks as *the* Regular or *the* Bold.
     slot: u8,
-    /// Then a static face over a variable instance. A named instance is
-    /// selectable and correct on screen, but its coordinates cannot yet be baked
-    /// into embedded PDF bytes, so where the two are otherwise equal the static
-    /// face is the one that survives the round trip. See
-    /// `SubsetOutcome::VariableInstanceNotBaked`.
+    /// Then a static face over a variable instance. `FontRegistry::open_uncached`
+    /// bakes most instances into a static SFNT at open time (issue #113), but a
+    /// CFF2 or WOFF/WOFF2-sourced one still cannot round-trip — and this ranking
+    /// step runs before any typeface is opened, so it cannot yet tell which case
+    /// a given instance is. Kept as a blanket penalty until resolution can see
+    /// font flavor cheaply enough to narrow it; see `InstanceState::Unbaked` and
+    /// `docs/font-substitution.md`'s "Collections and variable fonts".
     instance: u8,
     /// Finally the candidate's position, so an exact tie is resolved the same
     /// way on every run rather than by hash order.
@@ -659,8 +661,9 @@ mod tests {
     }
 
     /// The §6 tie-break: where a static face and a variable instance fit
-    /// equally, the static one is chosen, because only it survives PDF
-    /// embedding intact.
+    /// equally, the static one is chosen — a blanket rule that costs nothing
+    /// in the common case (baking now recovers it) but still matters for the
+    /// CFF2/WOFF boundary baking cannot cross.
     #[test]
     fn a_static_face_beats_an_equally_good_instance() {
         let mut instance = face("F", 600, Slant::Upright);

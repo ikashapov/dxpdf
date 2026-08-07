@@ -41,6 +41,7 @@ from fontTools.fontBuilder import FontBuilder
 from fontTools.misc.timeTools import timestampSinceEpoch
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTFont, newTable
+from fontTools.ttLib.tables.TupleVariation import TupleVariation
 from fontTools.ttLib.ttCollection import TTCollection
 
 OUT = Path(__file__).resolve().parent.parent / "test-files" / "fonts"
@@ -321,9 +322,96 @@ def build_variable() -> TTFont:
         fvar.instances.append(instance)
     font["fvar"] = fvar
 
-    # `gvar` is deliberately absent: nothing here tests interpolation, and a
-    # variable font without it still declares a design space, which is all the
-    # catalogue reads.
+    # `gvar`: issue #113 (baking an instance's coordinates into embedded PDF
+    # bytes) needs instances that actually draw different outlines — a
+    # variable font with a design space but no deltas, which is all the
+    # *catalogue* reads, was sufficient before that but isn't anymore.
+    #
+    # Every real point of every non-empty glyph (`A`, `B`, `a`, `b`, all four
+    # corners of the same rectangle — see `_outlines`) gets an explicit delta
+    # in both tuples, rather than leaving some unset and relying on `gvar`'s
+    # IUP inference to fill them in: the glyph shape stays a rectangle (only
+    # taller or narrower), and every consumer of this fixture reads deltas it
+    # wrote explicitly, not ones a reader-side IUP implementation invented.
+    # `wght` stretches the top edge upward from a pinned bottom edge; `wdth`
+    # pulls the right edge inward from a pinned left edge — independent axes,
+    # independently checkable. Phantom points (indices 4-7, appended after
+    # each glyph's real points) are left with no delta: this fixture is about
+    # outlines, not advance widths.
+    gvar = newTable("gvar")
+    gvar.version = 1
+    gvar.reserved = 0
+    wght_tv = TupleVariation(
+        {"wght": (0.0, 1.0, 1.0)},
+        [(0, 0), (0, 100), (0, 100), (0, 0), None, None, None, None],
+    )
+    wdth_tv = TupleVariation(
+        {"wdth": (-1.0, -1.0, 0.0)},
+        [(0, 0), (0, 0), (-50, 0), (-50, 0), None, None, None, None],
+    )
+    gvar.variations = {g: [wght_tv, wdth_tv] for g in ("A", "B", "a", "b")}
+    font["gvar"] = gvar
+
+    # `MVAR`: baking (issue #113) doesn't just rebuild `glyf`/`hmtx` for the
+    # pinned location — it also applies MVAR deltas to the metric tables that
+    # carry them (`hhea`, `post`, `OS/2`), rather than embedding the default
+    # location's stale values into a font that no longer varies. That needs
+    # deltas that actually differ from zero, hence a real MVAR table, built
+    # through the same `OnlineVarStoreBuilder`/`VariationModel` pair `varLib`
+    # itself uses to compile MVAR when merging masters — an item variation
+    # store is a different structure from `gvar`'s tuple variations above, so
+    # it isn't buildable by hand the same way.
+    #
+    # `hasc`/`hdsc` (hhea ascender/descender) and `undo`/`unds` (post
+    # underline offset/thickness) are enough to exercise what baking patches
+    # without also touching every OS/2 field the same mechanism covers. A
+    # single tent from the default (`{}`) to `wght`'s maximum (normalized
+    # `1.0`) reuses the shape of the `gvar` tuples above, so `Regular` (400,
+    # the default) again reads as an exact match to the unbaked font's
+    # values, and `SemiBold`/`Bold` (600/700) fall at different fractions of
+    # the tent and so must differ from each other too.
+    from fontTools.ttLib.tables import otTables as ot
+    from fontTools.varLib import varStore
+    from fontTools.varLib.models import VariationModel
+
+    axis_tags = [axis.axisTag for axis in fvar.axes]
+    model = VariationModel([{}, {"wght": 1.0}], axisOrder=axis_tags)
+    store_builder = varStore.OnlineVarStoreBuilder(axis_tags)
+    store_builder.setModel(model)
+
+    mvar_records = []
+
+    def mvar_entry(tag: str, default_value: int, peak_value: int) -> int:
+        """Store one MVAR value record; return the default-location value,
+        which must equal what the corresponding table field already carries
+        — MVAR only ever contributes a delta on top of it."""
+        base, var_idx = store_builder.storeMasters([default_value, peak_value])
+        record = ot.MetricsValueRecord()
+        record.ValueTag = tag
+        record.VarIdx = var_idx
+        mvar_records.append(record)
+        return base
+
+    font["hhea"].ascender = mvar_entry("hasc", font["hhea"].ascender, font["hhea"].ascender + 100)
+    font["hhea"].descender = mvar_entry("hdsc", font["hhea"].descender, font["hhea"].descender - 40)
+    font["post"].underlinePosition = mvar_entry(
+        "undo", font["post"].underlinePosition, font["post"].underlinePosition - 20
+    )
+    font["post"].underlineThickness = mvar_entry(
+        "unds", font["post"].underlineThickness, font["post"].underlineThickness + 40
+    )
+
+    mvar = newTable("MVAR")
+    mvar.table = ot.MVAR()
+    mvar.table.Version = 0x00010000
+    mvar.table.Reserved = 0
+    mvar.table.ValueRecordSize = 8
+    mvar_records.sort(key=lambda r: r.ValueTag)
+    mvar.table.ValueRecord = mvar_records
+    mvar.table.ValueRecordCount = len(mvar_records)
+    mvar.table.VarStore = store_builder.finish()
+    font["MVAR"] = mvar
+
     stat = newTable("STAT")
     from fontTools.otlLib.builder import buildStatTable
 

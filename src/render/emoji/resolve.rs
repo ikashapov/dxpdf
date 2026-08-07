@@ -219,7 +219,7 @@ impl<L: EmojiTypefaceLookup> EmojiResolver<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::fonts::{TypefaceId, TypefaceOrigin};
+    use crate::render::fonts::{InstanceState, TypefaceId, TypefaceOrigin};
     use skia_safe::FontMgr;
     use std::cell::Cell;
 
@@ -232,7 +232,7 @@ mod tests {
             .expect("system has no default typeface — cannot run test");
         let id = TypefaceId::from(&tf);
         TypefaceEntry {
-            instance: None,
+            instance: InstanceState::NotInstanced,
             typeface: tf,
             origin: TypefaceOrigin::System { typeface_id: id },
         }

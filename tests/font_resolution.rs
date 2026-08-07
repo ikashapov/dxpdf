@@ -139,6 +139,29 @@ fn the_fixtures_carry_what_the_tests_assume() {
 
     let variable = load(&font_mgr, "DxVariable.ttf");
     assert_eq!(variable.len(), 1);
+
+    // Issue #113: an instance whose location can't be told apart from the
+    // default at the byte level would make every baking test pass vacuously.
+    // `gvar` is what supplies that difference — this only checks the table is
+    // present, not what it says; `instance_bake`'s own tests are what pin the
+    // actual outline geometry per instance.
+    let variable_bytes = std::fs::read(fixture_dir().join("DxVariable.ttf")).unwrap();
+    assert!(
+        has_table(&variable_bytes, b"gvar"),
+        "DxVariable.ttf must carry gvar deltas, or no instance's outline can \
+         differ from the default location's"
+    );
+}
+
+/// A minimal, standalone SFNT table-directory scan — deliberately not sharing
+/// code with the reader under test, so this can't pass for the same reason a
+/// bug in that reader would.
+fn has_table(sfnt: &[u8], tag: &[u8; 4]) -> bool {
+    let num_tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+    (0..num_tables).any(|i| {
+        let record = &sfnt[12 + i * 16..12 + i * 16 + 4];
+        record == tag
+    })
 }
 
 // ─── Acceptance: exact family names win over style-like suffixes ────────────
@@ -385,8 +408,9 @@ fn each_collection_face_resolves_to_itself() {
 /// > layout, painting, and PDF embedding.
 ///
 /// The resolution half: a named instance is selectable by name and arrives with
-/// its coordinates. (Embedding is the boundary — see
-/// `SubsetOutcome::VariableInstanceNotBaked`.)
+/// its coordinates. (Embedding is `instance_bake::bake_instance`, exercised
+/// end to end by `a_named_instance_bakes_at_open_time` in
+/// `render::fonts::mod`'s own test module — issue #113.)
 #[test]
 fn a_named_instance_resolves_with_its_coordinates() {
     let catalog = catalog();
@@ -414,6 +438,15 @@ fn a_named_instance_resolves_with_its_coordinates() {
         "the instance's coordinates become its intrinsic style"
     );
 }
+
+// The embedding half (issue #113) is exercised in `render::fonts::mod`'s own
+// test module (`a_named_instance_bakes_at_open_time`), not here: it needs
+// `FontRegistry::open`, which is crate-private, and — separately —
+// `TypefaceFontProvider`/`OrderedFontMgr`-backed `FontMgr`s (the only way
+// this file can make a fixture resolvable by *family* at all, since none of
+// them are installed on the host) do not implement `new_from_data`, which
+// baking's success path needs to build the final typeface. Both are
+// non-issues for the embedded-font path a real render actually takes.
 
 /// The default location is *not* offered as a separate instance: it is what the
 /// unmodified bytes already draw, and a second record for it would make the

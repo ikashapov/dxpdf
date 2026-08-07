@@ -32,6 +32,19 @@ clap = { version = "4", features = ["derive"] }
 # which then fails on hosts missing the freetype/fontconfig dev headers.
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py38"], optional = true }
 fontcull = { version = "2", optional = true }
+# General OpenType libraries (fontations, republished under these names) — not
+# `fontcull` itself, which stays behind `subset-fonts` below. Baking a variable
+# instance's coordinates into embedded PDF bytes (issue #113) has to work
+# whether or not that feature is on, since the wrong-outline bug it fixes isn't
+# a subsetting defect: it's in what byte blob backs the `Typeface` used to
+# draw, which Skia's PDF backend embeds regardless of subsetting. Both are
+# already in the dependency tree today as `fontcull`'s own transitive deps;
+# this only changes which line pulls them in.
+fontcull-skrifa = "0.39"
+fontcull-write-fonts = "0.44"
+fontcull-read-fonts = "0.38"
+fontcull-font-types = "0.10"
+kurbo = "0.12"
 unicode-segmentation = "1.13.2"
 unicode-properties = "0.1.4"
 unicode-normalization = "0.1.25"
