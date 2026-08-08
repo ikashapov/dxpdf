@@ -73,7 +73,6 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 ### `docs/` — current behavior
 
 - [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
-- [Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab` alignment derived at layout time; §17.18.85 `bar` stops (a rule, invisible to a tab character) and `decimal` stops
 - [Internationalisation](docs/i18n.md) — §17.3.2.20 `w:lang`, the `Locale` type and its language table, and the ICU-shaped gap it is a stopgap for (number spelling, UAX #14 line breaking, bidi, date pictures)
 - [Floating Tables](docs/floating-tables.md) — §17.4.58 tblpPr positioning, vertical anchors
 - [Floating Images](docs/floating-images.md) — §20.4.2 anchor positioning, text wrapping, forward-scan
