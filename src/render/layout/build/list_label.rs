@@ -6,6 +6,10 @@
 //! body-text indent. For centered and right-aligned paragraphs the separator
 //! is a fixed-advance spacer instead of a tab, so the §17.3.1.37 tab-line
 //! rule cannot suppress the paragraph's alignment.
+//!
+//! Because the label is the paragraph's first fragment, it is first-segment
+//! -only by construction when the paragraph splits across pages — it lives on
+//! line 0, which always belongs to the first segment.
 
 use std::rc::Rc;
 

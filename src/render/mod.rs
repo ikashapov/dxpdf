@@ -331,9 +331,10 @@ fn fit_shared_page(
         // relayout also moves the cursor the chain resumes from.
         let committed = index;
         let layout::section::SectionTail::SharedWithNext(ref cont) = layout.tail else {
-            // Unreachable from `render_to_pages`, which only calls this when a
-            // `Continuous` section follows — but a page nothing shares needs no
-            // fitting, which is a better answer than an `unwrap`.
+            // Unreachable from this module's page-building loop, which only
+            // calls this when a `Continuous` section follows — but a page
+            // nothing shares needs no fitting, which is a better answer than
+            // an `unwrap`.
             return SharedPageFit::NotNeeded;
         };
         let bounds = shared_page_owner_bounds(&input, cont, committed, ctx, state);

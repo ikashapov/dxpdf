@@ -148,8 +148,9 @@ impl HeaderFooterClearance {
     /// §17.6.22: a page shared with a following `Continuous` section is that
     /// section's page 0, so `for_page(0)` on the *succeeding* section's
     /// clearance yields the bounds the shared page must actually use — see the
-    /// ownership rule at `render::render_to_pages`, and `render::fit_shared_page`
-    /// for how those bounds get back into the preceding section's layout. It is
+    /// ownership rule at `render::shared_page_owner_bounds`, and
+    /// `render::fit_shared_page` for how those bounds get back into the
+    /// preceding section's layout. It is
     /// the one call site where a section is asked about a page it does not
     /// commit.
     ///
