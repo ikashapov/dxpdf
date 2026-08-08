@@ -243,6 +243,9 @@ pub fn next_logical_page_base(
 ///
 /// `hf_blocks` contains the raw DOCX header/footer blocks; content is
 /// rebuilt per-page so that field values (PAGE, NUMPAGES) are correct.
+///
+/// Stacked with [`stack_blocks`], the same shared vertical-flow core table
+/// cells use — see its own doc comment for why that sharing matters.
 pub fn render_headers_footers(
     pages: &mut [LayoutedPage],
     config: &PageConfig,
@@ -317,11 +320,19 @@ pub fn render_headers_footers(
         }
     }
 
-    // Reset field context after header/footer rendering.
+    // Reset field context after header/footer rendering, so this page's
+    // page_number/num_pages don't leak into body layout — the body is
+    // measured independently of which page it ends up on.
     state.field_ctx = crate::render::layout::fragment::FieldContext::default();
 }
 
 /// Render a single header onto a page.
+///
+/// Positioned at `(margins.left, header_margin)` unless VML absolute
+/// positioning overrides both — top-anchored, since a header's content grows
+/// downward from the top margin. The stacked commands are shifted to that
+/// origin and **prepended** to the page's existing commands so the header
+/// paints (and z-orders) before the body.
 fn render_header(
     page: &mut LayoutedPage,
     config: &PageConfig,
@@ -345,6 +356,11 @@ fn render_header(
     let mut header_cmds: Vec<DrawCommand> = Vec::new();
 
     // §20.4.2.3 @behindDoc=true: paint behind text — emit before text commands.
+    //
+    // `Absolute` is already resolved in page frame, so it's used as-is;
+    // `RelativeToParagraph` is relative to the header content's own origin,
+    // so it needs this header's offset added, same as the text/table commands
+    // shifted below.
     for fi in hf.floating_images.iter().filter(|fi| fi.behind_doc) {
         let img_y = match fi.y {
             super::section::FloatingImageY::Absolute(y) => y,
@@ -397,6 +413,11 @@ fn render_header(
 }
 
 /// Render a single footer onto a page.
+///
+/// `footer_y = page_height - footer_margin - content_height`: bottom-anchored,
+/// so taller footer content grows upward from the margin rather than
+/// downward off the page. The stacked commands are shifted to that origin and
+/// **appended** to the page's existing commands, after the body.
 fn render_footer(
     page: &mut LayoutedPage,
     config: &PageConfig,
@@ -414,6 +435,9 @@ fn render_footer(
     let footer_y = config.page_size.height - config.footer_margin - result.height;
 
     // §20.4.2.3 @behindDoc=true: paint behind text.
+    //
+    // Same `Absolute`/`RelativeToParagraph` split as the header (see
+    // `render_header`), against `footer_y` instead of the header's offset.
     for fi in hf.floating_images.iter().filter(|fi| fi.behind_doc) {
         let img_y = match fi.y {
             super::section::FloatingImageY::Absolute(y) => y,
