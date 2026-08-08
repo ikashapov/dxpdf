@@ -21,6 +21,9 @@
 //!   deobfuscation) is enforced upstream by the parser. ISO 32000-1 §9.6.4
 //!   subset prefixes (`AAAAAA+`-style) are emitted by Skia's PDF backend at
 //!   write time — we only feed it smaller bytes.
+//! - **Order is load-bearing.** This pass runs after layout, not before:
+//!   layout measures against the *full* typeface, and usage is derived from
+//!   what layout produced, so subsetting first would be circular.
 
 // No `#[cfg(feature = "subset-fonts")]` below, and none inside these modules:
 // `render::mod` gates `pub mod subset` on that feature, so everything here

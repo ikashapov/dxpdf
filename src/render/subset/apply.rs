@@ -329,6 +329,20 @@ pub fn apply(usage: CodepointUsage, registry: &mut FontRegistry) -> SubsetReport
     SubsetReport { outcomes }
 }
 
+/// One typeface through the whole subsetting pipeline, in order:
+/// 0. Bail on a variable instance that never got baked (below) — first,
+///    because a subset carved at the font's *default* location would be
+///    smaller *and* wrong, which would hide the problem behind an apparent
+///    success.
+/// 1. [`extract`] — get subsettable SFNT bytes.
+/// 2. [`subset_with_fontcull`].
+/// 3. [`splice_name_recording_size`] — restore the `name` table `fontcull`
+///    drops.
+/// 4. [`savings_verdict`] — reject non-shrinking output, keeping the
+///    original.
+/// 5. Rebuild as a Skia `Typeface` via `FontMgr::new_from_data`.
+/// 6. [`check_shapeability`] — post-validate against the original.
+/// 7. [`FontRegistry::replace_typeface_by_id`] — swap the subsetted bytes in.
 fn process_one(
     id: TypefaceId,
     entry: &crate::render::fonts::TypefaceEntry,
