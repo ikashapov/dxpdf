@@ -171,6 +171,7 @@ impl RunHandler for Collector {
 mod tests {
     use super::*;
     use crate::render::emoji::resolve::EmojiFamily;
+    use crate::render::fonts::opentype::table_tag;
     use skia_safe::{FontMgr, FontStyle};
 
     /// The host's color emoji typeface, or `None` on a host without one —
@@ -220,11 +221,48 @@ mod tests {
     #[test]
     fn zwj_sequence_ligates_to_one_glyph() {
         let Some(tf) = emoji_typeface() else { return };
+
+        // ── issue #117 temporary diagnostic ──────────────────────────────
+        // Windows CI failed this test (3 glyphs, not 1) while the sibling
+        // modifier/keycap ligation test passed on the same run, on the same
+        // matched typeface. That rules out "shaping is broken" and points at
+        // a font-specific GSUB coverage gap, but there's no way to confirm
+        // that from outside a real Windows runner — this prints what's
+        // actually there (never `to_font_data`: see the module doc's 549 MB
+        // note) and probes each 2-person sub-sequence to localize exactly
+        // where ligation stops, so the real fix can be written from evidence
+        // rather than a guess. Remove once #117 is resolved.
+        eprintln!(
+            "[diag #117] matched typeface: family={:?} style={:?}",
+            tf.family_name(),
+            tf.font_style()
+        );
+        match tf.copy_table_data(table_tag(b"GSUB")) {
+            Some(data) => eprintln!("[diag #117] GSUB table present: {} bytes", data.len()),
+            None => eprintln!("[diag #117] GSUB table: ABSENT"),
+        }
         let shaper = ClusterShaper::new().expect("shaper");
+        for (label, text) in [
+            ("man+ZWJ+woman", "\u{1F468}\u{200D}\u{1F469}"),
+            ("woman+ZWJ+girl", "\u{1F469}\u{200D}\u{1F467}"),
+            ("man+ZWJ+girl", "\u{1F468}\u{200D}\u{1F467}"),
+        ] {
+            match shaper.shape(&tf, text, 44.0) {
+                Ok(run) => eprintln!("[diag #117] '{label}' -> {} glyph(s)", run.glyphs.len()),
+                Err(e) => eprintln!("[diag #117] '{label}' -> shape error: {e}"),
+            }
+        }
+        // ── end temporary diagnostic ──────────────────────────────────────
+
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         assert_eq!(family.chars().count(), 5);
 
         let run = shaper.shape(&tf, family, 44.0).expect("shape");
+        eprintln!(
+            "[diag #117] full family sequence -> {} glyph(s), ids={:?}",
+            run.glyphs.len(),
+            run.glyphs.iter().map(|g| g.id).collect::<Vec<_>>()
+        );
 
         assert_eq!(
             run.glyphs.len(),
