@@ -229,7 +229,10 @@ mod tests {
     /// difference in what this font's own tables define, not a shaping bug:
     /// the portable claim this test can make is that shaping is GSUB/cluster
     /// -aware (nowhere near the naive 5), not that any two color-emoji fonts
-    /// ligate the same combinations.
+    /// ligate the same combinations. Apple Color Emoji *does* ligate this
+    /// sequence, but via AAT `morx` — it carries no `GSUB` table at all, so
+    /// the two fonts solve the same problem through mechanisms this module
+    /// doesn't even need to distinguish between.
     #[test]
     fn zwj_sequence_ligates_to_one_glyph() {
         let Some(tf) = emoji_typeface() else { return };
