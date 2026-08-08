@@ -150,6 +150,10 @@ pub enum HyperlinkTarget {
 pub struct Field {
     /// Parsed field instruction (e.g., `FieldInstruction::Page`, `FieldInstruction::Toc { .. }`).
     pub instruction: FieldInstruction,
+    /// The cached result inlines from when the document was last saved —
+    /// Word's own evaluation. Used as-is for fields this engine doesn't
+    /// dynamically evaluate, and as the fallback when `FieldContext` lacks a
+    /// value for one it does.
     pub content: Vec<Inline>,
 }
 

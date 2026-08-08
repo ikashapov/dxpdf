@@ -5,6 +5,12 @@ use std::collections::HashMap;
 /// Consumers provide whichever fields they have available — layout provides
 /// page numbers, mail merge provides data fields, etc. Missing context
 /// causes the evaluator to return `FieldValue::Unevaluable`.
+///
+/// Not the struct layout actually threads through today —
+/// `render::layout::fragment::collect::FieldContext` is the layout-local
+/// subset in current use (just page/count, `usize`); this is the full
+/// struct `crate::field::eval`'s evaluator takes, which nothing in
+/// `src/render/` calls yet.
 #[derive(Clone, Debug, Default)]
 pub struct FieldContext {
     /// Current page number (1-based).
