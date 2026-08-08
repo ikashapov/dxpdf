@@ -80,8 +80,8 @@ fn rewrite_in_inlines(inlines: &mut [Inline], remap: &HashMap<RelId, RelId>) {
             Inline::Field(f) => rewrite_in_inlines(&mut f.content, remap),
             Inline::AlternateContent(ac) => {
                 // §M.2.2: the renderer prefers a supported `<mc:Choice>` over
-                // `<mc:Fallback>` (see `layout::choices_render_wps_shape`), so
-                // rIds inside the choices must be rewritten too — not just the
+                // `<mc:Fallback>` (see `layout::live_mc_branch`), so rIds
+                // inside the choices must be rewritten too — not just the
                 // fallback. A header/footer logo or link often lives in a choice.
                 for choice in &mut ac.choices {
                     rewrite_in_inlines(&mut choice.content, remap);

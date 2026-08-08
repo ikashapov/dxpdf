@@ -357,6 +357,12 @@ impl<'doc> PageLayoutState<'doc> {
     /// that blocks all text (§17.4.56). Shared by the main block loop and the
     /// across-page split re-fit (§4) so a continuation wraps around whatever
     /// floats live on *its* page, not the paragraph's starting page.
+    ///
+    /// Word runs multi-pass layout, where every float on a page affects all of
+    /// that page's text regardless of document order. This single-pass
+    /// renderer approximates that by forward-scanning upcoming blocks for
+    /// absolute floats when a page starts, rather than only ever knowing about
+    /// floats already encountered.
     fn effective_floats_at_cursor(
         &mut self,
         blocks: &[LayoutBlock],
