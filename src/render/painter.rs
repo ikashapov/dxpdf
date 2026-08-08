@@ -78,8 +78,11 @@ fn quantize_crop(crop: &crate::render::geometry::PtRect) -> (i32, i32, i32, i32)
 /// the heading *level digit* in each node's type string, not from the shape of
 /// this tree: nesting an `H2` node inside an `H1` node does not nest the
 /// outline entry, it concatenates the two titles into one entry. Measured
-/// against Skia m145; the obvious "mirror the heading hierarchy" design
-/// silently merges every subheading into its parent.
+/// against Skia **m145**, the pinned build: `SkPDFTag.cpp` on Skia's `main`
+/// branch describes different behaviour (`main`'s public node has a `fTitle`
+/// field this version doesn't, for one), so do not "simplify" toward it. The
+/// obvious "mirror the heading hierarchy" design silently merges every
+/// subheading into its parent.
 ///
 /// The title comes from `set_alt`, and must: this Skia has no `fTitle` field on
 /// the public node, so a node without an alt contributes **no outline entry at
@@ -151,6 +154,12 @@ pub fn render_to_pdf(
         // A document with no headings gets neither, so it keeps its current
         // output byte for byte: an empty `/Outlines`, or a `/StructTreeRoot`
         // for a document that has no structure to describe, is worse than none.
+        //
+        // `pdf::Outline` has a third value, `StructureElements`, which mirrors
+        // the whole structure tree with titles taken from each node's *type
+        // string* (`"Document"`, `"H1"`, …) rather than its heading text —
+        // useless as a reader-facing outline, so `StructureElementHeaders`
+        // (H1-H6 only, titled from `set_alt`) is the one used here.
         outline: if structure_tree.is_some() {
             pdf::Outline::StructureElementHeaders
         } else {
@@ -243,11 +252,9 @@ fn render_page(
 
     for cmd in &page.commands {
         match cmd {
-            // §17.3.1.19: marked-content boundaries. The destination Skia gives
-            // an outline entry is the union of the marks under its node, so the
-            // ID must be set for exactly this heading's commands and cleared
-            // straight after — leaving it set would pull the destination onto
-            // whatever body text follows.
+            // §17.3.1.19: marked-content boundaries — see `OutlineMark`'s doc
+            // for why the pair matters even though it doesn't change any
+            // observable destination.
             DrawCommand::Outline(OutlineMark::Begin(heading)) => {
                 pdf::set_node_id(canvas, heading.node_id);
             }

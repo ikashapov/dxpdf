@@ -149,8 +149,9 @@ pub(super) fn paragraph_locale(
 
 /// §17.3.1.19: this paragraph's PDF outline entry, if it is a heading.
 ///
-/// `props` is the **cascaded** paragraph properties, so a level inherited from
-/// a heading style counts exactly as a direct `w:outlineLvl` does — which is
+/// `props` is the **cascaded** (§17.7.2) paragraph properties, so a level
+/// inherited from a heading style counts exactly as a direct `w:outlineLvl`
+/// does — which is
 /// the point: §17.3.1.19 is a paragraph property, and "is a heading" is not a
 /// question about style names. `OutlineLevel::from_ooxml` has already rejected
 /// value 9 ("body text"), so `None` here means "not a heading" for either

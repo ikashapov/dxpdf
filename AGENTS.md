@@ -82,7 +82,6 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 - [Floating Tables](docs/floating-tables.md) — §17.4.58 tblpPr positioning, vertical anchors
 - [Floating Images](docs/floating-images.md) — §20.4.2 anchor positioning, text wrapping, forward-scan
 - [Headers and Footers](docs/headers-footers.md) — §17.10.1 rendering, table support, per-page fields
-- [Document Outline](docs/document-outline.md) — §17.3.1.19 `w:outlineLvl` → PDF `/Outlines`, the flat-structure-tree contract Skia actually implements, and where headings are deliberately not collected
 - [Fields](docs/fields.md) — §17.16.18 complex/simple fields, PAGE/NUMPAGES evaluation
 - [Shape Geometry](docs/shape-geometry.md) — §20.1.9 `prstGeom`/`custGeom` → paths, guide-formula evaluation, preset tiering
 

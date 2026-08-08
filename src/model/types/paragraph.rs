@@ -142,7 +142,9 @@ impl OutlineLevel {
     /// outline level, not a ninth heading level. Word writes it when a
     /// paragraph's outline level is reset to Body Text, so a heading style's
     /// level can be overridden back off. `None` therefore means "not a
-    /// heading", whether the attribute was absent or present-and-9.
+    /// heading", whether the attribute was absent or present-and-9. Not
+    /// theoretical: `sample-emoji.docx` in the test corpus declares
+    /// `w:outlineLvl w:val="9"` twice.
     pub fn from_ooxml(val: u8) -> Option<Self> {
         if val <= 8 {
             Some(Self(val + 1))
