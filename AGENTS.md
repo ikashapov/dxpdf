@@ -73,7 +73,6 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 ### `docs/` — current behavior
 
 - [Internationalisation](docs/i18n.md) — §17.3.2.20 `w:lang`, the `Locale` type and its language table, and the ICU-shaped gap it is a stopgap for (number spelling, UAX #14 line breaking, bidi, date pictures)
-- [Floating Tables](docs/floating-tables.md) — §17.4.58 tblpPr positioning, vertical anchors
 - [Floating Images](docs/floating-images.md) — §20.4.2 anchor positioning, text wrapping, forward-scan
 
 ### Known-unimplemented work

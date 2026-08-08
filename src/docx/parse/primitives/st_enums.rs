@@ -694,7 +694,7 @@ impl From<StTblLayoutType> for TableLayout {
     }
 }
 
-// ── StTblOverlap (§17.4.56) ───────────────────────────────────────────────
+// ── StTblOverlap (§17.4.57) ───────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]

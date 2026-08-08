@@ -3,7 +3,7 @@
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtRect;
 
-/// §17.4.56 / §20.4.2: source of a floating element.
+/// §17.4.57 / §20.4.2: source of a floating element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatSource {
     /// §20.4.2: floating image — wraps text for all overlapping lines.
@@ -13,7 +13,7 @@ pub enum FloatSource {
     /// as a distinct variant so the stacker can detect shape-owned rects
     /// when debugging.
     Shape,
-    /// §17.4.56: floating table — only wraps text for the paragraph that
+    /// §17.4.57: floating table — only wraps text for the paragraph that
     /// was active when the table was encountered. Subsequent paragraphs
     /// clear below the table.
     Table {

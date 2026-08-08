@@ -113,6 +113,8 @@ struct PageLayoutState<'doc> {
     /// Index of the first block on the current page (for forward scanning).
     page_start_block: usize,
     /// §17.4.58: y-start of the most recent paragraph (floating-table anchor).
+    /// Set after that paragraph's spacing collapse but before its
+    /// `space_before` is added.
     last_para_start_y: Pt,
     /// §17.4.38: style_id of the previous table for adjacent border collapse.
     prev_table_style_id: Option<StyleId>,
@@ -2231,6 +2233,9 @@ pub(crate) fn layout_section_with_clearance(
                                 crate::model::TableAnchor::Margin => state.page_top + fi.y_offset,
                                 crate::model::TableAnchor::Page => fi.y_offset,
                             };
+                            // The table must not start above the cursor —
+                            // preceding content already occupies the space
+                            // above it.
                             anchor_y.max(state.cursor_y)
                         } else {
                             state.cursor_y

@@ -34,7 +34,7 @@ pub struct TableProperties {
     pub style_col_band_size: Option<u32>,
     /// §17.4.58: floating table positioning properties.
     pub positioning: Option<TablePositioning>,
-    /// §17.4.56: whether this floating table can overlap other floating tables.
+    /// §17.4.57: whether this floating table can overlap other floating tables.
     pub overlap: Option<TableOverlap>,
 }
 
@@ -59,7 +59,12 @@ pub struct TablePositioning {
     pub y: Option<Dimension<Twips>>,
 }
 
-/// §17.4.56 ST_TblOverlap — floating table overlap behavior.
+/// §17.4.57 ST_TblOverlap — floating table overlap behavior.
+///
+/// This repo's §17.4.x citations follow ISO/IEC 29500-1 1st Edition.
+/// MS-OI29500 annotates a later edition whose §17.4 numbering runs exactly
+/// one lower (`tblOverlap` is §17.4.56 there) — a cross-check against that
+/// document will look off-by-one. It isn't a bug; it's the other edition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableOverlap {
     Overlap,
