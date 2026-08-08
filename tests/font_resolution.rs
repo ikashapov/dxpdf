@@ -59,14 +59,15 @@ fn catalog() -> FaceCatalog {
         "DxSans-SemiBold.ttf",
         "DxMedium-Regular.ttf",
         "Dx-Regular.ttf",
+        "DxOblique.ttf",
         "DxCollection.ttc",
         "DxVariable.ttf",
     ] {
         faces.extend(load(&font_mgr, filename));
     }
     assert!(
-        faces.len() >= 7,
-        "expected at least seven fixture faces, got {}",
+        faces.len() >= 8,
+        "expected at least eight fixture faces, got {}",
         faces.len()
     );
     FaceCatalog::from_faces(font_mgr, &faces)
@@ -151,6 +152,18 @@ fn the_fixtures_carry_what_the_tests_assume() {
         "DxVariable.ttf must carry gvar deltas, or no instance's outline can \
          differ from the default location's"
     );
+
+    // Issue #115: an Oblique face whose fsSelection can't be told apart from
+    // Italic at the byte level would make "must not double-slant an already-
+    // Oblique face" pass vacuously.
+    let oblique_bytes = std::fs::read(fixture_dir().join("DxOblique.ttf")).unwrap();
+    let fs_selection = os2_fs_selection(&oblique_bytes);
+    const FS_SELECTION_OBLIQUE: u16 = 1 << 9; // matches `os2.rs::FS_SELECTION_OBLIQUE`
+    assert_ne!(
+        fs_selection & FS_SELECTION_OBLIQUE,
+        0,
+        "DxOblique.ttf must declare OS/2 OBLIQUE (fsSelection bit 9)"
+    );
 }
 
 /// A minimal, standalone SFNT table-directory scan — deliberately not sharing
@@ -162,6 +175,18 @@ fn has_table(sfnt: &[u8], tag: &[u8; 4]) -> bool {
         let record = &sfnt[12 + i * 16..12 + i * 16 + 4];
         record == tag
     })
+}
+
+/// A minimal, standalone `OS/2.fsSelection` read — deliberately not sharing
+/// code with `os2.rs`, for the same reason `has_table` does not.
+fn os2_fs_selection(sfnt: &[u8]) -> u16 {
+    let num_tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+    let record = (0..num_tables)
+        .map(|i| &sfnt[12 + i * 16..12 + i * 16 + 16])
+        .find(|record| &record[0..4] == b"OS/2")
+        .expect("fixture must carry an OS/2 table");
+    let offset = u32::from_be_bytes(record[8..12].try_into().unwrap()) as usize;
+    u16::from_be_bytes([sfnt[offset + 62], sfnt[offset + 63]])
 }
 
 // ─── Acceptance: exact family names win over style-like suffixes ────────────

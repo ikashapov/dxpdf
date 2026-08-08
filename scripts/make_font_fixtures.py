@@ -58,6 +58,10 @@ CMAP = {0x20: "space", 0x41: "A", 0x42: "B", 0x61: "a", 0x62: "b"}
 # the localized-name path is exercised by records a real producer would write.
 EN_US, RU_RU, JA_JP = 0x0409, 0x0419, 0x0411
 
+# `OS/2.fsSelection` bit 9 — matches `os2.rs::FS_SELECTION_OBLIQUE`. Distinct
+# from bit 0 (ITALIC), which `build()`'s own `italic` flag sets.
+FS_SELECTION_OBLIQUE = 1 << 9
+
 
 def _outlines() -> dict:
     """One rectangle per glyph — the resolver never looks at outlines, but a
@@ -82,8 +86,14 @@ def build(
     width_class: int = 5,
     fs_selection: int = 0b1000000,  # REGULAR
     italic: bool = False,
+    os2_version: int = 3,
 ) -> TTFont:
-    """A minimal but complete static TrueType font carrying `names`."""
+    """A minimal but complete static TrueType font carrying `names`.
+
+    `os2_version` only needs raising above the default 3 for a fixture that
+    sets an `fsSelection` bit the spec defines starting at version 4 (e.g.
+    OBLIQUE, bit 9) — fontTools warns on that mismatch otherwise.
+    """
     fb = FontBuilder(UPM, isTTF=True)
     fb.setupGlyphOrder(GLYPHS)
     fb.setupCharacterMap(CMAP)
@@ -92,6 +102,7 @@ def build(
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupNameTable(names)
     fb.setupOS2(
+        version=os2_version,
         sTypoAscender=800,
         sTypoDescender=-200,
         usWeightClass=weight,
@@ -231,6 +242,28 @@ def main() -> None:
             }
         ),
         "Dx-Regular.ttf",
+    )
+
+    # A face whose `OS/2` declares OBLIQUE rather than ITALIC — issue #115's
+    # synthesis decision has to tell the two apart: an already-Oblique face
+    # must not be slanted again, exactly as an already-Italic one must not.
+    # `italic=True` keeps `head.macStyle` consistent (see `build()`); the
+    # OBLIQUE bit added on top is what `os2.rs` actually keys `Slant::Oblique`
+    # on, since it outranks ITALIC when both are set.
+    write(
+        build(
+            names={
+                "familyName": "Dx Oblique",
+                "styleName": "Oblique",
+                "fullName": "Dx Oblique",
+                "psName": "Dx-Oblique",
+                "version": "Version 1.000",
+            },
+            italic=True,
+            fs_selection=FS_SELECTION_OBLIQUE,
+            os2_version=4,
+        ),
+        "DxOblique.ttf",
     )
 
     # ── A two-face collection ────────────────────────────────────────────

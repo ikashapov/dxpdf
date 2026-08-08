@@ -394,7 +394,7 @@ mod tests {
     use super::*;
     use crate::render::emoji::cluster::{EmojiPresentation, EmojiStructure};
     use crate::render::emoji::resolve::{resolve, EmojiTypeface, RegistryLookup};
-    use crate::render::fonts::{FontRegistry, InstanceState, TypefaceOrigin};
+    use crate::render::fonts::{FontRegistry, InstanceState, Synthesis, TypefaceOrigin};
     use skia_safe::{FontMgr, FontStyle};
 
     /// Construct a real `TypefaceEntry` from any host-default font. Used by
@@ -409,6 +409,7 @@ mod tests {
             instance: InstanceState::NotInstanced,
             typeface: tf,
             origin: TypefaceOrigin::System { typeface_id: id },
+            synthesis: Synthesis::default(),
         }
     }
 

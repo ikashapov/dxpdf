@@ -31,12 +31,17 @@
 //! matched face's intrinsic weight alone.
 //!
 //! The one behaviour that would separate them is *synthetic* emboldening — Word
-//! thickens a face when `w:b` is set and no bolder face exists, and under that
-//! rule `Off` on an already-bold face would mean "do not thicken further" while
-//! `Absent` would mean nothing at all. This engine does no synthetic
-//! emboldening, so the distinction is currently unobservable. Modelling it
-//! anyway keeps the information available at the point where it would be needed,
-//! instead of reconstructing it later from a `bool` that never had it.
+//! thickens a face when `w:b` is set and no bolder face exists. [`Synthesis`]
+//! is where that now lives (issue #115), and it settles what this section used
+//! to only speculate about: gated on [`Toggle::On`] specifically, `Off` and
+//! `Absent` both decline to synthesise, for the same reason they already agree
+//! at selection — neither is asking for anything. Not a special case written
+//! for `Off`; [`Synthesis::compute`] never asks [`Toggle::is_on`], only
+//! `== Toggle::On`, which already excludes both. Modelling the third state
+//! still earns its place for the reason above — the §17.7.2 cascade itself
+//! needs it — even though, here too, it produces the same answer as `Absent`,
+//! not because one collapsed into the other but because a fully resolved
+//! "not bold" is not bold in Word regardless of how it got there.
 
 use skia_safe::font_style::{Slant, Weight, Width};
 use skia_safe::FontStyle;
@@ -166,6 +171,47 @@ impl EffectiveStyle {
     /// by index.
     pub fn font_style(&self) -> FontStyle {
         FontStyle::new(Weight::from(self.weight), self.width, self.slant)
+    }
+}
+
+/// What resolution could not satisfy with a real face — issue #115.
+///
+/// The input `set_embolden`/`set_skew_x` need, since re-deriving it at paint
+/// time would mean guessing at something resolution already knows for
+/// certain. Carried on [`super::TypefaceEntry`] alongside the resolved
+/// typeface itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Synthesis {
+    /// `w:b` was `On` and the selected face is not already bold.
+    pub embolden: bool,
+    /// `w:i` was `On` and the selected face is not already italic or oblique.
+    pub oblique: bool,
+}
+
+impl Synthesis {
+    /// `selected` is the face resolution actually chose — its *own* intrinsic
+    /// style, not [`EffectiveStyle`] (which forces weight/slant toward what
+    /// was asked, for ranking; comparing against that would make every `On`
+    /// request read as already satisfied).
+    ///
+    /// Gated on the raw [`Toggle::On`], not
+    /// [`EffectiveStyle::weight_is_requested`]/[`EffectiveStyle::slant_is_requested`]:
+    /// those answer "should ranking's floor rise", which `Off` and `Absent`
+    /// answer identically (see this module's doc) — the same reason a fully
+    /// resolved §17.7.2 cascade renders them the same here too, now checked
+    /// directly against the tri-state rather than through a value that
+    /// already discarded it.
+    ///
+    /// The [`IntrinsicStyle::is_italic`] check (not `slant == Slant::Italic`)
+    /// is deliberate: a face whose `OS/2` already declares `OBLIQUE` must not
+    /// be slanted again. [`IntrinsicStyle::is_already_bold`] is the weight
+    /// analogue — see its own doc for why the legacy bold-slot bit alone is
+    /// not enough.
+    pub fn compute(request: &FaceRequest<'_>, selected: &IntrinsicStyle) -> Self {
+        Self {
+            embolden: request.bold == Toggle::On && !selected.is_already_bold(),
+            oblique: request.italic == Toggle::On && !selected.is_italic(),
+        }
     }
 }
 
@@ -309,5 +355,115 @@ mod tests {
             IntrinsicStyle::NEUTRAL,
         );
         assert_eq!(e.font_style(), FontStyle::bold_italic());
+    }
+
+    // ── Synthesis (issue #115) ──────────────────────────────────────────
+
+    #[test]
+    fn bold_requested_against_a_light_face_embolds() {
+        let s = Synthesis::compute(
+            &FaceRequest::new("Dx", Toggle::On, Toggle::Absent),
+            &at(400, Slant::Upright),
+        );
+        assert!(s.embolden);
+        assert!(!s.oblique);
+    }
+
+    /// Never synthesise over a real face: the bold-slot bit alone is enough
+    /// to suppress it, regardless of weight.
+    #[test]
+    fn bold_requested_against_a_bold_slot_face_does_not_embold() {
+        let bold_slot_face = IntrinsicStyle {
+            weight: 600,
+            bold_slot: true,
+            ..IntrinsicStyle::NEUTRAL
+        };
+        let s = Synthesis::compute(
+            &FaceRequest::new("Dx SemiBold", Toggle::On, Toggle::Absent),
+            &bold_slot_face,
+        );
+        assert!(!s.embolden);
+    }
+
+    /// The `is_already_bold` refinement, pinned at this layer too: a family
+    /// with nothing but Regular and Black ranks Black closest to "at least
+    /// Bold" (`EffectiveStyle::resolve`'s own floor-raising), and Black not
+    /// setting the legacy bit must not thicken it further.
+    #[test]
+    fn bold_requested_against_an_unmarked_black_face_does_not_embold() {
+        let black_no_bit = IntrinsicStyle {
+            weight: *Weight::BLACK,
+            bold_slot: false,
+            ..IntrinsicStyle::NEUTRAL
+        };
+        let s = Synthesis::compute(
+            &FaceRequest::new("Dx Black", Toggle::On, Toggle::Absent),
+            &black_no_bit,
+        );
+        assert!(!s.embolden);
+    }
+
+    /// The acceptance criterion this issue was written to settle: a fully
+    /// §17.7.2-cascaded "not bold" is not bold whether it got there via an
+    /// explicit `w:val="0"` or plain absence, so both read identically here —
+    /// checked explicitly against the raw tri-state, not assumed.
+    #[test]
+    fn off_and_absent_never_embold_even_against_an_already_bold_face() {
+        let already_bold = IntrinsicStyle {
+            weight: 600,
+            bold_slot: true,
+            ..IntrinsicStyle::NEUTRAL
+        };
+        for toggle in [Toggle::Off, Toggle::Absent] {
+            let s = Synthesis::compute(
+                &FaceRequest::new("Dx SemiBold", toggle, Toggle::Absent),
+                &already_bold,
+            );
+            assert!(!s.embolden, "{toggle:?} must not synthesise");
+        }
+    }
+
+    #[test]
+    fn italic_requested_against_an_upright_face_obliques() {
+        let s = Synthesis::compute(
+            &FaceRequest::new("Dx", Toggle::Absent, Toggle::On),
+            &at(400, Slant::Upright),
+        );
+        assert!(s.oblique);
+        assert!(!s.embolden);
+    }
+
+    /// The other acceptance criterion this issue names explicitly: a face
+    /// whose `OS/2` already declares OBLIQUE (not ITALIC) must not be slanted
+    /// again — `is_italic` treating the two alike is what this test pins.
+    #[test]
+    fn italic_requested_against_an_oblique_face_does_not_double_slant() {
+        let s = Synthesis::compute(
+            &FaceRequest::new("Dx Oblique", Toggle::Absent, Toggle::On),
+            &at(400, Slant::Oblique),
+        );
+        assert!(!s.oblique);
+    }
+
+    #[test]
+    fn off_and_absent_never_oblique_even_against_an_already_italic_face() {
+        let already_italic = at(400, Slant::Italic);
+        for toggle in [Toggle::Off, Toggle::Absent] {
+            let s = Synthesis::compute(
+                &FaceRequest::new("Dx Italic", Toggle::Absent, toggle),
+                &already_italic,
+            );
+            assert!(!s.oblique, "{toggle:?} must not synthesise");
+        }
+    }
+
+    #[test]
+    fn both_toggles_synthesise_together_against_a_fully_plain_face() {
+        let s = Synthesis::compute(
+            &FaceRequest::new("Dx", Toggle::On, Toggle::On),
+            &IntrinsicStyle::NEUTRAL,
+        );
+        assert!(s.embolden);
+        assert!(s.oblique);
     }
 }

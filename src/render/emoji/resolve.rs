@@ -219,7 +219,7 @@ impl<L: EmojiTypefaceLookup> EmojiResolver<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::fonts::{InstanceState, TypefaceId, TypefaceOrigin};
+    use crate::render::fonts::{InstanceState, Synthesis, TypefaceId, TypefaceOrigin};
     use skia_safe::FontMgr;
     use std::cell::Cell;
 
@@ -235,6 +235,7 @@ mod tests {
             instance: InstanceState::NotInstanced,
             typeface: tf,
             origin: TypefaceOrigin::System { typeface_id: id },
+            synthesis: Synthesis::default(),
         }
     }
 

@@ -46,7 +46,7 @@ pub use cache::FontCache;
 pub use catalog::{FaceCatalog, FaceLookup, FaceRef};
 pub use face::{FaceIdentity, FaceName, FaceRecord, IntrinsicStyle, NameKind, VariationInstance};
 pub use instance_bake::InstanceBakeFailure;
-pub use request::{EffectiveStyle, FaceRequest, Toggle};
+pub use request::{EffectiveStyle, FaceRequest, Synthesis, Toggle};
 pub use resolve::{FaceResolution, FallbackReason, ResolutionStep, Selection};
 
 use std::cell::RefCell;
@@ -120,6 +120,15 @@ pub struct TypefaceEntry {
     /// Whether `typeface` is a variable-font named instance, and if so,
     /// whether its coordinates are baked into `origin`'s bytes.
     pub instance: InstanceState,
+    /// What resolution could not get from a real face for this typeface —
+    /// issue #115. `FontCache` is what turns it into an actual
+    /// `set_embolden`/`set_skew_x`. Defaults to
+    /// [`Synthesis::default`] (nothing to synthesise) here: this is the
+    /// **face**-keyed constructor, opened independent of any particular
+    /// request's toggles — `resolve_uncached`/`host_default` are what
+    /// overwrite it with the value a specific request's `Synthesis::compute`
+    /// produces, since only they know what was asked.
+    pub synthesis: Synthesis,
 }
 
 impl TypefaceEntry {
@@ -129,6 +138,7 @@ impl TypefaceEntry {
             typeface,
             origin: TypefaceOrigin::System { typeface_id },
             instance: InstanceState::NotInstanced,
+            synthesis: Synthesis::default(),
         }
     }
 }
@@ -431,7 +441,7 @@ impl FontRegistry {
     fn resolve_uncached(&self, request: &FaceRequest<'_>) -> TypefaceEntry {
         match resolve::resolve(request, &self.catalog) {
             resolve::FaceResolution::Selected(selection) => {
-                if let Some(entry) = self.open(&selection.record) {
+                if let Some(mut entry) = self.open(&selection.record) {
                     log::debug!(
                         "[font] '{}' {:?}/{:?} → {} '{}'{}",
                         request.name,
@@ -446,6 +456,13 @@ impl FontRegistry {
                             .map(|i| format!(" instance '{}'", i.subfamily))
                             .unwrap_or_default(),
                     );
+                    // §115: `open` is cached by face identity, shared across
+                    // every request that resolves to this face — a
+                    // `Synthesis` computed *there* would be one request's
+                    // decision leaking into another's cache hit. Computed
+                    // here instead, against this request's own toggles, and
+                    // set on the (already-cloned) entry this call owns.
+                    entry.synthesis = Synthesis::compute(request, &selection.record.intrinsic);
                     return entry;
                 }
                 // The catalogue named a face the manager then declined to open.
@@ -497,7 +514,14 @@ impl FontRegistry {
             request.name,
             tf.family_name()
         );
-        TypefaceEntry::system(tf)
+        let mut entry = TypefaceEntry::system(tf);
+        // The *returned* typeface's own reported style, not the style
+        // requested of `legacy_make_typeface` — the two can differ (the host
+        // has no italic variant, hands back upright anyway), and it is what
+        // the face actually *is* that decides whether synthesis is needed.
+        let selected = IntrinsicStyle::from_font_style(entry.typeface.font_style());
+        entry.synthesis = Synthesis::compute(request, &selected);
+        entry
     }
 
     /// One warning per requested family, however many style variants ask.
@@ -560,6 +584,7 @@ impl FontRegistry {
                 typeface: base,
                 origin,
                 instance: InstanceState::NotInstanced,
+                synthesis: Synthesis::default(),
             });
         };
 
@@ -602,6 +627,7 @@ impl FontRegistry {
                     typeface: baked_tf,
                     origin: TypefaceOrigin::System { typeface_id },
                     instance: InstanceState::Baked(instance.clone()),
+                    synthesis: Synthesis::default(),
                 })
             }
             Err(reason) => {
@@ -634,6 +660,7 @@ impl FontRegistry {
                                 instance: instance.clone(),
                                 reason,
                             },
+                            synthesis: Synthesis::default(),
                         })
                     }
                     None => {
@@ -647,6 +674,7 @@ impl FontRegistry {
                             typeface: base,
                             origin,
                             instance: InstanceState::NotInstanced,
+                            synthesis: Synthesis::default(),
                         })
                     }
                 }
@@ -1313,6 +1341,82 @@ pub(crate) mod tests {
         assert_ne!(
             default_bytes, semibold_bytes,
             "the baked instance's embedded bytes must differ from the default location's"
+        );
+    }
+
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files/fonts")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("fixture '{name}' is missing ({e}) — run scripts/make_font_fixtures.py")
+        })
+    }
+
+    /// Issue #115, end to end through `FontRegistry::resolve` — the same
+    /// path a real render takes, one layer above `Synthesis::compute`'s own
+    /// pure tests in `request.rs`. `Dx-Regular.ttf` is a genuinely
+    /// single-face family: nothing bolder exists for ranking to find.
+    #[test]
+    fn a_single_face_family_embolds_on_request() {
+        let mut registry = FontRegistry::new(fmgr());
+        registry
+            .register_embedded(
+                "Dx",
+                crate::model::EmbeddedFontVariant::Regular,
+                fixture_bytes("Dx-Regular.ttf"),
+            )
+            .expect("Dx-Regular.ttf must register");
+
+        let entry = registry.resolve(&FaceRequest::new("Dx", Toggle::On, Toggle::Absent));
+        assert!(entry.synthesis.embolden, "nothing bolder exists to select");
+        assert!(!entry.synthesis.oblique);
+    }
+
+    /// Acceptance criterion 2, literally: a family with a real Bold face is
+    /// unchanged by a bold request.
+    #[test]
+    fn a_family_with_a_real_bold_face_does_not_embold() {
+        let mut registry = FontRegistry::new(fmgr());
+        registry
+            .register_embedded(
+                "DxSans",
+                crate::model::EmbeddedFontVariant::Regular,
+                fixture_bytes("DxSans-Regular.ttf"),
+            )
+            .expect("DxSans-Regular.ttf must register");
+        registry
+            .register_embedded(
+                "DxSans",
+                crate::model::EmbeddedFontVariant::Bold,
+                fixture_bytes("DxSans-Bold.ttf"),
+            )
+            .expect("DxSans-Bold.ttf must register");
+
+        let entry = registry.resolve(&FaceRequest::new("DxSans", Toggle::On, Toggle::Absent));
+        assert!(
+            !entry.synthesis.embolden,
+            "ranking must have selected the family's real Bold face"
+        );
+    }
+
+    /// Acceptance criterion 3: a face whose `OS/2` already declares OBLIQUE
+    /// (not ITALIC) must not be slanted again.
+    #[test]
+    fn an_already_oblique_face_does_not_double_slant() {
+        let mut registry = FontRegistry::new(fmgr());
+        registry
+            .register_embedded(
+                "Dx Oblique",
+                crate::model::EmbeddedFontVariant::Italic,
+                fixture_bytes("DxOblique.ttf"),
+            )
+            .expect("DxOblique.ttf must register");
+
+        let entry = registry.resolve(&FaceRequest::new("Dx Oblique", Toggle::Absent, Toggle::On));
+        assert!(
+            !entry.synthesis.oblique,
+            "the face is already Oblique, not Upright"
         );
     }
 

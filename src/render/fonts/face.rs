@@ -133,6 +133,20 @@ impl IntrinsicStyle {
     pub fn is_italic(&self) -> bool {
         matches!(self.slant, Slant::Italic | Slant::Oblique)
     }
+
+    /// Whether the face already claims to be bold — checked against *both*
+    /// signals `OS/2` can carry, not just the legacy slot bit: a family with
+    /// weights past Bold (ExtraBold 800, Black 900) may leave `fsSelection`'s
+    /// bold bit set only on the literal Bold face, since the bit names one
+    /// slot in the legacy four-style model, not "at least this heavy". A
+    /// `w:b` request against such a family ranks its heaviest available face
+    /// as the closest match to "at least Bold" (see
+    /// [`EffectiveStyle::resolve`](super::request::EffectiveStyle::resolve))
+    /// — `bold_slot` alone would then read Black as un-bold and thicken it
+    /// further.
+    pub fn is_already_bold(&self) -> bool {
+        self.bold_slot || self.weight >= *Weight::BOLD
+    }
 }
 
 /// How the engine came to know a face by a given name.
@@ -412,6 +426,41 @@ pub(crate) mod tests {
             ..IntrinsicStyle::NEUTRAL
         };
         assert!(oblique.is_italic());
+    }
+
+    /// The legacy slot bit alone: a face can claim it well under weight 700.
+    #[test]
+    fn the_bold_slot_bit_alone_counts_as_already_bold() {
+        let semibold_bold_slot = IntrinsicStyle {
+            weight: 600,
+            bold_slot: true,
+            ..IntrinsicStyle::NEUTRAL
+        };
+        assert!(semibold_bold_slot.is_already_bold());
+    }
+
+    /// Weight alone, with no bit: issue #115's motivating case — a family
+    /// with weights past Bold (ExtraBold, Black) may leave the bit set only
+    /// on the literal Bold face, since the bit names one slot in the legacy
+    /// four-style model, not "at least this heavy".
+    #[test]
+    fn a_weight_past_bold_alone_counts_as_already_bold() {
+        let black_no_bit = IntrinsicStyle {
+            weight: *Weight::BLACK,
+            bold_slot: false,
+            ..IntrinsicStyle::NEUTRAL
+        };
+        assert!(black_no_bit.is_already_bold());
+    }
+
+    #[test]
+    fn neither_signal_present_is_not_already_bold() {
+        let semibold = IntrinsicStyle {
+            weight: 600,
+            bold_slot: false,
+            ..IntrinsicStyle::NEUTRAL
+        };
+        assert!(!semibold.is_already_bold());
     }
 
     // ── FaceRecord matching ──────────────────────────────────────────────
