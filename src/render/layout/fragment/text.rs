@@ -85,6 +85,13 @@ pub(super) struct TextRunStyle {
 /// Split text into word-level chunks for line breaking.
 /// Whitespace is kept attached to the preceding word: "hello world" → ["hello ", "world"].
 /// This allows the line fitter to break between fragments at word boundaries.
+///
+/// Only space, tab and hyphen are break opportunities — not full UAX #14. Thai,
+/// Lao, Khmer, Burmese and CJK are written without spaces, so a paragraph in
+/// any of them does not wrap at all; it runs off the page. This is the
+/// hardest of this engine's known i18n gaps — closing it needs a dictionary
+/// /LSTM-based segmenter, not a wider set of literal break characters.
+/// Tracked in issue #124.
 fn split_into_words(text: &str) -> Vec<&str> {
     let mut words = Vec::new();
     let mut start = 0;

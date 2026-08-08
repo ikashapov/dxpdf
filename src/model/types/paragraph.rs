@@ -39,6 +39,9 @@ pub struct ParagraphProperties {
     pub suppress_auto_hyphens: Option<bool>,
     /// §17.3.1.9: suppress spacing when adjacent paragraph has same style.
     pub contextual_spacing: Option<bool>,
+    /// §17.3.1.6: this paragraph is right-to-left. Parsed but never
+    /// consumed — same UAX #9 bidi gap as `RunProperties::rtl`. Tracked in
+    /// issue #124.
     pub bidi: Option<bool>,
     /// §17.3.1.45: allow line breaking between any characters for East Asian text.
     pub word_wrap: Option<bool>,

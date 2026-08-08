@@ -273,6 +273,9 @@ fn to_12hour(hour: u32) -> (u32, &'static str) {
     }
 }
 
+/// §17.16.4.2 date-picture month name — hardcoded English regardless of the
+/// document's declared language. A German document's `DATE \@ "MMMM"` still
+/// renders "August". Tracked in issue #124.
 fn short_month_name(month: u32) -> &'static str {
     match month {
         1 => "Jan",
@@ -291,6 +294,8 @@ fn short_month_name(month: u32) -> &'static str {
     }
 }
 
+/// §17.16.4.2 date-picture month name — same English-only gap as
+/// `short_month_name`. Tracked in issue #124.
 fn long_month_name(month: u32) -> &'static str {
     match month {
         1 => "January",
