@@ -72,7 +72,6 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 
 ### `docs/` — current behavior
 
-- [Style Cascade](docs/style-cascade.md) — §17.7.2 property resolution, doc defaults, table style interaction
 - [Paragraph Spacing](docs/paragraph-spacing.md) — §17.3.1.33 spacing, page-top suppression, collapse rules
 - [Tabs](docs/position-tabs.md) — §17.3.1.30 `w:ptab` alignment derived at layout time; §17.18.85 `bar` stops (a rule, invisible to a tab character) and `decimal` stops
 - [Internationalisation](docs/i18n.md) — §17.3.2.20 `w:lang`, the `Locale` type and its language table, and the ICU-shaped gap it is a stopgap for (number spelling, UAX #14 line breaking, bidi, date pictures)

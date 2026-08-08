@@ -136,7 +136,11 @@ fn resolve_one(
     // table style must be able to override doc defaults, which requires
     // doc defaults to be the lowest priority in the merge chain.
     // Character styles inherit only from their basedOn chain.
-    // Run defaults from docDefaults still apply for font resolution.
+    // Run defaults from docDefaults still apply for font resolution: character
+    // formatting has no "table style" insertion point the way paragraph
+    // properties do, so there is no later cascade level that would ever need
+    // to override a doc-default run property — the conflict this exclusion
+    // exists to avoid, above, simply doesn't arise for runs.
     if style.style_type != crate::model::StyleType::Character {
         merge_run_properties(&mut run, &sheet.doc_defaults_run);
     }
