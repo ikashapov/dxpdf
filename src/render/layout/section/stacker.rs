@@ -105,7 +105,7 @@ pub fn stack_blocks(
             } => {
                 let mut effective_style = style.clone_for_layout();
 
-                // §17.3.1.9: spacing collapse — see docs/paragraph-spacing.md.
+                // §17.3.1.9: spacing collapse.
                 if effective_style.contextual_spacing
                     && effective_style.style_id.is_some()
                     && effective_style.style_id == prev_style_id

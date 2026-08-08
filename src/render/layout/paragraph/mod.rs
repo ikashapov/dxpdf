@@ -393,7 +393,7 @@ impl PlacedParagraph<'_> {
     ///
     /// Total height is `space_before + Σ line heights + space_after`; the
     /// caller adds it to the page cursor. `space_after` can collapse with the
-    /// next paragraph's `space_before` — see `docs/paragraph-spacing.md`.
+    /// next paragraph's `space_before` (§17.3.1.9).
     pub(crate) fn emit_full(&self) -> ParagraphLayout {
         let mut commands = Vec::new();
         let mut cursor_y = self.style.space_before;
