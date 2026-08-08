@@ -66,35 +66,34 @@ pub enum SubsetOutcome {
         regressed: usize,
         shapeable_before: usize,
     },
-    /// The selected face is a **variable-font named instance**, and the bytes
-    /// available to embed are the font's *default* location, not the instance's.
+    /// The selected face is a **variable-font named instance** whose
+    /// coordinates `instance_bake::bake_instance` could not bake into
+    /// a static SFNT at font-open time — `reason` says why (issue #113).
     ///
-    /// Layout and on-screen painting are correct: resolution applied the
-    /// coordinates through `Typeface::clone_with_arguments`, so metrics and the
-    /// Skia canvas both draw the right weight. What cannot be made correct here
-    /// is the embedded font program — `fontcull` 2.0.1 exposes no instancing
-    /// API (its `klippa` still carries `TODO: instancing`), and neither
-    /// `to_font_data` nor a table copy can bake a design-space location into
-    /// `glyf`/`gvar`. A conforming PDF viewer therefore draws the default
+    /// Reachable only for the cases that route genuinely cannot handle
+    /// (CFF2-flavored variable fonts, WOFF/WOFF2-compressed source bytes, or
+    /// a real parse/serialize failure) — not for the ordinary case, which is
+    /// already baked by the time this pass runs and needs no special case at
+    /// all: `entry.instance` is `Baked` or `NotInstanced`, and `process_one`
+    /// falls through to the same path any static face takes.
+    ///
+    /// Layout and on-screen painting are still correct even when baking
+    /// fails: resolution's live-instancing fallback
+    /// (`Typeface::clone_with_arguments`) applies the coordinates, so metrics
+    /// and the Skia canvas both draw the right weight. What is not correct is
+    /// the embedded font program — a conforming PDF viewer draws the default
     /// instance's outlines against advances taken from the instanced font.
-    ///
-    /// Selection avoids this wherever it can: where a static face fits a request
-    /// as well as an instance does, [`crate::render::fonts::resolve`] prefers
-    /// the static one precisely because it survives the round trip. This outcome
-    /// is what remains when a family ships *only* as a variable font.
     ///
     /// The original typeface is left in place, so the PDF embeds a complete
     /// font rather than a subset carved at the wrong location.
-    ///
-    /// Baking the location is issue #113, which names the two candidate routes:
-    /// a `glyf`/`gvar` instancer over the fontations crates, or an `hb-subset`
-    /// dependency. The seam is the bail-out in `process_one`.
     VariableInstanceNotBaked {
         id: TypefaceId,
         /// The instance's subfamily name, e.g. `"SemiBold"`.
         subfamily: String,
         /// The axes and values that could not be baked, for the log.
         axes: Vec<(String, f32)>,
+        /// Why baking failed.
+        reason: crate::render::fonts::InstanceBakeFailure,
     },
 }
 
@@ -305,7 +304,10 @@ pub fn apply(usage: CodepointUsage, registry: &mut FontRegistry) -> SubsetReport
 
         let outcome = process_one(id, &entry, cps, registry);
         if let SubsetOutcome::VariableInstanceNotBaked {
-            subfamily, axes, ..
+            subfamily,
+            axes,
+            reason,
+            ..
         } = &outcome
         {
             let at = axes
@@ -314,9 +316,10 @@ pub fn apply(usage: CodepointUsage, registry: &mut FontRegistry) -> SubsetReport
                 .collect::<Vec<_>>()
                 .join(", ");
             log::warn!(
-                "[subset] '{}' is a variable instance ({at}); the embedded font \
-                 carries the default location, so the PDF will draw that instead. \
-                 Advances are still correct.",
+                "[subset] '{}' is a variable instance ({at}) that could not be \
+                 baked ({reason}); the embedded font carries the default \
+                 location, so the PDF will draw that instead. Advances are \
+                 still correct.",
                 subfamily
             );
         }
@@ -332,11 +335,15 @@ fn process_one(
     codepoints: &std::collections::BTreeSet<crate::render::subset::collect::Codepoint>,
     registry: &mut FontRegistry,
 ) -> SubsetOutcome {
-    // A variable instance's coordinates cannot be baked into the bytes, and a
-    // subset carved at the default location would embed the wrong outlines
-    // *and* be smaller — hiding the problem behind an apparent success. Bail
-    // before extraction so the original, complete font is what ships.
-    if let Some(instance) = &entry.instance {
+    // §113: baking is attempted once, at font-open time
+    // (`FontRegistry::open_uncached`) — by the time a typeface reaches here,
+    // `entry.instance` is `Baked` (or `NotInstanced`) far more often than not,
+    // and falls straight through to the ordinary path below. This only bails
+    // for the residual case baking itself could not handle: a subset carved
+    // at the default location would embed the wrong outlines *and* be
+    // smaller — hiding the problem behind an apparent success — so the
+    // original, complete font ships instead.
+    if let crate::render::fonts::InstanceState::Unbaked { instance, reason } = &entry.instance {
         return SubsetOutcome::VariableInstanceNotBaked {
             id,
             subfamily: instance.subfamily.clone(),
@@ -345,6 +352,7 @@ fn process_one(
                 .iter()
                 .map(|coord| (coord.axis.to_string(), coord.value))
                 .collect(),
+            reason: reason.clone(),
         };
     }
 
@@ -985,30 +993,35 @@ mod tests {
 
     // ── variable instances (§85 acceptance criterion 6) ──────────────────
 
-    /// A variable instance must be reported, not subsetted. Carving a subset at
-    /// the *default* location would be smaller — and wrong — which is exactly
-    /// the failure this outcome exists to make visible rather than silent.
+    /// An instance baking genuinely cannot handle must be reported, not
+    /// subsetted. Carving a subset at the *default* location would be
+    /// smaller — and wrong — which is exactly the failure this outcome exists
+    /// to make visible rather than silent.
     #[test]
     fn a_variable_instance_is_reported_rather_than_subsetted_at_the_wrong_location() {
         let mut r = FontRegistry::new(FontMgr::new());
         let entry = r.resolve(&FaceRequest::plain("InstanceProbe"));
         let id = TypefaceId::from(&entry.typeface);
 
+        let variation = VariationInstance {
+            subfamily: "SemiBold".into(),
+            post_script_name: None,
+            coords: vec![
+                VariationCoord {
+                    axis: AxisTag::WEIGHT,
+                    value: 600.0,
+                },
+                VariationCoord {
+                    axis: AxisTag::WIDTH,
+                    value: 75.0,
+                },
+            ],
+        };
         let instanced = crate::render::fonts::TypefaceEntry {
-            instance: Some(VariationInstance {
-                subfamily: "SemiBold".into(),
-                post_script_name: None,
-                coords: vec![
-                    VariationCoord {
-                        axis: AxisTag::WEIGHT,
-                        value: 600.0,
-                    },
-                    VariationCoord {
-                        axis: AxisTag::WIDTH,
-                        value: 75.0,
-                    },
-                ],
-            }),
+            instance: crate::render::fonts::InstanceState::Unbaked {
+                instance: variation,
+                reason: crate::render::fonts::InstanceBakeFailure::Cff2NotSupported,
+            },
             ..entry
         };
 
@@ -1023,6 +1036,7 @@ mod tests {
                 id: reported,
                 subfamily,
                 axes,
+                reason,
             } => {
                 assert_eq!(reported, id);
                 assert_eq!(subfamily, "SemiBold");
@@ -1030,6 +1044,10 @@ mod tests {
                     axes,
                     vec![("wght".to_string(), 600.0), ("wdth".to_string(), 75.0)],
                     "the axes that could not be baked must be named"
+                );
+                assert_eq!(
+                    reason,
+                    crate::render::fonts::InstanceBakeFailure::Cff2NotSupported
                 );
             }
             other => panic!("expected VariableInstanceNotBaked, got {other:?}"),
@@ -1042,7 +1060,10 @@ mod tests {
     fn a_static_face_is_unaffected_by_the_instance_check() {
         let mut r = FontRegistry::new(FontMgr::new());
         let entry = r.resolve(&FaceRequest::plain("StaticProbe"));
-        assert!(entry.instance.is_none());
+        assert_eq!(
+            entry.instance,
+            crate::render::fonts::InstanceState::NotInstanced
+        );
         let id = TypefaceId::from(&entry.typeface);
 
         let mut codepoints = std::collections::BTreeSet::new();
@@ -1055,6 +1076,38 @@ mod tests {
         );
     }
 
+    /// A `Baked` entry is, by the time this pass sees it, indistinguishable
+    /// from an ordinary static face — the acceptance criterion that baking
+    /// "subsets normally afterwards", pinned at this layer rather than only
+    /// at `instance_bake`'s own.
+    #[test]
+    fn a_baked_instance_subsets_like_any_static_face() {
+        let mut r = FontRegistry::new(FontMgr::new());
+        let entry = r.resolve(&FaceRequest::plain("BakedProbe"));
+        let id = TypefaceId::from(&entry.typeface);
+
+        let baked = crate::render::fonts::TypefaceEntry {
+            instance: crate::render::fonts::InstanceState::Baked(VariationInstance {
+                subfamily: "SemiBold".into(),
+                post_script_name: None,
+                coords: vec![VariationCoord {
+                    axis: AxisTag::WEIGHT,
+                    value: 600.0,
+                }],
+            }),
+            ..entry
+        };
+
+        let mut codepoints = std::collections::BTreeSet::new();
+        codepoints.insert(crate::render::subset::collect::Codepoint::from('a'));
+
+        let outcome = process_one(id, &baked, &codepoints, &mut r);
+        assert!(
+            !matches!(outcome, SubsetOutcome::VariableInstanceNotBaked { .. }),
+            "a Baked entry must not be reported as unbaked: got {outcome:?}"
+        );
+    }
+
     #[test]
     fn the_report_counts_and_names_unbaked_instances() {
         let report = SubsetReport {
@@ -1062,6 +1115,7 @@ mod tests {
                 id: TypefaceId(1),
                 subfamily: "SemiBold".into(),
                 axes: vec![("wght".into(), 600.0)],
+                reason: crate::render::fonts::InstanceBakeFailure::Cff2NotSupported,
             }],
         };
         assert_eq!(report.variable_instance_count(), 1);

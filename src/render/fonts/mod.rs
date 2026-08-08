@@ -17,8 +17,11 @@
 //!    face's own OpenType tables through [`opentype`] when a request needs more
 //!    than a family name.
 //! 3. [`resolve`] runs the eight-step chain and names one [`FaceRecord`].
-//! 4. This module opens it — positionally, and applying variation coordinates
-//!    where the record is a named instance.
+//! 4. This module opens it — positionally, and where the record is a named
+//!    instance, baking its coordinates into a static SFNT (`instance_bake`)
+//!    so embedding is correct too, not just measurement and paint. A named
+//!    boundary (CFF2, WOFF/WOFF2, a `spec_next` cubic outline) falls back to
+//!    `Typeface::clone_with_arguments` instead — see [`InstanceState`].
 //!
 //! Only step 4 touches Skia beyond reading tables, which is what lets the first
 //! three be tested against fixture fonts identically on every platform.
@@ -33,6 +36,7 @@
 mod cache;
 pub mod catalog;
 pub mod face;
+mod instance_bake;
 pub mod opentype;
 pub mod request;
 pub mod resolve;
@@ -41,6 +45,7 @@ mod substitutes;
 pub use cache::FontCache;
 pub use catalog::{FaceCatalog, FaceLookup, FaceRef};
 pub use face::{FaceIdentity, FaceName, FaceRecord, IntrinsicStyle, NameKind, VariationInstance};
+pub use instance_bake::InstanceBakeFailure;
 pub use request::{EffectiveStyle, FaceRequest, Toggle};
 pub use resolve::{FaceResolution, FallbackReason, ResolutionStep, Selection};
 
@@ -112,13 +117,9 @@ pub enum TypefaceOrigin {
 pub struct TypefaceEntry {
     pub typeface: Typeface,
     pub origin: TypefaceOrigin,
-    /// The design-space location this typeface was instanced at, when it is a
-    /// variable-font named instance.
-    ///
-    /// Carried on the entry rather than recovered from the typeface because the
-    /// subsetting pass has to *know* the bytes it is about to embed do not
-    /// contain this location — see `SubsetOutcome::VariableInstanceNotBaked`.
-    pub instance: Option<VariationInstance>,
+    /// Whether `typeface` is a variable-font named instance, and if so,
+    /// whether its coordinates are baked into `origin`'s bytes.
+    pub instance: InstanceState,
 }
 
 impl TypefaceEntry {
@@ -127,9 +128,36 @@ impl TypefaceEntry {
         Self {
             typeface,
             origin: TypefaceOrigin::System { typeface_id },
-            instance: None,
+            instance: InstanceState::NotInstanced,
         }
     }
+}
+
+/// The three states a resolved typeface can be in with respect to a variable
+/// font's design space — replaces what used to be `Option<VariationInstance>`,
+/// which could not distinguish "not an instance" from "an instance, unbaked."
+///
+/// Carried on [`TypefaceEntry`] rather than recovered from `typeface` itself
+/// because the subsetting pass has to *know*, without re-deriving it, whether
+/// the bytes it is about to embed already contain the pinned location — see
+/// `SubsetOutcome::VariableInstanceNotBaked`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InstanceState {
+    /// Not a variable-font instance — either an ordinary static face, or the
+    /// font system declined to instance one at all (§113's own live-instance
+    /// fallback, `apply_variation`, returning `None`; rare, and no worse than
+    /// resolution failing to find the family in the first place).
+    NotInstanced,
+    /// `typeface`'s embedded bytes ARE this location — subsetting needs no
+    /// special case for it.
+    Baked(VariationInstance),
+    /// `typeface` is still `Typeface::clone_with_arguments`-instanced (screen-
+    /// and measurement-correct); its embedded bytes remain the font's default
+    /// location, for the stated reason.
+    Unbaked {
+        instance: VariationInstance,
+        reason: InstanceBakeFailure,
+    },
 }
 
 /// Cache key for a resolved face: the *request*, not a Skia style.
@@ -531,40 +559,97 @@ impl FontRegistry {
             return Some(TypefaceEntry {
                 typeface: base,
                 origin,
-                instance: None,
+                instance: InstanceState::NotInstanced,
             });
         };
-        // A named instance is a *different* Skia typeface with its own
-        // `unique_id`, so measurement, paint and subset collection all pick it
-        // up without further plumbing. If the platform declines to instance it,
-        // the un-instanced face is still the right family and weight class —
-        // better than falling through to the host default.
-        match apply_variation(&base, instance) {
-            Some(instanced) => {
-                let origin = match origin {
-                    TypefaceOrigin::System { .. } => TypefaceOrigin::System {
-                        typeface_id: TypefaceId::from(&instanced),
-                    },
-                    embedded => embedded,
-                };
+
+        // §113: bake the instance's coordinates into a static SFNT before
+        // falling back to Skia's live instancing, which makes measurement and
+        // painting correct but cannot make embedding correct on its own — see
+        // `instance_bake`'s module doc. Tried here, at open time, rather than
+        // only where subsetting is enabled, because the wrong-outline bug this
+        // fixes is Skia's PDF backend embedding whatever typeface is used to
+        // draw, independent of whether this render subsets anything at all.
+        let bake_result = match &origin {
+            TypefaceOrigin::Embedded {
+                id,
+                collection_index,
+            } => {
+                instance_bake::bake_instance(self.embedded_bytes(*id), *collection_index, instance)
+            }
+            TypefaceOrigin::System { .. } => match base.to_font_data() {
+                Some((bytes, collection_index)) => {
+                    instance_bake::bake_instance(&bytes, collection_index as u32, instance)
+                }
+                None => Err(InstanceBakeFailure::Failed(
+                    "the font system returned no data for this typeface".to_string(),
+                )),
+            },
+        };
+        let baked = bake_result.and_then(|bytes| {
+            let data = skia_safe::Data::new_copy(&bytes);
+            self.font_mgr.new_from_data(&data, 0).ok_or_else(|| {
+                InstanceBakeFailure::Failed(
+                    "the font system declined to open the baked font".to_string(),
+                )
+            })
+        });
+
+        match baked {
+            Ok(baked_tf) => {
+                let typeface_id = TypefaceId::from(&baked_tf);
                 Some(TypefaceEntry {
-                    typeface: instanced,
-                    origin,
-                    instance: Some(instance.clone()),
+                    typeface: baked_tf,
+                    origin: TypefaceOrigin::System { typeface_id },
+                    instance: InstanceState::Baked(instance.clone()),
                 })
             }
-            None => {
-                log::debug!(
-                    "[font] '{}': the font system declined to instance '{}'; \
-                     using the default location",
-                    record.canonical_family,
-                    instance.subfamily
+            Err(reason) => {
+                self.warn_once(
+                    &record.canonical_family,
+                    format_args!(
+                        "'{}' is a variable instance ({reason}); the embedded \
+                         font will carry the default location",
+                        instance.subfamily
+                    ),
                 );
-                Some(TypefaceEntry {
-                    typeface: base,
-                    origin,
-                    instance: None,
-                })
+                // A named instance is a *different* Skia typeface with its own
+                // `unique_id`, so measurement, paint and subset collection all
+                // pick it up without further plumbing. If the platform
+                // declines to instance it, the un-instanced face is still the
+                // right family and weight class — better than falling through
+                // to the host default.
+                match apply_variation(&base, instance) {
+                    Some(instanced) => {
+                        let origin = match origin {
+                            TypefaceOrigin::System { .. } => TypefaceOrigin::System {
+                                typeface_id: TypefaceId::from(&instanced),
+                            },
+                            embedded => embedded,
+                        };
+                        Some(TypefaceEntry {
+                            typeface: instanced,
+                            origin,
+                            instance: InstanceState::Unbaked {
+                                instance: instance.clone(),
+                                reason,
+                            },
+                        })
+                    }
+                    None => {
+                        log::debug!(
+                            "[font] '{}': the font system declined to instance '{}'; \
+                             using the default location",
+                            record.canonical_family,
+                            instance.subfamily
+                        );
+                        Some(TypefaceEntry {
+                            typeface: base,
+                            origin,
+                            instance: InstanceState::NotInstanced,
+                        })
+                    }
+                }
             }
         }
     }
@@ -1133,8 +1218,8 @@ pub(crate) mod tests {
     }
 
     /// A face record with no instance must not be handed a variation position,
-    /// and one with an instance must come back with it recorded — that flag is
-    /// what tells subsetting the embedded bytes are at the wrong location.
+    /// and must come back `NotInstanced` — instanced/baked states are only for
+    /// a face record that actually names a design-space location.
     #[test]
     fn an_opened_face_reports_whether_it_is_an_instance() {
         let r = FontRegistry::new(fmgr());
@@ -1145,9 +1230,89 @@ pub(crate) mod tests {
         };
         let (_, record) = &faces[0];
         let entry = r.open(record).expect("reopen");
-        assert!(
-            entry.instance.is_none(),
+        assert_eq!(
+            entry.instance,
+            InstanceState::NotInstanced,
             "a manager face carries no design-space location"
+        );
+    }
+
+    /// The embedding half of issue #113, end to end through the real
+    /// `FontRegistry::open` path — private, which is why this lives here
+    /// rather than in `tests/font_resolution.rs`. A variable instance
+    /// registered as an embedded font bakes at open time, and its embedded
+    /// bytes differ from the default location's: the same claim
+    /// `instance_bake`'s own tests pin one layer lower, now through the exact
+    /// path a real render takes.
+    ///
+    /// Opens the two records directly via `catalog().embedded_faces()`
+    /// rather than through `resolve()` by name: `resolve()`'s step 1
+    /// (`identifies_one_face`, the only embedded-scope name step) checks only
+    /// `Full`/`CompatibleFull`/`PostScript` names — an embedded font's own
+    /// `fvar` instance name is not `is_primary_identity()` and is therefore
+    /// unreachable by name today, independent of this issue (step 5, the
+    /// `Instance`-checking one, only ever runs for the host/`Deep` scope).
+    /// This test is about what baking does once a record is opened, not about
+    /// that separate, pre-existing reachability gap.
+    ///
+    /// Uses the committed `DxVariable.ttf` fixture rather than
+    /// `arbitrary_system_font_bytes`: this needs a real variable font with
+    /// real `gvar` deltas, which no host can be assumed to provide.
+    #[test]
+    fn a_named_instance_bakes_at_open_time() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files/fonts/DxVariable.ttf");
+        let bytes = std::fs::read(&fixture).unwrap_or_else(|e| {
+            panic!("fixture 'DxVariable.ttf' is missing ({e}) — run scripts/make_font_fixtures.py")
+        });
+
+        let mut registry = FontRegistry::new(fmgr());
+        registry
+            .register_embedded(
+                "Dx Variable",
+                crate::model::EmbeddedFontVariant::Regular,
+                bytes,
+            )
+            .expect("DxVariable.ttf must register");
+
+        let records = registry.catalog().embedded_faces();
+        let default_record = records
+            .iter()
+            .find(|r| r.instance.is_none())
+            .expect("the default location has its own record");
+        let semibold_record = records
+            .iter()
+            .find(|r| r.instance.as_ref().map(|i| i.subfamily.as_str()) == Some("SemiBold"))
+            .expect("the SemiBold instance has its own record");
+
+        let default_entry = registry.open(default_record).expect("open default");
+        let semibold_entry = registry.open(semibold_record).expect("open SemiBold");
+
+        match &semibold_entry.instance {
+            InstanceState::Baked(instance) => assert_eq!(instance.subfamily, "SemiBold"),
+            other => panic!("expected a baked instance, got {other:?}"),
+        }
+        assert_eq!(
+            default_entry.instance,
+            InstanceState::NotInstanced,
+            "the default location is not itself an instance to bake"
+        );
+
+        let default_bytes = default_entry
+            .typeface
+            .to_font_data()
+            .expect("default typeface must have data")
+            .0
+            .to_vec();
+        let semibold_bytes = semibold_entry
+            .typeface
+            .to_font_data()
+            .expect("baked typeface must have data")
+            .0
+            .to_vec();
+        assert_ne!(
+            default_bytes, semibold_bytes,
+            "the baked instance's embedded bytes must differ from the default location's"
         );
     }
 
