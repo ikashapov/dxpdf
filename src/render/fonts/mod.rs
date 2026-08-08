@@ -342,14 +342,12 @@ impl FontRegistry {
     /// ranking reads the font rather than the slot it was declared in. See
     /// [`Self::embedded_meta`].
     ///
-    /// **How many faces of a collection are actually reachable is
-    /// platform-dependent.** Skia's CoreText backend declines a non-zero
-    /// collection index outright — `new_from_data(bytes, 1)` returns `None` on
-    /// macOS — so a two-face collection contributes one face there and both on
-    /// a backend that honours the index. Faces the platform will not open are
-    /// skipped rather than registered as unopenable, and only a font that yields
-    /// *no* face at all is an error. The subsetting pass does not share this
-    /// limitation: it carves a face out of the collection's own bytes.
+    /// Every face of a collection is carved into a standalone SFNT
+    /// (`open_embedded_typeface`) before the font system ever sees it, so no
+    /// platform is asked to interpret a collection index directly — Skia's
+    /// CoreText backend declines any index but 0. Only a font that yields no
+    /// face at all — carving failed, or the platform declined even the
+    /// carved bytes — is an error.
     pub fn register_embedded(
         &mut self,
         family: &str,
@@ -374,10 +372,7 @@ impl FontRegistry {
         let id = EmbeddedFontId(self.embedded.len() as u32);
         let mut registered = 0;
         for collection_index in 0..face_count {
-            let Some(typeface) = self
-                .font_mgr
-                .new_from_data(&bytes, collection_index as usize)
-            else {
+            let Some(typeface) = self.open_embedded_typeface(&bytes, collection_index) else {
                 continue;
             };
             self.catalog
@@ -398,6 +393,36 @@ impl FontRegistry {
             id.0
         );
         Ok(id)
+    }
+
+    /// Open one face of embedded font bytes, carving a collection face into a
+    /// standalone SFNT first (issue #116) — no platform is ever asked to
+    /// interpret a non-zero collection index, which Skia's CoreText backend
+    /// declines outright (`new_from_data(bytes, 1)` returns `None` on macOS).
+    ///
+    /// Used both at registration, to catalogue every face, and at
+    /// [`Self::open_uncached`], to reopen a face resolution has already
+    /// selected — carving is cheap enough to redo (collections in DOCX are
+    /// rare and small) and keeps this the single place either call site
+    /// needs to know the CoreText limitation exists at all.
+    fn open_embedded_typeface(&self, bytes: &[u8], collection_index: u32) -> Option<Typeface> {
+        let face_count = match FontFormat::detect(bytes) {
+            Ok(FontFormat::Ttc { face_count }) => face_count,
+            _ => 1,
+        };
+        if face_count <= 1 {
+            return self.font_mgr.new_from_data(bytes, 0);
+        }
+        match opentype::carve_collection_face(bytes, collection_index, face_count) {
+            Ok(carved) => self.font_mgr.new_from_data(&carved.bytes, 0),
+            Err(err) => {
+                log::debug!(
+                    "[font] could not carve collection face {collection_index} of \
+                     {face_count} ({err})"
+                );
+                None
+            }
+        }
     }
 
     /// Bytes for a registered embedded font.
@@ -560,9 +585,7 @@ impl FontRegistry {
                 collection_index,
             } => {
                 let bytes = self.embedded_bytes(*font);
-                let typeface = self
-                    .font_mgr
-                    .new_from_data(bytes, *collection_index as usize)?;
+                let typeface = self.open_embedded_typeface(bytes, *collection_index)?;
                 (
                     typeface,
                     TypefaceOrigin::Embedded {
@@ -992,6 +1015,39 @@ pub(crate) mod tests {
             r.embedded_meta(id),
             ("ByteIdentityProbe", EmbeddedFontVariant::Regular)
         );
+    }
+
+    /// issue #116: on Skia's CoreText backend, `FontMgr::new_from_data`
+    /// declines any collection index but 0 — `register_embedded` must carve
+    /// each face into its own standalone SFNT rather than asking the
+    /// platform to open it by index, or the second face of a collection is
+    /// silently unreachable. This exercises both the catalog side
+    /// (`register_embedded` must catalog face 1, not just face 0) and the
+    /// reopen side (`resolve` must actually reopen face 1 for rendering,
+    /// through the crate-private `open`/`open_uncached`): a fix to only one
+    /// of the two would still fail this test.
+    #[test]
+    fn every_face_of_an_embedded_collection_registers() {
+        let mut r = FontRegistry::new(fmgr());
+        let id = r
+            .register_embedded(
+                "DxCollection",
+                EmbeddedFontVariant::Regular,
+                fixture_bytes("DxCollection.ttc"),
+            )
+            .expect("a two-face collection must register");
+
+        for (collection_index, family) in [(0u32, "Dx Collection One"), (1, "Dx Collection Two")] {
+            let resolved = r.resolve(&FaceRequest::plain(family));
+            assert_eq!(
+                resolved.origin,
+                TypefaceOrigin::Embedded {
+                    id,
+                    collection_index
+                },
+                "face {collection_index} ('{family}') must resolve to its own record"
+            );
+        }
     }
 
     /// An embedded font is indexed under the name the *document* declared as

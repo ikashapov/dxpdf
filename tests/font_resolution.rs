@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use dxpdf::render::fonts::catalog::Scope;
 use dxpdf::render::fonts::face::NameKind;
-use dxpdf::render::fonts::opentype::{FontFormat, NameId};
+use dxpdf::render::fonts::opentype::{carve_collection_face, FontFormat, NameId};
 use dxpdf::render::fonts::resolve::{resolve, FaceResolution, FallbackReason, ResolutionStep};
 use dxpdf::render::fonts::{FaceCatalog, FaceRequest, Toggle};
 use skia_safe::{FontMgr, Typeface};
@@ -24,6 +24,25 @@ use skia_safe::{FontMgr, Typeface};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-files/fonts")
+}
+
+/// Open one face, carving it out of a collection first (issue #116) — the
+/// same strategy `FontRegistry::open_embedded_typeface` uses internally, so
+/// this loader exercises fixtures the same way the real registry does rather
+/// than asking the platform to interpret a collection index directly (which
+/// Skia's CoreText backend declines for any index but 0).
+fn open_fixture_face(
+    font_mgr: &FontMgr,
+    bytes: &[u8],
+    index: u32,
+    face_count: u32,
+) -> Option<Typeface> {
+    if face_count <= 1 {
+        return font_mgr.new_from_data(bytes, 0);
+    }
+    let carved = carve_collection_face(bytes, index, face_count)
+        .unwrap_or_else(|e| panic!("carving face {index} of {face_count}: {e}"));
+    font_mgr.new_from_data(&carved.bytes, 0)
 }
 
 /// Load one fixture, naming every face it contains.
@@ -43,7 +62,7 @@ fn load(font_mgr: &FontMgr, filename: &str) -> Vec<(String, Typeface)> {
 
     (0..face_count)
         .filter_map(|index| {
-            let typeface = font_mgr.new_from_data(&bytes[..], index as usize)?;
+            let typeface = open_fixture_face(font_mgr, &bytes, index, face_count)?;
             Some((typeface.family_name(), typeface))
         })
         .collect()
@@ -66,8 +85,8 @@ fn catalog() -> FaceCatalog {
         faces.extend(load(&font_mgr, filename));
     }
     assert!(
-        faces.len() >= 8,
-        "expected at least eight fixture faces, got {}",
+        faces.len() >= 9,
+        "expected at least nine fixture faces, got {}",
         faces.len()
     );
     FaceCatalog::from_faces(font_mgr, &faces)
@@ -119,11 +138,10 @@ fn the_fixtures_carry_what_the_tests_assume() {
         "fixtures are host faces, not embedded ones"
     );
 
-    // `DxCollection.ttc` carries two faces, but how many the *platform* will
-    // open is not universal: Skia's CoreText backend declines a non-zero
-    // collection index outright, so on macOS only face 0 is reachable. The file
-    // itself is what the assertion is about — `FontFormat::detect` reads the
-    // header, and the subset pass carves faces from those bytes directly.
+    // `DxCollection.ttc` carries two faces, and both are reachable on every
+    // platform (issue #116): `load()` carves each face into a standalone SFNT
+    // before opening it, so Skia's CoreText backend — which declines any
+    // collection index but 0 — is never asked to interpret one directly.
     let ttc = std::fs::read(fixture_dir().join("DxCollection.ttc")).unwrap();
     assert!(
         matches!(
@@ -133,9 +151,10 @@ fn the_fixtures_carry_what_the_tests_assume() {
         "DxCollection.ttc must declare two faces"
     );
     let openable = load(&font_mgr, "DxCollection.ttc");
-    assert!(
-        !openable.is_empty(),
-        "the platform must open at least the first collection face"
+    assert_eq!(
+        openable.len(),
+        2,
+        "both collection faces must open on every platform"
     );
 
     let variable = load(&font_mgr, "DxVariable.ttf");
@@ -404,10 +423,14 @@ fn a_face_name_shared_by_two_faces_is_reported_as_ambiguous() {
 fn each_collection_face_resolves_to_itself() {
     let font_mgr = FontMgr::new();
     let faces = load(&font_mgr, "DxCollection.ttc");
+    assert_eq!(
+        faces.len(),
+        2,
+        "both collection faces must be reachable on every platform"
+    );
 
-    // Every face the platform *does* open must be reachable by its own name and
-    // distinguishable from its siblings. On a backend that declines a non-zero
-    // collection index this checks one face; on one that does not, both.
+    // Every face must be reachable by its own name and distinguishable from
+    // its siblings.
     let expected: &[(&str, i32)] = &[("Dx Collection One", 400), ("Dx Collection Two", 700)];
     for (index, _) in faces.iter().enumerate() {
         let (family, weight) = expected[index];
@@ -424,7 +447,6 @@ fn each_collection_face_resolves_to_itself() {
         );
         assert_eq!(weight_of(family, Toggle::Absent, Toggle::Absent), weight);
     }
-    assert!(!faces.is_empty(), "no collection face opened at all");
 }
 
 // ─── Acceptance: variable named instances ───────────────────────────────────

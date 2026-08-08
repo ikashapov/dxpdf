@@ -31,13 +31,22 @@
 //! yields a typed error that the catalogue records and moves past. The `name`
 //! table of a real shipping font is routinely a little malformed, so this is
 //! the common path, not the exceptional one.
+//!
+//! **Also assembles, not just reads.** [`collection::carve_collection_face`]
+//! and `sfnt::rebuild_sfnt` build standalone SFNT bytes from a table list —
+//! the write-side counterpart to the read-only table parsers above, needed
+//! because a TrueType Collection's faces are not independently addressable
+//! (by any platform, in `FontMgr::new_from_data`'s case) without it.
 
+pub mod collection;
 pub mod format;
 pub mod fvar;
 pub mod name;
 pub mod os2;
+pub mod sfnt;
 pub mod stat;
 
+pub use collection::{carve_collection_face, CollectionCarveError, ExtractedSfnt};
 pub use format::{FontFormat, FormatError, SfntFlavor, WoffVersion};
 pub use fvar::{Axis, AxisTag, NamedInstance, VariationCoord};
 pub use name::{NameId, NameRecords, PlatformId};
