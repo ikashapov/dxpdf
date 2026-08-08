@@ -117,6 +117,10 @@ Open engineering units are tracked as GitHub issues, not here — this file goes
 | `font_scaling.docx` | Font sizing and scaling |
 | `sample-emoji.docx` | Color-emoji pipeline |
 | `fonts/*.ttf`, `fonts/*.ttc` | §17.8 face resolution — built by `scripts/make_font_fixtures.py`, exercised by `tests/font_resolution.rs`. Regenerate rather than hand-edit; the build is deterministic |
+| `comment-reference.docx` | `<w:commentReference>` inside a run (parsed, not rendered) |
+| `russian-numbering.docx` | `russianUpper` list numbering (А, Б, В…) |
+| `numbering-direct-indent.docx` | Direct paragraph `w:ind` overriding the numbering level's indentation (suffix-tab position) |
+| `centered-numbered-heading.docx` | Numbered heading with `jc=center` (suffix tab must not suppress alignment) |
 
 `tests/parse_test_files.rs` parses these and validates the resulting `Document`, so anything added here becomes part of the test suite. Add a new fixture when reproducing a bug — a committed fixture is what makes a fix verifiable by anyone.
 

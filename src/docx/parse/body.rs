@@ -258,6 +258,7 @@ fn extend_from_run(r: RunXml, out: &mut Vec<Inline>, ctx: &mut ConvertCtx) {
                 out.push(Inline::AlternateContent(convert_alt_content(ac, ctx)));
             }
             RunChildXml::RPr(_) => {} // already captured via r.r_pr
+            RunChildXml::CommentReference(_) => {} // comments are not rendered
         }
     }
     flush(&mut acc, out);

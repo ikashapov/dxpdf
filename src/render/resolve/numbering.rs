@@ -106,7 +106,9 @@ pub fn format_list_label(
     // as decimal regardless of the individual levels' own formats.
     let mut result = lvl.level_text.clone();
     for i in (0..=level).rev() {
-        let placeholder = format!("%{}", i + 1);
+        // Widen before adding: `i` is a raw `w:ilvl` u8, so a crafted
+        // ilvl=255 would overflow `i + 1` (§17.9.9 placeholders are 1-based).
+        let placeholder = format!("%{}", u32::from(i) + 1);
         if result.contains(&placeholder) {
             let count = counters.get(&(num_id, i)).copied().unwrap_or(1);
             let fmt = if lvl.is_legal {
@@ -140,6 +142,9 @@ fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
         NumberFormat::UpperLetter => to_letter_upper(n),
         NumberFormat::LowerRoman => to_roman_lower(n),
         NumberFormat::UpperRoman => to_roman_upper(n),
+        // Same in every locale: the Cyrillic sequence *is* the format.
+        NumberFormat::RussianLower => to_russian_lower(n),
+        NumberFormat::RussianUpper => to_russian_upper(n),
 
         // §17.9.27: the three formats that are written differently in every
         // language. This engine spells one of them; for the rest the digits
@@ -288,20 +293,42 @@ fn ordinal_word(word: &str) -> String {
     .to_string()
 }
 
-fn to_letter_lower(n: u32) -> String {
+/// Alphabetic numbering shared by the letter formats: Word repeats the
+/// letter on overflow — a…z, then aa, bb, …, zz, aaa (a *repeating* scheme,
+/// not bijective base-N). Item `len + 1` is the first letter doubled, not the
+/// first letter again.
+fn alphabetic_repeat(n: u32, len: u32, letter: impl Fn(u32) -> char) -> String {
     if n == 0 {
         return String::new();
     }
-    // ST_NumberFormat `lowerLetter`: Word repeats the letter on overflow —
-    // a…z, then aa, bb, …, zz, aaa (a *repeating* scheme, not bijective
-    // base-26). Item 27 is "aa", not "a" again.
-    let idx = ((n - 1) % 26) as u8;
-    let count = ((n - 1) / 26) as usize + 1;
-    std::iter::repeat_n((b'a' + idx) as char, count).collect()
+    let idx = (n - 1) % len;
+    let count = ((n - 1) / len) as usize + 1;
+    std::iter::repeat_n(letter(idx), count).collect()
+}
+
+fn to_letter_lower(n: u32) -> String {
+    alphabetic_repeat(n, 26, |i| (b'a' + i as u8) as char)
 }
 
 fn to_letter_upper(n: u32) -> String {
     to_letter_lower(n).to_uppercase()
+}
+
+/// Word's Russian alphabetic numbering sequence (§17.18.59 russianLower):
+/// 28 of the 33 Cyrillic letters — Ё, Й, Ъ, Ы, Ь are skipped.
+const RUSSIAN_LETTERS: [char; 28] = [
+    'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к', 'л', 'м', 'н', 'о', 'п', 'р', 'с', 'т', 'у',
+    'ф', 'х', 'ц', 'ч', 'ш', 'щ', 'э', 'ю', 'я',
+];
+
+fn to_russian_lower(n: u32) -> String {
+    alphabetic_repeat(n, RUSSIAN_LETTERS.len() as u32, |i| {
+        RUSSIAN_LETTERS[i as usize]
+    })
+}
+
+fn to_russian_upper(n: u32) -> String {
+    to_russian_lower(n).to_uppercase()
 }
 
 fn to_roman_lower(mut n: u32) -> String {
@@ -397,6 +424,30 @@ mod tests {
             suffix: LevelSuffix::default(),
             is_legal: false,
         }
+    }
+
+    #[test]
+    fn russian_letters_follow_word_sequence() {
+        assert_eq!(to_russian_lower(1), "а");
+        assert_eq!(to_russian_lower(2), "б");
+        // Ё (7th of the full alphabet) is skipped: 6 → е, 7 → ж.
+        assert_eq!(to_russian_lower(6), "е");
+        assert_eq!(to_russian_lower(7), "ж");
+        // Й is skipped: 9 → и, 10 → к.
+        assert_eq!(to_russian_lower(10), "к");
+        assert_eq!(to_russian_lower(28), "я");
+        // Overflow repeats the letter, like latin `aa`.
+        assert_eq!(to_russian_lower(29), "аа");
+        assert_eq!(to_russian_upper(1), "А");
+        assert_eq!(to_russian_upper(28), "Я");
+        assert_eq!(to_russian_lower(0), "");
+    }
+
+    #[test]
+    fn russian_format_expands_in_label_template() {
+        let locale = Locale::default();
+        assert_eq!(format_number(3, NumberFormat::RussianUpper, locale), "В");
+        assert_eq!(format_number(3, NumberFormat::RussianLower, locale), "в");
     }
 
     #[test]
