@@ -1,8 +1,11 @@
 //! List label injection — prepend bullet/number labels to paragraph fragments.
 //!
 //! §17.9.22: when a paragraph carries a numbering reference, resolve the label
-//! text (or picture bullet) and inject it as the first fragment, followed by a
-//! tab that advances to the body text indent position.
+//! text (or picture bullet) and inject it as the first fragment, followed by
+//! the level's §17.9.29 separator — by default a tab that advances to the
+//! body-text indent. For centered and right-aligned paragraphs the separator
+//! is a fixed-advance spacer instead of a tab, so the §17.3.1.37 tab-line
+//! rule cannot suppress the paragraph's alignment.
 
 use std::rc::Rc;
 
@@ -48,6 +51,7 @@ pub(super) fn inject_list_label(
     {
         use std::collections::hash_map::Entry;
         let counters = &mut state.list_counters;
+        let level_start = |lvl: u8| levels.get(lvl as usize).map(|l| l.start).unwrap_or(1);
         // Word semantics: an item at level L instantiates every not-yet-active
         // ancestor counter at its start value without consuming it — after
         // "1.1.1"-style items, the next top-level item continues as "2.", not
@@ -55,20 +59,23 @@ pub(super) fn inject_list_label(
         for ancestor in 0..level {
             counters
                 .entry((num_id, ancestor))
-                .or_insert_with(|| levels.get(ancestor as usize).map(|l| l.start).unwrap_or(1));
+                .or_insert_with(|| level_start(ancestor));
         }
         match counters.entry((num_id, level)) {
             Entry::Vacant(slot) => {
-                slot.insert(levels.get(level as usize).map(|l| l.start).unwrap_or(1));
+                slot.insert(level_start(level));
             }
             Entry::Occupied(mut slot) => {
                 let next = slot.get().saturating_add(1);
                 slot.insert(next);
             }
         }
-        // Reset deeper levels.
+        // Reset deeper levels. `saturating_add`: `w:ilvl` is parsed as a raw
+        // u8, so a crafted ilvl=255 must yield an empty range here — `level + 1`
+        // would overflow (panic in debug, wrap to 0 in release and wipe every
+        // counter this numId owns, including the ancestors seeded above).
         let max_level = levels.len() as u8;
-        for deeper in (level + 1)..max_level {
+        for deeper in level.saturating_add(1)..max_level {
             counters.remove(&(num_id, deeper));
         }
     }
@@ -76,10 +83,15 @@ pub(super) fn inject_list_label(
     let level_def = levels.get(level as usize);
 
     // §17.9.23: the level's indentation with the paragraph's direct overrides
-    // applied. Everything below — hanging width, implicit tab stop, merged
-    // paragraph indentation — must use this one value, or the suffix tab
-    // lands somewhere other than where the body text wraps.
+    // applied. `None` when the level defines no indentation — the paragraph
+    // then keeps its style-cascade value, which is exactly what
+    // `merged_props.indentation` already holds.
     let effective_ind = effective_indentation(para, level_def);
+    // Label geometry — hanging width, implicit tab stop — must follow the
+    // paragraph's *final* indentation wherever it came from, or the suffix tab
+    // lands somewhere other than where the body text wraps. Only the §17.9.23
+    // overwrite below stays keyed to the level-derived value.
+    let layout_ind = effective_ind.or(merged_props.indentation);
 
     // §17.9.10: check for picture bullet before text label.
     let pic_bullet_injected = level_def
@@ -109,7 +121,7 @@ pub(super) fn inject_list_label(
         });
 
     if let Some((label_frag, label_height)) = pic_bullet_injected {
-        let hanging = extract_hanging(effective_ind.as_ref());
+        let hanging = extract_hanging(layout_ind);
         // §17.9.29: `Nothing` drops the separator entirely. `Tab` and `Space`
         // both advance via a tab here — a picture bullet has no text font to emit
         // a literal space with, and image-bullet + space is vanishingly rare.
@@ -127,18 +139,25 @@ pub(super) fn inject_list_label(
                 size,
                 state.shape_auto_fit,
             );
-            let tab_frag = Fragment::Tab {
-                line_height: label_height,
-                font: Rc::new(sep_font),
-                color,
-                fitting_width: Some(hanging),
-            };
-            fragments.insert(0, tab_frag);
+            if alignment_suppresses_tab(merged_props) {
+                // An image's advance is its drawn size, so the gap cannot be
+                // baked into the label fragment like the text path does.
+                let gap = (hanging - label_frag.width()).max(Pt::ZERO);
+                fragments.insert(0, spacer_fragment(gap, &sep_font, color, ctx.measurer));
+            } else {
+                let tab_frag = Fragment::Tab {
+                    line_height: label_height,
+                    font: Rc::new(sep_font),
+                    color,
+                    fitting_width: Some(hanging),
+                };
+                fragments.insert(0, tab_frag);
+            }
         }
         fragments.insert(0, label_frag);
 
         if !drop_separator {
-            insert_implicit_tab_stop(merged_props, effective_ind.as_ref());
+            insert_implicit_tab_stop(merged_props, layout_ind);
         }
     } else {
         inject_text_label(
@@ -151,7 +170,7 @@ pub(super) fn inject_list_label(
             level,
             level_def,
             state.shape_auto_fit,
-            effective_ind.as_ref(),
+            layout_ind,
         );
     }
 
@@ -180,8 +199,62 @@ fn effective_indentation(
         if let Some(first_line) = direct.first_line {
             ind.first_line = Some(first_line);
         }
+        if let Some(mirror) = direct.mirror {
+            ind.mirror = Some(mirror);
+        }
     }
     Some(ind)
+}
+
+/// §17.3.1.37 suppresses paragraph alignment on lines that contain tabs, but
+/// the label's suffix tab is layout machinery, not typed content — Word still
+/// centers "1.  Heading". For centered and right-aligned paragraphs the
+/// separator is emitted as a fixed-advance spacer (see [`spacer_fragment`])
+/// instead of a tab, so alignment applies to the whole line while the
+/// label→text distance stays the hanging width, as in the left-aligned case.
+fn alignment_suppresses_tab(merged_props: &ParagraphProperties) -> bool {
+    matches!(
+        merged_props.alignment,
+        Some(model::Alignment::Center | model::Alignment::End)
+    )
+}
+
+/// Fixed-advance spacer standing in for the suffix tab on centered/right
+/// lines.
+///
+/// - `trimmed_width` is zero: when nothing follows the label, the gap is
+///   trailing whitespace, which per Word does not participate in alignment —
+///   the label's glyphs center exactly, and on end-alignment they sit flush
+///   at the margin with the gap hanging past it (see
+///   [`Fragment::trimmed_width`]).
+/// - Never underlined: a `<w:lvl><w:rPr>` underline covers the label's
+///   glyphs, not the separator.
+/// - A gap clamped to zero (no hanging indent, or a label wider than it)
+///   still yields one space width, so the label never glues to the text.
+fn spacer_fragment(
+    gap: Pt,
+    font: &crate::render::layout::fragment::FontProps,
+    color: crate::render::resolve::color::RgbColor,
+    measurer: &crate::render::layout::measurer::TextMeasurer,
+) -> Fragment {
+    let mut font = font.clone();
+    font.underline = false;
+    let (space_width, metrics) = measurer.measure(" ", &font);
+    let gap = if gap > Pt::ZERO { gap } else { space_width };
+    Fragment::Text {
+        text: Rc::from(""),
+        font: Rc::new(font),
+        color,
+        shading: None,
+        border: None,
+        width: gap,
+        trimmed_width: Pt::ZERO,
+        metrics,
+        hyperlink_url: None,
+        baseline_offset: Pt::ZERO,
+        text_offset: Pt::ZERO,
+        is_footnote_ref: false,
+    }
 }
 
 /// Add the implicit tab stop at the effective text-indent position so the
@@ -189,9 +262,9 @@ fn effective_indentation(
 /// stop at the paragraph's left indent for numbered paragraphs).
 fn insert_implicit_tab_stop(
     merged_props: &mut ParagraphProperties,
-    effective_ind: Option<&model::Indentation>,
+    layout_ind: Option<model::Indentation>,
 ) {
-    if let Some(left) = effective_ind.and_then(|ind| ind.start) {
+    if let Some(left) = layout_ind.and_then(|ind| ind.start) {
         merged_props.tabs.insert(
             0,
             crate::model::TabStop {
@@ -215,7 +288,7 @@ fn inject_text_label(
     level: u8,
     level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
     auto_fit: crate::render::layout::ShapeAutoFit,
-    effective_ind: Option<&model::Indentation>,
+    layout_ind: Option<model::Indentation>,
 ) {
     let num_id = model::NumId::new(merged_props.numbering.as_ref().unwrap().num_id);
 
@@ -291,7 +364,7 @@ fn inject_text_label(
     let (w, m) = ctx.measurer.measure(&label_text, &label_font);
     let h = m.height();
 
-    let hanging = extract_hanging(effective_ind);
+    let hanging = extract_hanging(layout_ind);
     // §17.9.7: lvlJc controls label justification within the hanging indent area.
     let jc = level_def.and_then(|l| l.justification);
     let text_offset = match jc {
@@ -300,7 +373,7 @@ fn inject_text_label(
         _ => Pt::ZERO,
     };
     let label_width = w;
-    let mut label_frag = Fragment::Text {
+    let label_frag = Fragment::Text {
         text: Rc::from(label_text.as_str()),
         font: Rc::new(label_font.clone()),
         color: label_color,
@@ -322,22 +395,11 @@ fn inject_text_label(
     match level_def.map(|l| l.suffix).unwrap_or_default() {
         LevelSuffix::Tab => {
             let gap = (hanging - label_width).max(Pt::ZERO);
-            // §17.3.1.37 suppresses paragraph alignment on lines that contain
-            // tabs, but the label's suffix tab is layout machinery, not typed
-            // content — Word still centers "1.  Heading". For centered and
-            // right-aligned paragraphs, bake the label→text gap into the label
-            // fragment's advance instead of emitting a tab: alignment then
-            // applies to the whole line, and the label→text distance stays the
-            // hanging width, exactly as in the left-aligned case.
-            let alignment_suppresses_tab = matches!(
-                merged_props.alignment,
-                Some(crate::model::Alignment::Center | crate::model::Alignment::End)
-            );
-            if alignment_suppresses_tab {
-                if let Fragment::Text { width, .. } = &mut label_frag {
-                    *width = label_width + gap;
-                }
-                fragments.insert(0, label_frag);
+            if alignment_suppresses_tab(merged_props) {
+                fragments.insert(
+                    0,
+                    spacer_fragment(gap, &label_font, label_color, ctx.measurer),
+                );
             } else {
                 fragments.insert(
                     0,
@@ -350,11 +412,12 @@ fn inject_text_label(
                         fitting_width: Some(gap),
                     },
                 );
-                fragments.insert(0, label_frag);
-
-                // Implicit tab stop so the tab lands at the body text indent.
-                insert_implicit_tab_stop(merged_props, effective_ind);
             }
+            fragments.insert(0, label_frag);
+            // Implicit tab stop at the body-text indent. Also installed on the
+            // spacer path: the line has no tab there, so the stop is inert
+            // unless the run content itself contains one.
+            insert_implicit_tab_stop(merged_props, layout_ind);
         }
         LevelSuffix::Space => {
             let (sw, sm) = ctx.measurer.measure(" ", &label_font);
@@ -384,7 +447,7 @@ fn inject_text_label(
 }
 
 /// Extract the hanging indent from an effective indentation.
-fn extract_hanging(ind: Option<&model::Indentation>) -> Pt {
+fn extract_hanging(ind: Option<model::Indentation>) -> Pt {
     ind.and_then(|ind| ind.first_line)
         .map(|fl| match fl {
             model::FirstLineIndent::Hanging(v) => Pt::from(v),
@@ -747,12 +810,14 @@ mod tests {
 
     /// §17.3.1.37 suppresses paragraph alignment on lines with tabs, but the
     /// label's suffix tab is layout machinery — a centered numbered heading
-    /// must stay centered. For center/end alignment the gap is baked into the
-    /// label fragment's advance (label starts at left−hanging, text at left,
-    /// so the advance is exactly the hanging width) and no tab or implicit
-    /// stop is emitted.
+    /// must stay centered. For center/end alignment the separator is a
+    /// fixed-advance spacer, not a tab: label advance + spacer advance equal
+    /// the hanging width (label starts at left−hanging, text at left, as in
+    /// the left-aligned case), and the spacer's `trimmed_width` is zero so a
+    /// label alone on its line aligns by its glyphs, the gap hanging like
+    /// trailing whitespace.
     #[test]
-    fn centered_paragraph_bakes_gap_into_label_instead_of_tab() {
+    fn centered_paragraph_emits_spacer_instead_of_tab() {
         for alignment in [Alignment::Center, Alignment::End] {
             let resolved = resolved_with(vec![ResolvedNumberingLevel {
                 indentation: Some(ind(360, 360)),
@@ -769,21 +834,256 @@ mod tests {
                 props,
             );
 
-            assert_eq!(fragments.len(), 1, "{alignment:?}: label only, no tab");
-            match &fragments[0] {
-                Fragment::Text { width, .. } => {
-                    // 360 twips = 18 pt.
+            assert_eq!(fragments.len(), 2, "{alignment:?}: label + spacer");
+            let label_width = match &fragments[0] {
+                Fragment::Text { width, .. } => *width,
+                other => panic!("{alignment:?}: expected label text fragment, got {other:?}"),
+            };
+            match &fragments[1] {
+                Fragment::Text {
+                    text,
+                    width,
+                    trimmed_width,
+                    ..
+                } => {
+                    assert!(text.is_empty(), "{alignment:?}: spacer carries no glyphs");
+                    // 360 twips = 18 pt total advance.
                     assert!(
-                        (width.raw() - 18.0).abs() < 0.01,
-                        "{alignment:?}: advance must equal the hanging width, got {width:?}"
+                        ((label_width.raw() + width.raw()) - 18.0).abs() < 0.01,
+                        "{alignment:?}: label + spacer must advance the hanging width"
+                    );
+                    assert_eq!(
+                        trimmed_width.raw(),
+                        0.0,
+                        "{alignment:?}: the gap is trailing whitespace when nothing follows"
                     );
                 }
-                other => panic!("{alignment:?}: expected label text fragment, got {other:?}"),
+                other => panic!("{alignment:?}: expected spacer text fragment, got {other:?}"),
             }
-            assert!(
-                props.tabs.is_empty(),
-                "{alignment:?}: no implicit tab stop for a tab-less line"
+            // The implicit stop is installed but inert — the line has no tab.
+            assert_eq!(
+                props.tabs.first().map(|t| t.position.raw()),
+                Some(360),
+                "{alignment:?}: implicit stop still installed"
             );
+        }
+    }
+
+    /// A zero hanging indent (or a label wider than it) must not glue the
+    /// label to the body text on the spacer path: the gap floors at one
+    /// space width of the label font.
+    #[test]
+    fn centered_spacer_floors_at_a_space_width_when_hanging_is_zero() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(ind(360, 0)),
+            ..decimal_level()
+        }]);
+        let props = ParagraphProperties {
+            alignment: Some(Alignment::Center),
+            ..props_at(0)
+        };
+        let (fragments, _) = inject_full(
+            &resolved,
+            &mut BuildState::default(),
+            &numbered_para(),
+            props,
+        );
+        match &fragments[1] {
+            Fragment::Text { width, .. } => {
+                assert!(
+                    width.raw() > 0.0,
+                    "spacer must keep a positive advance, got {width:?}"
+                );
+            }
+            other => panic!("expected spacer, got {other:?}"),
+        }
+    }
+
+    /// A `<w:lvl><w:rPr>` underline covers the label's glyphs only — the
+    /// spacer standing in for the suffix tab must not stretch the underline
+    /// across the gap.
+    #[test]
+    fn centered_spacer_is_never_underlined() {
+        let level_rpr = RunProperties {
+            underline: Some(UnderlineStyle::Single),
+            ..Default::default()
+        };
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(ind(360, 360)),
+            run_properties: Some(level_rpr),
+            ..decimal_level()
+        }]);
+        let props = ParagraphProperties {
+            alignment: Some(Alignment::Center),
+            ..props_at(0)
+        };
+        let (fragments, _) = inject_full(
+            &resolved,
+            &mut BuildState::default(),
+            &numbered_para(),
+            props,
+        );
+        match (&fragments[0], &fragments[1]) {
+            (Fragment::Text { font: label, .. }, Fragment::Text { font: spacer, .. }) => {
+                assert!(label.underline, "precondition: the label is underlined");
+                assert!(!spacer.underline, "the spacer must not be underlined");
+            }
+            other => panic!("expected label + spacer, got {other:?}"),
+        }
+    }
+
+    /// A crafted `w:ilvl="255"` must not overflow the deeper-level reset
+    /// range (`level + 1` would panic in debug and wrap in release, wiping
+    /// every counter for the numId — including seeded ancestors).
+    #[test]
+    fn ilvl_255_does_not_overflow_or_wipe_counters() {
+        let resolved = resolved_with(vec![decimal_level()]);
+        let mut state = BuildState::default();
+        assert_eq!(label_text(&inject(&resolved, &mut state, 0).0), "1");
+        // No level 255 exists: no label, and — critically — no panic and no
+        // counter wipe.
+        let (fragments, _) = inject(&resolved, &mut state, 255);
+        assert!(fragments.is_empty(), "no label for an undefined level");
+        assert_eq!(
+            label_text(&inject(&resolved, &mut state, 0).0),
+            "2",
+            "the level-0 counter must survive the crafted ilvl"
+        );
+    }
+
+    /// §17.9.23 direct override carries `w:mirrorIndents` too, not just the
+    /// start/end/first-line fields.
+    #[test]
+    fn direct_mirror_override_survives_the_level_merge() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(ind(2631, 504)),
+            ..decimal_level()
+        }]);
+        let para = para_with(ParagraphProperties {
+            indentation: Some(Indentation {
+                mirror: Some(true),
+                ..ind(567, 567)
+            }),
+            ..Default::default()
+        });
+        let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
+        assert_eq!(props.indentation.unwrap().mirror, Some(true));
+    }
+
+    /// When the numbering level defines no `w:ind`, label geometry falls back
+    /// to the paragraph's cascade indentation: the implicit tab stop lands at
+    /// its start and the tab's fitting width reflects its hanging — while the
+    /// §17.9.23 overwrite is skipped (the cascade value is already in place).
+    #[test]
+    fn level_without_ind_falls_back_to_cascade_indentation() {
+        let resolved = resolved_with(vec![decimal_level()]); // no level ind
+        let props = ParagraphProperties {
+            indentation: Some(ind(720, 360)),
+            ..props_at(0)
+        };
+        let (fragments, props) = inject_full(
+            &resolved,
+            &mut BuildState::default(),
+            &numbered_para(),
+            props,
+        );
+
+        assert_eq!(
+            props.tabs.first().map(|t| t.position.raw()),
+            Some(720),
+            "implicit stop must land at the cascade start"
+        );
+        let label_width = match &fragments[0] {
+            Fragment::Text { width, .. } => *width,
+            other => panic!("expected label, got {other:?}"),
+        };
+        match &fragments[1] {
+            Fragment::Tab { fitting_width, .. } => {
+                // 360 twips = 18 pt hanging.
+                let expected = (Pt::new(18.0) - label_width).max(Pt::ZERO);
+                assert!(
+                    (fitting_width.unwrap().raw() - expected.raw()).abs() < 0.01,
+                    "fitting width must reflect the cascade hanging"
+                );
+            }
+            other => panic!("expected separator tab, got {other:?}"),
+        }
+        // The cascade value stays as-is; the §17.9.23 overwrite is for
+        // level-derived indentation only.
+        assert_eq!(props.indentation.unwrap().start.map(|d| d.raw()), Some(720));
+    }
+
+    /// The picture-bullet branch honors alignment suppression too: a centered
+    /// picture-bulleted item emits a spacer, not a tab, so the line keeps its
+    /// alignment.
+    #[test]
+    fn centered_picture_bullet_emits_spacer_instead_of_tab() {
+        use crate::model::{
+            NumPicBullet, NumPicBulletId, Pict, RelId, VmlCommonAttrs, VmlImageData, VmlPrimitive,
+            VmlShape,
+        };
+        let mut resolved = resolved_with(vec![ResolvedNumberingLevel {
+            lvl_pic_bullet_id: Some(NumPicBulletId::new(1)),
+            indentation: Some(ind(360, 360)),
+            ..decimal_level()
+        }]);
+        resolved.pic_bullets.insert(
+            NumPicBulletId::new(1),
+            NumPicBullet {
+                id: NumPicBulletId::new(1),
+                pict: Some(Pict {
+                    shape_type: None,
+                    primitives: vec![VmlPrimitive::Shape(VmlShape {
+                        common: VmlCommonAttrs {
+                            image_data: Some(VmlImageData {
+                                rel_id: Some(RelId::new("rId9")),
+                                title: None,
+                            }),
+                            ..Default::default()
+                        },
+                        shape_type_ref: None,
+                        vml_path: None,
+                    })],
+                }),
+            },
+        );
+        resolved.media.insert(
+            RelId::new("rId9"),
+            crate::render::resolve::images::MediaEntry {
+                data: std::sync::Arc::from(&b"\x89PNG"[..]),
+                format: crate::model::ImageFormat::Png,
+            },
+        );
+
+        for (alignment, expect_tab) in [
+            (Some(Alignment::Center), false),
+            (Some(Alignment::End), false),
+            (None, true),
+        ] {
+            let props = ParagraphProperties {
+                alignment,
+                ..props_at(0)
+            };
+            let (fragments, _) = inject_full(
+                &resolved,
+                &mut BuildState::default(),
+                &numbered_para(),
+                props,
+            );
+            assert!(
+                matches!(fragments[0], Fragment::Image { .. }),
+                "{alignment:?}: picture bullet first"
+            );
+            match (&fragments[1], expect_tab) {
+                (Fragment::Tab { .. }, true) => {}
+                (Fragment::Text { text, width, .. }, false) => {
+                    assert!(text.is_empty(), "{alignment:?}: spacer carries no glyphs");
+                    assert!(width.raw() > 0.0, "{alignment:?}: spacer has an advance");
+                }
+                (other, expected) => {
+                    panic!("{alignment:?}: expected tab={expected}, got {other:?}")
+                }
+            }
         }
     }
 
@@ -906,8 +1206,9 @@ mod tests {
     }
 
     /// `extract_hanging` reads only the hanging case: a *first-line* indent is
-    /// not a hanging indent, and neither is an absent one. Reached through the
-    /// tab's fitting width, which is the only thing that consumes it.
+    /// not a hanging indent, and neither is an absent one. Observed here
+    /// through the tab's fitting width; the centered/right-aligned path
+    /// consumes the same value as the spacer fragment's advance instead.
     #[test]
     fn only_a_hanging_first_line_indent_is_a_hanging_indent() {
         let fitting_for = |first_line: Option<FirstLineIndent>| {

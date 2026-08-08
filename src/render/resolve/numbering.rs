@@ -106,7 +106,9 @@ pub fn format_list_label(
     // as decimal regardless of the individual levels' own formats.
     let mut result = lvl.level_text.clone();
     for i in (0..=level).rev() {
-        let placeholder = format!("%{}", i + 1);
+        // Widen before adding: `i` is a raw `w:ilvl` u8, so a crafted
+        // ilvl=255 would overflow `i + 1` (§17.9.9 placeholders are 1-based).
+        let placeholder = format!("%{}", u32::from(i) + 1);
         if result.contains(&placeholder) {
             let count = counters.get(&(num_id, i)).copied().unwrap_or(1);
             let fmt = if lvl.is_legal {
@@ -291,16 +293,21 @@ fn ordinal_word(word: &str) -> String {
     .to_string()
 }
 
-fn to_letter_lower(n: u32) -> String {
+/// Alphabetic numbering shared by the letter formats: Word repeats the
+/// letter on overflow — a…z, then aa, bb, …, zz, aaa (a *repeating* scheme,
+/// not bijective base-N). Item `len + 1` is the first letter doubled, not the
+/// first letter again.
+fn alphabetic_repeat(n: u32, len: u32, letter: impl Fn(u32) -> char) -> String {
     if n == 0 {
         return String::new();
     }
-    // ST_NumberFormat `lowerLetter`: Word repeats the letter on overflow —
-    // a…z, then aa, bb, …, zz, aaa (a *repeating* scheme, not bijective
-    // base-26). Item 27 is "aa", not "a" again.
-    let idx = ((n - 1) % 26) as u8;
-    let count = ((n - 1) / 26) as usize + 1;
-    std::iter::repeat_n((b'a' + idx) as char, count).collect()
+    let idx = (n - 1) % len;
+    let count = ((n - 1) / len) as usize + 1;
+    std::iter::repeat_n(letter(idx), count).collect()
+}
+
+fn to_letter_lower(n: u32) -> String {
+    alphabetic_repeat(n, 26, |i| (b'a' + i as u8) as char)
 }
 
 fn to_letter_upper(n: u32) -> String {
@@ -315,15 +322,9 @@ const RUSSIAN_LETTERS: [char; 28] = [
 ];
 
 fn to_russian_lower(n: u32) -> String {
-    if n == 0 {
-        return String::new();
-    }
-    // Overflow repeats the letter, mirroring `to_letter_lower`: item 29 is
-    // "аа", not "а" again.
-    let len = RUSSIAN_LETTERS.len() as u32;
-    let idx = ((n - 1) % len) as usize;
-    let count = ((n - 1) / len) as usize + 1;
-    std::iter::repeat_n(RUSSIAN_LETTERS[idx], count).collect()
+    alphabetic_repeat(n, RUSSIAN_LETTERS.len() as u32, |i| {
+        RUSSIAN_LETTERS[i as usize]
+    })
 }
 
 fn to_russian_upper(n: u32) -> String {
