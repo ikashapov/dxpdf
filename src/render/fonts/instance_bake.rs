@@ -9,26 +9,36 @@
 //! pinned location through `fontcull-skrifa`'s outline and metrics providers
 //! (which already resolve composite glyphs and IUP-interpolated deltas
 //! internally — that is exactly the risk a hand-rolled interpolator would
-//! reintroduce) and writes a fresh, static `glyf`/`loca`/`hmtx`/`head`/`hhea`
-//! set with `fontcull-write-fonts`. `cmap`, `name`, layout tables and every
-//! other table this module does not itself touch carry over unchanged; the
-//! variable-specific tables (`fvar`, `gvar`, `avar`, `HVAR`, `VVAR`, `MVAR`,
-//! `STAT`, `cvar`) are dropped, since the result no longer varies.
+//! reintroduce) and writes a fresh, static `glyf`/`loca`/`hmtx` set with
+//! `fontcull-write-fonts`, patching `head`'s bbox/`indexToLocFormat` and
+//! `hhea.numberOfHMetrics` to match.
 //!
-//! `post`/`OS/2` are a partial exception: an `MVAR` table, when the font has
-//! one, carries per-instance deltas for line metrics and decoration metrics
-//! that live *outside* `glyf`, and dropping `MVAR` without applying those
-//! deltas first would leave a baked instance's `hhea` ascender/descender/line
-//! gap, `OS/2` win ascent/descent/cap height/x-height/strikeout, and `post`
-//! underline position/thickness at the *default* location's values — wrong
-//! in the same way an un-baked `glyf` would be, just harder to notice because
-//! nothing painted by this renderer reads them back (layout measures off the
-//! live `clone_with_arguments` typeface, not the embedded bytes). This module
-//! applies each tag's delta to its own field directly via `Mvar::metric_delta`
-//! rather than through a higher-level "resolved metrics" API, because such an
-//! API picks one of `hhea` or `OS/2`'s typo metrics as *the* line height —
-//! useful for a renderer, wrong for a byte-accurate table patch that must not
-//! conflate which table a delta belongs to.
+//! An `MVAR` table, when the font has one, carries deltas for metrics that
+//! live *outside* `glyf` — `hhea` ascender/descender/line gap, `OS/2` win
+//! ascent/descent/cap height/x-height/strikeout, `post` underline
+//! position/thickness — and dropping `MVAR` without applying those first
+//! would leave a baked instance's own metric tables at the *default*
+//! location's values: wrong in the same way an un-baked `glyf` would be, just
+//! harder to notice, since nothing painted by this renderer reads them back
+//! (layout measures off the live `clone_with_arguments` typeface, never the
+//! embedded bytes). Each tag's delta is applied straight to its own field via
+//! `Mvar::metric_delta`, not through a higher-level "resolved metrics" API:
+//! such an API picks one of `hhea` or `OS/2`'s typo metrics as *the* line
+//! height, which is useful for a renderer but wrong for a byte-accurate patch
+//! that must not conflate which table a delta belongs to.
+//!
+//! Everything else — `cmap`, `name`, layout tables, and every table this
+//! module does not itself touch — carries over unchanged. The
+//! variable-specific tables (`fvar`, `gvar`, `avar`, `HVAR`, `VVAR`, `MVAR`,
+//! `STAT`, `cvar`) are dropped, since the result no longer varies; `MVAR`'s
+//! own remaining tags go with it unapplied — vertical metrics (`vhea`,
+//! meaningless here: this renderer has no vertical-text layout to feed them),
+//! caret slope/offset (consulted only by an interactive editor's cursor,
+//! never a static PDF page), subscript/superscript size and offset (`dxpdf`
+//! positions `vertAlign` text itself, at layout time, rather than asking the
+//! embedded font's own hinting for it), and `gasp` (a rasterizer's
+//! grid-fitting hint). None of these affect what a PDF viewer draws or
+//! measures.
 //!
 //! # What this does not handle
 //!
@@ -47,15 +57,6 @@
 //! - **A `spec_next` cubic-outline glyph.** `glyf` is quadratic-only outside
 //!   an unstabilized spec extension. Real fonts do not produce these today;
 //!   this exists for totality, not because it is expected to fire.
-//!
-//! `MVAR` also carries tags this module does not apply — vertical metrics
-//! (`vhea`, meaningless here: this renderer has no vertical-text layout to
-//! feed them), caret slope/offset (consulted only by an interactive editor's
-//! cursor, never a static PDF page), subscript/superscript size and offset
-//! (`dxpdf` positions `vertAlign` text itself, at layout time, rather than
-//! asking the embedded font's own hinting for it), and `gasp` (a rasterizer's
-//! grid-fitting hint, not a value any consumer of embedded PDF bytes reads).
-//! None of these affect what a PDF viewer draws or measures.
 //!
 //! Baking always covers the *entire* glyph set — never scoped to the
 //! codepoints a render actually used. `fontcull`'s own (still-optional)
