@@ -13,6 +13,17 @@ use super::request::{FaceRequest, Toggle};
 use super::FontRegistry;
 use crate::render::dimension::Pt;
 
+/// The shear `Font::set_skew_x` applies to synthesise italic (issue #115) —
+/// **Word reference render**: this environment has no Word to compare
+/// against, so the value is not verified against an actual Word render, only
+/// against a cited convention: CSS Fonts Level 4's documented default oblique
+/// angle, 14° (`tan(14°) ≈ 0.249`), used here as a non-arbitrary placeholder
+/// rather than a guessed one. What would settle it: rendering a synthesised-
+/// italic run and comparing the slant against Word's own output for the same
+/// document. The sign (which direction the glyph leans) is verified — see
+/// `an_oblique_font_leans_the_way_a_reader_expects` below.
+const SYNTHETIC_OBLIQUE_SKEW_X: f32 = -0.249;
+
 /// Cache key: the request plus the size, case-folded.
 ///
 /// Keyed on the *toggles* rather than on a resolved weight and slant, so this
@@ -124,6 +135,17 @@ impl FontCache {
                 font.set_subpixel(true);
                 font.set_linear_metrics(true);
                 font.set_hinting(skia_safe::FontHinting::None);
+                // §115: resolution already knows, for certain, whether this
+                // face fell short of what was asked — applied here, the one
+                // place both the measurer and the painter build a `Font`
+                // from a resolved typeface, so measurement and paint can
+                // never see a different embolden/skew than each other.
+                if entry.synthesis.embolden {
+                    font.set_embolden(true);
+                }
+                if entry.synthesis.oblique {
+                    font.set_skew_x(SYNTHETIC_OBLIQUE_SKEW_X);
+                }
                 let i = self.fonts.len();
                 self.fonts.push(font);
                 self.index.insert(key, i);
@@ -144,11 +166,35 @@ impl FontCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::EmbeddedFontVariant;
     use crate::render::fonts::tests::arbitrary_system_font_bytes;
     use crate::render::fonts::FaceRequest;
     use crate::render::fonts::Toggle;
     use crate::render::fonts::{TypefaceId, TypefaceOrigin};
     use skia_safe::{Data, FontMgr};
+
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-files/fonts")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("fixture '{name}' is missing ({e}) — run scripts/make_font_fixtures.py")
+        })
+    }
+
+    /// A registry carrying the single-face `Dx` fixture, which requesting
+    /// bold or italic against always synthesises (nothing bolder or slanted
+    /// exists to select instead).
+    fn dx_registry() -> FontRegistry {
+        let mut r = FontRegistry::new(FontMgr::new());
+        r.register_embedded(
+            "Dx",
+            EmbeddedFontVariant::Regular,
+            fixture_bytes("Dx-Regular.ttf"),
+        )
+        .expect("Dx-Regular.ttf must register");
+        r
+    }
 
     #[test]
     fn font_cache_uses_registry_after_replacement() {
@@ -189,6 +235,77 @@ mod tests {
             TypefaceId::from(&font.typeface()),
             new_id,
             "FontCache must observe the post-replacement typeface"
+        );
+    }
+
+    // ── issue #115: synthesis applied at the shared Font-construction seam ──
+
+    /// `measurer.rs` and `painter.rs` both call `get_indexed`, so pinning it
+    /// once here covers both — there is no second call site to duplicate the
+    /// test at.
+    #[test]
+    fn embolden_is_applied_to_the_cached_font() {
+        let r = dx_registry();
+        let mut cache = FontCache::new();
+        let font = cache.get(&r, "Dx", Pt::new(12.0), Toggle::On, Toggle::Absent);
+        assert!(
+            font.is_embolden(),
+            "the single-face fixture has nothing bolder to select"
+        );
+    }
+
+    #[test]
+    fn oblique_is_applied_to_the_cached_font() {
+        let r = dx_registry();
+        let mut cache = FontCache::new();
+        let font = cache.get(&r, "Dx", Pt::new(12.0), Toggle::Absent, Toggle::On);
+        assert_ne!(
+            font.skew_x(),
+            0.0,
+            "the single-face fixture has nothing slanted to select"
+        );
+    }
+
+    #[test]
+    fn a_plain_request_synthesises_neither() {
+        let r = dx_registry();
+        let mut cache = FontCache::new();
+        let font = cache.get(&r, "Dx", Pt::new(12.0), Toggle::Absent, Toggle::Absent);
+        assert!(!font.is_embolden());
+        assert_eq!(font.skew_x(), 0.0);
+    }
+
+    /// The `SYNTHETIC_OBLIQUE_SKEW_X` **Word reference render** gap names an
+    /// unverified *magnitude*; this pins the *direction* regardless of it —
+    /// the top of a straight vertical stroke must lean right of the bottom,
+    /// the ordinary italic slant, not its mirror image.
+    #[test]
+    fn an_oblique_font_leans_the_way_a_reader_expects() {
+        let r = dx_registry();
+        let mut cache = FontCache::new();
+        // A large size keeps the lean well above float noise.
+        let font = cache.get(&r, "Dx", Pt::new(1000.0), Toggle::Absent, Toggle::On);
+        // Dx-Regular.ttf's glyphs are a rectangle with a straight left edge
+        // at font-design x=50 for y in [0,700] (see
+        // scripts/make_font_fixtures.py::_outlines) — Skia's glyph path
+        // space is Y-down, so the top of the glyph is the most-negative-y
+        // point and the bottom is y=0.
+        let glyphs = font.text_to_glyphs_vec("A");
+        let path = font.get_path(glyphs[0]).expect("glyph must have a path");
+        let points = path.points();
+        let top_x = points
+            .iter()
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("glyph has points")
+            .x;
+        let bottom_x = points
+            .iter()
+            .filter(|p| p.y == 0.0)
+            .map(|p| p.x)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            top_x > bottom_x,
+            "the top of the glyph must lean right of the bottom: top={top_x} bottom={bottom_x}"
         );
     }
 }
