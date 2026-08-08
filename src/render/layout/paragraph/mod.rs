@@ -390,6 +390,10 @@ impl PlacedParagraph<'_> {
 
     /// Emit the whole paragraph — drop cap, every line, and border/shading with
     /// `space_before`/`space_after`. The common, non-split path.
+    ///
+    /// Total height is `space_before + Σ line heights + space_after`; the
+    /// caller adds it to the page cursor. `space_after` can collapse with the
+    /// next paragraph's `space_before` — see `docs/paragraph-spacing.md`.
     pub(crate) fn emit_full(&self) -> ParagraphLayout {
         let mut commands = Vec::new();
         let mut cursor_y = self.style.space_before;

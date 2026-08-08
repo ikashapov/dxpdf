@@ -28,6 +28,7 @@ pub struct ParagraphStyle {
     pub indent_left: Pt,
     pub indent_right: Pt,
     pub indent_first_line: Pt,
+    /// §17.3.1.33: see [`LineSpacingRule`].
     pub line_spacing: LineSpacingRule,
     /// §20.1.2.1.18: the enclosing shape text body's `a:normAutofit` shrink.
     /// [`ShapeAutoFit::NONE`](crate::render::layout::ShapeAutoFit::NONE) for
@@ -201,12 +202,13 @@ impl Default for ParagraphStyle {
 // Workaround for clippy: ParagraphStyle has many fields but they all map 1:1 to spec properties.
 // A builder pattern would add complexity without value here.
 
-/// Line spacing rules matching OOXML semantics.
+/// §17.3.1.33: line spacing rules matching OOXML semantics.
 #[derive(Clone, Copy, Debug)]
 pub enum LineSpacingRule {
     /// Proportional: multiplier on natural line height (1.0 = single, 1.5 = 1.5x, etc.)
     Auto(f32),
-    /// Exact line height in points.
+    /// Exact line height in points. Taller content doesn't clip — it visually
+    /// overruns into the neighboring line.
     Exact(Pt),
     /// Minimum line height in points.
     AtLeast(Pt),
