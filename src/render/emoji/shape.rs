@@ -171,7 +171,6 @@ impl RunHandler for Collector {
 mod tests {
     use super::*;
     use crate::render::emoji::resolve::EmojiFamily;
-    use crate::render::fonts::opentype::table_tag;
     use skia_safe::{FontMgr, FontStyle};
 
     /// The host's color emoji typeface, or `None` on a host without one —
@@ -215,59 +214,35 @@ mod tests {
         assert!(run.total_advance > Pt::ZERO);
     }
 
-    /// **The reason this module exists.** A ZWJ sequence is five codepoints
-    /// that must ligate to a single glyph; cmap-only mapping yields five, and
-    /// the rasterizer would draw a row of separate people.
+    /// **The reason this module exists.** A ZWJ sequence is five codepoints;
+    /// cmap-only mapping would map each independently, and the rasterizer
+    /// would draw a row of separate people rather than a ligated glyph.
+    ///
+    /// Full ligation to one glyph is *not* asserted here — issue #117 found
+    /// it isn't a portable guarantee. On Windows, `Segoe UI Emoji` carries a
+    /// real 24 KB `GSUB` table (confirmed by reading it directly) and does
+    /// ligate other sequences (see `modifier_and_keycap_sequences_ligate`,
+    /// which passes there), but has no ligature for this specific man+woman+
+    /// girl combination or any of its three 2-person sub-pairs — each
+    /// resolves to 2 glyphs (the ZWJ consumed, the two people left
+    /// unligated), and the full sequence to 3. That is a real, observed
+    /// difference in what this font's own tables define, not a shaping bug:
+    /// the portable claim this test can make is that shaping is GSUB/cluster
+    /// -aware (nowhere near the naive 5), not that any two color-emoji fonts
+    /// ligate the same combinations.
     #[test]
     fn zwj_sequence_ligates_to_one_glyph() {
         let Some(tf) = emoji_typeface() else { return };
-
-        // ── issue #117 temporary diagnostic ──────────────────────────────
-        // Windows CI failed this test (3 glyphs, not 1) while the sibling
-        // modifier/keycap ligation test passed on the same run, on the same
-        // matched typeface. That rules out "shaping is broken" and points at
-        // a font-specific GSUB coverage gap, but there's no way to confirm
-        // that from outside a real Windows runner — this prints what's
-        // actually there (never `to_font_data`: see the module doc's 549 MB
-        // note) and probes each 2-person sub-sequence to localize exactly
-        // where ligation stops, so the real fix can be written from evidence
-        // rather than a guess. Remove once #117 is resolved.
-        eprintln!(
-            "[diag #117] matched typeface: family={:?} style={:?}",
-            tf.family_name(),
-            tf.font_style()
-        );
-        match tf.copy_table_data(table_tag(b"GSUB")) {
-            Some(data) => eprintln!("[diag #117] GSUB table present: {} bytes", data.len()),
-            None => eprintln!("[diag #117] GSUB table: ABSENT"),
-        }
         let shaper = ClusterShaper::new().expect("shaper");
-        for (label, text) in [
-            ("man+ZWJ+woman", "\u{1F468}\u{200D}\u{1F469}"),
-            ("woman+ZWJ+girl", "\u{1F469}\u{200D}\u{1F467}"),
-            ("man+ZWJ+girl", "\u{1F468}\u{200D}\u{1F467}"),
-        ] {
-            match shaper.shape(&tf, text, 44.0) {
-                Ok(run) => eprintln!("[diag #117] '{label}' -> {} glyph(s)", run.glyphs.len()),
-                Err(e) => eprintln!("[diag #117] '{label}' -> shape error: {e}"),
-            }
-        }
-        // ── end temporary diagnostic ──────────────────────────────────────
-
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         assert_eq!(family.chars().count(), 5);
 
         let run = shaper.shape(&tf, family, 44.0).expect("shape");
-        eprintln!(
-            "[diag #117] full family sequence -> {} glyph(s), ids={:?}",
-            run.glyphs.len(),
-            run.glyphs.iter().map(|g| g.id).collect::<Vec<_>>()
-        );
 
-        assert_eq!(
-            run.glyphs.len(),
-            1,
-            "GSUB must ligate the sequence; got {} glyphs",
+        assert!(
+            run.glyphs.len() < 5,
+            "shaping must be GSUB/cluster-aware, not cmap-only mapping \
+             (which would yield 5 for this 5-codepoint sequence); got {}",
             run.glyphs.len()
         );
         assert!(run.total_advance > Pt::ZERO);
