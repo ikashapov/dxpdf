@@ -12,6 +12,11 @@ use super::types::{
 };
 
 /// Layered command buffers for table rendering: shading, content, borders.
+///
+/// Concatenated in that order — shading, then content, then borders — and the
+/// order is load-bearing: a cell's background is painted before its
+/// neighbours' borders, so a background can never cover a shared edge, and
+/// text is never hidden under a background.
 pub(super) struct TableCommandBuffers<'a> {
     pub(super) commands: &'a mut Vec<DrawCommand>,
     pub(super) content_commands: &'a mut Vec<DrawCommand>,

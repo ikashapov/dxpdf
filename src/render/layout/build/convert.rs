@@ -462,6 +462,11 @@ pub(super) fn merge_table_borders(
 
 /// Convert model `TableBorders` to a layout `TableBorderConfig`.
 /// §17.4.38: borders with `val="none"` or `val="nil"` are suppressed.
+///
+/// Filtered here, *before* [`convert_model_border`] ever runs — that function
+/// has no "draw nothing" style of its own, so an unsuppressed `none`/`nil`
+/// would fall into its unhandled-style arm and be approximated as a visible
+/// solid line instead of correctly drawing nothing.
 pub(super) fn convert_table_border_config(
     b: &model::TableBorders,
     state: &mut BuildState,

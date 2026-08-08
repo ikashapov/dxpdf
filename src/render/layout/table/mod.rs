@@ -3,6 +3,12 @@
 //! Pass 1: Compute column widths from grid definitions or equal distribution.
 //! Pass 2: Lay out each cell with tight width constraints, determine row heights.
 //! Pass 3: Position cells and emit border commands.
+//!
+//! Widths are fixed *first*, from the declared grid rather than from content,
+//! because the three depend on each other in a circle: column width affects
+//! how cell content wraps, wrapped content determines row height, and there is
+//! no width-independent way to measure a cell. Fixing width from the grid
+//! breaks the cycle instead of resolving it.
 
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
@@ -23,6 +29,10 @@ use measure::measure_table_rows;
 use split::{find_row_cut, split_row_at, RowCutInput};
 
 /// Measure the first atomic paginator row group without emitting table commands.
+///
+/// A lookahead for the section stacker's page-fit decisions (does the next
+/// atomic group fit before a page/column break, keepNext chains, and so on) —
+/// it needs a height to decide with, not commands to draw.
 ///
 /// The following row is included only to resolve the group's shared bottom
 /// border; later rows and groups are neither measured nor paginated.
@@ -63,6 +73,10 @@ pub(crate) fn measure_leading_table_group_height(
 }
 
 /// Lay out a table: compute column widths, lay out cells, emit borders.
+///
+/// Monolithic — the whole table fits on one page, so unlike
+/// [`layout_table_paginated`] there is no top-border override to thread
+/// through: every border is already resolved correctly in one pass.
 ///
 /// §17.4.38: `suppress_first_row_top` suppresses the top border of the first row
 /// for adjacent table border collapse.
@@ -184,6 +198,10 @@ pub fn layout_table_paginated(
     )
 }
 
+/// As [`layout_table_paginated`], but with a per-page height rather than one
+/// fixed page height — continuation pages can have different header/footer
+/// clearance than the first, so the height available to a row varies by which
+/// page it lands on.
 pub(crate) fn layout_table_paginated_with_page_heights(
     rows: &[TableRowInput],
     col_widths: &[Pt],

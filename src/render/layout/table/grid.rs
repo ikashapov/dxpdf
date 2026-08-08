@@ -24,6 +24,11 @@ pub(super) struct RowGroup {
 /// zero, or negative from a malformed file) carries no proportions to scale,
 /// and scaling it by any factor leaves every column at zero — cells laid out
 /// at zero width, with their content unreadable rather than merely misplaced.
+///
+/// Word's own autofit algorithm is not implemented. Proportional scaling of
+/// the declared grid matches Word's output for the overwhelming majority of
+/// real documents, and it keeps this pass O(columns) rather than requiring a
+/// content-measurement pre-pass before any width is known.
 pub fn compute_column_widths(grid_cols: &[Pt], num_cols: usize, available_width: Pt) -> Vec<Pt> {
     let total: Pt = grid_cols.iter().copied().sum();
     if !grid_cols.is_empty() && total > Pt::ZERO {
@@ -47,8 +52,8 @@ pub fn compute_column_widths(grid_cols: &[Pt], num_cols: usize, available_width:
 /// Build atomic row groups for pagination.
 ///
 /// Groups are formed by: vMerge groups (Restart through consecutive Continue
-/// rows) and §17.4.1 cantSplit rows. Each group is an indivisible unit for
-/// page-break decisions.
+/// rows), §17.4.1 cantSplit rows, and rows whose cells contain a nested
+/// table. Each group is an indivisible unit for page-break decisions.
 pub(super) fn build_row_groups(rows: &[TableRowInput], measured: &MeasuredTable) -> Vec<RowGroup> {
     let mut groups = Vec::new();
     let mut i = 0;
@@ -83,6 +88,10 @@ pub(super) fn build_row_groups(rows: &[TableRowInput], measured: &MeasuredTable)
 }
 
 /// Return the exclusive end of the paginator's atomic row group at `start`.
+///
+/// Walks forward while the next row has any `vMerge = Continue` cell, which
+/// is what makes a merge span indivisible: a span is exactly the run of rows
+/// from its `Restart` through the last consecutive `Continue`.
 pub(super) fn row_group_end(rows: &[TableRowInput], start: usize) -> usize {
     let mut end = start + 1;
     while end < rows.len()
@@ -131,11 +140,20 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
 /// So even distribution is disfavoured and last-row and first-row both remain
 /// open; last-row has the better structural argument (a single-pass
 /// top-to-bottom sizer can only enforce a span's total once the span closes)
-/// but no spec text. The choice is *observable* — it changes rendered output on
-/// one real corpus document — so settling it needs a Word-exported PDF of a
-/// two-row vertical merge whose restart cell overflows both rows. Until then
-/// the behaviour is pinned by `expand_spreads_overflow_across_the_merge_span`,
-/// so it cannot change silently.
+/// but no spec text.
+///
+/// The choice is *observable*, not academic: it changes rendered output on 1
+/// of the 24 real documents in the local `test-cases/` corpus —
+/// `2026-03-09_annahme_abgabe_zusatzartikel__200.docx` (4 restarts / 28
+/// continues). That file also shows the overflow is genuine rather than a
+/// parsing artefact: Word wrote exactly **one** `w:trHeight` in the entire
+/// document, so the merge rows carry no authored heights for a renderer to
+/// defer to instead of computing one.
+///
+/// Settling it needs a Word-exported PDF of a two-row vertical merge whose
+/// restart cell overflows both rows. Until then the behaviour is pinned by
+/// `expand_spreads_overflow_across_the_merge_span`, so it cannot change
+/// silently. Tracked as E5a#6.
 ///
 /// A lone `Restart` with no `Continue` below it is not a span, and is sized by
 /// the normal row-height path in `measure_table_rows` instead.

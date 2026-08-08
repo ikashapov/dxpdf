@@ -42,6 +42,11 @@ struct CellCut {
 
 impl CellCut {
     /// "Don't split" sentinel — all commands and lines stay on the first half.
+    ///
+    /// Used for a cell that can't be cut text-wise — too few baselines, or
+    /// image/shape-only content — since you cannot cut through an image. The
+    /// caller adds the cell's full visible height to the row's required
+    /// first-half height instead of a partial one.
     fn keep_all() -> Self {
         Self {
             content_cut_y: Pt::new(f32::INFINITY),
@@ -65,8 +70,11 @@ pub(super) struct SplitCut {
 /// bottom margins so the cut-edge border gets the natural padding Word
 /// preserves on split cells.
 ///
-/// Returns `None` when no cell has at least one line that fits within
-/// `available - margins.vertical()`.
+/// Returns `None` in two cases: no cell has at least one line that fits
+/// within `available - margins.vertical()`, or every cell does but honoring
+/// the row's non-splittable cells' full visible height (see
+/// [`CellCut::keep_all`]) would itself overflow `available` — in both cases
+/// the caller spills the whole row to the next page instead.
 pub(super) fn find_row_cut(input: &RowCutInput<'_>) -> Option<SplitCut> {
     let mut cells: Vec<CellCut> = Vec::with_capacity(input.row.cells.len());
     let mut first_half_height = Pt::ZERO;

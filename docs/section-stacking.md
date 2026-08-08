@@ -66,7 +66,7 @@ produces.
 
 `lines` is left **empty** when the content cannot be safely bisected (a nested
 table or floating object is present). Such cells move whole rather than split.
-See [Table Layout](table-layout.md).
+See `src/render/layout/table/split.rs`.
 
 ## Page-level concerns (`layout.rs`)
 
