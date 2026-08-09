@@ -18,6 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::model::{Inline, RunElement, TextRun};
 use crate::render::emoji::cluster::{self, EmojiPresentation, EmojiStructure, InlineCluster};
+use crate::render::layout::fragment::BreakAfter;
 
 // ─── Public ADTs ─────────────────────────────────────────────────────────────
 
@@ -71,22 +72,48 @@ impl<'a> JoinedTextSegment<'a> {
         &self.char_runs
     }
 
-    /// Classify this segment per UAX #29 + UTS #51, splitting at run
-    /// boundaries within text spans and packaging emoji clusters
-    /// (possibly cross-run) as a single piece using the cluster's first
-    /// run as the base.
+    /// Classify this segment per UAX #29 + UTS #51 **and** UAX #14, splitting
+    /// at run boundaries and line-break opportunities within text spans, and
+    /// packaging emoji clusters (possibly cross-run) as a single piece using
+    /// the cluster's first run as the base.
+    ///
+    /// The line-break opportunities are computed over the *joined* text, which
+    /// is the whole point of computing them here rather than per run: a Thai
+    /// word or a CJK phrase that Word split across `<w:r>` boundaries — for a
+    /// colour change, a `<w:rFonts>` slot change, anything — is one string by
+    /// the time it reaches [`crate::i18n::segment::break_offsets`], so its
+    /// boundaries come out where the language puts them and not where the
+    /// formatting does.
+    ///
+    /// The segment's own last piece takes UAX #14's answer for the end of its
+    /// input like any other, which is always [`BreakAfter::Opportunity`]. That
+    /// looks unsafe — a segment ends where the next inline is not a joinable
+    /// text run, and a `<w:bookmarkStart/>` can sit in the middle of a word —
+    /// but it changes nothing: whatever ends a segment produces a fragment of
+    /// its own, and every non-text fragment is already an unconditional break
+    /// point in [`fit_lines`](crate::render::layout::line::fit_lines),
+    /// zero-width bookmark markers included. Withholding the opportunity here
+    /// would not glue the token back together; it would only lose the
+    /// opportunity where the segment really does end at a space, which is what
+    /// the old character rule granted and what a paragraph interrupted by a
+    /// bookmark or a field depends on.
     pub(super) fn classify(self) -> Vec<SegmentPiece<'a>> {
         let mut out = Vec::new();
         let mut buffer: Option<TextBuffer<'a>> = None;
         let mut char_idx = 0usize;
+        let mut byte_idx = 0usize;
+        let mut breaks = BreakCursor::new(&self.text);
 
+        // `cluster::classify` partitions the input contiguously and in order,
+        // so tracking the byte offset alongside the char offset keeps both in
+        // step with `self.text` without re-deriving spans from pointers.
         for ic in cluster::classify(&self.text) {
             match ic {
                 InlineCluster::Text(span) => {
-                    // Walk graphemes inside this text span so we can
-                    // split when the originating run changes.
+                    // Walk graphemes inside this text span so we can split
+                    // when the originating run changes, or when UAX #14 says
+                    // a line may break.
                     for grapheme in UnicodeSegmentation::graphemes(span, true) {
-                        let chars_in = grapheme.chars().count();
                         let run = self.char_runs[char_idx];
                         match buffer.as_mut() {
                             None => {
@@ -99,50 +126,94 @@ impl<'a> JoinedTextSegment<'a> {
                                 buf.text.push_str(grapheme);
                             }
                             Some(_) => {
-                                // Run boundary inside a text span — flush.
-                                let prev = buffer.take().unwrap();
-                                out.push(SegmentPiece::Text {
-                                    run: prev.run,
-                                    text: prev.text,
-                                });
+                                // Run boundary inside a token: the piece ends
+                                // here for formatting reasons, not linguistic
+                                // ones, so no break opportunity comes with it.
+                                flush(&mut buffer, BreakAfter::Prohibited, &mut out);
                                 buffer = Some(TextBuffer {
                                     run,
                                     text: grapheme.to_string(),
                                 });
                             }
                         }
-                        char_idx += chars_in;
+                        char_idx += grapheme.chars().count();
+                        byte_idx += grapheme.len();
+                        if breaks.is_opportunity(byte_idx) {
+                            flush(&mut buffer, BreakAfter::Opportunity, &mut out);
+                        }
                     }
                 }
                 InlineCluster::Emoji(ec) => {
-                    // Flush any pending text.
-                    if let Some(prev) = buffer.take() {
-                        out.push(SegmentPiece::Text {
-                            run: prev.run,
-                            text: prev.text,
-                        });
-                    }
-                    let base_run = self.char_runs[char_idx];
-                    let chars_in = ec.text.chars().count();
+                    // Any pending text ends at a formatting boundary, not a
+                    // linguistic one — a break opportunity just before the
+                    // emoji would already have flushed it above.
+                    flush(&mut buffer, BreakAfter::Prohibited, &mut out);
                     out.push(SegmentPiece::Emoji {
-                        base_run,
+                        base_run: self.char_runs[char_idx],
                         text: ec.text.to_string(),
                         presentation: ec.presentation,
                         structure: ec.structure,
                     });
-                    char_idx += chars_in;
+                    char_idx += ec.text.chars().count();
+                    byte_idx += ec.text.len();
+                    breaks.skip_past(byte_idx);
                 }
             }
         }
 
-        if let Some(last) = buffer {
-            out.push(SegmentPiece::Text {
-                run: last.run,
-                text: last.text,
-            });
-        }
-
+        // Unreachable with a non-empty buffer: `break_offsets` always reports
+        // the end of its input, so a segment ending in text was flushed by the
+        // check above, and one ending in an emoji left nothing pending.
+        flush(&mut buffer, BreakAfter::Opportunity, &mut out);
         out
+    }
+}
+
+/// Emit whatever text has accumulated, tagged with the break status its
+/// trailing edge earned. A no-op when nothing is pending.
+fn flush<'a>(
+    buffer: &mut Option<TextBuffer<'a>>,
+    break_after: BreakAfter,
+    out: &mut Vec<SegmentPiece<'a>>,
+) {
+    if let Some(buf) = buffer.take() {
+        out.push(SegmentPiece::Text {
+            run: buf.run,
+            text: buf.text,
+            break_after,
+        });
+    }
+}
+
+/// A forward-only cursor over [`crate::i18n::segment::break_offsets`].
+///
+/// Both the offsets and the walk that queries them ascend, so membership is a
+/// pointer bump rather than a set lookup.
+struct BreakCursor {
+    offsets: Vec<usize>,
+    next: usize,
+}
+
+impl BreakCursor {
+    fn new(text: &str) -> Self {
+        Self {
+            offsets: crate::i18n::segment::break_offsets(text),
+            next: 0,
+        }
+    }
+
+    /// True when a line may break immediately after byte `offset`.
+    fn is_opportunity(&mut self, offset: usize) -> bool {
+        self.skip_past(offset);
+        self.offsets.get(self.next).is_some_and(|&o| o == offset)
+    }
+
+    /// Advance past every offset before `offset` — used directly when a
+    /// multi-scalar emoji cluster jumps the walk over several of them.
+    fn skip_past(&mut self, offset: usize) {
+        while self.offsets.get(self.next).is_some_and(|&o| o < offset) {
+            self.next += 1;
+        }
     }
 }
 
@@ -152,13 +223,16 @@ struct TextBuffer<'a> {
 }
 
 /// One classified piece of a [`JoinedTextSegment`] after applying UAX #29
-/// + UTS #51.
+/// + UTS #51 + UAX #14.
 ///
 /// `Text` is split at run boundaries so each piece carries a single
-/// originating run; that run's properties drive the whole piece. `Emoji`
-/// is not split — a UAX #29 cluster is one visual unit at one size, so
+/// originating run; that run's properties drive the whole piece. It is also
+/// split at line-break opportunities, and each piece records which kind of
+/// boundary it ends at, so the fitter never has to guess from the text.
+/// `Emoji` is not split — a UAX #29 cluster is one visual unit at one size, so
 /// when it spans runs we use the base run's formatting (font-name hint
-/// per §17.3.2.26, color, baseline offset, font size).
+/// per §17.3.2.26, color, baseline offset, font size) — and carries no break
+/// status because every non-text fragment is an unconditional break point.
 ///
 /// The same first-run rule applies to a *text* grapheme that spans runs:
 /// `classify` attributes a whole grapheme to the run its first scalar came
@@ -172,6 +246,10 @@ pub(super) enum SegmentPiece<'a> {
     Text {
         run: &'a TextRun,
         text: String,
+        /// UAX #14 status of this piece's trailing edge, computed over the
+        /// joined text so a `<w:r>` boundary inside a word does not become a
+        /// break opportunity — and a break opportunity inside a `<w:r>` does.
+        break_after: BreakAfter,
     },
     Emoji {
         base_run: &'a TextRun,
@@ -481,7 +559,7 @@ mod tests {
         let pieces = seg.classify();
         assert_eq!(pieces.len(), 1);
         match &pieces[0] {
-            SegmentPiece::Text { run, text } => {
+            SegmentPiece::Text { run, text, .. } => {
                 assert!(std::ptr::eq(*run, r1));
                 assert_eq!(text, "hello");
             }
@@ -504,14 +582,14 @@ mod tests {
         let pieces = seg.classify();
         assert_eq!(pieces.len(), 2);
         match &pieces[0] {
-            SegmentPiece::Text { run, text } => {
+            SegmentPiece::Text { run, text, .. } => {
                 assert!(std::ptr::eq(*run, r1));
                 assert_eq!(text, "ab");
             }
             _ => panic!(),
         }
         match &pieces[1] {
-            SegmentPiece::Text { run, text } => {
+            SegmentPiece::Text { run, text, .. } => {
                 assert!(std::ptr::eq(*run, r2));
                 assert_eq!(text, "cd");
             }
@@ -608,8 +686,14 @@ mod tests {
         }
     }
 
-    /// B6 — mixed: ["hi 1", VS-16+U+20E3, " there"] → three pieces:
-    /// Text("hi "), Emoji("1️⃣"), Text(" there").
+    /// B6 — mixed: ["hi 1", VS-16+U+20E3, " there"] → Text("hi "),
+    /// Emoji("1️⃣"), then the trailing run divided at its own UAX #14
+    /// boundary into Text(" ") and Text("there").
+    ///
+    /// That last division is issue #130's split axis, not a change to cluster
+    /// reassembly: the space after the emoji is a break opportunity, so it
+    /// ends a unit. The two pieces carry the same run and render exactly as
+    /// the single `" there"` piece did.
     #[test]
     fn b6_mixed_text_and_keycap() {
         let inlines = vec![
@@ -626,11 +710,16 @@ mod tests {
             _ => panic!(),
         };
         let pieces = seg.classify();
-        assert_eq!(pieces.len(), 3);
+        assert_eq!(pieces.len(), 4, "{pieces:#?}");
         match &pieces[0] {
-            SegmentPiece::Text { run, text } => {
+            SegmentPiece::Text {
+                run,
+                text,
+                break_after,
+            } => {
                 assert!(std::ptr::eq(*run, r1));
                 assert_eq!(text, "hi ");
+                assert_eq!(*break_after, BreakAfter::Opportunity);
             }
             _ => panic!(),
         }
@@ -650,13 +739,24 @@ mod tests {
             }
             _ => panic!(),
         }
-        match &pieces[2] {
-            SegmentPiece::Text { run, text } => {
-                assert!(std::ptr::eq(*run, r3));
-                assert_eq!(text, " there");
+        for (i, expected) in [(2, " "), (3, "there")] {
+            match &pieces[i] {
+                SegmentPiece::Text { run, text, .. } => {
+                    assert!(std::ptr::eq(*run, r3));
+                    assert_eq!(text, expected);
+                }
+                _ => panic!("piece {i} must be Text"),
             }
-            _ => panic!(),
         }
+        // …and the run's text is preserved exactly, division notwithstanding.
+        let rejoined: String = pieces[2..]
+            .iter()
+            .map(|p| match p {
+                SegmentPiece::Text { text, .. } => text.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(rejoined, " there");
     }
 
     /// B7 — two distinct emoji "📞📧" in two runs → two Emoji pieces
@@ -691,7 +791,7 @@ mod tests {
         let pieces = seg.classify();
         assert_eq!(pieces.len(), 1);
         match &pieces[0] {
-            SegmentPiece::Text { run, text } => {
+            SegmentPiece::Text { run, text, .. } => {
                 assert!(std::ptr::eq(*run, r1));
                 assert_eq!(text, "a\u{0301}");
             }
@@ -726,6 +826,11 @@ mod tests {
 
     /// B10 — default-text codepoints (digits) NOT promoted: regression
     /// for the digit fix. Single-run digits stay text.
+    ///
+    /// The piece *count* is not the property under test and is no longer 1 —
+    /// since issue #130 the run is divided at its UAX #14 boundaries. What
+    /// must hold is that every piece is Text (no digit became an emoji) and
+    /// that the division loses nothing.
     #[test]
     fn b10_digits_in_one_run_stay_text() {
         let inlines = vec![text_run("Numbers: 1, 2, 3")];
@@ -735,8 +840,14 @@ mod tests {
             _ => panic!(),
         };
         let pieces = seg.classify();
-        assert_eq!(pieces.len(), 1);
-        assert!(matches!(pieces[0], SegmentPiece::Text { .. }));
+        let texts: Vec<&str> = pieces
+            .iter()
+            .map(|p| match p {
+                SegmentPiece::Text { text, .. } => text.as_str(),
+                other => panic!("a digit was promoted out of text: {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts.concat(), "Numbers: 1, 2, 3");
     }
 
     /// B11 — field char between text-only runs has already produced a

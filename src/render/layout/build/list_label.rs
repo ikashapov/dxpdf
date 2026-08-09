@@ -251,6 +251,10 @@ fn spacer_fragment(
         color,
         shading: None,
         border: None,
+        // §17.9.6: the label and the first line of its paragraph are one
+        // line by construction — the gap exists so they don't touch, not so
+        // the body can start on the line below.
+        break_after: crate::render::layout::fragment::BreakAfter::Prohibited,
         width: gap,
         trimmed_width: Pt::ZERO,
         metrics,
@@ -383,6 +387,10 @@ fn inject_text_label(
         color: label_color,
         shading: None,
         border: None,
+        // The label leads its paragraph's first line; what separates it from
+        // the body is the suffix that follows (tab, space or nothing), and
+        // that fragment carries the break status.
+        break_after: crate::render::layout::fragment::BreakAfter::Prohibited,
         width: label_width,
         trimmed_width: label_width,
         metrics: m,
@@ -433,6 +441,9 @@ fn inject_text_label(
                     color: label_color,
                     shading: None,
                     border: None,
+                    // §17.9.30 `w:suff` of `space`: a real space, so UAX #14
+                    // breaks after it like any other.
+                    break_after: crate::render::layout::fragment::BreakAfter::Opportunity,
                     width: sw,
                     trimmed_width: sw,
                     metrics: sm,

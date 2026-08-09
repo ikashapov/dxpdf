@@ -573,6 +573,7 @@ mod tests {
         };
         Fragment::Text {
             text: Rc::from(s),
+            break_after: crate::render::layout::fragment::fixture_break_after(s),
             font: Rc::new(font),
             color: RgbColor::BLACK,
             shading: None,

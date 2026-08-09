@@ -12,7 +12,7 @@
 
 use std::rc::Rc;
 
-use super::{FontProps, Fragment, TextMetrics};
+use super::{BreakAfter, FontProps, Fragment, TextMetrics};
 use crate::render::dimension::Pt;
 use crate::render::spacing;
 
@@ -23,16 +23,30 @@ pub type MeasureFn<'a> = Option<&'a dyn Fn(&str, &FontProps) -> (Pt, TextMetrics
 
 /// True for a text fragment that is both too wide and actually splittable.
 ///
-/// The *cluster* count is what matters: a single cluster cannot be split
-/// however many scalars or bytes it occupies. An earlier byte-length
-/// (`text.len() > 1`) spelling of this test disagreed with the split itself for
-/// any non-ASCII single character — it reported "needs split", then split
-/// nothing, and the caller paid for a full clone of the fragment vector. A
-/// scalar count has the same disagreement for a one-cluster accented letter.
+/// "Too wide" is measured **without trailing whitespace**, the same width line
+/// fitting checks overflow against: trailing space is allowed to hang past the
+/// margin, so a fragment whose visible text fits is not over-wide however much
+/// space trails it. Documents lay out with runs of spaces — one in
+/// `test-cases/` pads a header with 130 of them — and UAX #14 keeps such a run
+/// in a single unit, because [LB7] forbids a break *before* a space. Measuring
+/// the full width would send that unit here to be cut into 130 one-space
+/// fragments, and the visible word ahead of them would be dragged onto its own
+/// line for want of room that was never needed.
+///
+/// The *cluster* count is what matters for splittability: a single cluster
+/// cannot be split however many scalars or bytes it occupies. An earlier
+/// byte-length (`text.len() > 1`) spelling of this test disagreed with the
+/// split itself for any non-ASCII single character — it reported "needs
+/// split", then split nothing, and the caller paid for a full clone of the
+/// fragment vector. A scalar count has the same disagreement for a
+/// one-cluster accented letter.
+///
+/// [LB7]: https://www.unicode.org/reports/tr14/#LB7
 fn needs_split(fragment: &Fragment, max_width: Pt) -> bool {
     matches!(
         fragment,
-        Fragment::Text { width, text, .. } if *width > max_width && spacing::unit_count(text) > 1
+        Fragment::Text { trimmed_width, text, .. }
+            if *trimmed_width > max_width && spacing::unit_count(text) > 1
     )
 }
 
@@ -95,6 +109,18 @@ pub fn split_oversized_fragments(
                 color: *color,
                 shading: *shading,
                 border: *border,
+                // Still prohibited, even though this split exists precisely to
+                // let the fitter break here. The fitter breaks at the *last*
+                // opportunity before an overflow, so calling each cluster one
+                // would drag the head of the word up onto the previous line —
+                // "Nicht gefunden" in a narrow cell becomes "Nicht ge" /
+                // "funden" — when the word would have fitted whole on the next
+                // line. With no opportunity to fall back to, the fitter breaks
+                // immediately before whichever cluster overflows, which is only
+                // reached once the word has a line to itself and still doesn't
+                // fit. That is the order Word applies too: move the word down
+                // first, cut it only if it still won't fit.
+                break_after: BreakAfter::Prohibited,
                 width: w,
                 trimmed_width: w,
                 metrics: unit_metrics,
@@ -118,6 +144,7 @@ mod tests {
     fn text_frag(text: &str, width: f32) -> Fragment {
         Fragment::Text {
             text: Rc::from(text),
+            break_after: super::super::fixture_break_after(text),
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
@@ -233,6 +260,25 @@ mod tests {
                 "{ch:?} is one character regardless of its byte length"
             );
         }
+    }
+
+    /// A unit whose *visible* text fits is not over-wide, however much space
+    /// trails it. Real documents pad with runs of spaces, and UAX #14 keeps a
+    /// run of them in one unit ([LB7] forbids a break before a space) — so
+    /// this fragment reaches the splitter looking 200pt wide when only 5pt of
+    /// it will ever be drawn inside the margin.
+    ///
+    /// [LB7]: https://www.unicode.org/reports/tr14/#LB7
+    #[test]
+    fn trailing_whitespace_does_not_make_a_fragment_over_wide() {
+        let mut frag = text_frag("H                    ", 200.0);
+        if let Fragment::Text { trimmed_width, .. } = &mut frag {
+            *trimmed_width = Pt::new(5.0);
+        }
+        assert!(
+            split_oversized_fragments(&[frag], Pt::new(20.0), None).is_none(),
+            "only the visible width counts; the spaces hang past the margin",
+        );
     }
 
     #[test]

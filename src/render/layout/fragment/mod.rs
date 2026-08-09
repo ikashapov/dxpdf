@@ -127,6 +127,36 @@ pub enum LinkTarget {
     Internal(Rc<str>),
 }
 
+/// UAX #14 line-break status at the *end* of a [`Fragment::Text`] — whether
+/// the line fitter may put the next fragment on a new line.
+///
+/// Carried as data rather than re-derived from the fragment's last character,
+/// which is what [`fit_lines`](crate::render::layout::line::fit_lines) used to
+/// do. Two copies of "may a line break here?" is exactly what issue #130 found
+/// had drifted: the cutter broke after U+2012 FIGURE DASH and the fitter's
+/// character list did not include it. [`crate::i18n::segment`] is the one
+/// place that answers the question now; this enum is how the answer travels.
+///
+/// Two states, not three. UAX #14 also has *mandatory* breaks ([LB4]/[LB5]),
+/// and none can reach a fragment: CR, LF and every other C0 control but TAB
+/// are stripped while the text is collected, and an authored `<w:br/>`
+/// (§17.3.3.1) becomes [`Fragment::LineBreak`] instead of text.
+///
+/// [LB4]: https://www.unicode.org/reports/tr14/#LB4
+/// [LB5]: https://www.unicode.org/reports/tr14/#LB5
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BreakAfter {
+    /// [LD3]: a line may break between this fragment and the next.
+    ///
+    /// [LD3]: https://www.unicode.org/reports/tr14/#LD3
+    Opportunity,
+    /// No opportunity — the next fragment continues the same unbreakable
+    /// unit. Either UAX #14 prohibits the break (`ID-001` between `-` and
+    /// `0`), or the fragment ends at a `<w:r>` boundary that falls inside a
+    /// token and the run after it carries the rest.
+    Prohibited,
+}
+
 /// A measured fragment — the atomic unit for line fitting.
 #[derive(Clone, Debug)]
 pub enum Fragment {
@@ -142,6 +172,11 @@ pub enum Fragment {
         shading: Option<RgbColor>,
         /// §17.3.2.4: run-level border (box around text).
         border: Option<FragmentBorder>,
+        /// UAX #14: whether a line may break after this fragment. See
+        /// [`BreakAfter`] — this is the only thing line fitting consults, so
+        /// a fragment that must stay joined to the next one says so here
+        /// rather than relying on what its text happens to end with.
+        break_after: BreakAfter,
         /// Full width including trailing whitespace (used for positioning).
         width: Pt,
         /// Width excluding trailing whitespace (used for line-break overflow checking).
@@ -309,6 +344,26 @@ impl Fragment {
             Fragment::Text { font, .. } => Some(font),
             _ => None,
         }
+    }
+}
+
+/// The [`BreakAfter`] a unit-test fixture means when it writes a word with a
+/// trailing space.
+///
+/// Fixtures all over the layout tests build `Fragment::Text` literals by hand
+/// and spell their break opportunities as trailing whitespace, because until
+/// issue #130 that *was* the encoding — `fit_lines` read the last character.
+/// Restating that reading once, here, keeps every one of those fixtures
+/// meaning what it meant and every test outcome comparable across the change.
+/// Test-only on purpose: this is the rule the production path no longer has,
+/// and nothing outside `#[cfg(test)]` may call it.
+#[cfg(test)]
+pub(crate) fn fixture_break_after(text: &str) -> BreakAfter {
+    let breaks = text.ends_with([' ', '\t', '-', '\u{2010}', '\u{2013}', '\u{2014}']);
+    if breaks {
+        BreakAfter::Opportunity
+    } else {
+        BreakAfter::Prohibited
     }
 }
 
