@@ -106,7 +106,9 @@ impl Locale {
     /// is the BCP-47 parsing this type exists to avoid; a half-filled table
     /// would look complete and not be. Likewise Arabic and Persian are listed
     /// as point-decimal, which is right for their Latin-digit documents and
-    /// wrong for the Arabic-Indic `٫` some regions use.
+    /// wrong for the Arabic-Indic `٫` some regions use. `crate::i18n` (issue
+    /// #127) is the first step toward closing this properly, via ICU4X
+    /// regional data instead of a hand-rolled table — tracked in issue #128.
     pub fn from_tag(tag: &str) -> Self {
         let primary = tag.split('-').next().unwrap_or("").to_ascii_lowercase();
         match primary.as_str() {

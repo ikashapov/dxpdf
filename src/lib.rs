@@ -1,6 +1,7 @@
 pub mod docx;
 pub mod error;
 pub mod field;
+pub mod i18n;
 pub mod model;
 pub mod render;
 
