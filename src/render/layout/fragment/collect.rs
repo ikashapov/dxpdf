@@ -218,24 +218,55 @@ pub struct FieldContext {
     pub page_number: Option<usize>,
     /// Total page count in the document.
     pub num_pages: Option<usize>,
+    /// §17.16.5.13: the moment this render started, in UTC — the same value
+    /// for every `DATE` field in the document, so a render that spans
+    /// midnight doesn't date two pages differently. Seeded once in
+    /// `render::layout_document` (see `crate::field::now`); `None` in
+    /// contexts that never evaluate a date field, where the field keeps its
+    /// cached text.
+    pub date: Option<crate::field::context::Date>,
+    /// §17.16.5.76: `TIME`'s half of the same instant.
+    pub time: Option<crate::field::context::Time>,
 }
 
 /// §17.16.4.1: evaluate a parsed field instruction against the current context.
-/// Returns the substituted text for PAGE/NUMPAGES, or None for other fields
-/// or when no context is available.
+/// Returns the substituted text, or `None` for a field this evaluator does not
+/// compute — which leaves the field's cached `content` in place.
+///
+/// `locale_tag` is the §17.3.2.20 `w:lang` of the paragraph the field sits in;
+/// only the §17.16.4.2 date pictures read it, for their month and weekday
+/// names.
 ///
 /// `crate::field::eval` has a fuller evaluator covering most
 /// `FieldInstruction` variants (TOC, HYPERLINK, REF, SEQ, ...), but it isn't
-/// wired into layout — today this is the only field evaluation that happens
-/// during rendering, and anything else falls through to the field's cached
-/// `content`.
+/// wired into layout — this is the only field evaluation that happens during
+/// rendering, and anything it doesn't answer falls through to the cached
+/// `content`. The general `\*`/`\#` switches that evaluator applies are not
+/// applied here for any field, DATE included: PAGE and NUMPAGES have always
+/// ignored them on this path, and quietly honouring them for one field type
+/// would make the same picture behave differently depending on which
+/// evaluator ran.
 fn evaluate_field_instruction(
     instruction: &crate::field::FieldInstruction,
     ctx: FieldContext,
+    locale_tag: Option<&str>,
 ) -> Option<String> {
+    use crate::field::FieldInstruction;
     match instruction {
-        crate::field::FieldInstruction::Page { .. } => ctx.page_number.map(|n| n.to_string()),
-        crate::field::FieldInstruction::NumPages { .. } => ctx.num_pages.map(|n| n.to_string()),
+        FieldInstruction::Page { .. } => ctx.page_number.map(|n| n.to_string()),
+        FieldInstruction::NumPages { .. } => ctx.num_pages.map(|n| n.to_string()),
+        // §17.16.4.2: `switches.date_format` is the `\@ "picture"` argument,
+        // already extracted during parse. The defaults are Word's for a
+        // picture-less field.
+        FieldInstruction::Date { switches, .. } => Some(crate::field::format::format_date(
+            ctx.date.as_ref()?,
+            switches.date_format.as_deref().unwrap_or("M/d/yyyy"),
+            locale_tag,
+        )),
+        FieldInstruction::Time { switches, .. } => Some(crate::field::format::format_time(
+            ctx.time.as_ref()?,
+            switches.date_format.as_deref().unwrap_or("h:mm AM/PM"),
+        )),
         _ => None,
     }
 }
@@ -440,6 +471,12 @@ pub struct FragmentCtx<'a> {
     ///
     /// [`ShapeAutoFit::NONE`]: crate::render::layout::ShapeAutoFit::NONE
     pub auto_fit: crate::render::layout::ShapeAutoFit,
+    /// §17.3.2.20: the `w:lang` tag in effect for this paragraph, resolved
+    /// from the same cascade `build::convert::paragraph_locale` reads (see
+    /// `build::convert::resolve_lang_tag`). Carried as the raw tag rather
+    /// than a `Locale` because its one consumer here — §17.16.4.2 date
+    /// pictures — needs the region a `Locale` bucket discards.
+    pub locale_tag: Option<&'a str>,
 }
 
 /// Walk inline content and collect fragments.
@@ -743,7 +780,8 @@ where
                 }
                 Inline::Field(field) => {
                     // §17.16.18: simple field — check for dynamic substitution.
-                    let substituted = evaluate_field_instruction(&field.instruction, field_ctx);
+                    let substituted =
+                        evaluate_field_instruction(&field.instruction, field_ctx, ctx.locale_tag);
                     if let Some(text) = substituted {
                         fragments.push(make_field_text_fragment(
                             Rc::from(text.as_str()),
@@ -776,10 +814,12 @@ where
                             field_sub_emitted = false;
                         }
                         FieldCharType::Separate => {
-                            // §17.16.4.1: parse accumulated instruction, evaluate
-                            // PAGE/NUMPAGES if field context is available.
+                            // §17.16.4.1: parse accumulated instruction, then
+                            // evaluate it if this context can (PAGE/NUMPAGES,
+                            // DATE/TIME).
                             if let Ok(parsed) = crate::field::parse(&field_instr) {
-                                field_sub_pending = evaluate_field_instruction(&parsed, field_ctx);
+                                field_sub_pending =
+                                    evaluate_field_instruction(&parsed, field_ctx, ctx.locale_tag);
                             }
                             // §17.16.19: bind the formatting source resolved
                             // against raw inlines, so the End fallback path
@@ -994,6 +1034,10 @@ where
                                         theme,
                                         measurer: ctx.measurer,
                                         auto_fit: ctx.auto_fit,
+                                        // A VML text box carries no language
+                                        // of its own; it reads as part of the
+                                        // paragraph that anchors it.
+                                        locale_tag: ctx.locale_tag,
                                     };
                                     let mut sub = collect_fragments(
                                         &p.content,
@@ -1046,6 +1090,7 @@ mod tests {
             theme: None,
             measurer: None,
             auto_fit: crate::render::layout::ShapeAutoFit::NONE,
+            locale_tag: None,
         }
     }
 
@@ -1688,7 +1733,7 @@ mod tests {
             &mut 0,
             FieldContext {
                 page_number: Some(7),
-                num_pages: None,
+                ..Default::default()
             },
         );
         // Two visible text fragments: "Seite " and the substituted "7".

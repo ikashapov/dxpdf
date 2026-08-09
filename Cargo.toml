@@ -57,16 +57,30 @@ rustc-hash = "2"
 # loaded through `icu_provider_blob`, not through each crate's own default
 # `compiled_data` feature — that feature bakes in every CLDR locale, which is
 # the wheel-size risk #124 names by name. Every `icu_*` leaf crate that ships
-# actual locale data (`icu_decimal` here; `icu_segmenter`/`icu_datetime` when
-# later phases add them) must be added with `default-features = false` for
-# the trimmed blob to actually save anything instead of shipping both.
+# actual locale data (`icu_decimal`, `icu_datetime`; `icu_segmenter` when a
+# later phase adds it) must be added with `default-features = false` for the
+# trimmed blob to actually save anything instead of shipping both.
 # `icu_locale_core`/`icu_provider`/`fixed_decimal` carry no `compiled_data`
 # feature to begin with — they're plumbing/type crates, not locale data.
+#
+# Feature spellings differ per crate and are not interchangeable: `icu_decimal`
+# and `icu_calendar` each have their own `alloc` feature, `icu_datetime` has
+# none at all (its deps hard-wire `alloc` themselves, so naming it here is an
+# unknown-feature error). Both date crates also default to `ixdtf` (IXDTF
+# string parsing), which nothing here uses — `default-features = false` drops
+# it along with `compiled_data`.
 icu_locale_core = "2.2.0"
 icu_provider = "2.2.0"
 fixed_decimal = "0.7.2"
 icu_provider_blob = { version = "2.2.0", default-features = false, features = ["alloc"] }
 icu_decimal = { version = "2.2.0", default-features = false, features = ["alloc", "serde"] }
+# §17.16.4.2 date-picture month/weekday names (issue #129). `icu_calendar` is
+# not only `icu_datetime`'s input type: `src/field/now.rs` uses its `RataDie`
+# arithmetic to turn a Unix timestamp into a Gregorian date rather than
+# hand-rolling leap-year math.
+icu_calendar = { version = "2.2.1", default-features = false, features = ["alloc", "serde"] }
+icu_datetime = { version = "2.2.0", default-features = false, features = ["serde"] }
+writeable = "0.6.3"
 
 [features]
 default = ["subset-fonts"]

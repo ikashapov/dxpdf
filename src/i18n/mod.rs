@@ -134,6 +134,128 @@ pub fn decimal_separator_for_tag(tag: &str) -> Option<char> {
     })
 }
 
+/// §17.16.4.2 (issue #129): a Gregorian month's name in `tag`'s language —
+/// `MMMM` when `long`, `MMM` when not.
+///
+/// Only `date`'s month is read, so a caller holding just a month number can
+/// build one with any valid day. OOXML date pictures are Gregorian, which is
+/// why the calendar is fixed rather than resolved from the locale: a `w:lang`
+/// of `th-TH` asks for Thai *names*, not Thai *era* reckoning.
+///
+/// **Stand-alone, not format, names.** CLDR carries two sets, and they differ
+/// in more than case: `ru` writes "август" stand-alone against "августа"
+/// (genitive) in format position, `pl` "sierpień" against "sierpnia", and
+/// `ca` "agost" against "d’agost" — the format set carries the *preposition*.
+/// §17.16.4.2 does not say which OOXML means, and the spec's own model
+/// decides it: a picture is a caller-authored template whose tokens are
+/// substituted one at a time, not a CLDR pattern. Substituting the format set
+/// would inject CLDR's own connective glue into a template that already
+/// supplies its own, doubling it — `\@ "d 'de' MMMM"` would render
+/// "10 de d’agost". The stand-alone set is the bare name a token asks for.
+/// **Word reference render**: unverified against Word, which is reported to
+/// use one month-name table per language rather than distinguishing the two;
+/// a Russian document whose picture is `d MMMM yyyy` would settle it, since
+/// only that context makes the genitive correct.
+///
+/// `None` under the same two conditions [`decimal_separator_for_tag`]
+/// documents — an unparseable tag, or one this engine's baked data has
+/// nothing for even after ICU4X's own fallback. `field::format`'s hardcoded
+/// English tables are what the call sites fall back to.
+pub fn month_name_for_tag(
+    date: &icu_calendar::Date<icu_calendar::Gregorian>,
+    long: bool,
+    tag: &str,
+) -> Option<String> {
+    use icu_datetime::fieldsets::M;
+    use icu_datetime::pattern::{FixedCalendarDateTimeNames, MonthNameLength};
+
+    let (length, pattern) = if long {
+        (MonthNameLength::StandaloneWide, "LLLL")
+    } else {
+        (MonthNameLength::StandaloneAbbreviated, "LLL")
+    };
+    let locale: icu_locale_core::Locale = tag.parse().ok()?;
+    with_data_provider(|provider| {
+        let mut names =
+            FixedCalendarDateTimeNames::<icu_calendar::Gregorian, M>::new_without_number_formatting(
+                locale.into(),
+            );
+        names
+            .load_month_names(&as_data_provider(provider), length)
+            .ok()?;
+        let pattern: icu_datetime::pattern::DateTimePattern = pattern.parse().ok()?;
+        let formatter = names.with_pattern_unchecked(&pattern);
+        write_field(formatter.format(date))
+    })
+}
+
+/// §17.16.4.2 (issue #129): a weekday's name in `tag`'s language — `dddd`
+/// when `long`, `ddd` when not.
+///
+/// Takes a bare [`Weekday`](icu_calendar::types::Weekday) rather than a date,
+/// because that is all the underlying CLDR data is keyed by;
+/// `icu_calendar::Date::weekday` is the route from a date to one. Unlike
+/// month names, weekday-name data is calendar-agnostic — one CLDR marker
+/// covers every calendar system.
+///
+/// Stand-alone names, for the reason [`month_name_for_tag`] gives. No locale
+/// baked in today distinguishes the two sets for weekdays (`ru`, `pl` and
+/// `ca` all repeat themselves where their months diverge), so this matches
+/// month handling for consistency rather than because a case demands it.
+///
+/// `None` under the same conditions as [`month_name_for_tag`].
+pub fn weekday_name_for_tag(
+    weekday: icu_calendar::types::Weekday,
+    long: bool,
+    tag: &str,
+) -> Option<String> {
+    use icu_datetime::fieldsets::E;
+    use icu_datetime::pattern::{FixedCalendarDateTimeNames, WeekdayNameLength};
+
+    let (length, pattern) = if long {
+        (WeekdayNameLength::StandaloneWide, "cccc")
+    } else {
+        (WeekdayNameLength::StandaloneAbbreviated, "ccc")
+    };
+    let locale: icu_locale_core::Locale = tag.parse().ok()?;
+    with_data_provider(|provider| {
+        let mut names =
+            FixedCalendarDateTimeNames::<icu_calendar::Gregorian, E>::new_without_number_formatting(
+                locale.into(),
+            );
+        names
+            .load_weekday_names(&as_data_provider(provider), length)
+            .ok()?;
+        let pattern: icu_datetime::pattern::DateTimePattern = pattern.parse().ok()?;
+        let formatter = names.with_pattern_unchecked(&pattern);
+        write_field(formatter.format(&weekday))
+    })
+}
+
+/// Deserialize a buffer provider into the `DataProvider` the `load_*_names`
+/// calls above want — the same conversion ICU4X's own
+/// `try_new_with_buffer_provider` constructors perform internally.
+fn as_data_provider(
+    provider: &BlobDataProvider,
+) -> icu_provider::buf::DeserializingBufferProvider<'_, BlobDataProvider> {
+    use icu_provider::buf::AsDeserializingBufferProvider;
+    provider.as_deserializing()
+}
+
+/// Collect a formatted single-field pattern into a `String`.
+///
+/// The `TryWriteable` error side means "a field in the pattern had no loaded
+/// names" — unreachable for the two literal single-field patterns above,
+/// each of which formats exactly the field whose names were just loaded, but
+/// answered as `None` rather than unwrapped so a future pattern that gets
+/// this wrong degrades to the English fallback instead of panicking mid-render.
+fn write_field(formatted: impl writeable::TryWriteable) -> Option<String> {
+    formatted
+        .try_write_to_string()
+        .ok()
+        .map(|written| written.into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +332,112 @@ mod tests {
     fn decimal_separator_for_tag_is_none_for_an_unparseable_tag() {
         assert_eq!(decimal_separator_for_tag(""), None);
         assert_eq!(decimal_separator_for_tag("not a bcp47 tag!"), None);
+    }
+
+    // ── §17.16.4.2 date-picture names (issue #129) ──────────────────────────
+
+    /// 2026-08-10, a Monday — one date answering both lookups, so the month
+    /// and weekday cases can't drift apart. Expected strings below were read
+    /// off these functions' own output against the committed blob, not
+    /// guessed from a table.
+    fn reference_date() -> icu_calendar::Date<icu_calendar::Gregorian> {
+        icu_calendar::Date::try_new_gregorian(2026, 8, 10).expect("2026-08-10 is a real date")
+    }
+
+    #[test]
+    fn month_name_for_tag_localizes() {
+        let d = reference_date();
+        assert_eq!(
+            month_name_for_tag(&d, true, "en-US").as_deref(),
+            Some("August")
+        );
+        assert_eq!(
+            month_name_for_tag(&d, false, "en-US").as_deref(),
+            Some("Aug")
+        );
+        assert_eq!(
+            month_name_for_tag(&d, true, "fr-FR").as_deref(),
+            Some("août")
+        );
+        assert_eq!(
+            month_name_for_tag(&d, true, "ru-RU").as_deref(),
+            Some("август")
+        );
+        // German's August happens to be spelled like English's — included
+        // deliberately so a reader doesn't mistake it for a failed lookup.
+        assert_eq!(
+            month_name_for_tag(&d, true, "de-DE").as_deref(),
+            Some("August")
+        );
+    }
+
+    #[test]
+    fn weekday_name_for_tag_localizes() {
+        let monday = reference_date().weekday();
+        assert_eq!(
+            weekday_name_for_tag(monday, true, "en-US").as_deref(),
+            Some("Monday")
+        );
+        assert_eq!(
+            weekday_name_for_tag(monday, false, "en-US").as_deref(),
+            Some("Mon")
+        );
+        assert_eq!(
+            weekday_name_for_tag(monday, true, "de-DE").as_deref(),
+            Some("Montag")
+        );
+        assert_eq!(
+            weekday_name_for_tag(monday, false, "de-DE").as_deref(),
+            Some("Mo")
+        );
+        assert_eq!(
+            weekday_name_for_tag(monday, true, "fr-FR").as_deref(),
+            Some("lundi")
+        );
+    }
+
+    /// The reference date really is a Monday — if this fails, every expected
+    /// weekday string above is measuring the wrong day.
+    #[test]
+    fn the_reference_date_is_a_monday() {
+        assert_eq!(
+            reference_date().weekday(),
+            icu_calendar::types::Weekday::Monday
+        );
+    }
+
+    /// Locks in the stand-alone-vs-format choice `month_name_for_tag`'s doc
+    /// argues for, in the three baked locales where CLDR's two sets actually
+    /// differ. The format set would give "августа", "sierpnia" and "d’agost"
+    /// — the last carrying a preposition that would double against a
+    /// picture's own literal text. If this test starts failing, the choice
+    /// was changed; re-read that doc before updating the expectations.
+    #[test]
+    fn month_names_are_the_standalone_set_not_the_format_set() {
+        let d = reference_date();
+        assert_eq!(
+            month_name_for_tag(&d, true, "ru-RU").as_deref(),
+            Some("август")
+        );
+        assert_eq!(
+            month_name_for_tag(&d, true, "pl-PL").as_deref(),
+            Some("sierpień")
+        );
+        assert_eq!(
+            month_name_for_tag(&d, true, "ca-ES").as_deref(),
+            Some("agost")
+        );
+    }
+
+    /// Same two failure modes as `decimal_separator_for_tag`, so the caller's
+    /// fallback (`field::format`'s English tables) is reachable identically.
+    #[test]
+    fn date_names_are_none_for_unusable_tags() {
+        let d = reference_date();
+        let monday = d.weekday();
+        assert_eq!(month_name_for_tag(&d, true, "zz-ZZ"), None);
+        assert_eq!(month_name_for_tag(&d, true, "not a bcp47 tag!"), None);
+        assert_eq!(weekday_name_for_tag(monday, true, "zz-ZZ"), None);
+        assert_eq!(weekday_name_for_tag(monday, true, ""), None);
     }
 }

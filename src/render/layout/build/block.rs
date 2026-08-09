@@ -472,6 +472,10 @@ pub(super) fn build_fragments(
         theme: ctx.resolved.theme.as_ref(),
         measurer: Some(ctx.measurer),
         auto_fit: state.shape_auto_fit,
+        // §17.3.2.20: resolved here rather than taken from the caller
+        // because fragments are built before the paragraph's style is —
+        // `paragraph_locale` runs later, off this same cascade.
+        locale_tag: super::convert::resolve_lang_tag(para, ctx.resolved),
     };
     let mut fragments = collect_fragments(
         &para.content,

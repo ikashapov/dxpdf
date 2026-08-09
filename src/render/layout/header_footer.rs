@@ -285,10 +285,14 @@ pub fn render_headers_footers(
         );
 
         if let Some(blocks) = header_blocks {
-            // Set per-page field context for PAGE/NUMPAGES evaluation.
+            // Set per-page field context for PAGE/NUMPAGES evaluation. The
+            // spread keeps the render-wide date/time — those are not
+            // per-page, and a header's own DATE field must report the same
+            // instant the body's does.
             state.field_ctx = crate::render::layout::fragment::FieldContext {
                 page_number: Some(logical_page_number),
                 num_pages: Some(page_range.total_pages),
+                ..state.field_ctx
             };
 
             let hf = build_header_footer_content(blocks, ctx, state);
@@ -306,6 +310,7 @@ pub fn render_headers_footers(
             state.field_ctx = crate::render::layout::fragment::FieldContext {
                 page_number: Some(logical_page_number),
                 num_pages: Some(page_range.total_pages),
+                ..state.field_ctx
             };
 
             let hf = build_header_footer_content(blocks, ctx, state);
@@ -322,8 +327,14 @@ pub fn render_headers_footers(
 
     // Reset field context after header/footer rendering, so this page's
     // page_number/num_pages don't leak into body layout — the body is
-    // measured independently of which page it ends up on.
-    state.field_ctx = crate::render::layout::fragment::FieldContext::default();
+    // measured independently of which page it ends up on. Only those two are
+    // cleared: the date/time are render-wide, and dropping them here would
+    // leave a body DATE field with nothing to evaluate against.
+    state.field_ctx = crate::render::layout::fragment::FieldContext {
+        page_number: None,
+        num_pages: None,
+        ..state.field_ctx
+    };
 }
 
 /// Render a single header onto a page.

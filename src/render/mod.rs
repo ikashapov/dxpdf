@@ -445,6 +445,13 @@ pub fn layout_document(
         resolved,
     };
     let mut state = BuildState::default();
+    // §17.16.5.13/§17.16.5.76: read the clock once, here, so every DATE and
+    // TIME field in the document reports the same instant even if the render
+    // crosses a second — or midnight. See `crate::field::now` for why it is
+    // UTC rather than the host's local time.
+    let (today, now_time) = crate::field::now::now();
+    state.field_ctx.date = Some(today);
+    state.field_ctx.time = Some(now_time);
     let dlh = default_line_height(&ctx);
     let mut all_pages = Vec::new();
     let mut last_config = PageConfig::default();

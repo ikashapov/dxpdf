@@ -42,11 +42,16 @@ pub fn evaluate(instr: &FieldInstruction, ctx: &FieldContext) -> FieldValue {
         } => {
             match &ctx.date {
                 Some(date) => {
+                    // `None` locale: this evaluator carries no `w:lang` — see
+                    // the module doc on `crate::field::context::FieldContext`
+                    // for why it isn't the one layout calls. The evaluator
+                    // layout *does* call (`render::layout::fragment::collect`)
+                    // passes the paragraph's tag through.
                     let formatted = if let Some(pattern) = &switches.date_format {
-                        format::format_date(date, pattern)
+                        format::format_date(date, pattern, None)
                     } else {
                         // Default: M/d/yyyy
-                        format::format_date(date, "M/d/yyyy")
+                        format::format_date(date, "M/d/yyyy", None)
                     };
                     format_result(formatted, switches)
                 }
