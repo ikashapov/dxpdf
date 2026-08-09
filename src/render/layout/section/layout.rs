@@ -113,6 +113,8 @@ struct PageLayoutState<'doc> {
     /// Index of the first block on the current page (for forward scanning).
     page_start_block: usize,
     /// §17.4.58: y-start of the most recent paragraph (floating-table anchor).
+    /// Set after that paragraph's spacing collapse but before its
+    /// `space_before` is added.
     last_para_start_y: Pt,
     /// §17.4.38: style_id of the previous table for adjacent border collapse.
     prev_table_style_id: Option<StyleId>,
@@ -355,6 +357,12 @@ impl<'doc> PageLayoutState<'doc> {
     /// that blocks all text (§17.4.56). Shared by the main block loop and the
     /// across-page split re-fit (§4) so a continuation wraps around whatever
     /// floats live on *its* page, not the paragraph's starting page.
+    ///
+    /// Word runs multi-pass layout, where every float on a page affects all of
+    /// that page's text regardless of document order. This single-pass
+    /// renderer approximates that by forward-scanning upcoming blocks for
+    /// absolute floats when a page starts, rather than only ever knowing about
+    /// floats already encountered.
     fn effective_floats_at_cursor(
         &mut self,
         blocks: &[LayoutBlock],
@@ -765,6 +773,11 @@ fn paragraph_keep_next(block: &LayoutBlock) -> bool {
     matches!(block, LayoutBlock::Paragraph { style, .. } if style.keep_next)
 }
 
+/// §17.3.1.15: does a keepNext run *start* at `block_idx`?
+///
+/// True when the block itself is keepNext and either it is the first block,
+/// it forces a `pageBreakBefore`, or the previous block is not keepNext — any
+/// of those means nothing above it is chained to it.
 fn starts_keep_next_chain(blocks: &[LayoutBlock], block_idx: usize) -> bool {
     paragraph_keep_next(&blocks[block_idx])
         && (block_idx == 0
@@ -778,6 +791,16 @@ fn starts_keep_next_chain(blocks: &[LayoutBlock], block_idx: usize) -> bool {
             || !paragraph_keep_next(&blocks[block_idx - 1]))
 }
 
+/// Walk a keepNext chain forward from `start` looking for a non-floating table
+/// that terminates it.
+///
+/// Returns `None` if the chain hits a `pageBreakBefore`, a paragraph that
+/// isn't itself keepNext, or a *floating* table — a floating table is
+/// positioned independently of the flow (§17.4.58 `tblpPr`) and so cannot
+/// anchor a chain the way an in-flow table can. `None` here means the chain
+/// either ends in an ordinary paragraph or doesn't terminate in something this
+/// function can peel around; the caller falls back to measuring the whole
+/// paragraph run instead.
 fn keep_next_terminal_table(blocks: &[LayoutBlock], start: usize) -> Option<&LayoutBlock> {
     let mut index = start;
 
@@ -845,6 +868,18 @@ impl KeepNextGroupMeasurement {
     }
 }
 
+/// Pre-measure a keepNext chain starting at `start`, so the fit decision at
+/// the call site is made once against a single number rather than re-measured
+/// per candidate. The group ends at the first block that is a table, or a
+/// paragraph that is not itself keepNext (its `page_break_before` already
+/// having been checked at the previous iteration); `None` if a
+/// `pageBreakBefore` interrupts the chain before it can close.
+///
+/// An oversized group that fits on neither the current nor a fresh page falls
+/// through to ordinary in-line placement at the call site rather than being
+/// specially handled here — the pagination loop always makes progress this
+/// way, the same guarantee [`decide_paragraph_split`] gives the plain
+/// (non-keepNext) splitting path.
 fn measure_keep_next_group(
     blocks: &[LayoutBlock],
     start: usize,
@@ -1082,27 +1117,6 @@ fn decide_paragraph_split(
     }
 }
 
-/// Place a splittable paragraph, breaking its lines across pages as needed.
-///
-/// The caller establishes splittability — see the `can_split` gate at the call
-/// site, which is the authority. It requires: no §17.3.1.14 `keepLines`, no
-/// floating images or shapes (those anchor to one page), `>= 2` fitted lines,
-/// and footnotes only within a single unbroken chunk (with explicit
-/// page/column breaks a reference→segment mapping is ambiguous, so those keep
-/// the atomic reservation).
-///
-/// Deliberately *not* required — each was allowed by a later change and this
-/// list is the historical trip hazard:
-/// - **Borders, shading and drop caps** split fine; they are drawn per segment
-///   (`emit_segment_borders_and_shading`).
-/// - **Multiple columns** split fine; §17.6.4 unequal-width columns work
-///   because each segment re-fits against its own column's width.
-///
-/// Each iteration fits as many remaining lines as the current page holds,
-/// applies §17.3.1.44 widow/orphan control via [`decide_paragraph_split`],
-/// emits that segment, and page-breaks to continue. `line_start` advances by
-/// `>= 1` on every emitted segment and a `MoveWhole` always lands on a fresh
-/// page where progress is forced, so the loop terminates.
 /// §17.11.23: reserve `footnotes` on the current page — measure each, subtract
 /// its height (and the separator gap for the first footnote on the page) from
 /// the available bottom, and queue it for rendering. Shared by the atomic
@@ -1154,6 +1168,27 @@ fn advance_column_or_page(
     *para_start_y = state.cursor_y;
 }
 
+/// Place a splittable paragraph, breaking its lines across pages as needed.
+///
+/// The caller establishes splittability — see the `can_split` gate at the call
+/// site, which is the authority. It requires: no §17.3.1.14 `keepLines`, no
+/// floating images or shapes (those anchor to one page), `>= 2` fitted lines,
+/// and footnotes only within a single unbroken chunk (with explicit
+/// page/column breaks a reference→segment mapping is ambiguous, so those keep
+/// the atomic reservation).
+///
+/// Deliberately *not* required — each was allowed by a later change and this
+/// list is the historical trip hazard:
+/// - **Borders, shading and drop caps** split fine; they are drawn per segment
+///   (`emit_segment_borders_and_shading`).
+/// - **Multiple columns** split fine; §17.6.4 unequal-width columns work
+///   because each segment re-fits against its own column's width.
+///
+/// Each iteration fits as many remaining lines as the current page holds,
+/// applies §17.3.1.44 widow/orphan control via [`decide_paragraph_split`],
+/// emits that segment, and page-breaks to continue. `line_start` advances by
+/// `>= 1` on every emitted segment and a `MoveWhole` always lands on a fresh
+/// page where progress is forced, so the loop terminates.
 #[allow(clippy::too_many_arguments)] // stacker state + placement inputs are cohesive
 fn emit_split_paragraph<'doc>(
     state: &mut PageLayoutState<'doc>,
@@ -1446,8 +1481,8 @@ impl LastPageOwner {
 /// `Continuous` section shares it.
 ///
 /// A page holding a continuous break is drawn with the header and footer of the
-/// **last** section on it — see the ownership rule at `render::render_to_pages`,
-/// which is where it is decided.
+/// **last** section on it — see the ownership rule at
+/// `render::shared_page_owner_bounds`, which is where it is decided.
 ///
 /// Index and bounds travel as one value because they are one decision: an index
 /// without bounds, or bounds without an index, cannot be acted on, and as two
@@ -1519,6 +1554,12 @@ pub(crate) enum SectionTail {
 
 /// Lay out a sequence of blocks using header/footer clearances selected for
 /// each physical page in the section.
+///
+/// Per-page rather than one clearance for the whole section because pages can
+/// have differently-sized headers/footers (first-page, even/odd, or a
+/// `Continuous` section's shared page) — using one clearance for all of them
+/// would give the wrong body bounds on every page but the one it was measured
+/// from.
 pub(crate) fn layout_section_with_clearance(
     blocks: &[LayoutBlock],
     config: &PageConfig,
@@ -2198,6 +2239,9 @@ pub(crate) fn layout_section_with_clearance(
                                 crate::model::TableAnchor::Margin => state.page_top + fi.y_offset,
                                 crate::model::TableAnchor::Page => fi.y_offset,
                             };
+                            // The table must not start above the cursor —
+                            // preceding content already occupies the space
+                            // above it.
                             anchor_y.max(state.cursor_y)
                         } else {
                             state.cursor_y

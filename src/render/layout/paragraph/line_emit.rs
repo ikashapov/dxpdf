@@ -997,6 +997,11 @@ const BAR_RULE_WIDTH: Pt = Pt::new(0.75);
 /// layout. The paragraph's first run is the closest thing that does, and taking
 /// it from the *paragraph* rather than from each line is what keeps one rule
 /// one colour when the paragraph wraps or splits across pages.
+///
+/// Both this and [`BAR_RULE_WIDTH`] are approximations of a value Word derives
+/// from data this layer doesn't have. Recorded here rather than as a TODO:
+/// there's nothing further to implement without threading paragraph-mark run
+/// properties into `ParagraphStyle`.
 fn paragraph_bar_color(fragments: &[Fragment]) -> crate::render::resolve::color::RgbColor {
     fragments
         .iter()

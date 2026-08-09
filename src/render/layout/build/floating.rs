@@ -1009,8 +1009,8 @@ fn resolve_anchor_y(
                 // document mirrors left and right, not top and bottom, so
                 // there is no reading of a vertical "inside" that source can
                 // derive. Aligned to the region's top, the long-standing
-                // fallback. Open on the same Word reference render as vertical
-                // `insideMargin`/`outsideMargin` above.
+                // fallback. **Word reference render**: open on the same
+                // question as vertical `insideMargin`/`outsideMargin` above.
                 AnchorAlignment::Inside | AnchorAlignment::Outside => area_top,
                 // §20.4.3.1 horizontal alignments on `wp:positionV` —
                 // malformed, the same way round as the horizontal axis.
@@ -1356,7 +1356,7 @@ pub(super) fn build_shape_text_commands(
 /// per-page list with no scoping — so it would mean a new `DrawCommand`
 /// wrapper variant and an arm in every consumer. Dropping is the safe
 /// direction (`clip`'s contract is that nothing paints outside the box), and
-/// no corpus document asks for `clip` at all — 4 explicit `overflow`, 10
+/// no corpus document asks for `clip` at all — 1 explicit `overflow`, 12
 /// `bodyPr` with the attribute absent, zero `clip` or `ellipsis` — so this is
 /// worth revisiting only once a real document needs the sliver.
 fn overflow_keeps(

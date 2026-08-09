@@ -72,8 +72,8 @@ pub enum PathVerb {
 ///
 /// Returns `None` if:
 ///  * a preset has no generator registered (Tier 0 supports `line` and
-///    `rect`; callers should log once and fall back to a stub bounding box),
-///  * the extent is zero in either dimension (nothing to draw).
+///    `rect` only; the call site logs once and skips the shape),
+///  * the extent is zero in both dimensions (nothing to draw).
 pub fn build_geometry(geometry: &ShapeGeometry, extent: PtSize) -> Option<ShapePath> {
     // Reject only fully zero-extent shapes. Lines are commonly authored as
     // `cx=0, cy=N` (vertical) or `cx=N, cy=0` (horizontal); both are valid

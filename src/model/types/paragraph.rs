@@ -39,6 +39,9 @@ pub struct ParagraphProperties {
     pub suppress_auto_hyphens: Option<bool>,
     /// §17.3.1.9: suppress spacing when adjacent paragraph has same style.
     pub contextual_spacing: Option<bool>,
+    /// §17.3.1.6: this paragraph is right-to-left. Parsed but never
+    /// consumed — same UAX #9 bidi gap as `RunProperties::rtl`. Tracked in
+    /// issue #124.
     pub bidi: Option<bool>,
     /// §17.3.1.45: allow line breaking between any characters for East Asian text.
     pub word_wrap: Option<bool>,
@@ -142,7 +145,9 @@ impl OutlineLevel {
     /// outline level, not a ninth heading level. Word writes it when a
     /// paragraph's outline level is reset to Body Text, so a heading style's
     /// level can be overridden back off. `None` therefore means "not a
-    /// heading", whether the attribute was absent or present-and-9.
+    /// heading", whether the attribute was absent or present-and-9. Not
+    /// theoretical: `sample-emoji.docx` in the test corpus declares
+    /// `w:outlineLvl w:val="9"` twice.
     pub fn from_ooxml(val: u8) -> Option<Self> {
         if val <= 8 {
             Some(Self(val + 1))

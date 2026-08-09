@@ -36,10 +36,19 @@ pub struct OutlineHeading {
 
 /// §17.3.1.19: the boundaries of a heading's marked content.
 ///
-/// A *pair* rather than a single marker because the PDF destination is the
-/// union of the marks under the node — leaving the node ID set past the
-/// heading would drag its destination down onto the body text below. This is
-/// the same shape as the `BDC`/`EMC` operator pair it ultimately becomes.
+/// A *pair* rather than a single marker so the structure tree's scoping is
+/// correct — without `End`, every heading's node would swallow the rest of
+/// the document, and a following heading would otherwise be the only thing
+/// that ever closed one. This is the same shape as the `BDC`/`EMC` operator
+/// pair it ultimately becomes.
+///
+/// `End`'s effect is **not** observable through `/Outlines` alone: a
+/// destination is the uppermost point on the *earliest* page of a node's
+/// marks, and content after a heading is never higher or earlier than the
+/// heading itself, so leaving the ID set would not actually move any
+/// destination. A mutation that drops `End` survives the outline tests for
+/// exactly this reason — that is a property of what `/Outlines` can express,
+/// not a gap in them.
 ///
 /// The balance invariant is held by a single emitter
 /// (`paragraph::line_emit::emit_line_commands`) rather than by the type: the

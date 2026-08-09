@@ -123,8 +123,9 @@ pub(super) fn resolve_paragraph_defaults(
 /// regional settings rather than from the document at all, which a converter
 /// cannot reproduce and should not want to: the same file would render
 /// differently on two machines. This reading is deterministic and keyed to the
-/// document instead — but it is an assumption, not a verified match, and has
-/// never been checked against a Word render.
+/// document instead. **Word reference render**: this is an assumption, not a
+/// verified match — if a Word reference render ever settles the question
+/// differently, this cascade is the one place to change.
 pub(super) fn paragraph_locale(
     para: &model::Paragraph,
     resolved: &ResolvedDocument,
@@ -149,8 +150,9 @@ pub(super) fn paragraph_locale(
 
 /// §17.3.1.19: this paragraph's PDF outline entry, if it is a heading.
 ///
-/// `props` is the **cascaded** paragraph properties, so a level inherited from
-/// a heading style counts exactly as a direct `w:outlineLvl` does — which is
+/// `props` is the **cascaded** (§17.7.2) paragraph properties, so a level
+/// inherited from a heading style counts exactly as a direct `w:outlineLvl`
+/// does — which is
 /// the point: §17.3.1.19 is a paragraph property, and "is a heading" is not a
 /// question about style names. `OutlineLevel::from_ooxml` has already rejected
 /// value 9 ("body text"), so `None` here means "not a heading" for either
@@ -461,6 +463,11 @@ pub(super) fn merge_table_borders(
 
 /// Convert model `TableBorders` to a layout `TableBorderConfig`.
 /// §17.4.38: borders with `val="none"` or `val="nil"` are suppressed.
+///
+/// Filtered here, *before* [`convert_model_border`] ever runs — that function
+/// has no "draw nothing" style of its own, so an unsuppressed `none`/`nil`
+/// would fall into its unhandled-style arm and be approximated as a visible
+/// solid line instead of correctly drawing nothing.
 pub(super) fn convert_table_border_config(
     b: &model::TableBorders,
     state: &mut BuildState,

@@ -7,7 +7,10 @@
 //!   per ECMA-376 §17.8.3.3),
 //! - a [`FaceCatalog`] of everything selectable, host and embedded alike,
 //! - a cache of resolved [`Typeface`]s keyed by the *request* that produced
-//!   them ([`FaceRequestKey`]).
+//!   them ([`FaceRequestKey`]),
+//! - a cache of opened [`Typeface`]s keyed by the *face* itself, so two
+//!   different requests that land on the same face share one typeface — see
+//!   the `faces` field.
 //!
 //! # How a name becomes a typeface
 //!
@@ -553,8 +556,7 @@ impl FontRegistry {
     ///
     /// [`Self::preload`] resolves four combinations of every family the document
     /// mentions, so without the deduplication a single missing font would
-    /// produce four identical lines — the same noise `docs/font-substitution.md`
-    /// warns about when reading the debug log.
+    /// produce four identical lines.
     fn warn_once(&self, family: &str, detail: std::fmt::Arguments<'_>) {
         if self.warned.borrow_mut().insert(family.to_lowercase()) {
             log::warn!("[font] '{family}': {detail}; falling back to the host default");
@@ -733,6 +735,12 @@ impl FontRegistry {
     /// embedding emoji fonts, so a docx-embedded "Segoe UI Emoji" carries the
     /// right family name but no color glyphs and must not satisfy emoji
     /// resolution.
+    ///
+    /// This is a deliberate portability boundary, not an oversight: a document
+    /// that ships its own emoji font does not get it back, and the same
+    /// document renders with different emoji artwork on macOS, Windows and
+    /// Linux. It applies only to the color-emoji path — ordinary embedded text
+    /// fonts (§17.8) are honoured normally. See `src/render/emoji/resolve.rs`.
     pub fn resolve_system_only(&self, family: &str, style: FontStyle) -> Option<TypefaceEntry> {
         let request = request_from_style(family, style);
         let faces = self.catalog.family_faces(family)?;
@@ -755,6 +763,12 @@ impl FontRegistry {
     /// `Off` is not preloaded: it selects the same face as `Absent`, so a
     /// document using it hits the `Absent` work already done and pays only a
     /// second cache entry.
+    ///
+    /// Because this resolves every combination for every mentioned family
+    /// regardless of whether any run actually uses it, most `RUST_LOG=debug`
+    /// resolution lines describe a font nothing draws — confirm against the
+    /// combinations actually emitted as draw commands before chasing a
+    /// decision line here.
     pub fn preload(&self, families: &[String]) {
         for family in families {
             for (bold, italic) in [

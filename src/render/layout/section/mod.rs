@@ -24,7 +24,7 @@
 //! and the *last* section on the page wins — so the page is committed by the
 //! succeeding section and falls inside its page range. ECMA-376 §17.6 does not
 //! settle this; the rule, and what evidence would revisit it, is stated where it
-//! is decided, in `render::render_to_pages`. The consequence to hold onto is
+//! is decided, in `render::shared_page_owner_bounds`. The consequence to hold onto is
 //! that the shared page is the succeeding section's *page 0*, which is why
 //! `HeaderFooterClearance::for_page(0)` selects the right `first` / `even` /
 //! `default` slot there without a special case.

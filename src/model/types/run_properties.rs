@@ -27,6 +27,10 @@ pub struct RunProperties {
     pub no_proof: Option<bool>,
     /// §17.3.2.44: hidden when displayed as a web page, visible in print view.
     pub web_hidden: Option<bool>,
+    /// §17.3.2.30: this run is right-to-left. Parsed but never consumed —
+    /// UAX #9 bidi reordering isn't implemented, so Arabic/Hebrew text
+    /// renders in logical order rather than visual order. Tracked in
+    /// issue #124.
     pub rtl: Option<bool>,
     pub emboss: Option<bool>,
     pub imprint: Option<bool>,

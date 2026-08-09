@@ -171,6 +171,11 @@ fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
 /// hyphen, scale groups by a space, and **no** "and" before the final group.
 /// Each word capitalised. Unverified against a Word render; recorded here
 /// rather than guessed at each call site.
+///
+/// English-only by design, not yet a gap filled in: a non-English document
+/// gets digits instead (see `Locale::spells_numbers` for why digits are the
+/// honest fallback rather than English words). Real spelling in other
+/// languages needs CLDR data — tracked in issue #124.
 fn to_cardinal_text(n: u32) -> String {
     const UNITS: [&str; 20] = [
         "Zero",

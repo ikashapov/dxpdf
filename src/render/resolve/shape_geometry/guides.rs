@@ -31,6 +31,15 @@ use crate::model::{AdjAngle, AdjCoord, GeomGuide};
 ///  * `hd2`, `hd4`, `hd8`, `hd16`, `hd32` — height divisions.
 ///  * `cd2`, `cd4`, `cd8` — 360° / N angle divisions (in 60000ths of a deg).
 ///  * `3cd4`, `3cd8`, `5cd8`, `7cd8` — compound angle constants.
+///
+/// Not covered: the `ssd2`/`ssd4`/`ssd6`/`ssd8`/`ssd16`/`ssd32` shortest-side
+/// family, or the odd divisions (`wd3`/`wd5`/`wd6`/`wd10`/`wd12`,
+/// `hd3`/`hd5`/`hd6`) that Tier-1+ preset `gdLst` formulas rely on — an
+/// unknown constant resolves to `0.0`. Currently latent: only the Tier-0
+/// `line`/`rect` presets render today, so the one live case is a `custGeom`
+/// that references one of these directly, which is uncommon (most declare
+/// their own guides). Expand this table alongside the Tier-1 preset
+/// generators.
 #[derive(Clone, Copy, Debug)]
 pub struct GuideContext {
     pub w: f64,

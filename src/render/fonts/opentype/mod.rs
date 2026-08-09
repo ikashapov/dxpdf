@@ -17,7 +17,9 @@
 //! **Pure over bytes.** Nothing here takes a Skia type. The caller hands in one
 //! table's bytes; these functions do not know or care whether they came from a
 //! system typeface, a DOCX-embedded font, or a test fixture. That is what makes
-//! the face catalogue testable identically on every host.
+//! the face catalogue testable identically on every host. It is also why this
+//! module has no font-parsing crate dependency of its own: `--no-default-features`
+//! compiles `fontcull` out, and the metadata index still has to work.
 //!
 //! **One table at a time.** Callers source bytes with
 //! `Typeface::copy_table_data(tag)`, never `Typeface::to_font_data()`. The

@@ -66,6 +66,10 @@ pub struct StackResult {
 /// It does NOT handle page breaks, column breaks, or footnote collection —
 /// those are page-level concerns managed by `layout_section`.
 ///
+/// That sharing is what makes a table cell behave like a miniature page: the
+/// same code lays out cell content as body content, so spacing collapse and
+/// float wrapping work identically in both.
+///
 /// `parity` resolves §20.4.3.1 `inside`/`outside` float positions, which mirror
 /// on the page the object lands on. Callers that know their page pass its
 /// parity; the table-cell path cannot (see [`layout_cell`]).
@@ -101,7 +105,7 @@ pub fn stack_blocks(
             } => {
                 let mut effective_style = style.clone_for_layout();
 
-                // Spacing collapse.
+                // §17.3.1.9: spacing collapse.
                 if effective_style.contextual_spacing
                     && effective_style.style_id.is_some()
                     && effective_style.style_id == prev_style_id

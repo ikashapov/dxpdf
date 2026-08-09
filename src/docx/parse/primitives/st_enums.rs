@@ -329,6 +329,11 @@ pub enum StNumberFormat {
     /// not fail — otherwise one exotic `<w:numFmt>` would fail the *whole*
     /// document parse (`parse_numbering(..)?` propagates the error). Word itself
     /// falls back to decimal for formats it can't render.
+    ///
+    /// Closing this needs numbering-system and spellout data (CLDR) most of
+    /// these formats depend on — `russianUpper`/`russianLower` are the one
+    /// pair that graduated to real support, in `numbering.rs`. Tracked in
+    /// issue #124.
     #[serde(other)]
     Other,
 }
@@ -694,7 +699,7 @@ impl From<StTblLayoutType> for TableLayout {
     }
 }
 
-// ── StTblOverlap (§17.4.56) ───────────────────────────────────────────────
+// ── StTblOverlap (§17.4.57) ───────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -11,6 +11,13 @@
 //! that can be settled by reading the font's own `name` and `OS/2` tables is
 //! settled before control arrives here — see the resolution chain in
 //! [`super::FontRegistry::resolve`].
+//!
+//! "Metric-compatible" means *same advance widths*, so line breaks and page
+//! counts match Word even though glyph shapes differ — why Carlito/Caladea
+//! are used here rather than a generic sans/serif. Substitution is also a
+//! *host-dependent* step: the same DOCX can paginate differently on macOS and
+//! Linux depending on what is installed. When cross-platform output differs,
+//! check this table first.
 
 /// Open-source metric-compatible substitutes for proprietary fonts. Tried
 /// in order when `match_family_style` for the requested family fails.

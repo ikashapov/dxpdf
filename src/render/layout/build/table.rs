@@ -352,6 +352,14 @@ pub(super) fn build_table(
         .collect();
 
     // §17.4.58: floating table positioning.
+    //
+    // Horizontal positioning is partial: only `tblpXSpec` (`x_align`, below)
+    // and `rightFromText` (`right_gap`, which only widens the wrap-reservation
+    // width, not the table's own position) currently reach layout. `tblpX`
+    // (`pos.x`), `horzAnchor` and `leftFromText` are parsed into the model but
+    // not carried into `TableFloatInfo` — a horizontally-offset or
+    // margin/page-anchored-horizontally table places as if none of those were
+    // set.
     let float_info = t.properties.positioning.as_ref().map(|pos| {
         super::super::section::TableFloatInfo {
             right_gap: pos.right_from_text.map(Pt::from).unwrap_or(Pt::ZERO),

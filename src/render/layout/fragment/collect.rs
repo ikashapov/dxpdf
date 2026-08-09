@@ -207,6 +207,11 @@ where
 }
 
 /// §17.16.4.1: context for evaluating dynamic fields (PAGE, NUMPAGES).
+///
+/// The layout-local subset, not the full field evaluator's context —
+/// [`crate::field::FieldContext`] is the larger struct `crate::field::eval`
+/// uses (different field names, `u32` rather than `usize`, mail-merge/date
+/// /bookmark data this one doesn't carry).
 #[derive(Clone, Copy, Default)]
 pub struct FieldContext {
     /// Current page number (1-based).
@@ -218,6 +223,12 @@ pub struct FieldContext {
 /// §17.16.4.1: evaluate a parsed field instruction against the current context.
 /// Returns the substituted text for PAGE/NUMPAGES, or None for other fields
 /// or when no context is available.
+///
+/// `crate::field::eval` has a fuller evaluator covering most
+/// `FieldInstruction` variants (TOC, HYPERLINK, REF, SEQ, ...), but it isn't
+/// wired into layout — today this is the only field evaluation that happens
+/// during rendering, and anything else falls through to the field's cached
+/// `content`.
 fn evaluate_field_instruction(
     instruction: &crate::field::FieldInstruction,
     ctx: FieldContext,
@@ -362,8 +373,12 @@ fn emit_field_substitution<F>(
     );
 }
 
-/// Build a text fragment for a substituted field value, using the paragraph's
-/// default font properties.
+/// Build a text fragment for a substituted **simple field**
+/// (`w:fldSimple`) value, using the paragraph's default font properties.
+///
+/// Not the complex-field path: a complex field's MERGEFORMAT substitution
+/// goes through [`emit_field_substitution`] instead, which prefers the
+/// field's own first result run over paragraph defaults.
 fn make_field_text_fragment<F>(
     text: Rc<str>,
     default_family: &str,

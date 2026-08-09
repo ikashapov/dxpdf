@@ -421,8 +421,7 @@ struct FaceScore {
     /// CFF2 or WOFF/WOFF2-sourced one still cannot round-trip — and this ranking
     /// step runs before any typeface is opened, so it cannot yet tell which case
     /// a given instance is. Kept as a blanket penalty until resolution can see
-    /// font flavor cheaply enough to narrow it; see `InstanceState::Unbaked` and
-    /// `docs/font-substitution.md`'s "Collections and variable fonts".
+    /// font flavor cheaply enough to narrow it; see `InstanceState::Unbaked`.
     instance: u8,
     /// Finally the candidate's position, so an exact tie is resolved the same
     /// way on every run rather than by hash order.
