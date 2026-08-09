@@ -22,6 +22,7 @@ pub mod context;
 pub mod error;
 pub mod eval;
 pub mod format;
+pub mod now;
 pub(crate) mod parse;
 pub(crate) mod switches;
 

@@ -47,7 +47,27 @@ LOCALES="und ca-ES de-AT de-CH de-DE en-CA en-GB en-US en-ZA es-MX fr-FR it-IT p
 # icu_decimal (#127): DecimalSymbolsV1 (separators/affixes), DecimalDigitsV1
 # (per-numbering-system digit glyphs) — icu_decimal-*/src/provider.rs's own
 # `MARKERS` const names these as its minimal required set.
-MARKERS="DecimalSymbolsV1 DecimalDigitsV1"
+#
+# icu_datetime (#129): §17.16.4.2 date-picture month and weekday names.
+# Month-name data is per calendar system (there is a separate marker for
+# Buddhist, Chinese, Hebrew, …); OOXML DATE fields are Gregorian, so only the
+# Gregorian one is baked. Weekday names are calendar-agnostic — one marker
+# covers every system. Both names are the `data_marker!` identifiers from
+# icu_datetime-*/src/provider/names.rs (`WeekdayNamesV1` there is an alias of
+# DatetimeNamesWeekdayV1; datagen wants the canonical name).
+#
+# These two markers are the bulk of this blob: adding them took it from 7.7 KB
+# to 189 KB, and the wheel from 11,688,534 to 11,845,682 bytes (+1.34%).
+# `--attribute-filter datetime_month_length=/^(3s|5s)$/` (and the weekday
+# equivalent) would drop the name lengths src/i18n/mod.rs never asks for and
+# bring the blob to 160 KB — measured, and deliberately *not* done: 29 KB is
+# 0.24% of the wheel, and the filter would have to be kept in step with the
+# exact `MonthNameLength`/`WeekdayNameLength` constants that module picks.
+# Those constants encode the stand-alone-vs-format choice its doc flags as
+# unverified against Word, so they are the likeliest thing here to change —
+# and a filter left stale behind such a change removes the data silently,
+# degrading every locale to the English fallback.
+MARKERS="DecimalSymbolsV1 DecimalDigitsV1 DatetimeNamesMonthGregorianV1 DatetimeNamesWeekdayV1"
 
 icu4x-datagen \
   --locales $LOCALES \

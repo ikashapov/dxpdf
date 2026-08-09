@@ -143,6 +143,29 @@ pub(super) fn paragraph_locale(
 ) -> (crate::render::resolve::locale::Locale, char) {
     use crate::render::resolve::locale::Locale;
 
+    let tag = resolve_lang_tag(para, resolved);
+    let locale = tag.map_or(Locale::English, Locale::from_tag);
+    let decimal_separator = tag
+        .and_then(crate::i18n::decimal_separator_for_tag)
+        .unwrap_or_else(|| locale.decimal_separator());
+
+    (locale, decimal_separator)
+}
+
+/// The raw §17.3.2.20 tag [`paragraph_locale`] resolves from, before it is
+/// reduced to a `Locale` bucket or a separator.
+///
+/// Split out because a second consumer needs the tag itself, not either
+/// answer derived from it: §17.16.4.2 date-picture names
+/// (`crate::i18n::month_name_for_tag`) are looked up per tag, and a `DATE`
+/// field's text is built during fragment collection, where the paragraph's
+/// resolved style is not yet in hand. Both callers walk the same cascade
+/// through this one function rather than assembling the layer list twice —
+/// the layers, and their order, are the part that must not drift.
+pub(super) fn resolve_lang_tag<'a>(
+    para: &'a model::Paragraph,
+    resolved: &'a ResolvedDocument,
+) -> Option<&'a str> {
     let style_run = para
         .style_id
         .as_ref()
@@ -150,7 +173,7 @@ pub(super) fn paragraph_locale(
         .and_then(|id| resolved.styles.get(id))
         .map(|s| &s.run);
 
-    let tag = Locale::first_tag(
+    crate::render::resolve::locale::Locale::first_tag(
         [
             para.mark_run_properties.as_ref(),
             style_run,
@@ -158,14 +181,7 @@ pub(super) fn paragraph_locale(
         ]
         .into_iter()
         .flatten(),
-    );
-
-    let locale = tag.map_or(Locale::English, Locale::from_tag);
-    let decimal_separator = tag
-        .and_then(crate::i18n::decimal_separator_for_tag)
-        .unwrap_or_else(|| locale.decimal_separator());
-
-    (locale, decimal_separator)
+    )
 }
 
 /// §17.3.1.19: this paragraph's PDF outline entry, if it is a heading.

@@ -1,19 +1,21 @@
 use crate::field::context::{Date, Time};
 
-/// Format a date using an OOXML date/time format string (§17.16.4.1).
+/// Format a date using an OOXML date-time picture (§17.16.4.2).
 ///
-/// Supports common patterns:
-/// - `d`, `dd` — day of month (1 vs 01)
+/// Supports:
+/// - `d`, `dd` — day of month (9 vs 09)
+/// - `ddd`, `dddd` — day of *week* (Mon, Monday)
 /// - `M`, `MM`, `MMM`, `MMMM` — month (3, 03, Mar, March)
 /// - `yy`, `yyyy` — year (26, 2026)
-/// - `H`, `HH` — 24-hour (7, 07)
-/// - `h`, `hh` — 12-hour (7, 07)
-/// - `m`, `mm` — minute (5, 05)
-/// - `s`, `ss` — second (3, 03)
-/// - `AM/PM`, `am/pm`
 ///
-/// Literal text can be included in single quotes: `'at' h:mm`.
-pub fn format_date(date: &Date, pattern: &str) -> String {
+/// Literal text can be included in single quotes: `'on' d MMMM`.
+///
+/// `locale_tag` is the §17.3.2.20 `w:lang` in effect where the field sits;
+/// the two name-bearing tokens (`MMM`/`MMMM` and `ddd`/`dddd`) render in that
+/// language. `None`, or a tag this engine has no CLDR data for, falls back to
+/// the English tables below — the same discipline `Locale::decimal_separator`
+/// backstops [`crate::i18n::decimal_separator_for_tag`] with.
+pub fn format_date(date: &Date, pattern: &str, locale_tag: Option<&str>) -> String {
     let mut result = String::new();
     let chars: Vec<char> = pattern.chars().collect();
     let len = chars.len();
@@ -51,20 +53,25 @@ pub fn format_date(date: &Date, pattern: &str) -> String {
             match count {
                 1 => result.push_str(&date.month.to_string()),
                 2 => result.push_str(&format!("{:02}", date.month)),
-                3 => result.push_str(short_month_name(date.month)),
-                _ => result.push_str(long_month_name(date.month)),
+                3 => result.push_str(&month_name(date, false, locale_tag)),
+                _ => result.push_str(&month_name(date, true, locale_tag)),
             }
             i += count;
             continue;
         }
 
-        // Day
+        // Day. §17.16.4.2 splits this token by *count*, not just by presence:
+        // one or two `d` is the day of the month, three or four is the day of
+        // the week. Three and four used to fall into the zero-padded branch
+        // below and print the day number, so `dddd` silently rendered "09"
+        // where a weekday name belonged.
         if chars[i] == 'd' {
             let count = count_run(&chars, i, 'd');
-            if count >= 2 {
-                result.push_str(&format!("{:02}", date.day));
-            } else {
-                result.push_str(&date.day.to_string());
+            match count {
+                1 => result.push_str(&date.day.to_string()),
+                2 => result.push_str(&format!("{:02}", date.day)),
+                3 => result.push_str(&weekday_name(date, false, locale_tag)),
+                _ => result.push_str(&weekday_name(date, true, locale_tag)),
             }
             i += count;
             continue;
@@ -273,9 +280,90 @@ fn to_12hour(hour: u32) -> (u32, &'static str) {
     }
 }
 
-/// §17.16.4.2 date-picture month name — hardcoded English regardless of the
-/// document's declared language. A German document's `DATE \@ "MMMM"` still
-/// renders "August". Tracked in issue #124.
+/// §17.16.4.2 `MMM`/`MMMM` — the month named in `locale_tag`'s language.
+///
+/// Falls back to the English tables below when no tag is in effect, when the
+/// tag has no baked CLDR data, or when `date` isn't a real Gregorian date
+/// (a caller-supplied month of 13 has no name in any language, but must not
+/// panic mid-render).
+fn month_name(date: &Date, long: bool, locale_tag: Option<&str>) -> String {
+    let localized = locale_tag.and_then(|tag| {
+        // Day 1 is valid in every month of every year, so a month-only
+        // lookup never has to care whether the caller's day is in range.
+        let month = u8::try_from(date.month).ok()?;
+        let icu_date = icu_calendar::Date::try_new_gregorian(date.year, month, 1).ok()?;
+        crate::i18n::month_name_for_tag(&icu_date, long, tag)
+    });
+    localized.unwrap_or_else(|| {
+        if long {
+            long_month_name(date.month).to_string()
+        } else {
+            short_month_name(date.month).to_string()
+        }
+    })
+}
+
+/// §17.16.4.2 `ddd`/`dddd` — the weekday named in `locale_tag`'s language.
+///
+/// Unlike the month, this needs the *whole* date to exist: which weekday a
+/// day falls on is calendar arithmetic, not a table lookup. An out-of-range
+/// date has no weekday at all, so it renders as nothing rather than guessing
+/// one — the same "no answer" the empty string already means elsewhere in
+/// this module.
+fn weekday_name(date: &Date, long: bool, locale_tag: Option<&str>) -> String {
+    let Some(weekday) = u8::try_from(date.month)
+        .ok()
+        .zip(u8::try_from(date.day).ok())
+        .and_then(|(month, day)| icu_calendar::Date::try_new_gregorian(date.year, month, day).ok())
+        .map(|d| d.weekday())
+    else {
+        return String::new();
+    };
+    let localized =
+        locale_tag.and_then(|tag| crate::i18n::weekday_name_for_tag(weekday, long, tag));
+    localized.unwrap_or_else(|| {
+        if long {
+            long_weekday_name(weekday).to_string()
+        } else {
+            short_weekday_name(weekday).to_string()
+        }
+    })
+}
+
+/// The English `ddd` fallback, for a document that declares no language or
+/// one this engine has no CLDR data for — the weekday counterpart of
+/// [`short_month_name`].
+fn short_weekday_name(weekday: icu_calendar::types::Weekday) -> &'static str {
+    use icu_calendar::types::Weekday;
+    match weekday {
+        Weekday::Monday => "Mon",
+        Weekday::Tuesday => "Tue",
+        Weekday::Wednesday => "Wed",
+        Weekday::Thursday => "Thu",
+        Weekday::Friday => "Fri",
+        Weekday::Saturday => "Sat",
+        Weekday::Sunday => "Sun",
+    }
+}
+
+/// The English `dddd` fallback — see [`short_weekday_name`].
+fn long_weekday_name(weekday: icu_calendar::types::Weekday) -> &'static str {
+    use icu_calendar::types::Weekday;
+    match weekday {
+        Weekday::Monday => "Monday",
+        Weekday::Tuesday => "Tuesday",
+        Weekday::Wednesday => "Wednesday",
+        Weekday::Thursday => "Thursday",
+        Weekday::Friday => "Friday",
+        Weekday::Saturday => "Saturday",
+        Weekday::Sunday => "Sunday",
+    }
+}
+
+/// §17.16.4.2 date-picture month name, in English — the fallback
+/// [`month_name`] uses when no CLDR data applies. Not the primary path since
+/// issue #129: a German document's `DATE \@ "MMMM"` renders "August" because
+/// German spells it that way, not because this table is hardcoded.
 fn short_month_name(month: u32) -> &'static str {
     match month {
         1 => "Jan",
@@ -294,8 +382,7 @@ fn short_month_name(month: u32) -> &'static str {
     }
 }
 
-/// §17.16.4.2 date-picture month name — same English-only gap as
-/// `short_month_name`. Tracked in issue #124.
+/// §17.16.4.2 date-picture month name, in English — see `short_month_name`.
 fn long_month_name(month: u32) -> &'static str {
     match month {
         1 => "January",
@@ -373,9 +460,83 @@ mod tests {
             month: 3,
             day: 5,
         };
-        assert_eq!(format_date(&date, "dd/MM/yyyy"), "05/03/2026");
-        assert_eq!(format_date(&date, "d/M/yy"), "5/3/26");
-        assert_eq!(format_date(&date, "MMMM d, yyyy"), "March 5, 2026");
+        assert_eq!(format_date(&date, "dd/MM/yyyy", None), "05/03/2026");
+        assert_eq!(format_date(&date, "d/M/yy", None), "5/3/26");
+        assert_eq!(format_date(&date, "MMMM d, yyyy", None), "March 5, 2026");
+    }
+
+    // ── §17.16.4.2 name tokens (issue #129) ─────────────────────────────────
+
+    /// 2026-08-10, a Monday — `now.rs`'s own tests pin the same date from the
+    /// other direction (a Unix timestamp), so the two can't drift.
+    fn monday() -> Date {
+        Date {
+            year: 2026,
+            month: 8,
+            day: 10,
+        }
+    }
+
+    /// The regression this token split exists for: `ddd`/`dddd` used to fall
+    /// into the zero-padded day-of-month branch and render "10", a day
+    /// *number*, where §17.16.4.2 asks for a day *name*.
+    #[test]
+    fn ddd_is_a_weekday_name_not_a_zero_padded_day() {
+        assert_eq!(format_date(&monday(), "ddd", None), "Mon");
+        assert_eq!(format_date(&monday(), "dddd", None), "Monday");
+        // …while one and two `d` still mean the day of the month.
+        assert_eq!(format_date(&monday(), "d", None), "10");
+        assert_eq!(format_date(&monday(), "dd", None), "10");
+    }
+
+    #[test]
+    fn month_and_weekday_names_follow_the_locale() {
+        let d = monday();
+        assert_eq!(format_date(&d, "MMMM", Some("fr-FR")), "août");
+        assert_eq!(format_date(&d, "MMMM", Some("ru-RU")), "август");
+        assert_eq!(format_date(&d, "dddd", Some("de-DE")), "Montag");
+        assert_eq!(format_date(&d, "ddd", Some("de-DE")), "Mo");
+        assert_eq!(format_date(&d, "dddd", Some("fr-FR")), "lundi");
+    }
+
+    /// A whole picture, not one token: the literal text around the names is
+    /// untouched and the numeric tokens still read the *date*, not the
+    /// weekday.
+    #[test]
+    fn a_full_picture_localizes_only_its_name_tokens() {
+        assert_eq!(
+            format_date(&monday(), "dddd, d MMMM yyyy", Some("de-DE")),
+            "Montag, 10 August 2026",
+        );
+        assert_eq!(
+            format_date(&monday(), "dddd, d MMMM yyyy", None),
+            "Monday, 10 August 2026",
+        );
+    }
+
+    /// Both fallbacks: a tag with no baked data, and no tag at all, render
+    /// the English tables rather than erroring or emitting nothing.
+    #[test]
+    fn an_unusable_locale_falls_back_to_english_names() {
+        assert_eq!(format_date(&monday(), "MMMM", Some("zz-ZZ")), "August");
+        assert_eq!(format_date(&monday(), "dddd", Some("zz-ZZ")), "Monday");
+        assert_eq!(format_date(&monday(), "MMM", None), "Aug");
+    }
+
+    /// A date that isn't a real calendar date has no weekday to name. It must
+    /// degrade, not panic — `Date` is a plain struct with no range invariant,
+    /// so nothing upstream guarantees the caller's fields are sane.
+    #[test]
+    fn an_impossible_date_does_not_panic() {
+        let nonsense = Date {
+            year: 2026,
+            month: 13,
+            day: 40,
+        };
+        assert_eq!(format_date(&nonsense, "dddd", Some("de-DE")), "");
+        // The month table still answers for an out-of-range month, exactly as
+        // it did before this change.
+        assert_eq!(format_date(&nonsense, "MMMM", Some("de-DE")), "???");
     }
 
     #[test]
