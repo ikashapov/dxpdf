@@ -644,7 +644,7 @@ pub(super) fn emit_line_commands(
                             ts.alignment,
                             zone,
                             measure_text,
-                            style.locale.decimal_separator(),
+                            style.decimal_separator,
                         )
                         .offset(|| zone_width(fragments, frag_idx + 1, end));
                         // Never move the pen backwards: a zone wider than the

@@ -126,10 +126,23 @@ pub(super) fn resolve_paragraph_defaults(
 /// document instead. **Word reference render**: this is an assumption, not a
 /// verified match — if a Word reference render ever settles the question
 /// differently, this cascade is the one place to change.
+///
+/// Returns both the coarse [`Locale`](crate::render::resolve::locale::Locale)
+/// bucket (still primary-subtag-only — it also answers
+/// [`spells_numbers`](crate::render::resolve::locale::Locale::spells_numbers),
+/// a question region doesn't change) and the §17.18.85 decimal separator
+/// itself (issue #128), resolved from the *same* tag rather than derived from
+/// the bucket: a bucket built from the primary subtag alone cannot tell
+/// `de-DE` from `de-CH`, which is exactly the distinction the separator
+/// needs. [`crate::i18n::decimal_separator_for_tag`] answers from real CLDR
+/// data first; `Locale::decimal_separator` is the fallback when ICU4X has
+/// nothing for the tag (or the cascade declared none at all).
 pub(super) fn paragraph_locale(
     para: &model::Paragraph,
     resolved: &ResolvedDocument,
-) -> crate::render::resolve::locale::Locale {
+) -> (crate::render::resolve::locale::Locale, char) {
+    use crate::render::resolve::locale::Locale;
+
     let style_run = para
         .style_id
         .as_ref()
@@ -137,7 +150,7 @@ pub(super) fn paragraph_locale(
         .and_then(|id| resolved.styles.get(id))
         .map(|s| &s.run);
 
-    crate::render::resolve::locale::Locale::from_cascade(
+    let tag = Locale::first_tag(
         [
             para.mark_run_properties.as_ref(),
             style_run,
@@ -145,7 +158,14 @@ pub(super) fn paragraph_locale(
         ]
         .into_iter()
         .flatten(),
-    )
+    );
+
+    let locale = tag.map_or(Locale::English, Locale::from_tag);
+    let decimal_separator = tag
+        .and_then(crate::i18n::decimal_separator_for_tag)
+        .unwrap_or_else(|| locale.decimal_separator());
+
+    (locale, decimal_separator)
 }
 
 /// §17.3.1.19: this paragraph's PDF outline entry, if it is a heading.
@@ -247,7 +267,7 @@ pub(super) fn paragraph_style_from_props(
     props: &model::ParagraphProperties,
     default_tab_stop: Pt,
     auto_fit: crate::render::layout::ShapeAutoFit,
-    locale: crate::render::resolve::locale::Locale,
+    (locale, decimal_separator): (crate::render::resolve::locale::Locale, char),
     outline: Option<crate::render::layout::draw_command::OutlineHeading>,
 ) -> ParagraphStyle {
     let indent_left = props
@@ -326,6 +346,7 @@ pub(super) fn paragraph_style_from_props(
         tabs,
         default_tab_stop,
         locale,
+        decimal_separator,
         outline,
         drop_cap: None,
         borders: resolve_paragraph_borders(props),

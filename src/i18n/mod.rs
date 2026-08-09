@@ -40,14 +40,18 @@
 //!
 //! # Locale set
 //!
-//! Baked in: `und` (root, for ICU4X's locale-fallback chain) plus the 10
-//! region tags actually present in `test-files/`/`test-cases/` today
-//! (`ca-ES, de-AT, de-DE, en-CA, en-GB, en-US, fr-FR, it-IT, pl-PL, ru-RU`).
+//! Baked in: `und` (root, for ICU4X's locale-fallback chain), the 10 region
+//! tags actually present in `test-files/`/`test-cases/`
+//! (`ca-ES, de-AT, de-DE, en-CA, en-GB, en-US, fr-FR, it-IT, pl-PL, ru-RU`),
+//! and — since #128 — `de-CH`, `en-ZA`, `es-MX`: the region-divergent
+//! locales #124 names by name, each now with a real caller
+//! (`de-CH` a fixture in `tests/document_locale.rs`, `en-ZA`/`es-MX`
+//! [`decimal_separator_for_tag`]'s own test) rather than being spec-only.
 //! `scripts/make_icu_data.sh` is the single source of truth for this list —
 //! extend it there, not here, when a later phase needs a region this doesn't
-//! cover (e.g. #128's `de-CH`, which needs its own fixture before the region
-//! is worth baking in at all — see the "Known simplification" comment on
-//! [`Locale::from_tag`](crate::render::resolve::locale::Locale::from_tag)).
+//! cover yet (see the "Known simplification" comment on
+//! [`Locale::from_tag`](crate::render::resolve::locale::Locale::from_tag)
+//! for the ones still missing, e.g. `it-CH`).
 //!
 //! # No Cargo feature gate
 //!
@@ -92,6 +96,42 @@ thread_local! {
 /// why it's thread-local rather than process-wide.
 pub fn with_data_provider<R>(f: impl FnOnce(&BlobDataProvider) -> R) -> R {
     PROVIDER.with(|provider| f(provider))
+}
+
+/// §17.18.85 (issue #128): the character a `decimal` tab zone aligns on for a
+/// BCP-47 tag, resolved through real CLDR data instead of the primary-subtag
+/// bucket `Locale::from_tag` uses — the bucket cannot represent a region that
+/// diverges from its own language's answer (`de-CH` writes a point where
+/// plain `de` writes a comma; see that function's "Known simplification"
+/// doc). Returns `None` when `tag` doesn't parse as BCP-47, or when this
+/// engine's baked data (`scripts/make_icu_data.sh`) has nothing for it even
+/// after ICU4X's own locale fallback — the caller's job is deciding what to
+/// do then, not this function's; `Locale::decimal_separator`'s hand-rolled
+/// bucket is what every call site here falls back to.
+pub fn decimal_separator_for_tag(tag: &str) -> Option<char> {
+    use icu_decimal::options::DecimalFormatterOptions;
+    use icu_decimal::DecimalFormatter;
+
+    let locale: icu_locale_core::Locale = tag.parse().ok()?;
+    with_data_provider(|provider| {
+        let formatter = DecimalFormatter::try_new_with_buffer_provider(
+            provider,
+            locale.into(),
+            DecimalFormatterOptions::default(),
+        )
+        .ok()?;
+        // A single integer digit and a single fractional digit can never
+        // trigger a grouping separator (that needs several digits on one
+        // side), so whatever sits between "0" and "1" in the formatted
+        // output is unambiguously the decimal separator alone — no risk of
+        // reading `de-CH`'s grouping `'` where its decimal `.` belongs.
+        let formatted = formatter.format_to_string(&"0.1".parse().ok()?);
+        formatted
+            .strip_prefix('0')?
+            .strip_suffix('1')?
+            .chars()
+            .next()
+    })
 }
 
 #[cfg(test)]
@@ -143,5 +183,32 @@ mod tests {
             });
             assert_eq!(out, expected, "locale {tag}");
         }
+    }
+
+    /// Issue #128's acceptance criterion, at the unit closest to the claim:
+    /// `de-DE` and `de-CH` disagree, and `en-ZA`/`es-MX` — named in #128 as
+    /// needing verification against real regional usage, not a guess — get
+    /// their real CLDR answers too. All four values were read off this
+    /// function's own output, not assumed: `de-CH` and `es-MX` behave like
+    /// English (point) despite neither being English; `en-ZA` behaves like
+    /// German (comma) despite not being German. Region, not primary subtag,
+    /// decides — exactly the fact `Locale::from_tag` cannot represent.
+    #[test]
+    fn decimal_separator_for_tag_resolves_region_divergence() {
+        assert_eq!(decimal_separator_for_tag("de-DE"), Some(','));
+        assert_eq!(decimal_separator_for_tag("de-CH"), Some('.'));
+        assert_eq!(decimal_separator_for_tag("en-ZA"), Some(','));
+        assert_eq!(decimal_separator_for_tag("es-MX"), Some('.'));
+    }
+
+    #[test]
+    fn decimal_separator_for_tag_is_none_for_a_tag_with_no_data() {
+        assert_eq!(decimal_separator_for_tag("zz-ZZ"), None);
+    }
+
+    #[test]
+    fn decimal_separator_for_tag_is_none_for_an_unparseable_tag() {
+        assert_eq!(decimal_separator_for_tag(""), None);
+        assert_eq!(decimal_separator_for_tag("not a bcp47 tag!"), None);
     }
 }
