@@ -43,14 +43,24 @@ pub struct ParagraphStyle {
     /// §17.15.1.25: the default tab-stop interval, used when no custom tab stop
     /// applies (from `w:settings/w:defaultTabStop`; spec default 720tw = 36pt).
     pub default_tab_stop: Pt,
-    /// §17.3.2.20: the language in effect for this paragraph's own decisions —
-    /// today, only which character a §17.18.85 `decimal` stop aligns on.
+    /// §17.3.2.20: the language in effect for this paragraph's own decisions,
+    /// as a coarse bucket (English / writes-a-comma / writes-a-point).
     ///
     /// Resolved from the paragraph *mark*'s `w:rPr`, not from the runs inside
     /// the paragraph: a decimal stop is a `w:pPr` property, and a zone whose
     /// runs each declared their own `w:lang` would otherwise have no single
-    /// answer. See `build::convert::paragraph_locale`.
+    /// answer. See `build::convert::paragraph_locale`. Region-blind by
+    /// design — `decimal_separator` below is what actually answers §17.18.85
+    /// for a `decimal` stop, since a region can diverge from its own
+    /// language's bucket (`de-CH` vs `de-DE`).
     pub locale: crate::render::resolve::locale::Locale,
+    /// §17.18.85 (issue #128): the character a `decimal` tab stop's zone
+    /// aligns on, resolved from the same tag as `locale` above but through
+    /// real CLDR data (`crate::i18n::decimal_separator_for_tag`) rather than
+    /// `locale`'s primary-subtag-only bucket — the bucket alone can't tell
+    /// `de-DE` from `de-CH`. Falls back to `locale.decimal_separator()` when
+    /// ICU4X has nothing for the declared tag. See `build::convert::paragraph_locale`.
+    pub decimal_separator: char,
     /// §17.3.1.19: this paragraph's PDF outline entry, when it is a heading.
     ///
     /// Carried on the style rather than derived at emission because the node ID
@@ -148,6 +158,7 @@ impl ParagraphStyle {
             tabs: self.tabs.clone(),
             default_tab_stop: self.default_tab_stop,
             locale: self.locale,
+            decimal_separator: self.decimal_separator,
             outline: self.outline.clone(),
             drop_cap: self.drop_cap.clone(),
             borders: self.borders.clone(),
@@ -181,6 +192,7 @@ impl Default for ParagraphStyle {
             // §17.15.1.25: 720 twips = 36pt is the OOXML default interval.
             default_tab_stop: Pt::new(36.0),
             locale: crate::render::resolve::locale::Locale::English,
+            decimal_separator: crate::render::resolve::locale::Locale::English.decimal_separator(),
             outline: None,
             drop_cap: None,
             borders: None,

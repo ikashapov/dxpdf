@@ -70,25 +70,32 @@ impl Locale {
         }
     }
 
-    /// §17.7.2: classify the first `w:lang/@w:val` a cascade sets.
+    /// §17.7.2: the first non-empty `w:lang/@w:val` a cascade sets, before
+    /// classification — the raw tag [`from_cascade`](Self::from_cascade)
+    /// reduces to a [`Locale`] bucket, and what a caller needing more than
+    /// the bucket (§128's region-aware decimal separator, which the bucket
+    /// alone can't represent) resolves further itself.
     ///
     /// Layers come highest-priority first, exactly as §17.7.2 resolves any
-    /// other run property. A cascade that sets none anywhere is
-    /// [`Locale::English`] and logs nothing — an absent tag is the common case
-    /// for a minimal document, not an unhandled language.
+    /// other run property. The emptiness test belongs *inside* the search: an
+    /// empty `@w:val` sets nothing, so it must not stop the walk and shadow a
+    /// lower layer that does.
+    pub fn first_tag<'a>(layers: impl IntoIterator<Item = &'a RunProperties>) -> Option<&'a str> {
+        layers.into_iter().find_map(|rp| {
+            rp.lang
+                .as_ref()
+                .and_then(|l| l.val.as_deref())
+                .filter(|tag| !tag.is_empty())
+        })
+    }
+
+    /// §17.7.2: classify the first `w:lang/@w:val` a cascade sets.
+    ///
+    /// A cascade that sets none anywhere is [`Locale::English`] and logs
+    /// nothing — an absent tag is the common case for a minimal document, not
+    /// an unhandled language.
     pub fn from_cascade<'a>(layers: impl IntoIterator<Item = &'a RunProperties>) -> Self {
-        layers
-            .into_iter()
-            // The emptiness test belongs *inside* the search: an empty
-            // `@w:val` sets nothing, so it must not stop the walk and shadow a
-            // lower layer that does.
-            .find_map(|rp| {
-                rp.lang
-                    .as_ref()
-                    .and_then(|l| l.val.as_deref())
-                    .filter(|tag| !tag.is_empty())
-            })
-            .map_or(Locale::English, Locale::from_tag)
+        Self::first_tag(layers).map_or(Locale::English, Locale::from_tag)
     }
 
     /// Classify one §17.3.2.20 tag by its **primary subtag**.
@@ -99,16 +106,25 @@ impl Locale {
     /// point. Matched case-insensitively, because the attribute is a tag and
     /// tags are case-insensitive even though Word writes them `ll-CC`.
     ///
-    /// **Known simplification.** CLDR has regional overrides that this ignores
-    /// — `de-CH` and `it-CH` write a point where `de` and `it` write a comma,
-    /// `en-ZA` a comma where `en` writes a point, and Latin-American Spanish
-    /// splits both ways. Modelling those means carrying a region table, which
-    /// is the BCP-47 parsing this type exists to avoid; a half-filled table
-    /// would look complete and not be. Likewise Arabic and Persian are listed
-    /// as point-decimal, which is right for their Latin-digit documents and
-    /// wrong for the Arabic-Indic `٫` some regions use. `crate::i18n` (issue
-    /// #127) is the first step toward closing this properly, via ICU4X
-    /// regional data instead of a hand-rolled table — tracked in issue #128.
+    /// **Known simplification**, still true of *this function* — it stays
+    /// primary-subtag-only on purpose, since it also drives
+    /// [`spells_numbers`](Self::spells_numbers), a question region doesn't
+    /// change. But issue #128 closed the simplification for the one question
+    /// region *does* change: real §17.18.85 decimal-tab resolution no longer
+    /// goes through this bucket alone.
+    /// [`crate::i18n::decimal_separator_for_tag`] answers from real CLDR data
+    /// first, using this function's bucket only when ICU4X has nothing for
+    /// the tag — so `de-CH`/`it-CH` (write a point where `de`/`it` write a
+    /// comma) and `en-ZA` (a comma where `en` writes a point) all render
+    /// correctly today, `de-CH` and `en-ZA` explicitly tested, `it-CH`
+    /// working via ICU4X's own fallback without being explicitly baked
+    /// (`scripts/make_icu_data.sh`). Latin-American Spanish "splits both
+    /// ways" is verified only for `es-MX` so far — other regions in that
+    /// split are still open. Likewise still open: Arabic and Persian are
+    /// bucketed point-decimal, right for their Latin-digit documents and
+    /// wrong for the Arabic-Indic `٫` some regions use — a numbering-system
+    /// digit-glyph question `decimal_separator_for_tag` doesn't answer,
+    /// tracked with the rest of §17.18.59's exotic formats in issue #132.
     pub fn from_tag(tag: &str) -> Self {
         let primary = tag.split('-').next().unwrap_or("").to_ascii_lowercase();
         match primary.as_str() {

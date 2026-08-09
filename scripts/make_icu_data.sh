@@ -10,15 +10,20 @@
 # the *only* copy of the data, not an addition on top of the default one.
 #
 # LOCALES is the single source of truth for this engine's baked locale set —
-# don't duplicate it elsewhere. It starts as exactly the region tags present
-# in test-files/ + test-cases/ today (grepped from the real XML), plus `und`
-# (root, needed for ICU4X's locale-fallback chain). Notably absent: de-CH,
-# it-CH, en-ZA, es-MX — the region-divergent locales issue #124/#128 care
-# about — because nothing in this repo exercises them yet; adding untested
-# locales here would be exactly the kind of speculative addition AGENTS.md
-# warns against. Extend LOCALES (and MARKERS, as later phases add
-# icu_segmenter/icu_datetime/etc.) here, in one place, when a fixture and a
-# real caller justify it.
+# don't duplicate it elsewhere. The base set is exactly the region tags
+# present in test-files/ + test-cases/ today (grepped from the real XML),
+# plus `und` (root, needed for ICU4X's locale-fallback chain). #127 left the
+# region-divergent locales #124/#128 care about out on purpose, with nothing
+# in this repo exercising them yet — that changed with #128: de-CH now has a
+# fixture (tests/document_locale.rs) and en-ZA/es-MX are covered by
+# `decimal_separator_for_tag_resolves_region_divergence` (src/i18n/mod.rs), so
+# baking them explicitly is no longer the speculative addition AGENTS.md
+# warns against — it's tested. (it-CH is not: nothing here calls it yet, and
+# it happens to resolve correctly via ICU4X's own fallback from this same
+# set without being baked at all — verified, not relied on blindly, but left
+# out until something needs it explicitly.) Extend LOCALES (and MARKERS, as
+# later phases add icu_segmenter/icu_datetime/etc.) here, in one place, when
+# a fixture and a real caller justify it.
 #
 # MARKERS names the data types to bake in, read directly out of each icu_*
 # crate's `provider.rs` (`icu_provider::data_marker!` sites) rather than
@@ -37,7 +42,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-LOCALES="und ca-ES de-AT de-DE en-CA en-GB en-US fr-FR it-IT pl-PL ru-RU"
+LOCALES="und ca-ES de-AT de-CH de-DE en-CA en-GB en-US en-ZA es-MX fr-FR it-IT pl-PL ru-RU"
 
 # icu_decimal (#127): DecimalSymbolsV1 (separators/affixes), DecimalDigitsV1
 # (per-numbering-system digit glyphs) — icu_decimal-*/src/provider.rs's own

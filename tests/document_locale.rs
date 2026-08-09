@@ -231,6 +231,151 @@ fn a_german_document_right_aligns_a_zone_written_with_points() {
     );
 }
 
+// ── issue #128: regional decimal-separator divergence ──────────────────────
+//
+// `Locale::from_tag` buckets on the primary subtag alone, so on its own it
+// cannot tell `de-DE` from `de-CH` — both are just "German". These tabs are
+// now resolved through `crate::i18n::decimal_separator_for_tag` first, which
+// answers from real CLDR data instead, and this is the acceptance test #128
+// exists for: two regions of the same language, disagreeing correctly.
+
+/// Swiss German writes a **point**, unlike every other German-language
+/// document in this file — the opposite of `a_german_document_...`'s comma.
+#[test]
+fn a_swiss_german_document_aligns_a_decimal_tab_on_the_point() {
+    let swiss = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1.5", "333.125"], "de-CH"),
+        ),
+        ("word/styles.xml", &styles("de-CH")),
+    ]));
+    let english = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1.5", "333.125"], "en-US"),
+        ),
+        ("word/styles.xml", &styles("en-US")),
+    ]));
+
+    // Same shape, same literal separator character in the source XML, so a
+    // de-CH document must anchor exactly as an en-US one does.
+    assert_eq!(
+        swiss, english,
+        "de-CH anchors on the point exactly as English does: {swiss:?} vs {english:?}",
+    );
+}
+
+/// …and the converse: a de-CH document written with a comma finds no
+/// separator it recognises and right-aligns — the same degrade a de-DE
+/// document written with a point takes above.
+#[test]
+fn a_swiss_german_document_right_aligns_a_zone_written_with_commas() {
+    let xs = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1,5", "333,125"], "de-CH"),
+        ),
+        ("word/styles.xml", &styles("de-CH")),
+    ]));
+    let anchored = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1.5", "333.125"], "de-CH"),
+        ),
+        ("word/styles.xml", &styles("de-CH")),
+    ]));
+    assert!(
+        (xs[0] - xs[1]) > (anchored[0] - anchored[1]) + 1.0,
+        "a comma in a Swiss German document anchors nothing: degraded {:?} vs \
+         anchored {:?}",
+        xs[0] - xs[1],
+        anchored[0] - anchored[1],
+    );
+}
+
+/// The direct claim: the *same* primary subtag, two regions, two different
+/// separators — each anchoring correctly on its own region's character. A
+/// primary-subtag-only bucket could not produce this; both `de-DE` and
+/// `de-CH` here are written with the character that only *their own* region
+/// recognises, and both anchor (same gap magnitude either way).
+#[test]
+fn de_de_and_de_ch_disagree_on_the_decimal_separator() {
+    let de_de = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1,5", "333,125"], "de-DE"),
+        ),
+        ("word/styles.xml", &styles("de-DE")),
+    ]));
+    let de_ch = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1.5", "333.125"], "de-CH"),
+        ),
+        ("word/styles.xml", &styles("de-CH")),
+    ]));
+    let de_de_gap = de_de[0] - de_de[1];
+    let de_ch_gap = de_ch[0] - de_ch[1];
+    assert!(
+        (de_de_gap - de_ch_gap).abs() < 1.5,
+        "de-DE's comma and de-CH's point must anchor the same way despite \
+         being written with different characters: de-DE gap {de_de_gap}, \
+         de-CH gap {de_ch_gap}",
+    );
+}
+
+/// #128 names `en-ZA` explicitly as needing verification, not a guess: South
+/// African English writes a **comma**, unlike `en-US`'s point.
+#[test]
+fn a_south_african_document_aligns_a_decimal_tab_on_the_comma() {
+    let za = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1,5", "333,125"], "en-ZA"),
+        ),
+        ("word/styles.xml", &styles("en-ZA")),
+    ]));
+    let german = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1,5", "333,125"], "de-DE"),
+        ),
+        ("word/styles.xml", &styles("de-DE")),
+    ]));
+
+    assert_eq!(
+        za, german,
+        "en-ZA anchors on the comma exactly as de-DE does: {za:?} vs {german:?}",
+    );
+}
+
+/// #128 names `es-MX` explicitly too: Mexican Spanish writes a **point**,
+/// unlike the comma general/European Spanish (`Locale::from_tag`'s "es"
+/// bucket) writes.
+#[test]
+fn a_mexican_spanish_document_aligns_a_decimal_tab_on_the_point() {
+    let mx = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1.5", "333.125"], "es-MX"),
+        ),
+        ("word/styles.xml", &styles("es-MX")),
+    ]));
+    let english = separator_offsets(&layout(&[
+        (
+            "word/document.xml",
+            &decimal_tab_document(&["1.5", "333.125"], "en-US"),
+        ),
+        ("word/styles.xml", &styles("en-US")),
+    ]));
+
+    assert_eq!(
+        mx, english,
+        "es-MX anchors on the point exactly as English does: {mx:?} vs {english:?}",
+    );
+}
+
 /// The document default reaches a paragraph that declares nothing of its own.
 #[test]
 fn the_document_default_language_governs_a_paragraph_that_declares_none() {
