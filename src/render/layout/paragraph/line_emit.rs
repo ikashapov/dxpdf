@@ -1305,6 +1305,7 @@ mod tests {
         use std::rc::Rc;
         Fragment::Text {
             text: text.into(),
+            break_after: crate::render::layout::fragment::fixture_break_after(text),
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),

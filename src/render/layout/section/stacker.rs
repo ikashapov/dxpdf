@@ -473,6 +473,7 @@ mod tests {
         use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
         Fragment::Text {
             text: Rc::from("word"),
+            break_after: crate::render::layout::fragment::fixture_break_after("word"),
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),

@@ -67,6 +67,8 @@
 
 use icu_provider_blob::BlobDataProvider;
 
+pub mod segment;
+
 static ICU_DATA: &[u8] = include_bytes!("data/icu_data.blob");
 
 thread_local! {

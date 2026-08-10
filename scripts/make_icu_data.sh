@@ -67,7 +67,31 @@ LOCALES="und ca-ES de-AT de-CH de-DE en-CA en-GB en-US en-ZA es-MX fr-FR it-IT p
 # unverified against Word, so they are the likeliest thing here to change —
 # and a filter left stale behind such a change removes the data silently,
 # degrading every locale to the English fallback.
-MARKERS="DecimalSymbolsV1 DecimalDigitsV1 DatetimeNamesMonthGregorianV1 DatetimeNamesWeekdayV1"
+#
+# icu_segmenter (#130): UAX #14 line breaking. All three markers are
+# locale-independent — LOCALES above does not apply to them, and dropping a
+# locale from that list does not shrink them.
+#
+#   SegmenterBreakLineV1            the UAX #14 property + pair tables
+#   SegmenterBreakGraphemeClusterV1 required by every LineSegmenter
+#                                   constructor, complex-script or not
+#   SegmenterLstmAutoV1             the four class-SA models (Thai, Lao,
+#                                   Khmer, Burmese)
+#
+# CJK is deliberately absent from that list: UAX #14's own rules break between
+# ideographs (class ID), so `SegmenterDictionaryAutoV1`'s `cjdict` buys line
+# breaking nothing — icu_segmenter's own `load_lstm_unstable` says so in a
+# comment. Measured, since the difference is large: line + grapheme alone is
+# 30,140 bytes; adding the four LSTM models makes the blob 529,383 (Thai
+# 72,089, Lao 71,921, Khmer 74,428, Burmese 91,132 standalone). Taking the
+# *dictionary* route for those same four scripts instead — swapping
+# SegmenterLstmAutoV1 for SegmenterDictionaryAutoV1, which also drags in
+# cjdict — measured 2,037,269 bytes, 6x the LSTM, and was rejected on that.
+# LSTM weights are floats and barely deflate (339,656 -> 299,106), so unlike
+# the CLDR name tables above this lands on the wheel at close to full size:
+# 11,845,784 -> 12,177,618 bytes, +331,834 (+2.80%), measured before and after
+# with `maturin build --release --features python`.
+MARKERS="DecimalSymbolsV1 DecimalDigitsV1 DatetimeNamesMonthGregorianV1 DatetimeNamesWeekdayV1 SegmenterBreakLineV1 SegmenterBreakGraphemeClusterV1 SegmenterLstmAutoV1"
 
 icu4x-datagen \
   --locales $LOCALES \

@@ -6,7 +6,7 @@ use crate::render::emoji::resolve::{EmojiFamily, EmojiTypeface};
 use crate::render::layout::measurer::TextMeasurer;
 use crate::render::resolve::color::RgbColor;
 
-use super::{FontProps, Fragment, FragmentBorder, LinkTarget, TextMetrics};
+use super::{BreakAfter, FontProps, Fragment, FragmentBorder, LinkTarget, TextMetrics};
 
 /// §17.18.40 ST_HighlightColor: map highlight enum to RGB.
 /// These are the fixed palette colors defined in the OOXML spec.
@@ -82,60 +82,15 @@ pub(super) struct TextRunStyle {
     pub baseline_offset: Pt,
 }
 
-/// Split text into word-level chunks for line breaking.
-/// Whitespace is kept attached to the preceding word: "hello world" → ["hello ", "world"].
-/// This allows the line fitter to break between fragments at word boundaries.
-///
-/// Only space, tab and hyphen are break opportunities — not full UAX #14. Thai,
-/// Lao, Khmer, Burmese and CJK are written without spaces, so a paragraph in
-/// any of them does not wrap at all; it runs off the page. This is the
-/// hardest of this engine's known i18n gaps — closing it needs a dictionary
-/// /LSTM-based segmenter, not a wider set of literal break characters.
-/// Tracked in issue #124.
-fn split_into_words(text: &str) -> Vec<&str> {
-    let mut words = Vec::new();
-    let mut start = 0;
-
-    for (i, ch) in text.char_indices() {
-        match ch {
-            // Whitespace: include with the preceding word.
-            ' ' | '\t' => {
-                let end = i + ch.len_utf8();
-                if end > start {
-                    words.push(&text[start..end]);
-                    start = end;
-                }
-            }
-            // Hyphen/dash: break AFTER the hyphen (UAX #14).
-            // The hyphen stays with the preceding word.
-            '-' | '\u{2010}' | '\u{2012}' | '\u{2013}' | '\u{2014}' => {
-                let end = i + ch.len_utf8();
-                if end > start {
-                    words.push(&text[start..end]);
-                    start = end;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Remaining text (last word without trailing space)
-    if start < text.len() {
-        words.push(&text[start..]);
-    }
-
-    words
-}
-
-/// Split text into word-level fragments and push to the output vec.
+/// Split text into UAX #14 break units and push to the output vec.
 ///
 /// When `measurer` is `Some`, the text is first split into grapheme clusters
 /// (UAX #29) and each cluster is classified per UTS #51. Emoji clusters that
 /// resolve to a host color emoji typeface become [`Fragment::Emoji`]; clusters
 /// without a resolved typeface fall through to the text path with a one-time
 /// warning per cluster. When `measurer` is `None` (used by unit tests that
-/// don't construct a font registry), the input is passed straight to the
-/// existing word-split + measure path — preserving prior behaviour.
+/// don't construct a font registry), the input is passed straight to
+/// [`emit_text_words`] — preserving prior behaviour.
 pub(super) fn emit_text_fragments<F>(
     text: &str,
     font: &FontProps,
@@ -193,8 +148,17 @@ pub(super) fn emit_text_fragments<F>(
     }
 }
 
-/// Word-split + measure path. Identical to the prior body of
-/// [`emit_text_fragments`]; factored out so emoji-cluster fallback can reuse it.
+/// Segment `text` per UAX #14 and emit one fragment per break unit.
+///
+/// For text with no surrounding context: the emoji-unavailable fallback, field
+/// substitutions, and runs that [`build_inline_units`] refused to join because
+/// they hold a tab or a break. Every unit — the trailing one included — takes
+/// UAX #14's own answer, for the reason
+/// [`JoinedTextSegment::classify`](super::segment) gives about a segment's
+/// tail: whatever follows such a run is a tab, a break or a marker, and each
+/// of those is already an unconditional break point.
+///
+/// [`build_inline_units`]: super::segment::build_inline_units
 pub(super) fn emit_text_words<F>(
     text: &str,
     font: &FontProps,
@@ -208,32 +172,100 @@ pub(super) fn emit_text_words<F>(
     if text.is_empty() {
         return;
     }
-    // Words within a run share their font properties: build one `Rc` per call
+    // Units within a run share their font properties: build one `Rc` per call
     // and hand each fragment a cheap refcount bump instead of a ~48-byte copy.
     let font = Rc::new(font.clone());
-    for word in split_into_words(text) {
-        let (w, m) = measure_text(word, &font);
-        let trimmed = word.trim_end();
-        let tw = if trimmed.len() < word.len() {
-            measure_text(trimmed, &font).0
-        } else {
-            w
-        };
-        fragments.push(Fragment::Text {
-            text: Rc::from(word),
-            font: Rc::clone(&font),
-            color: style.color,
-            shading: style.shading,
-            border: style.border,
-            width: w,
-            trimmed_width: tw,
-            metrics: m,
-            hyperlink_url: hyperlink_url.cloned(),
-            baseline_offset: style.baseline_offset,
-            text_offset: Pt::ZERO,
-            is_footnote_ref: false,
-        });
+    let mut start = 0;
+    for end in crate::i18n::segment::break_offsets(text) {
+        push_text_fragment(
+            &text[start..end],
+            BreakAfter::Opportunity,
+            &font,
+            style,
+            hyperlink_url,
+            measure_text,
+            fragments,
+        );
+        start = end;
     }
+}
+
+/// Emit one fragment for text that is *already* a single UAX #14 break unit,
+/// with the break status its trailing edge earned.
+///
+/// The joined path calls this: `segment::JoinedTextSegment::classify` has
+/// already segmented the paragraph's whole text — across `<w:r>` boundaries,
+/// which is the only way a Thai word or a CJK phrase split between two runs
+/// gets its boundaries right — so re-segmenting the piece here would find
+/// nothing and cost a second pass.
+///
+/// Takes the font already shared: every unit of one `<w:r>` arrives here
+/// separately and they all carry the same properties, so the caller resolves
+/// and wraps them once and each fragment pays a refcount bump.
+pub(super) fn emit_text_unit<F>(
+    text: &str,
+    break_after: BreakAfter,
+    font: &Rc<FontProps>,
+    style: &TextRunStyle,
+    hyperlink_url: Option<&LinkTarget>,
+    measure_text: &F,
+    fragments: &mut Vec<Fragment>,
+) where
+    F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
+{
+    if text.is_empty() {
+        return;
+    }
+    push_text_fragment(
+        text,
+        break_after,
+        font,
+        style,
+        hyperlink_url,
+        measure_text,
+        fragments,
+    );
+}
+
+/// Measure one break unit and append its fragment.
+///
+/// `trimmed_width` re-measures only when the unit actually ends in whitespace:
+/// trailing space is allowed to hang past the margin, so overflow checking
+/// needs the width without it, and every other unit would pay a second Skia
+/// call for the same number.
+fn push_text_fragment<F>(
+    text: &str,
+    break_after: BreakAfter,
+    font: &Rc<FontProps>,
+    style: &TextRunStyle,
+    hyperlink_url: Option<&LinkTarget>,
+    measure_text: &F,
+    fragments: &mut Vec<Fragment>,
+) where
+    F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
+{
+    let (width, metrics) = measure_text(text, font);
+    let trimmed = text.trim_end();
+    let trimmed_width = if trimmed.len() < text.len() {
+        measure_text(trimmed, font).0
+    } else {
+        width
+    };
+    fragments.push(Fragment::Text {
+        text: Rc::from(text),
+        font: Rc::clone(font),
+        color: style.color,
+        shading: style.shading,
+        border: style.border,
+        break_after,
+        width,
+        trimmed_width,
+        metrics,
+        hyperlink_url: hyperlink_url.cloned(),
+        baseline_offset: style.baseline_offset,
+        text_offset: Pt::ZERO,
+        is_footnote_ref: false,
+    });
 }
 
 /// Resolve a host color emoji typeface for an emoji cluster and emit a
@@ -300,26 +332,150 @@ mod tests {
     use super::*;
     use crate::render::fonts::Toggle;
 
-    // ── split_into_words ─────────────────────────────────────────────────
+    // ── emit_text_words: UAX #14 units, and the break status each earns ──
+    //
+    // These were `split_into_words` tests until issue #130. They assert the
+    // same divisions plus the thing that division alone never said: whether
+    // the fitter may break after each piece. That answer used to be re-derived
+    // in `layout::line` from the piece's last character, so a test here could
+    // pass while the fitter disagreed.
 
+    /// The text of each emitted unit with the break status it carries.
+    fn units(text: &str) -> Vec<(String, BreakAfter)> {
+        let mut fragments = Vec::new();
+        let measure = |t: &str, _: &FontProps| {
+            (
+                Pt::new(t.len() as f32 * 6.0),
+                TextMetrics {
+                    ascent: Pt::new(10.0),
+                    descent: Pt::new(2.0),
+                    leading: Pt::ZERO,
+                },
+            )
+        };
+        emit_text_words(
+            text,
+            &font("Calibri", 12.0),
+            &style(),
+            None,
+            &measure,
+            &mut fragments,
+        );
+        fragments
+            .iter()
+            .map(|f| match f {
+                Fragment::Text {
+                    text, break_after, ..
+                } => (text.to_string(), *break_after),
+                other => panic!("expected Text, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One unit, and its trailing edge is an opportunity like any other: what
+    /// follows a run this entry point is used for is a tab, a break or a
+    /// marker, each already an unconditional break point of its own.
     #[test]
-    fn split_single_word() {
-        assert_eq!(split_into_words("hello"), vec!["hello"]);
+    fn a_single_word_is_one_unit() {
+        assert_eq!(units("hello"), [("hello".into(), BreakAfter::Opportunity)]);
     }
 
     #[test]
-    fn split_two_words() {
-        assert_eq!(split_into_words("hello world"), vec!["hello ", "world"]);
+    fn a_space_ends_a_unit_and_opens_an_opportunity() {
+        assert_eq!(
+            units("hello world"),
+            [
+                ("hello ".into(), BreakAfter::Opportunity),
+                ("world".into(), BreakAfter::Opportunity),
+            ],
+        );
     }
 
     #[test]
-    fn split_trailing_space() {
-        assert_eq!(split_into_words("hello "), vec!["hello "]);
+    fn trailing_whitespace_stays_with_the_word_it_follows() {
+        assert_eq!(
+            units("hello "),
+            [("hello ".into(), BreakAfter::Opportunity)]
+        );
     }
 
     #[test]
-    fn non_breaking_hyphen_stays_inside_word() {
-        assert_eq!(split_into_words("ID‑001"), vec!["ID‑001"]);
+    fn a_non_breaking_hyphen_keeps_a_token_in_one_unit() {
+        assert_eq!(
+            units("ID\u{2011}001"),
+            [("ID\u{2011}001".into(), BreakAfter::Opportunity)],
+            "one unit — the hyphen is not a boundary",
+        );
+    }
+
+    #[test]
+    fn multiple_words_each_open_an_opportunity() {
+        assert_eq!(
+            units("the quick brown fox"),
+            [
+                ("the ".into(), BreakAfter::Opportunity),
+                ("quick ".into(), BreakAfter::Opportunity),
+                ("brown ".into(), BreakAfter::Opportunity),
+                ("fox".into(), BreakAfter::Opportunity),
+            ],
+        );
+    }
+
+    #[test]
+    fn empty_text_emits_nothing() {
+        assert!(units("").is_empty());
+    }
+
+    /// The gap #130 closes, at the layer that builds the fragments: a Thai
+    /// paragraph used to be a single unbreakable unit, and only wrapped
+    /// because `split_oversized_fragments` cut it into clusters mid-word.
+    #[test]
+    fn a_space_less_script_is_divided_into_breakable_units() {
+        let thai = units("ภาษาไทยเป็นภาษา");
+        assert!(
+            thai.len() > 1,
+            "Thai must divide into more than one unit, got {thai:?}",
+        );
+        assert!(
+            thai.iter().all(|(_, b)| *b == BreakAfter::Opportunity),
+            "every unit opens an opportunity: {thai:?}",
+        );
+    }
+
+    /// [`emit_text_unit`] is the joined path's entry point: it takes the
+    /// break status rather than deriving one, and never re-segments.
+    #[test]
+    fn emit_text_unit_emits_exactly_one_fragment_with_the_given_status() {
+        let mut fragments = Vec::new();
+        let measure = |t: &str, _: &FontProps| {
+            (
+                Pt::new(t.len() as f32 * 6.0),
+                TextMetrics {
+                    ascent: Pt::new(10.0),
+                    descent: Pt::new(2.0),
+                    leading: Pt::ZERO,
+                },
+            )
+        };
+        emit_text_unit(
+            "hello world",
+            BreakAfter::Opportunity,
+            &Rc::new(font("Calibri", 12.0)),
+            &style(),
+            None,
+            &measure,
+            &mut fragments,
+        );
+        assert_eq!(fragments.len(), 1, "must not re-segment: {fragments:#?}");
+        match &fragments[0] {
+            Fragment::Text {
+                text, break_after, ..
+            } => {
+                assert_eq!(&**text, "hello world");
+                assert_eq!(*break_after, BreakAfter::Opportunity);
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     // ── L1, L2, L4: emoji cluster integration ────────────────────────────
@@ -453,21 +609,5 @@ mod tests {
             joined.contains('\u{1F4DE}'),
             "emoji codepoint must survive through the text path"
         );
-    }
-
-    // ── split_into_words (existing tests) ────────────────────────────────
-
-    #[test]
-    fn split_multiple_words() {
-        assert_eq!(
-            split_into_words("the quick brown fox"),
-            vec!["the ", "quick ", "brown ", "fox"]
-        );
-    }
-
-    #[test]
-    fn split_empty() {
-        let result: Vec<&str> = split_into_words("");
-        assert!(result.is_empty());
     }
 }

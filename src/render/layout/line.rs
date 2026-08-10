@@ -1,7 +1,7 @@
 //! Line fitting — break fragments into lines that fit within a max width.
 
 use crate::render::dimension::Pt;
-use crate::render::layout::fragment::Fragment;
+use crate::render::layout::fragment::{BreakAfter, Fragment};
 
 /// A fitted line — a slice of fragments that fit within the available width.
 #[derive(Debug)]
@@ -25,8 +25,12 @@ pub struct FittedLine {
 
 /// Break fragments into lines that fit within `max_width`.
 ///
-/// Breaks at the last whitespace/hyphen boundary when a line overflows.
-/// A single fragment wider than `max_width` gets its own line (no infinite loop).
+/// When a line overflows, it breaks at the last fragment that reported a UAX
+/// #14 break opportunity ([`BreakAfter::Opportunity`]). A single fragment wider
+/// than `max_width` gets its own line (no infinite loop); over-wide *text* is
+/// cut into grapheme clusters upstream by
+/// [`split_oversized_fragments`](crate::render::layout::fragment::split_oversized_fragments)
+/// before it reaches here.
 ///
 /// `first_line_width`: if provided, the first line uses this narrower width
 /// (e.g., to account for first-line indent). Subsequent lines use `max_width`.
@@ -249,18 +253,13 @@ pub fn fit_lines_with_first(
             }
         }
 
-        // Track break opportunity: only after fragments that end with whitespace,
-        // or non-text fragments (tabs, images). Text fragments without trailing
-        // whitespace are mid-word continuations (e.g., a word split across runs)
-        // and must not be broken.
+        // Track break opportunity. A text fragment carries UAX #14's answer
+        // (`crate::i18n::segment` computed it over the whole paragraph text,
+        // across `<w:r>` boundaries); this used to re-derive it here by
+        // sniffing the fragment's last character, against a list that had
+        // already drifted from the one used to cut the fragments.
         let is_break_point = match frag {
-            Fragment::Text { text, .. } => {
-                text.ends_with(' ') || text.ends_with('\t')
-                    || text.ends_with('-')
-                    || text.ends_with('\u{2010}') // hyphen
-                    || text.ends_with('\u{2013}') // en-dash
-                    || text.ends_with('\u{2014}') // em-dash
-            }
+            Fragment::Text { break_after, .. } => *break_after == BreakAfter::Opportunity,
             _ => true, // tabs, images, line breaks are always break points
         };
         if is_break_point {
@@ -327,9 +326,22 @@ mod tests {
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
 
+    /// A fragment the fitter may break *after* — what a word followed by a
+    /// space becomes once `crate::i18n::segment` has looked at it.
     fn text_frag(text: &str, width: f32) -> Fragment {
+        frag(text, width, BreakAfter::Opportunity)
+    }
+
+    /// A fragment glued to whatever follows it: a token cut by a `<w:r>`
+    /// boundary, or one UAX #14 refuses to break inside.
+    fn glued_frag(text: &str, width: f32) -> Fragment {
+        frag(text, width, BreakAfter::Prohibited)
+    }
+
+    fn frag(text: &str, width: f32, break_after: BreakAfter) -> Fragment {
         Fragment::Text {
             text: text.into(),
+            break_after,
             font: Rc::new(FontProps {
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
@@ -402,12 +414,16 @@ mod tests {
         assert_eq!(lines[1].end, 3); // "world " + "end" on second line
     }
 
+    /// A token UAX #14 refuses to break inside stays whole even though it is
+    /// split across two fragments: `ID‑001` carries a non-breaking hyphen, so
+    /// the piece before it says [`BreakAfter::Prohibited`] and the fitter has
+    /// to go back to the space before `prefix`.
     #[test]
-    fn non_breaking_hyphen_is_not_a_break_point() {
+    fn a_prohibited_boundary_is_not_a_break_point() {
         let frags = vec![
             text_frag("prefix ", 45.0),
-            text_frag("ID‑", 20.0),
-            text_frag("001", 35.0),
+            glued_frag("ID‑", 20.0),
+            glued_frag("001", 35.0),
         ];
         let lines = fit_lines(&frags, Pt::new(70.0));
 
@@ -415,6 +431,28 @@ mod tests {
         assert_eq!(lines[0].end, 1);
         assert_eq!(lines[1].start, 1);
         assert_eq!(lines[1].end, 3);
+    }
+
+    /// The fitter reads [`BreakAfter`] and nothing else. This fragment ends in
+    /// a hyphen and a trailing space — every character the old rule broke on —
+    /// and still does not break, because UAX #14 said not to. If this fails,
+    /// the character sniff has grown back and `crate::i18n::segment` is no
+    /// longer the only answer to the question.
+    #[test]
+    fn the_text_itself_no_longer_decides_where_a_line_breaks() {
+        let frags = vec![
+            glued_frag("0100- ", 40.0),
+            text_frag("600", 40.0),
+            text_frag("rest", 40.0),
+        ];
+        let lines = fit_lines(&frags, Pt::new(100.0));
+
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert_eq!(
+            lines[0].end, 2,
+            "both halves of the token stay together despite the hyphen — the \
+             old character rule would have broken after it and put line 0 at 1",
+        );
     }
 
     #[test]
@@ -487,6 +525,7 @@ mod tests {
         let frags = vec![
             Fragment::Text {
                 text: "small".into(),
+                break_after: BreakAfter::Prohibited,
                 font: Rc::new(FontProps {
                     family: Rc::from("Test"),
                     size: Pt::new(10.0),
@@ -515,6 +554,7 @@ mod tests {
             },
             Fragment::Text {
                 text: "big".into(),
+                break_after: BreakAfter::Prohibited,
                 font: Rc::new(FontProps {
                     family: Rc::from("Test"),
                     size: Pt::new(24.0),

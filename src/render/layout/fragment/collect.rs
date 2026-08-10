@@ -10,12 +10,12 @@ use crate::render::resolve::color::RgbColor;
 
 use super::segment::{build_inline_units, InlineUnit, SegmentPiece};
 use super::text::{
-    emit_emoji_or_fallback, emit_text_fragments, emit_text_words, resolve_highlight_color,
-    TextRunStyle,
+    emit_emoji_or_fallback, emit_text_fragments, emit_text_unit, emit_text_words,
+    resolve_highlight_color, TextRunStyle,
 };
 use super::{
-    font_props_from_run, to_roman_lower, FontProps, Fragment, FragmentBorder, LinkTarget,
-    TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
+    font_props_from_run, to_roman_lower, BreakAfter, FontProps, Fragment, FragmentBorder,
+    LinkTarget, TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
     SUPERSCRIPT_FONT_SIZE_RATIO,
 };
 use crate::render::fonts::Toggle;
@@ -438,6 +438,11 @@ where
         color: default_color,
         shading: None,
         border: None,
+        // A substituted field value is one unbreakable unit — unchanged from
+        // before UAX #14 arrived, and adequate for what these fields produce
+        // (a page number, a date). A long result that has to wrap still can:
+        // `split_oversized_fragments` cuts it once it exceeds the line.
+        break_after: BreakAfter::Prohibited,
         width: w,
         trimmed_width: w,
         metrics: m,
@@ -573,26 +578,54 @@ where
 
                 // Normal segment: classify and emit each piece using its
                 // own (or for emoji, base) run's resolved styling.
+                //
+                // `classify` divides a run's text at every UAX #14 boundary,
+                // so consecutive pieces overwhelmingly come from the *same*
+                // `<w:r>`: resolving its styling once per piece would walk the
+                // §17.7.2 cascade once per word instead of once per run, which
+                // measured as +19% on the layout phase of `sample4.docx`. The
+                // resolved styling is memoized against the run's identity —
+                // `classify` never interleaves runs, so a one-entry memo
+                // catches every repeat.
+                let mut run_styling: Option<(&TextRun, Rc<FontProps>, TextRunStyle)> = None;
                 for piece in seg.classify() {
                     match piece {
-                        SegmentPiece::Text { run, text } => {
-                            let (font, text_style) = resolve_run_styling(
-                                run,
-                                default_family,
-                                default_size,
-                                default_color,
-                                resolved_styles,
-                                paragraph_run_defaults,
-                                theme,
-                                auto_fit,
-                                measure_text,
-                            );
-                            // Pre-classified text: bypass cluster::classify
-                            // by going straight to the word-split path.
-                            emit_text_words(
+                        SegmentPiece::Text {
+                            run,
+                            text,
+                            break_after,
+                        } => {
+                            let (font, text_style) = match &run_styling {
+                                Some((cached, font, style)) if std::ptr::eq(*cached, run) => {
+                                    (font, style)
+                                }
+                                _ => {
+                                    let (font, style) = resolve_run_styling(
+                                        run,
+                                        default_family,
+                                        default_size,
+                                        default_color,
+                                        resolved_styles,
+                                        paragraph_run_defaults,
+                                        theme,
+                                        auto_fit,
+                                        measure_text,
+                                    );
+                                    let (_, font, style) =
+                                        run_styling.insert((run, Rc::new(font), style));
+                                    (&*font, &*style)
+                                }
+                            };
+                            // Pre-classified *and* pre-segmented: `classify`
+                            // has already applied UAX #29, UTS #51 and UAX #14
+                            // across the whole joined text, so this piece is
+                            // one break unit and re-segmenting it would cost a
+                            // second pass to find nothing.
+                            emit_text_unit(
                                 &text,
-                                &font,
-                                &text_style,
+                                break_after,
+                                font,
+                                text_style,
                                 hyperlink_url,
                                 measure_text,
                                 &mut fragments,
@@ -919,6 +952,11 @@ where
                         color: RgbColor::BLACK,
                         shading: None,
                         border: None,
+                        // §17.3.3.30: one glyph from a symbol font, whose
+                        // code point carries the symbol font's meaning and
+                        // not Unicode's — so UAX #14 has nothing to say
+                        // about it. Joined to what follows, as before.
+                        break_after: BreakAfter::Prohibited,
                         width: w,
                         trimmed_width: w,
                         metrics: m,
@@ -963,6 +1001,9 @@ where
                         color: default_color,
                         shading: None,
                         border: None,
+                        // §17.11.12: a reference mark belongs to the word it
+                        // follows and must not be stranded on the next line.
+                        break_after: BreakAfter::Prohibited,
                         width: w,
                         trimmed_width: w,
                         metrics: m,
@@ -998,6 +1039,9 @@ where
                         color: default_color,
                         shading: None,
                         border: None,
+                        // §17.11.12: a reference mark belongs to the word it
+                        // follows and must not be stranded on the next line.
+                        break_after: BreakAfter::Prohibited,
                         width: w,
                         trimmed_width: w,
                         metrics: m,

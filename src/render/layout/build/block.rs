@@ -341,6 +341,10 @@ fn build_note_blocks(
                         color: RgbColor::BLACK,
                         shading: None,
                         border: None,
+                        // §17.11.12: the number is followed by the two spaces
+                        // built into `num_text`, so the note body may start on
+                        // the next line if its first word doesn't fit.
+                        break_after: crate::render::layout::fragment::BreakAfter::Opportunity,
                         width: w,
                         trimmed_width: w,
                         metrics: m,
