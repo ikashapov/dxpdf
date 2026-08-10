@@ -315,9 +315,9 @@ fn to_roman_upper(n: u32) -> String {
 // this engine has no per-glyph fallback: a codepoint the resolved face lacks
 // is dropped, not substituted. That is general — a body run of `ASCII ① ア` in
 // the spec fallback face loses both non-ASCII characters the same way — so it
-// is not a numbering defect and is not fixed here. It surfaces for these
-// formats because they are the first to emit anything outside a Latin face's
-// coverage on their own.
+// is not a numbering defect and is not fixed here (issue #139). It surfaces
+// for these formats because they are the first to emit anything outside a
+// Latin face's coverage on their own.
 //
 // It is also not the common case: §17.9.3 gives every level its own
 // `<w:rPr>`, and Word writes a covering font into it when it writes one of
