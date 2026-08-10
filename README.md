@@ -258,7 +258,7 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 |---|---|
 | Alignment (left, center, right) | ✅ |
 | Alignment (justify) | ✅ |
-| Alignment (distribute) | ✅ §17.3.1.13 spare width shared between UAX #29 grapheme clusters, never inside one; contextual scripts render as unshaped as they do everywhere else (see *Complex-script shaping*) |
+| Alignment (distribute) | ✅ §17.3.1.13 spare width shared between UAX #29 grapheme clusters, never inside one; not applied to a run that is shaped (see *Complex-script shaping*) |
 | Spacing before/after, line spacing | ✅ auto/exact/atLeast |
 | Indentation (left, right, first-line, hanging) | ✅ |
 | Tab stops (left) | ✅ |
@@ -361,7 +361,8 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | Footnotes | ✅ §17.11.23 separator, per-page reservation, split-aware |
 | Endnotes | ✅ §17.11.2 roman superscript marks, collected at document end |
 | Color emoji (ZWJ, modifier, keycap, flag sequences) | ✅ host-resolved color typeface, cross-run cluster reassembly, GSUB-shaped via Skia's HarfBuzz |
-| Complex-script shaping (Arabic joining, Indic reordering) | ❌ body text is mapped cmap-level without GSUB; only emoji clusters are shaped |
+| Complex-script shaping — cursive joining | ✅ §17.3.2.30 a run whose script has positional forms (Unicode `Joining_Type` — Arabic, Syriac, N'Ko, Mongolian, Adlam …) is shaped through Skia's HarfBuzz; everything else keeps the cmap path unchanged |
+| Complex-script shaping — Indic reordering | ❌ needs the spacing unit to become the shaped cluster, not just a new call site |
 | Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator and number-word spelling; no CLDR/ICU, so regional overrides and non-English number words are out of scope |
 | Font subsetting | ✅ codepoint-driven, with shapeability validation |
 | Comments, tracked changes | ❌ |
@@ -371,7 +372,10 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | SmartArt, charts | ❌ |
 | Bookmarks and internal cross-references | ✅ `w:bookmarkStart` → PDF named destinations; internal hyperlinks → GoTo link annotations |
 | PDF outline sidebar (`/Outlines`) | ✅ §17.3.1.19 `w:outlineLvl` → structure-element headers; levels 7–9 clamp to `H6` (ISO 32000-1 stops there) and headings in headers, footers and notes are excluded |
-| RTL text, automatic hyphenation | ❌ |
+| Bidirectional text (`w:bidi`, `w:rtl`) | ✅ §17.3.1.6 / §17.3.2.30 UAX #9 levels resolved per paragraph, reordered per line, with rule L4 mirroring; `w:jc` and `w:ind` resolve against the base direction |
+| Bidirectional tab stops and numbering labels | ❌ §17.3.1.37 stop positions are not mirrored under `w:bidi`, so a line reorders within each tab-delimited segment and a label before its suffix tab stays at the left |
+| `w:bidiVisual` (mirrored table columns) | ❌ not parsed |
+| Automatic hyphenation | ❌ |
 
 </details>
 
@@ -409,7 +413,7 @@ Yes. In Rust, add `dxpdf` as a dependency and call `dxpdf::convert(&docx_bytes)`
 
 dxpdf supports text formatting, paragraphs, tables (including nested, merged and floating tables with conditional formatting), inline and floating images, shapes and text boxes, styles with inheritance, headers/footers, multi-level lists, hyperlinks and a navigable PDF outline, footnotes and endnotes, section breaks, and automatic pagination. See the full [feature matrix](#ooxml-feature-coverage) above.
 
-Notable gaps: complex-script shaping (Arabic joining, Indic reordering), RTL text, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
+Notable gaps: Indic reordering, mirrored tab stops under `w:bidi`, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
 
 ### How fast is dxpdf?
 

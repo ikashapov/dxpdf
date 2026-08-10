@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use crate::i18n::bidi::BidiLevel;
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::{self, EmojiCluster, InlineCluster};
 use crate::render::emoji::resolve::{EmojiFamily, EmojiTypeface};
@@ -252,6 +253,8 @@ fn push_text_fragment<F>(
         width
     };
     fragments.push(Fragment::Text {
+        shaped: None,
+        level: BidiLevel::LTR,
         text: Rc::from(text),
         font: Rc::clone(font),
         color: style.color,
@@ -488,6 +491,7 @@ mod tests {
 
     fn font(family: &str, size: f32) -> FontProps {
         FontProps {
+            rtl: crate::render::fonts::Toggle::Absent,
             family: Rc::from(family),
             size: Pt::new(size),
             bold: Toggle::Absent,

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::i18n::bidi::BaseDirection;
 use crate::model::{self, FirstLineIndent, LineSpacing};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
@@ -279,6 +280,23 @@ pub(super) fn doc_font_size(ctx: &BuildContext) -> Pt {
 /// resolution — see [`ShapeAutoFit::scale_line_height`](crate::render::layout::ShapeAutoFit::scale_line_height).
 /// [`ShapeAutoFit::NONE`](crate::render::layout::ShapeAutoFit::NONE) outside a
 /// shape text box.
+/// §17.3.1.6 `w:bidi` — the paragraph's base embedding direction.
+///
+/// One reading of the property, because two things ask: level resolution
+/// (`fragment::bidi`, before the paragraph has a style) and the style itself.
+/// `props.bidi` has been parsed and cascaded correctly since long before
+/// either; this is the function that stops discarding it.
+///
+/// Absent means left-to-right, and is never inferred from the text — see
+/// [`BaseDirection`] for why UAX #9's own P2/P3 derivation is overridden.
+pub(super) fn base_direction(props: &model::ParagraphProperties) -> BaseDirection {
+    if props.bidi.unwrap_or(false) {
+        BaseDirection::Rtl
+    } else {
+        BaseDirection::Ltr
+    }
+}
+
 pub(super) fn paragraph_style_from_props(
     props: &model::ParagraphProperties,
     default_tab_stop: Pt,
@@ -353,6 +371,7 @@ pub(super) fn paragraph_style_from_props(
     ParagraphStyle {
         auto_fit,
         alignment: props.alignment.unwrap_or(model::Alignment::Start),
+        base_direction: base_direction(props),
         space_before,
         space_after,
         indent_left,

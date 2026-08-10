@@ -85,6 +85,8 @@ pub fn split_oversized_fragments(
             metrics,
             hyperlink_url,
             baseline_offset,
+            level,
+            shaped,
             ..
         } = frag
         else {
@@ -104,6 +106,17 @@ pub fn split_oversized_fragments(
                 None => (per_unit_fallback, *metrics),
             };
             result.push(Fragment::Text {
+                // Kept, though it buys little: a single cluster shapes to its
+                // isolated form, which is what the cmap would have given
+                // anyway. Cutting a word here is what costs the joining, and
+                // that is already this module's documented last resort — it
+                // now costs a joining script more than it costs Latin.
+                shaped: *shaped,
+                // UAX #9: a cluster of the parent's text is at the parent's
+                // level. Cutting a word never crosses a level boundary —
+                // `fragment::bidi` has already split at every one of those, so
+                // whatever reaches here is level-uniform by the time it does.
+                level: *level,
                 text: Rc::from(unit),
                 font: font.clone(),
                 color: *color,
@@ -143,9 +156,12 @@ mod tests {
 
     fn text_frag(text: &str, width: f32) -> Fragment {
         Fragment::Text {
+            shaped: None,
+            level: crate::i18n::bidi::BidiLevel::LTR,
             text: Rc::from(text),
             break_after: super::super::fixture_break_after(text),
             font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
                 bold: Toggle::Absent,

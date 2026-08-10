@@ -10,9 +10,26 @@
 //! Because the label is the paragraph's first fragment, it is first-segment
 //! -only by construction when the paragraph splits across pages — it lives on
 //! line 0, which always belongs to the first segment.
+//!
+//! # Under `w:bidi`
+//!
+//! The label is an ordinary fragment in the paragraph's stream, so UAX #9 sees
+//! it: `build::block::resolve_paragraph_bidi` runs *after* this module, and a
+//! label followed by a §17.9.29 separator of `space` or `nothing` reorders with
+//! the line like any other text — in a right-to-left paragraph it ends up at
+//! the right, which is where it belongs.
+//!
+//! With the default separator, which is a **tab**, it does not, and that is the
+//! same boundary §17.3.1.37 has everywhere else in this engine rather than a
+//! second gap: `line_emit::visual_order` segments a line at every tab and does
+//! not mirror the stop positions the pen jumps to, so a label before a tab
+//! stays at the physical left. Closing it means mirroring tab geometry under
+//! `w:bidi` — the stops, the pen, and the alignment-suppression rule together
+//! — and there is no reference corpus here to check that against.
 
 use std::rc::Rc;
 
+use crate::i18n::bidi::BidiLevel;
 use crate::model::{self, ParagraphProperties};
 use crate::render::dimension::Pt;
 use crate::render::layout::fragment::Fragment;
@@ -246,6 +263,8 @@ fn spacer_fragment(
     let (space_width, metrics) = measurer.measure(" ", &font);
     let gap = if gap > Pt::ZERO { gap } else { space_width };
     Fragment::Text {
+        shaped: None,
+        level: BidiLevel::LTR,
         text: Rc::from(""),
         font: Rc::new(font),
         color,
@@ -382,6 +401,8 @@ fn inject_text_label(
     };
     let label_width = w;
     let label_frag = Fragment::Text {
+        shaped: None,
+        level: BidiLevel::LTR,
         text: Rc::from(label_text.as_str()),
         font: Rc::new(label_font.clone()),
         color: label_color,
@@ -436,6 +457,8 @@ fn inject_text_label(
             fragments.insert(
                 0,
                 Fragment::Text {
+                    shaped: None,
+                    level: BidiLevel::LTR,
                     text: Rc::from(" "),
                     font: Rc::new(label_font.clone()),
                     color: label_color,

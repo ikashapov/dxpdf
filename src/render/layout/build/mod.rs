@@ -220,6 +220,9 @@ fn build_non_story_content(
                 // they must still drain — otherwise a reference inside one
                 // would be attributed to the next body paragraph.
                 let _ = state.footnotes.take_pending();
+                // §17.3.1.6 / UAX #9. A header carries no list label, so its
+                // fragment vector is already final here.
+                block::resolve_paragraph_bidi(&mut frags, &props, ctx);
                 let style = paragraph_style_from_props(
                     &props,
                     Pt::from(ctx.resolved.default_tab_stop),

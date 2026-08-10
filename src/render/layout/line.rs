@@ -340,9 +340,12 @@ mod tests {
 
     fn frag(text: &str, width: f32, break_after: BreakAfter) -> Fragment {
         Fragment::Text {
+            shaped: None,
+            level: crate::i18n::bidi::BidiLevel::LTR,
             text: text.into(),
             break_after,
             font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
                 bold: Toggle::Absent,
@@ -498,6 +501,7 @@ mod tests {
             Fragment::Tab {
                 line_height: Pt::new(14.0),
                 font: Rc::new(FontProps {
+                    rtl: crate::render::fonts::Toggle::Absent,
                     family: Rc::from("Test"),
                     size: Pt::new(12.0),
                     bold: Toggle::Absent,
@@ -524,9 +528,12 @@ mod tests {
     fn height_is_max_of_fragments() {
         let frags = vec![
             Fragment::Text {
+                shaped: None,
+                level: crate::i18n::bidi::BidiLevel::LTR,
                 text: "small".into(),
                 break_after: BreakAfter::Prohibited,
                 font: Rc::new(FontProps {
+                    rtl: crate::render::fonts::Toggle::Absent,
                     family: Rc::from("Test"),
                     size: Pt::new(10.0),
                     bold: Toggle::Absent,
@@ -553,9 +560,12 @@ mod tests {
                 is_footnote_ref: false,
             },
             Fragment::Text {
+                shaped: None,
+                level: crate::i18n::bidi::BidiLevel::LTR,
                 text: "big".into(),
                 break_after: BreakAfter::Prohibited,
                 font: Rc::new(FontProps {
+                    rtl: crate::render::fonts::Toggle::Absent,
                     family: Rc::from("Test"),
                     size: Pt::new(24.0),
                     bold: Toggle::Absent,

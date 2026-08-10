@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use crate::model::{PTabAlignment, PTabRelativeTo, RunProperties, TabLeader, UnderlineStyle};
 
+use crate::i18n::bidi::BidiLevel;
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::{EmojiPresentation, EmojiStructure};
 use crate::render::fonts::Toggle;
@@ -13,15 +14,20 @@ use crate::render::geometry::{PtRect, PtSize};
 use crate::render::resolve::color::RgbColor;
 use crate::render::resolve::fonts::effective_font;
 use crate::render::resolve::images::MediaEntry;
+use crate::render::shape::RunDirection;
 
+mod bidi;
 mod collect;
 mod segment;
+mod shape;
 mod split;
 mod text;
 
+pub use bidi::assign_bidi_levels;
 pub use collect::{
     collect_fragments, FieldContext, FootnoteTracker, FragmentCtx, RecordedFootnote,
 };
+pub use shape::shape_complex_scripts;
 pub use split::split_oversized_fragments;
 
 // ── Superscript / subscript rendering constants ───────────────────────────────
@@ -61,6 +67,22 @@ pub struct FontProps {
     /// §17.3.2.16 `w:i`, likewise.
     pub italic: Toggle,
     pub underline: bool,
+    /// §17.3.2.30 `w:rtl` as the §17.7.2 cascade left it.
+    ///
+    /// The *input* to UAX #9 level resolution, where [`Fragment::Text`]'s
+    /// `level` is the output: `layout::fragment::bidi` turns a run whose toggle
+    /// is [`Toggle::On`] into an RLI…PDI isolate around that run's text in the
+    /// analysis string. Tri-state because §17.7.2 toggles are, and because the
+    /// three states genuinely differ here — [`Toggle::Absent`] leaves UAX #9's
+    /// own rules to decide the run's direction from its characters, while
+    /// [`Toggle::Off`] states a left-to-right context that neighbouring
+    /// right-to-left text must not leak into.
+    ///
+    /// On `FontProps` rather than on the fragment because it is per *run*, and
+    /// this is the per-run resolved presentation every text fragment already
+    /// shares by `Rc` — the same reason `underline` and `char_spacing` are
+    /// here without being properties of a font either.
+    pub rtl: Toggle,
     pub char_spacing: Pt,
     /// §17.3.2.45: horizontal character scale as a multiplier (1.0 = normal,
     /// 0.8 = 80%, 1.5 = 150%). Applied to glyph advances during measure and
@@ -177,6 +199,34 @@ pub enum Fragment {
         /// a fragment that must stay joined to the next one says so here
         /// rather than relying on what its text happens to end with.
         break_after: BreakAfter,
+        /// UAX #9: the resolved embedding level of this fragment's text.
+        ///
+        /// The companion to `break_after`, and carried for the same reason:
+        /// the answer is a paragraph-scope one — rules W1–W7 and N0–N2 resolve
+        /// a neutral from strong characters that may be far away — while the
+        /// question is asked per line, once the breaks are known. `layout::
+        /// fragment::bidi` resolves it once and splits any fragment a level
+        /// boundary falls inside, so that by the time
+        /// [`line_emit`](crate::render::layout::paragraph) reorders a line
+        /// every fragment on it has exactly one level and the reorder is a
+        /// permutation.
+        ///
+        /// [`BidiLevel::LTR`] on every fragment of a document with no
+        /// bidirectional text, which is what lets the reorder be skipped
+        /// outright there.
+        level: BidiLevel,
+        /// Whether this run must be shaped to be legible, and which way round
+        /// — `None` for every run in a script that a cmap lookup renders
+        /// correctly, which is all of Latin, Cyrillic, Greek, CJK, Hebrew and
+        /// Thai.
+        ///
+        /// Set by `layout::fragment::shape`, which is also what re-measures
+        /// the fragment against the shaped advance, so `width` below and what
+        /// the painter draws cannot disagree. Carried rather than re-derived
+        /// at paint from the text, because a second copy of
+        /// [`needs_shaping`](crate::render::shape::needs_shaping) is the kind
+        /// of duplicate rule issue #130 was spent removing.
+        shaped: Option<RunDirection>,
         /// Full width including trailing whitespace (used for positioning).
         width: Pt,
         /// Width excluding trailing whitespace (used for line-break overflow checking).
@@ -332,6 +382,24 @@ impl Fragment {
         )
     }
 
+    /// UAX #9: the embedding level to reorder this fragment at, in a paragraph
+    /// whose base level is `base`.
+    ///
+    /// Only text carries a resolved level. Everything else takes the base, and
+    /// the approximation is deliberate rather than pending: an image or emoji
+    /// contributes U+FFFC — class ON, a neutral — to the analysis string, so
+    /// the text *around* it resolves against it correctly, and the base level
+    /// is where a neutral standing alone lands anyway. What it gets wrong is an
+    /// inline image between two runs of the *other* direction, which would need
+    /// the field on three more variants to fix. Tabs never reach a reorder at
+    /// all — `line_emit::visual_order` segments the line at them.
+    pub fn bidi_level(&self, base: BidiLevel) -> BidiLevel {
+        match self {
+            Fragment::Text { level, .. } => *level,
+            _ => base,
+        }
+    }
+
     /// §17.3.3.1: true if this fragment is a page break that forces
     /// subsequent content to the next page.
     pub fn is_page_break(&self) -> bool {
@@ -409,6 +477,12 @@ pub fn font_props_from_run(
         // collapses here into "draw / don't draw"; only the third case
         // draws.
         underline: matches!(rp.underline, Some(s) if s != UnderlineStyle::None),
+        // §17.3.2.30. Kept tri-state all the way to level resolution, for the
+        // same reason `bold` and `italic` are kept tri-state all the way to
+        // face selection: what the cascade left absent is not what it turned
+        // off, and only `layout::fragment::bidi` is entitled to decide what
+        // absent means.
+        rtl: Toggle::from_option(rp.rtl),
         char_spacing,
         text_scale,
         // Populated by the measurer from Skia font metrics.

@@ -199,6 +199,11 @@ struct PaintState {
     /// rebuilds this run on every call; reusing a `TextBlob` skips that remap for
     /// words repeated across the document.
     blob_cache: FxHashMap<usize, FxHashMap<Box<str>, TextBlob>>,
+    /// GSUB-aware shaper for runs in a joining script (issue #131), built once
+    /// per render like the caches around it. `None` if this Skia build exposes
+    /// no HarfBuzz shaper, in which case such runs fall back to `draw_str` —
+    /// unjoined, which is what every run looked like before #131.
+    shaper: Option<crate::render::shape::Shaper>,
     /// Tier-0 features already reported, so an unsupported fill in a header
     /// warns once per render rather than once per page. Per-render, like
     /// `warned_emoji` in `layout::measurer` and `warned_border_styles` in
@@ -213,9 +218,48 @@ impl PaintState {
             image_cache: HashMap::new(),
             emoji_rasterizer: EmojiRasterizer::default(),
             blob_cache: FxHashMap::default(),
+            shaper: crate::render::shape::Shaper::new().ok(),
             warned: FxHashSet::default(),
         }
     }
+}
+
+/// Draw one run through HarfBuzz, returning whether it drew anything.
+///
+/// `false` means the caller must fall back to the cmap path: either this Skia
+/// build has no shaper, or shaping produced no glyphs. Neither is a programming
+/// error — the run is then painted the way every run was painted before issue
+/// #131, which for a joining script is unjoined but present.
+///
+/// Positions come back as absolute offsets from the run origin, which is what
+/// [`Canvas::draw_glyphs_at`] takes — the same convention `render::emoji`'s
+/// rasterizer relies on, and the reason neither accumulates a pen.
+fn draw_shaped(
+    canvas: &skia_safe::Canvas,
+    shaper: Option<&crate::render::shape::Shaper>,
+    font: &skia_safe::Font,
+    text: &str,
+    direction: crate::render::shape::RunDirection,
+    position: crate::render::geometry::PtOffset,
+    paint: &Paint,
+) -> bool {
+    let Some(shaper) = shaper else {
+        return false;
+    };
+    let Ok(run) = shaper.shape(&font.typeface(), text, font.size(), direction) else {
+        return false;
+    };
+    if run.glyphs.is_empty() {
+        return false;
+    }
+    let ids: Vec<skia_safe::GlyphId> = run.glyphs.iter().map(|g| g.id).collect();
+    let offsets: Vec<skia_safe::Point> = run
+        .glyphs
+        .iter()
+        .map(|g| skia_safe::Point::new(f32::from(g.x), f32::from(g.y)))
+        .collect();
+    canvas.draw_glyphs_at(&ids, &*offsets, to_point(position), font, paint);
+    true
 }
 
 fn render_page(
@@ -232,6 +276,7 @@ fn render_page(
         image_cache,
         emoji_rasterizer,
         blob_cache,
+        shaper,
         warned,
     } = state;
     let image_dpi = options.image_dpi();
@@ -271,6 +316,7 @@ fn render_page(
                 italic,
                 color,
                 text_scale,
+                shaped,
             } => {
                 let (slot, base_font) =
                     font_cache.get_indexed(registry, font_family, *font_size, *bold, *italic);
@@ -301,7 +347,42 @@ fn render_page(
                 );
                 text_paint.set_color4f(to_color4f(*color), None);
 
-                if char_spacing.abs() > Pt::ZERO {
+                if let Some(direction) = shaped {
+                    // Issue #131: a joining script. `draw_str` and
+                    // `TextBlob::from_str` map codepoints through the cmap
+                    // alone, which for Arabic paints every letter in its
+                    // isolated form — a different word, not a plainer one.
+                    //
+                    // Shaping here rather than carrying glyph ids on the
+                    // command is deliberate: `render::subset` rewrites a
+                    // typeface's bytes *between* layout and paint, and a glyph
+                    // id recorded against the pre-subset font need not name the
+                    // same glyph in the subsetted one. Shaping against whatever
+                    // the registry holds now is correct by construction. The
+                    // advance agrees with the width layout measured because
+                    // both come from this same shaper over the same typeface,
+                    // and `fontcull` keeps the GSUB closure of every kept
+                    // codepoint (see `subset::collect`), so the substitutions
+                    // survive subsetting.
+                    //
+                    // §17.3.2.35 `w:spacing` is not applied to a shaped run —
+                    // `layout::fragment::shape` says why, and does not add it
+                    // to the measured width either.
+                    if !draw_shaped(
+                        canvas,
+                        shaper.as_ref(),
+                        font,
+                        text,
+                        *direction,
+                        *position,
+                        &text_paint,
+                    ) {
+                        // No shaper in this build, or nothing came back. Fall
+                        // through to the cmap path: wrong in the way this
+                        // engine was wrong before #131, rather than blank.
+                        canvas.draw_str(text, to_point(*position), font, &text_paint);
+                    }
+                } else if char_spacing.abs() > Pt::ZERO {
                     // §17.3.2.35 w:spacing / §17.3.1.13 distribute — draw one
                     // spacing unit at a time with explicit spacing between
                     // them, matching the measured fragment width. The unit is
@@ -989,6 +1070,7 @@ mod tests {
         let registry = test_registry();
         let page = LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: "Hello world".into(),
                 font_family: Rc::from("Helvetica"),
@@ -1013,6 +1095,7 @@ mod tests {
         let registry = test_registry();
         let page = LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: "Spaced".into(),
                 font_family: Rc::from("Helvetica"),
@@ -1041,6 +1124,7 @@ mod tests {
         let registry = test_registry();
         let page = LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: "e\u{301}cole\u{301}".into(),
                 font_family: Rc::from("Helvetica"),
@@ -1109,6 +1193,7 @@ mod tests {
         let registry = test_registry();
         let page = LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: Rc::from(""),
                 font_family: Rc::from("Helvetica"),
@@ -1232,6 +1317,7 @@ mod tests {
         let registry = test_registry();
         let page = LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: "Ärzte für Ökologie — 日本語".into(),
                 font_family: Rc::from("Helvetica"),

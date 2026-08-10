@@ -51,23 +51,28 @@
 //! # Why not the shaped cluster
 //!
 //! A shaping engine reports finer, script-aware boundaries, and issue #82 asks
-//! for them. They would be boundaries the painter cannot honour: `draw_str` and
-//! `TextBlob::from_str` map codepoints to glyphs through the cmap alone, with no
-//! GSUB, so body text is never shaped anywhere in this pipeline — only emoji
-//! clusters are, by `render::emoji`, which needs ligated glyphs to rasterize.
-//! That is the README's *Complex-script shaping* row: a gap in its own right,
-//! not a consequence of spacing.
+//! for them. For **most** text they would be boundaries the painter cannot
+//! honour: `draw_str` and `TextBlob::from_str` map codepoints to glyphs through
+//! the cmap alone, with no GSUB, and that is still the path every Latin,
+//! Cyrillic, Greek, CJK, Hebrew and Thai run takes.
 //!
-//! Which has a consequence worth stating plainly, because the table above
-//! otherwise invites more than is delivered. An Arabic word already paints in
-//! isolated forms whether or not it is distributed, because it was never
-//! joined. Splitting it into clusters takes nothing away — but cluster-safe
-//! spacing does not give joining back either, and the same holds for ligatures
-//! and Indic reordering. Promising shaped boundaries here while painting
-//! unshaped glyphs would buy nothing and hide which gap is which.
+//! Since issue #131 it is no longer the path *every* run takes. A run in a
+//! cursive-joining script — the ones [`crate::render::shape::needs_shaping`]
+//! picks out — is shaped through HarfBuzz and painted with `draw_glyphs_at`,
+//! so for those runs a shaped cluster is a boundary the painter could honour.
+//! This module does not yet offer one, and the consequence is stated at the
+//! seam that decides it (`layout::fragment::shape`): §17.3.2.35 `w:spacing` and
+//! §17.3.1.13 `distribute` are **not applied to a shaped run**, because
+//! inserting space at grapheme-cluster boundaries that shaping has since
+//! ligated across would put it in the wrong places, and neither measurement
+//! nor paint adds it.
 //!
-//! When the paint path does shape, this module is the seam that changes: the
-//! unit becomes the shaped cluster, and every caller above stays as it is.
+//! So the seam this module's own doc used to point at is now half-crossed. What
+//! remains for issue #82 is the other half: make the unit here the shaped
+//! cluster for a shaped run, and every caller above stays as it is. Indic
+//! reordering waits on the same change — README tracks it as its own row, and
+//! that is why it is not simply another entry in
+//! [`crate::render::shape::needs_shaping`]'s predicate.
 
 use unicode_segmentation::UnicodeSegmentation;
 

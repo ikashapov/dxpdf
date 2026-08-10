@@ -373,6 +373,7 @@ impl PlacedParagraph<'_> {
                 } = frag
                 {
                     commands.push(DrawCommand::Text {
+                        shaped: None,
                         position: PtOffset::new(dc_x, baseline_y),
                         text: text.clone(),
                         font_family: font.family.clone(),
@@ -542,9 +543,12 @@ mod tests {
 
     fn text_frag(text: &str, width: f32) -> Fragment {
         Fragment::Text {
+            shaped: None,
+            level: crate::i18n::bidi::BidiLevel::LTR,
             text: text.into(),
             break_after: crate::render::layout::fragment::fixture_break_after(text),
             font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
                 bold: Toggle::Absent,
@@ -2315,6 +2319,7 @@ mod tests {
     /// inherits it cannot pass by coincidence.
     fn leader_font(family: &str, size: f32) -> Rc<FontProps> {
         Rc::new(FontProps {
+            rtl: crate::render::fonts::Toggle::Absent,
             family: Rc::from(family),
             size: Pt::new(size),
             bold: Toggle::Absent,

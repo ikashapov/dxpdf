@@ -48,6 +48,27 @@ kurbo = "0.12"
 unicode-segmentation = "1.13.2"
 unicode-properties = "0.1.4"
 unicode-normalization = "0.1.25"
+# UAX #9 bidirectional text (issue #131). Not ICU4X, and deliberately so: all
+# three carry their Unicode tables in the binary, so unlike every other #124
+# phase this one adds no data marker to `src/i18n/data/icu_data.blob` and no
+# bytes to the Python wheel.
+#
+# `unicode-bidi` is Servo's, and already in `Cargo.lock` as a transitive dep of
+# the `lopdf` dev-dependency; naming it here only changes which line pulls it
+# in. Its default features are `std` + `hardcoded-data`, and `hardcoded-data`
+# is the one that matters — without it `BidiInfo::new` does not exist and every
+# caller has to supply its own `BidiDataSource`.
+unicode-bidi = "0.3.18"
+# Rule L4 (mirroring): `unicode-bidi` implements neither L3 nor L4 and says in
+# its own docs that "the engine using this API" must. This is that engine.
+unicode-bidi-mirroring = "0.4"
+# Which runs need shaping to be legible at all, as opposed to merely unkerned:
+# the Unicode Joining_Type property is exactly the set of scripts whose letters
+# change shape by position (Arabic, Syriac, Thaana, N'Ko, Mongolian, Adlam …).
+# Used as the predicate in `render::shape`, so that turning HarfBuzz on for
+# those scripts does not turn it on for Latin — see that module for why the
+# distinction is load-bearing rather than an optimization.
+unicode-joining-type = "1"
 # FxHash: a fast, non-cryptographic hasher for the per-render measurement memo
 # (hot path, short keys). std's SipHash made an earlier width cache net-negative
 # on small docs; FxHash keeps the probe cheap enough to win across the doc mix.

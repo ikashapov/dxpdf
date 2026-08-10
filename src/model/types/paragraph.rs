@@ -39,9 +39,13 @@ pub struct ParagraphProperties {
     pub suppress_auto_hyphens: Option<bool>,
     /// §17.3.1.9: suppress spacing when adjacent paragraph has same style.
     pub contextual_spacing: Option<bool>,
-    /// §17.3.1.6: this paragraph is right-to-left. Parsed but never
-    /// consumed — same UAX #9 bidi gap as `RunProperties::rtl`. Tracked in
-    /// issue #124.
+    /// §17.3.1.6: this paragraph is right-to-left.
+    ///
+    /// The base embedding level for UAX #9 (issue #131), and with it which
+    /// physical edge `Alignment::Start` and `Indentation::start` mean — see
+    /// `render::layout::build::convert::base_direction`. Never inferred from
+    /// the text: a document that states its direction outranks a heuristic
+    /// reading of its own characters.
     pub bidi: Option<bool>,
     /// §17.3.1.45: allow line breaking between any characters for East Asian text.
     pub word_wrap: Option<bool>,
