@@ -406,19 +406,25 @@ impl Fragment {
         matches!(self, Fragment::PageBreak { .. })
     }
 
-    /// True if this fragment only *moves* the flow and draws nothing —
-    /// §17.3.3.1's page and column breaks.
+    /// True if this fragment puts something on a line.
     ///
-    /// A paragraph made entirely of these still has a paragraph mark, so it
-    /// still owns a line (§17.3.1.29). `build::block` uses this to decide
-    /// whether to inject that line: an `is_empty()` test misses a paragraph
-    /// whose sole content is `<w:br w:type="page"/>`, which is issue #126.
+    /// Written as an exhaustive match rather than a `matches!` with a
+    /// wildcard: a new variant should have to state which side it is on, since
+    /// getting it wrong silently adds or drops a blank line.
     ///
-    /// `LineBreak` is deliberately **not** here. It is the injected mark line
-    /// itself, so counting it would make the predicate true again on a second
-    /// pass and inject twice.
-    pub fn is_break_only(&self) -> bool {
-        matches!(self, Fragment::PageBreak { .. } | Fragment::ColumnBreak)
+    /// `Bookmark` is on the false side and is the one that is easy to miss —
+    /// it is a navigation anchor with no glyphs and no advance, so a paragraph
+    /// holding nothing but bookmarks still shows nothing.
+    pub fn occupies_line(&self) -> bool {
+        match self {
+            Fragment::PageBreak { .. } | Fragment::ColumnBreak | Fragment::Bookmark { .. } => false,
+            Fragment::Text { .. }
+            | Fragment::Image { .. }
+            | Fragment::Emoji { .. }
+            | Fragment::Tab { .. }
+            | Fragment::PTab { .. }
+            | Fragment::LineBreak { .. } => true,
+        }
     }
 
     /// Get font properties if this is a text fragment.
@@ -426,6 +432,44 @@ impl Fragment {
         match self {
             Fragment::Text { font, .. } => Some(font),
             _ => None,
+        }
+    }
+}
+
+/// Whether a paragraph's mark (¶) needs a line made for it.
+///
+/// §17.3.1.29: every paragraph occupies at least one line, because the mark
+/// itself has a height, and it keeps that line when the paragraph has nothing
+/// to show. What varies is whether some content already put a line there.
+///
+/// The subtlety, and the whole of issue #126, is that "has nothing to show" is
+/// not "is empty". `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` has a run and
+/// a fragment, so an `is_empty()` test passes it over; it still draws nothing,
+/// and without a line it collapses to zero height and cannot be moved to the
+/// next page at all. A bookmark is the same story with no run properties to
+/// notice: a navigation anchor with no glyphs and no advance.
+///
+/// This asks about the paragraph as a whole rather than about the segment
+/// after its last break, because the line `build::block` makes is offered to
+/// the page the paragraph *starts* on. Two orderings were measured against
+/// `ELH_2025-12-18.docx` and that one is right; `build::block` records the
+/// numbers at the injection site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkLine {
+    /// Something in the paragraph draws, so the mark rides the last line that
+    /// content produces and there is nothing to add.
+    RidesContent,
+    /// Nothing in the paragraph draws. The mark needs a line of its own.
+    NeedsOwnLine,
+}
+
+impl MarkLine {
+    /// Decide from a paragraph's fragments.
+    pub fn of(fragments: &[Fragment]) -> Self {
+        if fragments.iter().any(Fragment::occupies_line) {
+            MarkLine::RidesContent
+        } else {
+            MarkLine::NeedsOwnLine
         }
     }
 }
@@ -531,6 +575,116 @@ pub fn to_roman_lower(mut n: u32) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod mark_line_tests {
+    use super::*;
+
+    fn page_break() -> Fragment {
+        Fragment::PageBreak {
+            line_height: Pt::new(12.0),
+        }
+    }
+
+    fn line_break() -> Fragment {
+        Fragment::LineBreak {
+            line_height: Pt::new(12.0),
+        }
+    }
+
+    fn bookmark() -> Fragment {
+        Fragment::Bookmark {
+            name: "anchor".into(),
+        }
+    }
+
+    /// Stands in for anything that draws. An image needs no font, so the test
+    /// says "content is present" without dragging a `FontProps` in.
+    fn drawn() -> Fragment {
+        Fragment::Image {
+            size: PtSize::new(Pt::new(10.0), Pt::new(10.0)),
+            rel_id: "rId1".into(),
+            image_data: None,
+            src_rect: None,
+        }
+    }
+
+    /// A paragraph with no content at all: the mark is all there is.
+    #[test]
+    fn an_empty_paragraph_needs_a_line() {
+        assert_eq!(MarkLine::of(&[]), MarkLine::NeedsOwnLine);
+    }
+
+    /// Issue #126's shape, and the one this rule exists for. The mark is the
+    /// only thing in the paragraph after the break.
+    #[test]
+    fn a_break_only_paragraph_needs_a_line() {
+        assert_eq!(MarkLine::of(&[page_break()]), MarkLine::NeedsOwnLine);
+        assert_eq!(
+            MarkLine::of(&[Fragment::ColumnBreak]),
+            MarkLine::NeedsOwnLine
+        );
+    }
+
+    /// Content already puts a line on the page and the mark rides its last one.
+    #[test]
+    fn drawn_content_carries_the_mark() {
+        assert_eq!(MarkLine::of(&[drawn()]), MarkLine::RidesContent);
+    }
+
+    /// Content anywhere in the paragraph carries the mark, on whichever side
+    /// of a break it sits. Injecting a line for `[text, break]` would put a
+    /// blank one *above* the text, since the injection goes at the front.
+    #[test]
+    fn content_carries_the_mark_on_either_side_of_a_break() {
+        assert_eq!(
+            MarkLine::of(&[drawn(), page_break()]),
+            MarkLine::RidesContent
+        );
+        assert_eq!(
+            MarkLine::of(&[page_break(), drawn()]),
+            MarkLine::RidesContent
+        );
+        assert_eq!(
+            MarkLine::of(&[page_break(), Fragment::ColumnBreak, drawn()]),
+            MarkLine::RidesContent
+        );
+    }
+
+    /// Several breaks and still nothing drawn: one line, not one per break.
+    #[test]
+    fn repeated_breaks_still_need_exactly_one_line() {
+        assert_eq!(
+            MarkLine::of(&[page_break(), page_break(), Fragment::ColumnBreak]),
+            MarkLine::NeedsOwnLine
+        );
+    }
+
+    /// A bookmark is a navigation anchor with no glyphs and no advance, so a
+    /// paragraph carrying only bookmarks and a break still shows nothing. The
+    /// old predicate asked "is every fragment a break?" and a bookmark made it
+    /// false, silently losing the mark's line.
+    #[test]
+    fn bookmarks_do_not_carry_the_mark() {
+        assert_eq!(MarkLine::of(&[bookmark()]), MarkLine::NeedsOwnLine);
+        assert_eq!(
+            MarkLine::of(&[bookmark(), page_break(), bookmark()]),
+            MarkLine::NeedsOwnLine
+        );
+    }
+
+    /// Idempotence, and it is load-bearing rather than tidy: the injected line
+    /// is itself a `LineBreak`, so a rule that did not count it would inject a
+    /// second one every time this ran again over its own output.
+    #[test]
+    fn an_already_injected_line_is_not_injected_twice() {
+        assert_eq!(
+            MarkLine::of(&[page_break(), line_break()]),
+            MarkLine::RidesContent
+        );
+        assert_eq!(MarkLine::of(&[line_break()]), MarkLine::RidesContent);
+    }
 }
 
 #[cfg(test)]
