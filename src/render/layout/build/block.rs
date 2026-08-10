@@ -3,7 +3,9 @@ use std::rc::Rc;
 use crate::i18n::bidi::BidiLevel;
 use crate::model::{self, Block, Paragraph};
 use crate::render::dimension::Pt;
-use crate::render::layout::fragment::{collect_fragments, FontProps, Fragment, FragmentCtx};
+use crate::render::layout::fragment::{
+    collect_fragments, font_props_from_run, FontProps, Fragment, FragmentCtx, MarkLine,
+};
 use crate::render::layout::paragraph::DropCapInfo;
 use crate::render::layout::section::LayoutBlock;
 use crate::render::resolve::color::{resolve_color, ColorContext, RgbColor};
@@ -19,6 +21,7 @@ use super::floating::{extract_floating_images, AnchorFrame};
 use super::table::build_table;
 use super::{BuildContext, BuildState};
 use crate::render::fonts::Toggle;
+use crate::render::layout::ShapeAutoFit;
 
 /// Recursively process a single model block into a layout block.
 ///
@@ -78,68 +81,69 @@ pub(super) fn build_paragraph_block(
     resolve_paragraph_bidi(&mut fragments, &merged_props, ctx);
 
     // §17.3.1.29: a paragraph with no runs still occupies one line — the
-    // paragraph mark (¶) has a font-sized line height. Inject a LineBreak
-    // so the layout phase treats it as a real line. Without this, an empty
-    // paragraph's fragments are split by `split_at_page_breaks` into a
-    // single empty page-chunk, which `section::layout_section` drops,
-    // collapsing the line to zero height.
+    // paragraph mark (¶) has a font-sized line height. Inject a `LineBreak` so
+    // the layout phase treats it as a real line. Without this, the fragment
+    // list is empty, `split_at_page_breaks` yields a single empty page-chunk,
+    // `section::layout_section` drops it, and the line collapses to zero.
     //
-    // The test is "carries nothing that draws", not "is empty" (issue #126).
-    // A paragraph whose only content is `<w:br w:type="page"/>` has a
-    // *fragment* — so it slipped past an `is_empty()` check — but still has
-    // no text, and its mark still owns a line. Missing it, the paragraph
-    // became zero-height: it could not be pushed to the next page when its
-    // line did not fit, so the break fired a page early and the blank page
-    // Word and LibreOffice both produce never appeared.
-    //
-    // The rule was pinned against LibreOffice rather than inferred: in #126's
-    // attached render, `FINAL` sits at y=72.23 on its page — exactly where the
-    // first line of page 1 sits — so nothing is above it, the break
-    // paragraph's mark really did occupy the preceding page alone, and the
-    // mark precedes the break. The inter-paragraph gap is charged too:
-    // dropping it renders that document a page short of the reference.
-    //
-    // **Word reference render** — what this is *not* verified against, stated
-    // with its number because it is close. On `ELH_2025-12-18.docx` (local
-    // corpus, a photo report with 20 break-only paragraphs) this rule adds ten
-    // pages, 23 -> 33, and each decision misses by **1.51 pt**: cursor at
-    // 751.52, a 15.44 pt mark line, content bottom 765.45. That is correct
-    // arithmetic under the rule above, but 1.51 pt is inside the vertical
-    // drift #126's reporter measured independently — they saw this engine fit
-    // 27 lines where LibreOffice fits 28, before any break is involved. So
-    // whether that document *should* grow turns on a margin thinner than a
-    // known metrics difference. What would settle it: a Word or LibreOffice
-    // render of a document whose break-only paragraph lands within ~2 pt of
-    // the content bottom.
+    // The test is "the final segment carries nothing that draws", not "the
+    // paragraph is empty" (issue #126). A paragraph whose only content is
+    // `<w:br w:type="page"/>` has a *fragment*, so it slips past an
+    // `is_empty()` check while still having nothing to show. [`MarkLine`]
+    // makes that judgement and carries the reasoning for where the line goes.
     //
     // Table cells use §17.4.66 (trailing-empty-after-table is structural
     // and suppressed) in `build_cell_blocks` — that skip runs before this
     // function, so genuinely structural terminators never reach us.
     // Headers/footers have their own injection in
     // `build_header_footer_content` (§17.10.1) and do not call this.
-    if fragments.iter().all(Fragment::is_break_only) {
-        let (family, mut size, ..) = resolve_paragraph_defaults(
+    if MarkLine::of(&fragments) == MarkLine::NeedsOwnLine {
+        let (family, size, ..) = resolve_paragraph_defaults(
             p,
             ctx.resolved,
             table_style.is_some(),
             state.shape_default_text_color,
             state.shape_default_font_family.as_deref(),
         );
-        if let Some(ref mrp) = p.mark_run_properties {
-            if let Some(fs) = mrp.font_size {
-                size = Pt::from(fs);
-            }
-        }
-        let line_height = ctx.measurer.default_line_height(&family, size);
+        // §17.3.1.29 says the mark is formatted by `w:pPr/w:rPr`, and that is
+        // the *whole* of it — `w:rFonts` as much as `w:sz`. Taking only the
+        // size and leaving the family at the paragraph default measures the
+        // mark's line in the wrong face, which is not a rounding error: on
+        // `ELH_2025-12-18.docx` every one of these paragraphs asks for Arial
+        // and got Calibri, whose line box is ~6% taller at the same size, so
+        // each mark line came out 13.43 pt instead of 12.65 pt. That document
+        // leaves 27.45 pt below its photo table for two such lines — 27.20 pt
+        // of Arial, 28.87 pt of Calibri — so the wrong face was the difference
+        // between fitting and spilling a page that holds nothing but the
+        // running footer, ten times over.
+        //
+        // `font_props_from_run` is the same resolution every ordinary run
+        // goes through, so the mark cannot drift from the text around it.
+        let default_mark_props = model::RunProperties::default();
+        let mark_font = font_props_from_run(
+            p.mark_run_properties
+                .as_ref()
+                .unwrap_or(&default_mark_props),
+            &family,
+            size,
+            ShapeAutoFit::NONE,
+        );
+        let line_height = ctx
+            .measurer
+            .default_line_height(&mark_font.family, mark_font.size);
         // **At the front, ahead of any break** — the position is load-bearing.
         // `split_at_page_breaks` cuts at the break, so `[LineBreak, PageBreak]`
         // yields `[[LineBreak], []]`: the mark's line is offered to the current
-        // page under the normal fit test (and moves to the next page when it
-        // does not fit, which is what leaves the blank page behind), and the
-        // empty trailing chunk defers the break to the following block.
-        // `[PageBreak, LineBreak]` fires the break first and puts the mark on
-        // the *next* page instead, which renders one page short of both
-        // reference implementations — checked against LibreOffice, not assumed.
+        // page under the normal fit test, and the empty trailing chunk defers
+        // the break to the following block.
+        //
+        // Appending instead — putting the mark on the page the break lands on,
+        // which is what a literal reading of §17.3.3.1 suggests, since the mark
+        // is the last thing in the paragraph — was tried against
+        // `ELH_2025-12-18.docx` and is worse: it adds a line above every table
+        // that follows a break, pushing 602 pt of photo table into a 629 pt
+        // band until the *next* paragraph spills instead. 34 pages against 23.
+        // The ordering here is the one both renderers agree on.
         fragments.insert(0, Fragment::LineBreak { line_height });
     }
 
@@ -726,6 +730,63 @@ mod tests {
                         if line_height.raw() > 0.0
                 ),
                 "line then break, in that order: {fragments:?}",
+            );
+        });
+    }
+
+    /// §17.3.1.29: the mark's line is measured in the mark's *own* font, which
+    /// `w:pPr/w:rPr` gives as a family as well as a size. Only the size used to
+    /// be read, so a paragraph that asked for one face had its mark measured in
+    /// another — on `ELH_2025-12-18.docx`, Arial asked for and Calibri
+    /// measured, 13.43 pt where 12.65 pt was due. That document had 27.45 pt
+    /// below a photo table for two such lines, so the difference cost it ten
+    /// pages holding nothing but a running footer.
+    ///
+    /// The assertion is that the injected height is what the measurer reports
+    /// for the *mark's* family, not the paragraph default's. It can only bite
+    /// on a host that has two faces of different metrics, so it says which it
+    /// used and steps aside when they measure alike rather than claiming to
+    /// have checked something it could not.
+    #[test]
+    fn the_mark_line_is_measured_in_the_marks_own_font() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let (default_family, size, ..) =
+                resolve_paragraph_defaults(&para(vec![]), ctx.resolved, false, None, None);
+            let mark_family = "Courier New";
+            let default_h = ctx.measurer.default_line_height(&default_family, size);
+            let mark_h = ctx.measurer.default_line_height(mark_family, size);
+            if (default_h.raw() - mark_h.raw()).abs() < 0.01 {
+                eprintln!(
+                    "skipped: this host measures {default_family} and {mark_family} \
+                     identically ({default_h:?}), so the two cannot be told apart"
+                );
+                return;
+            }
+
+            let mut p = para(vec![page_break_run()]);
+            p.mark_run_properties = Some(model::RunProperties {
+                fonts: model::FontSet {
+                    ascii: model::FontSlot::from_name(mark_family),
+                    ..model::FontSet::default()
+                },
+                ..model::RunProperties::default()
+            });
+
+            let mut pending = None;
+            let block = build_paragraph_block(&p, ctx, state, &mut pending, None, None)
+                .expect("a break-only paragraph still lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            let Some(Fragment::LineBreak { line_height }) = fragments.first() else {
+                panic!("expected an injected mark line: {fragments:?}");
+            };
+            assert_eq!(
+                line_height.raw(),
+                mark_h.raw(),
+                "mark line measured in {default_family} ({default_h:?}) instead of \
+                 the requested {mark_family} ({mark_h:?})",
             );
         });
     }
