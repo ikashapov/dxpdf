@@ -4,8 +4,9 @@
 //! on its own — [`Locale`](crate::render::resolve::locale::Locale) still
 //! answers the two questions it always has. What's here is the data-provider
 //! infrastructure later phases (#128 regional decimal separators, #129
-//! localized date names, #130 UAX #14 line breaking, #131 UAX #9 bidi) build
-//! real features on top of.
+//! localized date names, #130 UAX #14 line breaking) build real features on
+//! top of. #131 (UAX #9 bidi) is the one phase that needed none of it — see
+//! [`bidi`], which carries its own tables.
 //!
 //! # Why a committed blob, not baked `compiled_data`
 //!
@@ -67,6 +68,7 @@
 
 use icu_provider_blob::BlobDataProvider;
 
+pub mod bidi;
 pub mod segment;
 
 static ICU_DATA: &[u8] = include_bytes!("data/icu_data.blob");

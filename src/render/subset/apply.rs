@@ -557,6 +557,7 @@ mod tests {
     fn page_with_text(text: &str, family: &str) -> LayoutedPage {
         LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: Rc::from(text),
                 font_family: Rc::from(family),

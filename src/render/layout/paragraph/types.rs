@@ -1,5 +1,6 @@
 //! Type definitions for paragraph layout.
 
+use crate::i18n::bidi::BaseDirection;
 use crate::model::Alignment;
 
 use super::super::draw_command::DrawCommand;
@@ -23,9 +24,24 @@ pub struct TabStopDef {
 #[derive(Clone, Debug)]
 pub struct ParagraphStyle {
     pub alignment: Alignment,
+    /// §17.3.1.6 `w:bidi` — the paragraph's base embedding direction.
+    ///
+    /// Two things read it. UAX #9 level resolution takes it as the base level,
+    /// which is what makes `Alignment::Start`/`End` and `indent_left`/
+    /// `indent_right` below *logical* rather than physical: under
+    /// [`BaseDirection::Rtl`] "start" is the right margin. See
+    /// `line_emit::physical_edges` for the resolution and for why the model's
+    /// already-logical naming (`Indentation::start`/`end`,
+    /// `Alignment::Start`/`End`) made this a completion rather than a rewrite.
+    pub base_direction: BaseDirection,
     pub space_before: Pt,
     pub space_after: Pt,
+    /// §17.3.1.12 `w:ind/@w:start`. **Logical**: the inset at the edge text
+    /// flows *from*, which is the right margin when `base_direction` is
+    /// right-to-left. Named `left` because that is where it lands in every
+    /// left-to-right paragraph, which is nearly all of them.
     pub indent_left: Pt,
+    /// §17.3.1.12 `w:ind/@w:end` — logical, the mirror of `indent_left`.
     pub indent_right: Pt,
     pub indent_first_line: Pt,
     /// §17.3.1.33: see [`LineSpacingRule`].
@@ -148,6 +164,7 @@ impl ParagraphStyle {
     pub fn clone_for_layout(&self) -> Self {
         Self {
             alignment: self.alignment,
+            base_direction: self.base_direction,
             space_before: self.space_before,
             space_after: self.space_after,
             indent_left: self.indent_left,
@@ -181,6 +198,7 @@ impl Default for ParagraphStyle {
     fn default() -> Self {
         Self {
             alignment: Alignment::Start,
+            base_direction: BaseDirection::Ltr,
             space_before: Pt::ZERO,
             space_after: Pt::ZERO,
             indent_left: Pt::ZERO,

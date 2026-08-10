@@ -305,7 +305,100 @@ def main() -> None:
     # be *read* rather than parsed.
     write(build_variable(), "DxVariable.ttf")
 
+    # ── A cursive-joining font ───────────────────────────────────────────
+    #
+    # Four glyphs for one letter and the `GSUB` lookups that pick between
+    # them. See `build_joining` for why a synthetic one rather than a real
+    # Arabic face.
+    write(build_joining(), "DxJoining.ttf")
+
     print("done — commit the results")
+
+
+# Arabic letter beh (U+0628), Joining_Type=D, in its four positional forms.
+JOINING_GLYPHS = [".notdef", "space", "beh", "beh.init", "beh.medi", "beh.fina"]
+
+# `init`/`medi`/`fina` are what HarfBuzz's Arabic shaper applies once it has
+# worked out each letter's joining context. Writing them as three
+# single-substitution features is the smallest thing that is still a real
+# cursive font rather than a mock.
+JOINING_FEATURES = '''
+languagesystem DFLT dflt;
+languagesystem arab dflt;
+
+feature init { sub beh by beh.init; } init;
+feature medi { sub beh by beh.medi; } medi;
+feature fina { sub beh by beh.fina; } fina;
+'''
+
+
+def build_joining() -> TTFont:
+    """A font whose letters change shape by position — issue #131.
+
+    `tests/shaping.rs` needs to prove that body text now goes through GSUB, and
+    that claim cannot be made against a host font: an assertion about Arabic
+    joining that passes on macOS (Geeza Pro) and skips on a CI image with no
+    Arabic face proves nothing on the machine that matters. This fixture is the
+    same answer `DxCollection.ttc` is for face selection — the smallest real
+    font that exercises exactly one mechanism.
+
+    One letter, four forms, and three single-substitution lookups. Shaping
+    `beh beh beh` must return three *different* glyph ids (initial, medial,
+    final); a cmap-only mapping returns the same id three times, which is
+    precisely the defect #131 closes.
+    """
+    fb = FontBuilder(UPM, isTTF=True)
+    fb.setupGlyphOrder(JOINING_GLYPHS)
+    fb.setupCharacterMap({0x20: "space", 0x0628: "beh"})
+    glyphs = {}
+    for name in JOINING_GLYPHS:
+        pen = TTGlyphPen(None)
+        if name not in (".notdef", "space"):
+            pen.moveTo((50, 0))
+            pen.lineTo((50, 700))
+            pen.lineTo((450, 700))
+            pen.lineTo((450, 0))
+            pen.closePath()
+        glyphs[name] = pen.glyph()
+    fb.setupGlyf(glyphs)
+    # Distinct advances per form, so a width assertion can tell them apart
+    # without reading glyph ids — a positional form is not obliged to be as
+    # wide as the isolated one, and a shaped run's advance reflects that.
+    fb.setupHorizontalMetrics(
+        {
+            ".notdef": (500, 50),
+            "space": (500, 50),
+            "beh": (500, 50),
+            "beh.init": (600, 50),
+            "beh.medi": (700, 50),
+            "beh.fina": (800, 50),
+        }
+    )
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable(
+        {
+            "familyName": "Dx Joining",
+            "styleName": "Regular",
+            "fullName": "Dx Joining Regular",
+            "psName": "DxJoining-Regular",
+            "version": "Version 1.000",
+        }
+    )
+    fb.setupOS2(
+        version=3,
+        sTypoAscender=800,
+        sTypoDescender=-200,
+        usWeightClass=400,
+        usWidthClass=5,
+        fsSelection=0b1000000,
+        achVendID="DXPD",
+    )
+    fb.setupPost()
+    fb.addOpenTypeFeatures(JOINING_FEATURES)
+    fb.font["head"].created = EPOCH
+    fb.font["head"].modified = EPOCH
+    fb.font["head"].macStyle = 0
+    return fb.font
 
 
 def build_variable() -> TTFont:

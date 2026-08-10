@@ -17,9 +17,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::EmojiCluster;
-use crate::render::emoji::shape::ClusterShaper;
 use crate::render::fonts::{TypefaceEntry, TypefaceId};
 use crate::render::geometry::PtSize;
+use crate::render::shape::Shaper;
 
 // ─── Public ADTs ─────────────────────────────────────────────────────────────
 
@@ -194,15 +194,15 @@ pub struct EmojiImage {
 /// Per-render rasterizer that owns the image cache. Lifetime equals the
 /// painter's.
 ///
-/// It also owns the [`ClusterShaper`], built once per render. Shaping goes
+/// It also owns the [`Shaper`], built once per render. Shaping goes
 /// through the typeface rather than extracted font bytes, which is what keeps
-/// a ~183 MB emoji font off the heap — see [`crate::render::emoji::shape`].
+/// a ~183 MB emoji font off the heap — see [`crate::render::shape`].
 pub struct EmojiRasterizer {
     config: RasterConfig,
     cache: HashMap<EmojiKey, EmojiImage>,
     /// `None` if this Skia build exposes no HarfBuzz shaper; rasterization
     /// then takes the cmap-only `draw_str` fallback.
-    shaper: Option<ClusterShaper>,
+    shaper: Option<Shaper>,
 }
 
 impl Default for EmojiRasterizer {
@@ -216,7 +216,7 @@ impl EmojiRasterizer {
         Self {
             config,
             cache: HashMap::new(),
-            shaper: ClusterShaper::new().ok(),
+            shaper: Shaper::new().ok(),
         }
     }
 
@@ -283,7 +283,7 @@ fn rasterize_uncached(
     size: Pt,
     scale: SuperSample,
     target: PtSize,
-    shaper: Option<&ClusterShaper>,
+    shaper: Option<&Shaper>,
 ) -> Option<EmojiImage> {
     // Everything below scales from this one factor — glyph size, surface
     // dimensions, and the in-surface baseline — so a clamped surface stays
@@ -318,7 +318,17 @@ fn rasterize_uncached(
     // Try the GSUB-aware shaping path. On any shaping failure (no shaper in
     // this build, or no glyphs produced), fall through to the cmap-only
     // `draw_str` path so the rasterizer still produces output.
-    let shaped = shaper.and_then(|s| s.shape(&typeface.typeface, text, scaled_size).ok());
+    let shaped = shaper.and_then(|s| {
+        s.shape(
+            &typeface.typeface,
+            text,
+            scaled_size,
+            // An emoji cluster has no direction of its own — it is one
+            // grapheme, and UTS #51 sequences are stored in painting order.
+            crate::render::shape::RunDirection::LeftToRight,
+        )
+        .ok()
+    });
 
     // `None` here means Skia refused the allocation — a degenerate aspect that
     // slipped past the area budget, or genuine memory pressure. Neither is a
@@ -689,7 +699,7 @@ mod tests {
     #[test]
     fn draw_str_fallback_lands_on_the_same_baseline_as_shaping() {
         let tf = any_typeface();
-        let Some(shaper) = ClusterShaper::new().ok() else {
+        let Some(shaper) = Shaper::new().ok() else {
             eprintln!("skipping: no harfbuzz shaper in this build");
             return;
         };
@@ -749,7 +759,7 @@ mod tests {
                 return;
             }
         };
-        let Some(shaper) = ClusterShaper::new().ok() else {
+        let Some(shaper) = Shaper::new().ok() else {
             eprintln!("skipping: no harfbuzz shaper in this build");
             return;
         };

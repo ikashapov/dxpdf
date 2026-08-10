@@ -82,6 +82,14 @@ pub enum DrawCommand {
         /// §17.3.2.45: horizontal scale factor (1.0 = normal, 0.8 = 80%,
         /// 1.5 = 150%). Painter applies via `Font::set_scale_x`.
         text_scale: f32,
+        /// Shape this run through HarfBuzz instead of mapping its codepoints
+        /// through the cmap, and lay its glyphs out in this direction.
+        ///
+        /// `None` on every command of a document in a script that does not
+        /// need it, which keeps the painter's `TextBlob` fast path — and the
+        /// output of every existing document — exactly as it was. See
+        /// [`crate::render::shape::needs_shaping`] for what earns a `Some`.
+        shaped: Option<crate::render::shape::RunDirection>,
     },
     Underline {
         line: PtLineSegment,
@@ -393,6 +401,7 @@ mod tests {
     #[test]
     fn shift_y_moves_text() {
         let mut cmd = DrawCommand::Text {
+            shaped: None,
             position: PtOffset::new(Pt::new(10.0), Pt::new(20.0)),
             text: "hi".into(),
             font_family: Rc::from("Arial"),
@@ -535,6 +544,7 @@ mod tests {
             (
                 "Text",
                 DrawCommand::Text {
+                    shaped: None,
                     position: at(10.0, 20.0),
                     text: "hi".into(),
                     font_family: Rc::from("Arial"),
@@ -662,6 +672,7 @@ mod tests {
     #[test]
     fn a_text_span_straddles_its_baseline() {
         let cmd = DrawCommand::Text {
+            shaped: None,
             position: PtOffset::new(Pt::new(10.0), Pt::new(20.0)),
             text: Rc::from("x"),
             font_family: Rc::from("Arial"),

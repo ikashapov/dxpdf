@@ -8,8 +8,8 @@ use skia_safe::Font;
 
 use crate::render::dimension::Pt;
 use crate::render::emoji::resolve::{EmojiFamily, EmojiResolver, EmojiTypeface, RegistryLookup};
-use crate::render::emoji::shape::ClusterShaper;
 use crate::render::fonts::{self, FontRegistry, TypefaceEntry, TypefaceId};
+use crate::render::shape::Shaper;
 use crate::render::spacing;
 
 use super::fragment::{FontProps, TextMetrics};
@@ -47,8 +47,8 @@ pub struct TextMeasurer<'r> {
     ///
     /// Shaping through the typeface rather than extracted font bytes is what
     /// keeps a ~183 MB emoji font off the heap — see
-    /// [`crate::render::emoji::shape`].
-    cluster_shaper: Option<ClusterShaper>,
+    /// [`crate::render::shape`].
+    cluster_shaper: Option<Shaper>,
     /// Per-render memo of GSUB-aware advances from `measure_with_typeface`,
     /// keyed by (typeface id, size in raw-f32 bits, cluster text). Skips
     /// re-shaping identical clusters.
@@ -68,7 +68,7 @@ impl<'r> TextMeasurer<'r> {
             font_cache: RefCell::new(fonts::FontCache::new()),
             emoji_resolver: EmojiResolver::new(RegistryLookup { registry }),
             warned_emoji: RefCell::new(HashSet::new()),
-            cluster_shaper: ClusterShaper::new().ok(),
+            cluster_shaper: Shaper::new().ok(),
             emoji_advance_cache: RefCell::new(HashMap::new()),
             measure_cache: RefCell::new(FxHashMap::default()),
         }
@@ -139,6 +139,49 @@ impl<'r> TextMeasurer<'r> {
         };
 
         (scaled_width + spacing_extra, text_metrics)
+    }
+
+    /// The advance of `text` **shaped** through HarfBuzz, for a run in a
+    /// script that a cmap lookup renders wrongly.
+    ///
+    /// Separate from [`TextMeasurer::measure`] rather than a branch inside it,
+    /// so that the hot path every Latin document takes keeps exactly the shape
+    /// it had: one memo probe and, on a miss, one `measure_str`. Only
+    /// `layout::fragment::shape` calls this, and only for the fragments
+    /// [`needs_shaping`](crate::render::shape::needs_shaping) picked out.
+    ///
+    /// Returns `None` when this Skia build exposes no shaper or shaping
+    /// produced nothing — the caller then keeps its cmap-measured width, which
+    /// is what the engine did before issue #131 and is wrong in the same way
+    /// rather than in a new one.
+    ///
+    /// §17.3.2.35 `w:spacing` is deliberately *not* added here, and
+    /// `layout::fragment::shape` states why at the call site.
+    pub fn shaped_advance(
+        &self,
+        text: &str,
+        font_props: &FontProps,
+        direction: crate::render::shape::RunDirection,
+    ) -> Option<Pt> {
+        let shaper = self.cluster_shaper.as_ref()?;
+        let mut font_cache = self.font_cache.borrow_mut();
+        let font = font_cache.get(
+            self.registry,
+            &font_props.family,
+            font_props.size,
+            font_props.bold,
+            font_props.italic,
+        );
+        let run = shaper
+            .shape(
+                &font.typeface(),
+                text,
+                f32::from(font_props.size),
+                direction,
+            )
+            .ok()?;
+        // §17.3.2.45 applies to glyph advances however they were obtained.
+        Some(run.total_advance * font_props.text_scale)
     }
 
     /// Query font metrics for underline positioning.
@@ -237,7 +280,15 @@ impl<'r> TextMeasurer<'r> {
         let advance = self
             .cluster_shaper
             .as_ref()
-            .and_then(|s| s.shape(&typeface.typeface, text, f32::from(size)).ok())
+            .and_then(|s| {
+                s.shape(
+                    &typeface.typeface,
+                    text,
+                    f32::from(size),
+                    crate::render::shape::RunDirection::LeftToRight,
+                )
+                .ok()
+            })
             .map(|run| run.total_advance)
             .unwrap_or_else(|| Pt::new(font.measure_str(text, None).0));
 
@@ -270,6 +321,7 @@ mod tests {
 
     fn fp_at_scale(scale: f32) -> FontProps {
         FontProps {
+            rtl: crate::render::fonts::Toggle::Absent,
             family: Rc::from("Helvetica"),
             size: Pt::new(12.0),
             bold: Toggle::Absent,

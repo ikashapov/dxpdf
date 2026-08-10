@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use crate::i18n::bidi::BidiLevel;
 use crate::model::{self, Block, Paragraph};
 use crate::render::dimension::Pt;
 use crate::render::layout::fragment::{collect_fragments, FontProps, Fragment, FragmentCtx};
@@ -72,6 +73,9 @@ pub(super) fn build_paragraph_block(
 
     // §17.9.22: inject list label if paragraph has a numbering reference.
     super::list_label::inject_list_label(p, &mut fragments, &mut merged_props, ctx, state);
+
+    // §17.3.1.6 / UAX #9 — after the label, which is part of the text.
+    resolve_paragraph_bidi(&mut fragments, &merged_props, ctx);
 
     // §17.3.1.29: a paragraph with no runs still occupies one line — the
     // paragraph mark (¶) has a font-sized line height. Inject a LineBreak
@@ -316,6 +320,7 @@ fn build_note_blocks(
                 // §17.8.3.2 / §17.3.2.14: fall back to the document-level spec
                 // defaults rather than restating a font name here.
                 let font = frags[0].font_props().cloned().unwrap_or_else(|| FontProps {
+                    rtl: crate::render::fonts::Toggle::Absent,
                     family: std::rc::Rc::from(super::SPEC_FALLBACK_FONT),
                     size: super::SPEC_DEFAULT_FONT_SIZE,
                     bold: Toggle::Absent,
@@ -336,6 +341,8 @@ fn build_note_blocks(
                 frags.insert(
                     0,
                     Fragment::Text {
+                        shaped: None,
+                        level: BidiLevel::LTR,
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),
                         color: RgbColor::BLACK,
@@ -356,6 +363,9 @@ fn build_note_blocks(
                     },
                 );
             }
+            // §17.3.1.6 / UAX #9 — after the note number, which is part of
+            // the body's text.
+            resolve_paragraph_bidi(&mut frags, &merged_props, ctx);
             let style = paragraph_style_from_props(
                 &merged_props,
                 Pt::from(ctx.resolved.default_tab_stop),
@@ -402,6 +412,36 @@ pub(super) fn collect_endnotes(
 ///
 /// Handles the full cascade: table style → conditional → paragraph style →
 /// doc defaults → fragment collection → image/underline population.
+/// UAX #9: resolve every fragment's embedding level, once the paragraph's
+/// fragment vector is **final**.
+///
+/// "Final" is the whole reason this is a separate step called from three
+/// places rather than the tail of [`build_fragments`]: a list label
+/// (§17.9.22) and a note body's number (§17.11.12) are prefixed afterwards,
+/// and they are as much part of the paragraph's text as anything the document
+/// wrote. A label left out of the analysis keeps the base level while the text
+/// around it does not, and rule L2 then places it at the wrong end of a
+/// `w:bidi` line.
+pub(super) fn resolve_paragraph_bidi(
+    fragments: &mut Vec<Fragment>,
+    props: &model::ParagraphProperties,
+    ctx: &BuildContext,
+) {
+    let measure =
+        |text: &str, font: &FontProps| -> (Pt, crate::render::layout::fragment::TextMetrics) {
+            ctx.measurer.measure(text, font)
+        };
+    crate::render::layout::fragment::assign_bidi_levels(
+        fragments,
+        super::convert::base_direction(props),
+        &measure,
+    );
+    // Then shaping, which needs the levels the line above resolved: a run's
+    // direction is its embedding level, and nothing about the run's own
+    // characters says whether it is a Latin phrase quoted inside Arabic.
+    crate::render::layout::fragment::shape_complex_scripts(fragments, ctx.measurer);
+}
+
 pub(super) fn build_fragments(
     para: &Paragraph,
     ctx: &BuildContext,

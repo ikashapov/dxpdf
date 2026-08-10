@@ -142,14 +142,173 @@ pub(super) fn compute_line_placements(
     placements
 }
 
-fn stretchable_gap_after(fragments: &[Fragment], frag_idx: usize, line_end: usize) -> bool {
-    let Fragment::Text { text, .. } = &fragments[frag_idx] else {
+/// §17.3.1.12: the physical left inset of a line, from the paragraph's
+/// *logical* indents.
+///
+/// `w:ind` has been logical in this engine's model since it was written —
+/// `@w:start`/`@w:end`, with `@w:left`/`@w:right` parsed as their aliases
+/// (`docx::parse::properties::schema::paragraph::IndXml`) — and layout pinned
+/// both to fixed edges because nothing carried a direction. Now something
+/// does: under [`BaseDirection::Rtl`] the *start* inset is at the right, so
+/// the physical left inset is the `end` one.
+///
+/// The first-line indent (§17.3.1.12 `@w:firstLine`/`@w:hanging`) applies at
+/// the start edge too, so in a right-to-left paragraph it moves the right end
+/// of the first line inward and leaves the left alone — which is already what
+/// happens, because `line_available` subtracts it from the width. Adding it
+/// here as well would move the line twice.
+///
+/// `dc_offset` (§17.3.1.11 drop cap) and `float_offset` (§17.4.58) are added by
+/// the caller and stay physical-left: neither drop caps nor float wrapping is
+/// mirrored under `w:bidi`, and both are out of this phase's scope.
+fn physical_left_inset(style: &ParagraphStyle, is_first_line: bool) -> Pt {
+    match style.base_direction {
+        crate::i18n::bidi::BaseDirection::Ltr => {
+            if is_first_line {
+                style.indent_left + style.indent_first_line
+            } else {
+                style.indent_left
+            }
+        }
+        crate::i18n::bidi::BaseDirection::Rtl => style.indent_right,
+    }
+}
+
+/// §17.3.1.13: how far into the line's slack the content is pushed.
+///
+/// `Alignment` has been spelled `Start`/`End` rather than `Left`/`Right` since
+/// the enum was written — `st_enums.rs` says as much where it maps `ST_Jc` —
+/// and this is where the naming starts meaning something: under
+/// [`BaseDirection::Rtl`], `Start` is the right edge and `End` is the left.
+///
+/// **The decision this records**, since OOXML lets a paragraph spell it either
+/// way: a `w:bidi` paragraph carrying the Transitional spelling
+/// `<w:jc w:val="left"/>` is **right**-aligned, because parse maps `left` and
+/// `start` to the same variant. The evidence is ISO/IEC 29500's own
+/// Transitional→Strict migration, which maps `left`↔`start` and `right`↔`end`
+/// losslessly — a mapping that only holds if `left` *is* `start`. It also
+/// makes the no-`w:jc` case fall out correctly: absent alignment is `Start`,
+/// so a `w:bidi` paragraph with no `w:jc` right-aligns, which is what Word
+/// does.
+///
+/// What would overturn it: a Word reference render of a `w:bidi` paragraph
+/// with an explicit `w:jc="left"` that comes out left-aligned. The fix would
+/// then be a distinguishing variant at parse, not a change here — the model
+/// deliberately does not keep the two spellings apart today.
+///
+/// `Both` and `Distribute` return zero because they fill the line rather than
+/// place it; `justification_extra_after` and `distribution_extra_per_gap` are
+/// what spend the slack, and they work off the visual order.
+fn align_offset(style: &ParagraphStyle, remaining: Pt) -> Pt {
+    use crate::i18n::bidi::BaseDirection::Rtl;
+    use crate::model::Alignment;
+    match style.alignment {
+        Alignment::Center => remaining * 0.5,
+        Alignment::End if style.base_direction != Rtl => remaining,
+        Alignment::Start if style.base_direction == Rtl => remaining,
+        _ => Pt::ZERO,
+    }
+}
+
+/// The left-to-right order of one line's fragments — UAX #9 rule L2.
+///
+/// Indexed by *visual* position: `at(0)` is the fragment painted leftmost.
+/// [`VisualOrder::Logical`] is the case worth optimising, because it is every
+/// line of every document with no bidirectional text in it: there the two
+/// orders coincide, so the variant carries no allocation and `at` is an
+/// addition.
+enum VisualOrder {
+    /// Nothing on the line resolved to a right-to-left level, so visual order
+    /// is the line's own `start..end`.
+    Logical { start: usize, len: usize },
+    /// Absolute fragment indices, leftmost first.
+    Reordered(Vec<usize>),
+}
+
+impl VisualOrder {
+    fn len(&self) -> usize {
+        match self {
+            Self::Logical { len, .. } => *len,
+            Self::Reordered(order) => order.len(),
+        }
+    }
+
+    /// The fragment index painted at visual position `pos`.
+    fn at(&self, pos: usize) -> usize {
+        match self {
+            Self::Logical { start, .. } => start + pos,
+            Self::Reordered(order) => order[pos],
+        }
+    }
+}
+
+/// Resolve a line's fragments into the order they are painted in.
+///
+/// Reordering happens here, per line, and not earlier, because UAX #9 says so:
+/// levels are resolved over a paragraph in logical order and reordered per line
+/// *after* the breaks are chosen. `layout::fragment::bidi` has already done the
+/// first half and split every fragment a level boundary fell inside, so this is
+/// a permutation and nothing here has to look at a character.
+///
+/// **A tab segments the line, and the segments keep their logical order.** That
+/// is the deliberate boundary of §17.3.1.37 support under `w:bidi` — see
+/// [`emit_line_commands`]'s note on it. UAX #9 rule L1 resets a class-S
+/// character (which is what a tab is) to the paragraph level, so a tab is never
+/// *inside* a reordered run in the algorithm either; what this does not do is
+/// mirror the stop positions the pen then jumps to.
+fn visual_order(
+    fragments: &[Fragment],
+    line: &super::super::line::FittedLine,
+    base: crate::i18n::bidi::BaseDirection,
+) -> VisualOrder {
+    let logical = VisualOrder::Logical {
+        start: line.start,
+        len: line.end - line.start,
+    };
+    let base = base.level();
+    let levels: Vec<_> = fragments[line.start..line.end]
+        .iter()
+        .map(|f| f.bidi_level(base))
+        .collect();
+    // Rule L2 reverses from the highest level down to the lowest *odd* one, so
+    // a line with no odd level anywhere reorders to itself — including one
+    // holding an even-level run such as Western digits inside Arabic.
+    if levels.iter().all(|l| l.is_ltr()) {
+        return logical;
+    }
+
+    let mut order = Vec::with_capacity(levels.len());
+    let mut segment_start = 0;
+    let flush = |order: &mut Vec<usize>, from: usize, to: usize| {
+        if from < to {
+            let permutation = crate::i18n::bidi::reorder(&levels[from..to]);
+            order.extend(permutation.into_iter().map(|p| line.start + from + p));
+        }
+    };
+    for (offset, fragment) in fragments[line.start..line.end].iter().enumerate() {
+        if is_tab_like(fragment) {
+            flush(&mut order, segment_start, offset);
+            order.push(line.start + offset);
+            segment_start = offset + 1;
+        }
+    }
+    flush(&mut order, segment_start, levels.len());
+    VisualOrder::Reordered(order)
+}
+
+/// §17.3.1.13: whether the gap after the fragment at visual position `pos`
+/// grows when the line is justified.
+///
+/// "After" is *visual*, not logical: the space a `both`-justified line stretches
+/// is the one the reader sees between two words, and in a right-to-left line
+/// that is the gap to the left of the fragment that owns the trailing space.
+fn stretchable_gap_after(fragments: &[Fragment], order: &VisualOrder, pos: usize) -> bool {
+    let Fragment::Text { text, .. } = &fragments[order.at(pos)] else {
         return false;
     };
     text.ends_with(' ')
-        && fragments[frag_idx + 1..line_end]
-            .iter()
-            .any(|fragment| !matches!(fragment, Fragment::Bookmark { .. }))
+        && (pos + 1..order.len())
+            .any(|p| !matches!(fragments[order.at(p)], Fragment::Bookmark { .. }))
 }
 
 fn line_has_justification_tab(fragments: &[Fragment], line_start: usize, line_end: usize) -> bool {
@@ -179,25 +338,29 @@ fn visible_line_width(fragments: &[Fragment], line: &super::super::line::FittedL
         .sum()
 }
 
+/// §17.3.1.13 `both`: how much each stretchable gap on this line grows by.
+///
+/// `ends_paragraph` folds together the two reasons a line is not stretched
+/// because nothing follows it — it is the last line, or it ends at an authored
+/// `<w:br/>` — which the spec treats identically and which the caller can
+/// answer more cheaply than this function can.
 fn justification_extra_after(
     fragments: &[Fragment],
-    line: &super::super::line::FittedLine,
-    line_idx: usize,
-    line_count: usize,
+    order: &VisualOrder,
+    ends_paragraph: bool,
     alignment: crate::model::Alignment,
     line_has_tabs: bool,
     remaining: Pt,
 ) -> Pt {
     if alignment != crate::model::Alignment::Both
-        || line.has_break
-        || line_idx + 1 == line_count
+        || ends_paragraph
         || line_has_tabs
         || remaining <= Pt::ZERO
     {
         return Pt::ZERO;
     }
-    let gaps = (line.start..line.end)
-        .filter(|&idx| stretchable_gap_after(fragments, idx, line.end))
+    let gaps = (0..order.len())
+        .filter(|&pos| stretchable_gap_after(fragments, order, pos))
         .count();
     if gaps == 0 {
         Pt::ZERO
@@ -235,11 +398,10 @@ fn distribution_unit_count(fragment: &Fragment, terminal: bool) -> usize {
 /// zero gaps by construction, which is what stops
 /// [`distribution_extra_per_gap`] dividing by zero rather than a guard bolted
 /// on afterwards.
-fn distribution_gap_count_after(fragments: &[Fragment], frag_idx: usize, line_end: usize) -> usize {
-    let has_following_unit = fragments[frag_idx + 1..line_end]
-        .iter()
-        .any(|fragment| distribution_unit_count(fragment, false) > 0);
-    let units = distribution_unit_count(&fragments[frag_idx], !has_following_unit);
+fn distribution_gap_count_after(fragments: &[Fragment], order: &VisualOrder, pos: usize) -> usize {
+    let has_following_unit =
+        (pos + 1..order.len()).any(|p| distribution_unit_count(&fragments[order.at(p)], false) > 0);
+    let units = distribution_unit_count(&fragments[order.at(pos)], !has_following_unit);
     if has_following_unit {
         units
     } else {
@@ -260,7 +422,7 @@ fn distribution_gap_count_after(fragments: &[Fragment], frag_idx: usize, line_en
 /// it is authored, and is added to this value in the emitted command.
 fn distribution_extra_per_gap(
     fragments: &[Fragment],
-    line: &super::super::line::FittedLine,
+    order: &VisualOrder,
     alignment: crate::model::Alignment,
     line_has_tabs: bool,
     remaining: Pt,
@@ -268,8 +430,8 @@ fn distribution_extra_per_gap(
     if alignment != crate::model::Alignment::Distribute || line_has_tabs || remaining <= Pt::ZERO {
         return Pt::ZERO;
     }
-    let gaps = (line.start..line.end)
-        .map(|idx| distribution_gap_count_after(fragments, idx, line.end))
+    let gaps = (0..order.len())
+        .map(|pos| distribution_gap_count_after(fragments, order, pos))
         .sum::<usize>();
     if gaps == 0 {
         Pt::ZERO
@@ -349,11 +511,7 @@ pub(super) fn emit_line_commands(
         // §17.4.58: per-line float left indent.
         let float_offset = lp.float_left;
 
-        let indent = if line_idx == 0 {
-            style.indent_left + style.indent_first_line + dc_offset + float_offset
-        } else {
-            style.indent_left + dc_offset + float_offset
-        };
+        let indent = physical_left_inset(style, line_idx == 0) + dc_offset + float_offset;
 
         let natural_height = if line.height > Pt::ZERO {
             line.height
@@ -388,29 +546,24 @@ pub(super) fn emit_line_commands(
         let align_offset = if line_has_tab_placement {
             Pt::ZERO
         } else {
-            match style.alignment {
-                crate::model::Alignment::Center => remaining * 0.5,
-                crate::model::Alignment::End => remaining,
-                crate::model::Alignment::Both
-                    if !line.has_break && line_idx < line_placements.len() - 1 =>
-                {
-                    Pt::ZERO
-                }
-                _ => Pt::ZERO,
-            }
+            align_offset(style, remaining)
         };
+        // UAX #9 rule L2, per line — see [`visual_order`]. Everything below
+        // that walks the line walks it in this order, which is what makes the
+        // reorder carry run shading, run borders, underlines and hyperlink
+        // rects with it: each is positioned from the same running pen.
+        let order = visual_order(fragments, line, style.base_direction);
         let extra_per_gap = justification_extra_after(
             fragments,
-            line,
-            line_idx,
-            line_placements.len(),
+            &order,
+            line.has_break || line_idx + 1 == line_placements.len(),
             style.alignment,
             line_has_justification_tab(fragments, line.start, line.end),
             remaining,
         );
         let distribution_extra = distribution_extra_per_gap(
             fragments,
-            line,
+            &order,
             style.alignment,
             line_has_justification_tab(fragments, line.start, line.end),
             remaining,
@@ -425,7 +578,9 @@ pub(super) fn emit_line_commands(
 
         // Emit text commands for this line
         let mut x = x_start;
-        for (frag_idx, frag) in (line.start..line.end).zip(&fragments[line.start..line.end]) {
+        for pos in 0..order.len() {
+            let frag_idx = order.at(pos);
+            let frag = &fragments[frag_idx];
             match frag {
                 Fragment::Text {
                     text,
@@ -438,15 +593,16 @@ pub(super) fn emit_line_commands(
                     hyperlink_url,
                     baseline_offset,
                     text_offset,
+                    shaped,
                     ..
                 } => {
-                    let extra_after = if stretchable_gap_after(fragments, frag_idx, line.end) {
+                    let extra_after = if stretchable_gap_after(fragments, &order, pos) {
                         extra_per_gap
                     } else {
                         Pt::ZERO
                     };
                     let distributed_width = distribution_extra
-                        * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
+                        * distribution_gap_count_after(fragments, &order, pos) as f32;
                     let rendered_width = *width + extra_after + distributed_width;
 
                     // §17.3.2.32: render run-level shading behind text.
@@ -522,6 +678,7 @@ pub(super) fn emit_line_commands(
                         italic: font.italic,
                         color: *color,
                         text_scale: font.text_scale,
+                        shaped: *shaped,
                     });
 
                     if let Some(link) = hyperlink_url {
@@ -587,7 +744,7 @@ pub(super) fn emit_line_commands(
                     }
                     x += size.width
                         + distribution_extra
-                            * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
+                            * distribution_gap_count_after(fragments, &order, pos) as f32;
                 }
                 Fragment::Emoji {
                     text,
@@ -620,7 +777,7 @@ pub(super) fn emit_line_commands(
                     });
                     x += *advance
                         + distribution_extra
-                            * distribution_gap_count_after(fragments, frag_idx, line.end) as f32;
+                            * distribution_gap_count_after(fragments, &order, pos) as f32;
                 }
                 Fragment::Tab {
                     font: tab_font,
@@ -1185,6 +1342,7 @@ pub(super) fn emit_tab_leader(
     let leader_x = x_end - leader_width;
 
     commands.push(DrawCommand::Text {
+        shaped: None,
         position: PtOffset::new(leader_x.max(x_start), baseline_y),
         text: Rc::from(leader_text.as_str()),
         font_family: leader_font.family,
@@ -1304,9 +1462,12 @@ mod tests {
         use crate::render::layout::fragment::{FontProps, TextMetrics};
         use std::rc::Rc;
         Fragment::Text {
+            shaped: None,
+            level: crate::i18n::bidi::BidiLevel::LTR,
             text: text.into(),
             break_after: crate::render::layout::fragment::fixture_break_after(text),
             font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
                 bold: Toggle::Absent,
@@ -1456,6 +1617,120 @@ mod tests {
                 "{align:?}"
             );
             assert_eq!(calls.get(), 1, "{align:?} measures the zone once");
+        }
+    }
+
+    // ── visual_order (UAX #9 rule L2) ─────────────────────────────────────
+
+    mod visual {
+        use super::super::{visual_order, VisualOrder};
+        use super::text_fragment;
+        use crate::i18n::bidi::{BaseDirection, BidiLevel};
+        use crate::render::dimension::Pt;
+        use crate::render::layout::fragment::Fragment;
+        use crate::render::layout::line::FittedLine;
+
+        /// A text fragment already carrying a resolved level, as
+        /// `fragment::bidi` would have left it.
+        fn at(level: u8, text: &str) -> Fragment {
+            let mut frag = text_fragment(text, 10.0);
+            if let Fragment::Text { level: l, .. } = &mut frag {
+                *l = BidiLevel::from_number(level);
+            }
+            frag
+        }
+
+        fn line(len: usize) -> FittedLine {
+            FittedLine {
+                start: 0,
+                end: len,
+                width: Pt::ZERO,
+                height: Pt::ZERO,
+                text_height: Pt::ZERO,
+                ascent: Pt::ZERO,
+                has_break: false,
+            }
+        }
+
+        fn order(frags: &[Fragment], base: BaseDirection) -> Vec<usize> {
+            let o = visual_order(frags, &line(frags.len()), base);
+            (0..o.len()).map(|p| o.at(p)).collect()
+        }
+
+        /// The case that must stay free: no right-to-left level anywhere, so
+        /// no permutation is computed and none is stored.
+        #[test]
+        fn a_line_with_no_rtl_level_is_not_reordered_and_allocates_nothing() {
+            let frags = [at(0, "one "), at(0, "two "), at(0, "three")];
+            let resolved = visual_order(&frags, &line(3), BaseDirection::Ltr);
+            assert!(
+                matches!(resolved, VisualOrder::Logical { .. }),
+                "an all-LTR line must take the no-allocation path",
+            );
+            assert_eq!(order(&frags, BaseDirection::Ltr), [0, 1, 2]);
+        }
+
+        /// An even level is left-to-right however high it is — Western digits
+        /// inside Arabic sit at level 2 and must not be reversed.
+        #[test]
+        fn an_even_level_line_is_not_reordered_either() {
+            let frags = [at(0, "a "), at(2, "12"), at(0, " b")];
+            assert!(matches!(
+                visual_order(&frags, &line(3), BaseDirection::Ltr),
+                VisualOrder::Logical { .. }
+            ));
+        }
+
+        #[test]
+        fn a_right_to_left_line_paints_its_fragments_in_reverse() {
+            let frags = [at(1, "שלום "), at(1, "עולם "), at(1, "כאן")];
+            assert_eq!(order(&frags, BaseDirection::Rtl), [2, 1, 0]);
+        }
+
+        /// Rule L2 is a sort, not a reversal: an embedded left-to-right run
+        /// moves as a block while keeping its own words in reading order.
+        #[test]
+        fn an_embedded_run_moves_as_a_block_and_keeps_its_own_order() {
+            //  logical: he0 he1 [en2 en3] he4
+            let frags = [at(1, "א"), at(1, "ב"), at(2, "up"), at(2, "to"), at(1, "ג")];
+            assert_eq!(order(&frags, BaseDirection::Rtl), [4, 2, 3, 1, 0]);
+        }
+
+        /// §17.3.1.37 under `w:bidi`, decided in the plan and enforced here:
+        /// a tab splits the line into segments that each reorder on their own,
+        /// and the segments themselves stay in logical order because the tab
+        /// geometry they land in has not been mirrored.
+        #[test]
+        fn a_tab_segments_the_line_and_the_segments_keep_their_order() {
+            let tab = Fragment::Tab {
+                line_height: Pt::new(12.0),
+                font: match &text_fragment("x", 1.0) {
+                    Fragment::Text { font, .. } => font.clone(),
+                    _ => unreachable!(),
+                },
+                color: crate::render::resolve::color::RgbColor::BLACK,
+                fitting_width: None,
+            };
+            let frags = [at(1, "א"), at(1, "ב"), tab, at(1, "ג"), at(1, "ד")];
+            assert_eq!(
+                order(&frags, BaseDirection::Rtl),
+                [1, 0, 2, 4, 3],
+                "each side of the tab reverses; the tab and the sides' order do not",
+            );
+        }
+
+        #[test]
+        fn reordering_is_always_a_permutation_of_the_line() {
+            for frags in [
+                vec![at(1, "א"), at(0, "a"), at(1, "ב")],
+                vec![at(1, "א")],
+                vec![at(2, "ab"), at(1, "א"), at(3, "ג"), at(1, "ב")],
+            ] {
+                let mut seen = order(&frags, BaseDirection::Rtl);
+                let len = seen.len();
+                seen.sort_unstable();
+                assert_eq!(seen, (0..len).collect::<Vec<_>>());
+            }
         }
     }
 }

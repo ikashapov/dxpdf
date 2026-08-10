@@ -13,6 +13,16 @@
 //!    glyph the runtime might shape into is preserved.
 //! 2. Codepoints are the source of truth in DOCX text — independent of the
 //!    cmap of the specific font that happens to render them.
+//!
+//! Point 1 stopped being a nicety with issue #131. An Arabic run is now
+//! *painted* from GSUB output — its joined forms are reachable only through
+//! `init`/`medi`/`fina` lookups, never from the cmap — so a subsetter that
+//! pruned layout closure would leave the run's every glyph as `.notdef`.
+//! `fontcull` performs that closure unless `SUBSET_FLAGS_NO_LAYOUT_CLOSURE` is
+//! set, and nothing here sets it. The painter shapes against whatever bytes
+//! the registry holds at paint time — i.e. the subsetted ones — rather than
+//! replaying glyph ids recorded before this pass ran, so the two cannot
+//! disagree about glyph numbering either.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -122,6 +132,7 @@ mod tests {
     fn page_with_text(text: &str, family: &str, font_size: Pt, bold: Toggle) -> LayoutedPage {
         LayoutedPage {
             commands: vec![DrawCommand::Text {
+                shaped: None,
                 position: PtOffset::new(Pt::new(72.0), Pt::new(100.0)),
                 text: Rc::from(text),
                 font_family: Rc::from(family),

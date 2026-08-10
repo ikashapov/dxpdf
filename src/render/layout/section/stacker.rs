@@ -472,9 +472,12 @@ mod tests {
     fn text_fragment() -> crate::render::layout::fragment::Fragment {
         use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
         Fragment::Text {
+            shaped: None,
+            level: crate::i18n::bidi::BidiLevel::LTR,
             text: Rc::from("word"),
             break_after: crate::render::layout::fragment::fixture_break_after("word"),
             font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
                 bold: Toggle::Absent,

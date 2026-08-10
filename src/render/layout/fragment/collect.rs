@@ -18,6 +18,7 @@ use super::{
     LinkTarget, TextMetrics, SUBSCRIPT_HEIGHT_OFFSET_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
     SUPERSCRIPT_FONT_SIZE_RATIO,
 };
+use crate::i18n::bidi::BidiLevel;
 use crate::render::fonts::Toggle;
 
 /// §17.11.12: a footnote reference recorded while walking a paragraph's inlines.
@@ -375,6 +376,7 @@ fn emit_field_substitution<F>(
         ),
         _ => (
             FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from(default_family),
                 size: auto_fit.scale_font(default_size),
                 bold: Toggle::Absent,
@@ -421,6 +423,7 @@ where
     F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
 {
     let font = FontProps {
+        rtl: crate::render::fonts::Toggle::Absent,
         family: Rc::from(default_family),
         size: default_size,
         bold: Toggle::Absent,
@@ -433,6 +436,8 @@ where
     };
     let (w, m) = measure_text(&text, &font);
     Fragment::Text {
+        shaped: None,
+        level: BidiLevel::LTR,
         text,
         font: Rc::new(font),
         color: default_color,
@@ -933,6 +938,7 @@ where
                 }
                 Inline::Symbol(sym) => {
                     let font = FontProps {
+                        rtl: crate::render::fonts::Toggle::Absent,
                         family: Rc::from(sym.font.as_str()),
                         size: default_size,
                         bold: Toggle::Absent,
@@ -947,6 +953,8 @@ where
                     let text = ch.to_string();
                     let (w, m) = measure_text(&text, &font);
                     fragments.push(Fragment::Text {
+                        shaped: None,
+                        level: BidiLevel::LTR,
                         text: Rc::from(text.as_str()),
                         font: Rc::new(font),
                         color: RgbColor::BLACK,
@@ -982,6 +990,7 @@ where
                     // §17.11.12: footnote reference uses superscript sizing.
                     let ref_size = default_size * super::SUPERSCRIPT_FONT_SIZE_RATIO;
                     let ref_font = FontProps {
+                        rtl: crate::render::fonts::Toggle::Absent,
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
                         bold: Toggle::Absent,
@@ -996,6 +1005,8 @@ where
                     // Raise the mark clear of the baseline (see the constant).
                     let baseline_offset = -(default_size * super::NOTE_REF_BASELINE_OFFSET_RATIO);
                     fragments.push(Fragment::Text {
+                        shaped: None,
+                        level: BidiLevel::LTR,
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),
                         color: default_color,
@@ -1021,6 +1032,7 @@ where
                     let num_text = to_roman_lower(*endnote_counter);
                     let ref_size = default_size * super::SUPERSCRIPT_FONT_SIZE_RATIO;
                     let ref_font = FontProps {
+                        rtl: crate::render::fonts::Toggle::Absent,
                         family: std::rc::Rc::from(default_family),
                         size: ref_size,
                         bold: Toggle::Absent,
@@ -1034,6 +1046,8 @@ where
                     let (w, m) = measure_text(&num_text, &ref_font);
                     let baseline_offset = -(default_size * super::NOTE_REF_BASELINE_OFFSET_RATIO);
                     fragments.push(Fragment::Text {
+                        shaped: None,
+                        level: BidiLevel::LTR,
                         text: Rc::from(num_text.as_str()),
                         font: Rc::new(ref_font),
                         color: default_color,
