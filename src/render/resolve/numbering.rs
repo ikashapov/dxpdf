@@ -136,6 +136,11 @@ pub fn format_list_label(
 ///
 /// `locale` decides only the three language-dependent formats; the rest are
 /// the same in every language, which is why they take it without using it.
+///
+/// Those three used to be spelled here, in English only. They now live whole
+/// in [`super::spellout`], which is also where issue #132's decision is
+/// recorded — why the words are hand-written rather than taken from CLDR, and
+/// what the one crate that would have supplied them cost when it was measured.
 fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
     match fmt {
         // §17.18.59 `decimalHalfWidth` *is* decimal: "half-width Arabic
