@@ -103,6 +103,8 @@ Open engineering units are tracked as GitHub issues, not here — this file goes
 | `russian-numbering.docx` | `russianUpper` list numbering (А, Б, В…) |
 | `numbering-direct-indent.docx` | Direct paragraph `w:ind` overriding the numbering level's indentation (suffix-tab position) |
 | `centered-numbered-heading.docx` | Numbered heading with `jc=center` (suffix tab must not suppress alignment) |
+| `issue-126-minimal.docx` | The reporter's document from issue #126 — a paragraph before an explicit page break. Renders 4 pages, matching the LibreOffice reference attached to that issue |
+| `footer-path-wrap.docx` | A token UAX #14 cannot break (a Windows path) in a footer-table cell far narrower than it. Built by `scripts/make_footer_path_fixture.py`; exercised by `tests/footer_path_wrap.rs` |
 
 `tests/parse_test_files.rs` parses these and validates the resulting `Document`, so anything added here becomes part of the test suite. Add a new fixture when reproducing a bug — a committed fixture is what makes a fix verifiable by anyone.
 
