@@ -12,6 +12,7 @@ pub mod properties;
 pub mod sections;
 pub mod shape_geometry;
 pub mod shape_visuals;
+pub mod spellout;
 pub mod styles;
 
 use std::collections::HashMap;

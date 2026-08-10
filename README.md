@@ -341,7 +341,9 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | Feature | Status |
 |---|---|
 | Bullet, decimal, letter, roman | ✅ |
-| Ordinal, cardinalText, ordinalText | ✅ §17.9.27 spelled out in English; other languages fall back to digits |
+| Ordinal, cardinalText, ordinalText | ✅ §17.9.27 spelled out in English, German, French and Spanish (`Eins`, `Vingt et un`, `Veintiuno`, `Erste`, `1er`, `1.º`); other languages fall back to digits |
+| Non-Latin sequences | ✅ §17.18.59 — Cyrillic, full-width/Devanagari/Thai/ideographic digits, circled and parenthesised decimals, kana (`aiueo`, `iroha`, both widths), hangul (`ganada`, `chosung`), Hebrew/Arabic/Devanagari/Thai alphabets, Chicago footnote symbols, heavenly stems, earthly branches and the sexagenary cycle, Hebrew and abjad numerals. Needs the level's §17.9.3 `w:rPr` to name a font covering the sequence, as Word writes — there is no per-glyph font fallback (see below) |
+| Counting-system formats | ❌ §17.18.59 `chineseCounting`, `japaneseCounting`, `koreanCounting`, `thaiCounting`, `bahtText`, … render as decimal — each spells the number out in its own language rather than substituting digits |
 | Picture bullets | ✅ §17.9.21 |
 | Multi-level lists | ✅ `%1`–`%9` templates, per-level counters and resets, §17.9.8 `isLgl` |
 
@@ -363,8 +365,9 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | Color emoji (ZWJ, modifier, keycap, flag sequences) | ✅ host-resolved color typeface, cross-run cluster reassembly, GSUB-shaped via Skia's HarfBuzz |
 | Complex-script shaping — cursive joining | ✅ §17.3.2.30 a run whose script has positional forms (Unicode `Joining_Type` — Arabic, Syriac, N'Ko, Mongolian, Adlam …) is shaped through Skia's HarfBuzz; everything else keeps the cmap path unchanged |
 | Complex-script shaping — Indic reordering | ❌ needs the spacing unit to become the shaped cluster, not just a new call site |
-| Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator and number-word spelling; no CLDR/ICU, so regional overrides and non-English number words are out of scope |
+| Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator (from CLDR, region-aware — `de-CH` and `de-DE` disagree correctly) and number-word spelling (English, German, French, Spanish; every other language gets digits) |
 | Font subsetting | ✅ codepoint-driven, with shapeability validation |
+| Per-glyph font fallback | ❌ a codepoint the resolved face does not cover is dropped rather than drawn from another face — `ASCII ① ア` in a Latin-only font loses both non-ASCII characters. Emoji are the exception (their own host-resolved pipeline). Documents that name a covering font, as Word writes, are unaffected |
 | Comments, tracked changes | ❌ |
 | DrawingML fills, strokes, outer shadow | ⚠️ solid fills, strokes incl. dash patterns, and outer shadow; gradient and blip fills, blur, glow, reflection and soft edge are not rendered |
 | DrawingML preset geometry | ⚠️ `line` and `rect`; `custGeom` fully evaluated incl. guide formulas |

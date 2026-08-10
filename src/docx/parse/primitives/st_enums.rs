@@ -322,18 +322,122 @@ pub enum StNumberFormat {
     RussianUpper,
     RussianLower,
     None,
-    /// §17.18.59 ST_NumberFormat lists ~60 values (hebrew1, japaneseCounting,
-    /// decimalZero, hex, …); the renderer models only the common
-    /// subset above. This is the **exception to the strict-enum rule**: a large,
-    /// extensible value space where a legal-but-unsupported value must degrade,
-    /// not fail — otherwise one exotic `<w:numFmt>` would fail the *whole*
-    /// document parse (`parse_numbering(..)?` propagates the error). Word itself
-    /// falls back to decimal for formats it can't render.
+
+    // ── Digit substitution ────────────────────────────────────────────────
+    // Positional decimal in another digit set: same arithmetic, ten different
+    // characters. Nothing about the language is involved beyond which ten.
+    /// Full-width (double-byte) Arabic numerals — `１`, `２`, `３`.
+    DecimalFullWidth,
+    /// §17.18.59's second full-width form. Word writes the same ten
+    /// characters as `decimalFullWidth`; the two differ only in which
+    /// East-Asian font Word picks to draw them with, which is not a
+    /// numbering question.
+    DecimalFullWidth2,
+    /// Half-width Arabic numerals — the ASCII digits, i.e. `decimal`.
+    DecimalHalfWidth,
+    /// Devanagari digits — `१`, `२`, `३`.
+    HindiNumbers,
+    /// Thai digits — `๑`, `๒`, `๓`.
+    ThaiNumbers,
+    /// Ideographic digits used *positionally* — `一`, `二`, … `一二` for 12.
+    /// Not `chineseCounting`, which writes 12 as `十二`; that one is spellout
+    /// and stays in [`Other`](Self::Other).
+    IdeographDigital,
+
+    // ── Decorated decimal ─────────────────────────────────────────────────
+    // Ordinary arithmetic plus a wrapper, a pad, or an enclosed-glyph series.
+    /// Decimal padded to two digits — `01`, `02`, … `10`.
+    DecimalZero,
+    /// Upper-case hexadecimal — `1`, … `9`, `A`, `B`.
+    Hex,
+    /// The number between dashes — `-1-`, `-2-`.
+    NumberInDash,
+    /// Enclosed by a full stop — `⒈`, `⒉` (U+2488…, 1–20).
+    DecimalEnclosedFullstop,
+    /// Parenthesised — `⑴`, `⑵` (U+2474…, 1–20).
+    DecimalEnclosedParen,
+    /// Circled — `①`, `②` (U+2460…, 1–20).
+    DecimalEnclosedCircle,
+    /// §17.18.59's Chinese-locale circled form. The same U+2460 series;
+    /// Word distinguishes it by font, not by character.
+    DecimalEnclosedCircleChinese,
+    /// Circled ideographic digits — `㊀`, `㊁` (U+3280…, 1–10).
+    IdeographEnclosedCircle,
+
+    // ── Fixed alphabet ────────────────────────────────────────────────────
+    // A finite ordered list of characters, cycled with repetition exactly as
+    // `lowerLetter` cycles a…z, aa, bb — see `numbering::alphabetic_repeat`.
+    /// Katakana in gojūon (a-i-u-e-o) order, half-width — `ｱ`, `ｲ`, `ｳ`.
+    Aiueo,
+    /// Katakana in gojūon order, full-width — `ア`, `イ`, `ウ`.
+    AiueoFullWidth,
+    /// Katakana in iroha order, half-width — `ｲ`, `ﾛ`, `ﾊ`.
+    Iroha,
+    /// Katakana in iroha order, full-width — `イ`, `ロ`, `ハ`.
+    IrohaFullWidth,
+    /// Hangul syllables in ganada order — `가`, `나`, `다`.
+    Ganada,
+    /// Hangul leading jamo (chosung) — `ㄱ`, `ㄴ`, `ㄷ`.
+    Chosung,
+    /// The Hebrew *alphabet* — `א`, `ב`, `ג`. Distinct from
+    /// [`Hebrew1`](Self::Hebrew1), which is the numeral system.
+    Hebrew2,
+    /// The Arabic alphabet in modern hijāʾī order — `ا`, `ب`, `ت`.
+    ArabicAlpha,
+    /// Devanagari vowels — `अ`, `आ`, `इ`.
+    HindiVowels,
+    /// Devanagari consonants — `क`, `ख`, `ग`.
+    HindiConsonants,
+    /// Thai consonants — `ก`, `ข`, `ฃ`.
+    ThaiLetters,
+    /// The Chicago Manual of Style footnote symbols — `*`, `†`, `‡`, `§`,
+    /// then doubled.
+    Chicago,
+    /// The ten Heavenly Stems — `甲`, `乙`, `丙`.
+    IdeographTraditional,
+    /// The twelve Earthly Branches — `子`, `丑`, `寅`.
+    IdeographZodiac,
+    /// The sexagenary cycle, stem paired with branch — `甲子`, `乙丑`.
+    IdeographZodiacTraditional,
+
+    // ── Closed numeral algorithm ──────────────────────────────────────────
+    // Additive numerals with a fixed value table, the shape `lowerRoman`
+    // already has.
+    /// Hebrew numerals (gematria) — `א`=1, `י`=10, `טו`=15.
+    Hebrew1,
+    /// Arabic abjad numerals — `ا`=1, `ي`=10, `ق`=100.
+    ArabicAbjad,
+
+    /// §17.18.59's remaining values, which this engine renders as decimal.
     ///
-    /// Closing this needs numbering-system and spellout data (CLDR) most of
-    /// these formats depend on — `russianUpper`/`russianLower` are the one
-    /// pair that graduated to real support, in `numbering.rs`. Tracked in
-    /// issue #124.
+    /// This is the **exception to the strict-enum rule**: a large, extensible
+    /// value space where a legal-but-unsupported value must degrade, not fail
+    /// — otherwise one exotic `<w:numFmt>` would fail the *whole* document
+    /// parse (`parse_numbering(..)?` propagates the error). Word itself falls
+    /// back to decimal for formats it can't render.
+    ///
+    /// # What is left here, and why
+    ///
+    /// Issue #132 classified all 63 §17.18.59 values by *what data* rendering
+    /// them needs. The 31 above need none — a digit set, a wrapper, an
+    /// alphabet or a value table, each of which is in the source rather than
+    /// in CLDR. These need language data this engine does not carry:
+    ///
+    /// * **Counting systems** — `japaneseCounting`, `japaneseLegal`,
+    ///   `japaneseDigitalTenThousand`, `chineseCounting`,
+    ///   `chineseCountingThousand`, `chineseLegalSimplified`,
+    ///   `taiwaneseCounting`, `taiwaneseCountingThousand`, `taiwaneseDigital`,
+    ///   `ideographLegalTraditional`, `koreanCounting`, `koreanLegal`,
+    ///   `koreanDigital`, `koreanDigital2`, `vietnameseCounting`,
+    ///   `hindiCounting`, `thaiCounting`. These *look* like digits and are
+    ///   spellout: `chineseCounting` writes 12 as `十二`, twelve read aloud,
+    ///   not two positional digits. Each needs its own language's rules,
+    ///   which is the same data `cardinalText` needs — see
+    ///   `crate::render::resolve::spellout` for why that data is hand-written
+    ///   here and what the alternative cost.
+    /// * **Spellout with a currency** — `bahtText`, `dollarText`.
+    /// * **`custom`** — §17.9.30's picture string. Not a format at all: a
+    ///   template the consumer evaluates, and a separate feature.
     #[serde(other)]
     Other,
 }
@@ -353,6 +457,42 @@ impl From<StNumberFormat> for NumberFormat {
             StNumberFormat::RussianUpper => Self::RussianUpper,
             StNumberFormat::RussianLower => Self::RussianLower,
             StNumberFormat::None => Self::None,
+
+            StNumberFormat::DecimalFullWidth => Self::DecimalFullWidth,
+            StNumberFormat::DecimalFullWidth2 => Self::DecimalFullWidth2,
+            StNumberFormat::DecimalHalfWidth => Self::DecimalHalfWidth,
+            StNumberFormat::HindiNumbers => Self::HindiNumbers,
+            StNumberFormat::ThaiNumbers => Self::ThaiNumbers,
+            StNumberFormat::IdeographDigital => Self::IdeographDigital,
+
+            StNumberFormat::DecimalZero => Self::DecimalZero,
+            StNumberFormat::Hex => Self::Hex,
+            StNumberFormat::NumberInDash => Self::NumberInDash,
+            StNumberFormat::DecimalEnclosedFullstop => Self::DecimalEnclosedFullstop,
+            StNumberFormat::DecimalEnclosedParen => Self::DecimalEnclosedParen,
+            StNumberFormat::DecimalEnclosedCircle => Self::DecimalEnclosedCircle,
+            StNumberFormat::DecimalEnclosedCircleChinese => Self::DecimalEnclosedCircleChinese,
+            StNumberFormat::IdeographEnclosedCircle => Self::IdeographEnclosedCircle,
+
+            StNumberFormat::Aiueo => Self::Aiueo,
+            StNumberFormat::AiueoFullWidth => Self::AiueoFullWidth,
+            StNumberFormat::Iroha => Self::Iroha,
+            StNumberFormat::IrohaFullWidth => Self::IrohaFullWidth,
+            StNumberFormat::Ganada => Self::Ganada,
+            StNumberFormat::Chosung => Self::Chosung,
+            StNumberFormat::Hebrew2 => Self::Hebrew2,
+            StNumberFormat::ArabicAlpha => Self::ArabicAlpha,
+            StNumberFormat::HindiVowels => Self::HindiVowels,
+            StNumberFormat::HindiConsonants => Self::HindiConsonants,
+            StNumberFormat::ThaiLetters => Self::ThaiLetters,
+            StNumberFormat::Chicago => Self::Chicago,
+            StNumberFormat::IdeographTraditional => Self::IdeographTraditional,
+            StNumberFormat::IdeographZodiac => Self::IdeographZodiac,
+            StNumberFormat::IdeographZodiacTraditional => Self::IdeographZodiacTraditional,
+
+            StNumberFormat::Hebrew1 => Self::Hebrew1,
+            StNumberFormat::ArabicAbjad => Self::ArabicAbjad,
+
             StNumberFormat::Other => Self::Decimal,
         }
     }
@@ -1102,11 +1242,62 @@ mod tests {
             NumberFormat::RussianUpper
         );
     }
+
+    /// The §17.18.59 values issue #132 closed: each parses to its own variant
+    /// and reaches the model as itself, rather than collapsing to decimal.
+    /// One per classification group, plus the two spellings whose camelCase
+    /// mapping is not obvious (`hebrew1`, `decimalFullWidth2`).
+    #[test]
+    fn number_format_sequence_values_parse_to_their_own_variants() {
+        for (v, want) in [
+            ("decimalFullWidth", StNumberFormat::DecimalFullWidth),
+            ("decimalFullWidth2", StNumberFormat::DecimalFullWidth2),
+            ("decimalHalfWidth", StNumberFormat::DecimalHalfWidth),
+            ("thaiNumbers", StNumberFormat::ThaiNumbers),
+            ("decimalZero", StNumberFormat::DecimalZero),
+            ("hex", StNumberFormat::Hex),
+            ("numberInDash", StNumberFormat::NumberInDash),
+            (
+                "decimalEnclosedCircle",
+                StNumberFormat::DecimalEnclosedCircle,
+            ),
+            ("aiueoFullWidth", StNumberFormat::AiueoFullWidth),
+            ("iroha", StNumberFormat::Iroha),
+            ("chosung", StNumberFormat::Chosung),
+            ("chicago", StNumberFormat::Chicago),
+            (
+                "ideographZodiacTraditional",
+                StNumberFormat::IdeographZodiacTraditional,
+            ),
+            ("hebrew1", StNumberFormat::Hebrew1),
+            ("hebrew2", StNumberFormat::Hebrew2),
+            ("arabicAbjad", StNumberFormat::ArabicAbjad),
+        ] {
+            assert_eq!(de::<StNumberFormat>(v).unwrap(), want, "{v:?}");
+        }
+        assert_eq!(
+            NumberFormat::from(StNumberFormat::Hebrew1),
+            NumberFormat::Hebrew1,
+            "and it reaches the model as itself, not as decimal",
+        );
+    }
+
     #[test]
     fn number_format_unsupported_legal_values_degrade_not_fail() {
-        // §17.18.59 has ~60 legal values; unsupported ones must parse (→ Other)
-        // and convert to Decimal rather than failing the whole document parse.
-        for v in ["hex", "hebrew1", "japaneseCounting", "decimalZero"] {
+        // §17.18.59's remaining values must parse (→ Other) and convert to
+        // Decimal rather than failing the whole document parse. All of these
+        // are spellout — a counting system, a currency, or §17.9.30's picture
+        // string — which is what keeps them on this side of the boundary; see
+        // `StNumberFormat::Other`.
+        for v in [
+            "japaneseCounting",
+            "chineseCountingThousand",
+            "koreanDigital2",
+            "vietnameseCounting",
+            "bahtText",
+            "dollarText",
+            "custom",
+        ] {
             assert_eq!(
                 de::<StNumberFormat>(v).unwrap(),
                 StNumberFormat::Other,

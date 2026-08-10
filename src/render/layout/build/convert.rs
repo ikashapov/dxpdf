@@ -129,9 +129,9 @@ pub(super) fn resolve_paragraph_defaults(
 /// differently, this cascade is the one place to change.
 ///
 /// Returns both the coarse [`Locale`](crate::render::resolve::locale::Locale)
-/// bucket (still primary-subtag-only — it also answers
-/// [`spells_numbers`](crate::render::resolve::locale::Locale::spells_numbers),
-/// a question region doesn't change) and the §17.18.85 decimal separator
+/// bucket (still primary-subtag-only — it also picks which language's number
+/// words a §17.9.27 label is spelled in, a question region doesn't change)
+/// and the §17.18.85 decimal separator
 /// itself (issue #128), resolved from the *same* tag rather than derived from
 /// the bucket: a bucket built from the primary subtag alone cannot tell
 /// `de-DE` from `de-CH`, which is exactly the distinction the separator
