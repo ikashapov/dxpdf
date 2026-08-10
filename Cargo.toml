@@ -17,10 +17,30 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 bitflags = "2"
-quick-xml = { version = "0.39", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
-skia-safe = { version = "0.93", features = ["embed-freetype", "textlayout"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# 0.93 -> 0.99 is **Skia m145 -> m150**, five upstream milestones, so it was
+# treated as a rendering change rather than a version bump. What that audit
+# found, recorded because the next bump should start from it:
+#
+# * No API break. All 29 files that touch `skia_safe` compiled untouched.
+# * One behaviour change, in shaping: the keycap sequence `1<VS16><U+20E3>`
+#   now comes back as two glyphs (the composed keycap plus a zero-advance
+#   blank) where m145 returned one. Same advance, same rasterized image — see
+#   `render::shape`'s `modifier_and_keycap_sequences_ligate`, whose assertion
+#   moved from glyph count to cell width because of it.
+# * **A pixel-diff is a weak instrument for this dependency**, which is worth
+#   knowing before trusting one: output is vector, so *poppler* rasterizes at
+#   diff time, not Skia. Milestone changes to Skia's rasterizer cannot show up.
+#   0/566 corpus pages differed — true, and not the whole story.
+# * The complementary check is PDF bytes, and they did move: 40 of 42 corpus
+#   documents got **smaller** (none grew), corpus total 26,955,053 ->
+#   26,944,930, -0.038%. Skia's PDF backend emits slightly tighter streams.
+# * No performance regression (hyperfine, 50 runs, 10 warmup, median):
+#   sample-4 189.0 -> 170.7 ms, sample1 56.2 -> 52.9 ms, sample4 424.1 ->
+#   418.6 ms. The binary also shrank 93,536 bytes.
+skia-safe = { version = "0.99", features = ["embed-freetype", "textlayout"] }
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
@@ -30,7 +50,7 @@ clap = { version = "4", features = ["derive"] }
 # Without it, maturin emits CPython-version-locked wheels (`cp311`, `cp312`),
 # forcing pip to fall back to source-build sdist on any unmatched Python —
 # which then fails on hosts missing the freetype/fontconfig dev headers.
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py38"], optional = true }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py38"], optional = true }
 fontcull = { version = "2", optional = true }
 # General OpenType libraries (fontations, republished under these names) — not
 # `fontcull` itself, which stays behind `subset-fonts` below. Baking a variable
@@ -44,6 +64,13 @@ fontcull-skrifa = "0.39"
 fontcull-write-fonts = "0.44"
 fontcull-read-fonts = "0.38"
 fontcull-font-types = "0.10"
+# **Pinned to whatever `fontcull-write-fonts` uses, not to the latest release.**
+# The only thing this crate does with kurbo is build a `BezPath` and hand it to
+# `SimpleGlyph::from_bezpath`, so the two must agree on the *same* `BezPath`
+# type. Bumping this alone to 0.13 compiles kurbo twice and fails with
+# "expected `kurbo::bezpath::BezPath`, found `BezPath`" — measured, not
+# guessed. 0.13 becomes available here when fontcull-write-fonts takes it, and
+# not before.
 kurbo = "0.12"
 unicode-segmentation = "1.13.2"
 unicode-properties = "0.1.4"
@@ -127,8 +154,8 @@ subset-fonts = ["dep:fontcull"]
 
 [dev-dependencies]
 tempfile = "3"
-criterion = { version = "0.5", features = ["html_reports"] }
-lopdf = { version = "0.40", default-features = false }
+criterion = { version = "0.8", features = ["html_reports"] }
+lopdf = { version = "0.44", default-features = false }
 
 [[bench]]
 name = "convert_bench"

@@ -155,7 +155,12 @@ fn whitespace_only_wordprocessingml_text_spans(xml: &[u8]) -> Vec<(usize, usize)
                 }
             }
             Event::Text(text) if text_depth.is_some() => {
-                let content = text.as_ref();
+                // Annotated, not inferred: `BytesText` derefs to something
+                // with more than one `AsRef` impl in scope, so which one this
+                // resolves to depends on what *else* is in the dependency
+                // graph. It compiled bare until an unrelated bump (zip 2 -> 8)
+                // brought another impl into scope and turned it into E0282.
+                let content: &[u8] = text.as_ref();
                 if !content.is_empty() && content.iter().all(is_xml_whitespace_byte) {
                     let end = reader.buffer_position() as usize;
                     let Some(start) = end.checked_sub(content.len()) else {
