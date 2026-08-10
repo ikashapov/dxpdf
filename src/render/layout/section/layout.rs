@@ -1065,6 +1065,43 @@ enum ParagraphSplit {
     MoveWhole,
 }
 
+/// How many of a placement's `total` lines fit in `avail`.
+///
+/// Three things are charged, and which ones apply to which line is the whole
+/// of the rule:
+///
+/// * `space_before` — once, ahead of the first line, and only when this is the
+///   paragraph's first segment (§17.3.1.33).
+/// * each line's own height.
+/// * `trailing_extra` — once, with the **last** line, and only if this
+///   placement carries it.
+///
+/// What is deliberately *not* charged is the paragraph's `space_after`; see
+/// the call site for why (issue #126). `trailing_extra` today is the bottom
+/// border's space, which is drawn and so must genuinely fit.
+fn lines_that_fit(
+    total: usize,
+    line_height: impl Fn(usize) -> Pt,
+    space_before: Pt,
+    trailing_extra: Pt,
+    avail: Pt,
+) -> usize {
+    let mut used = space_before;
+    let mut n_fit = 0;
+    for i in 0..total {
+        let mut needed = used + line_height(i);
+        if i + 1 == total {
+            needed += trailing_extra;
+        }
+        if needed > avail {
+            break;
+        }
+        used += line_height(i);
+        n_fit += 1;
+    }
+    n_fit
+}
+
 /// Decide how a paragraph whose first `n_fit` of `total` lines fit in the
 /// remaining space should break (§17.3.1.14 keepLines is handled by the caller,
 /// which only calls this for splittable paragraphs).
@@ -1242,43 +1279,47 @@ fn emit_split_paragraph<'doc>(
         // but the branch this feeds trades differently from the two block-move
         // sites that do use the predicate. Here `at_page_top` selects "emit the
         // whole paragraph and let it overflow" over "move it", and the overflow
-        // is bounded and often invisible: `n_fit` charges the paragraph's
-        // trailing `space_after` against the column bottom, so a remainder
-        // whose *text* fits still counts as not fitting. Honouring the short
-        // column there abandons the rest of the column set to avoid overflowing
-        // by whitespace — on `sample-docx-files-sample3.docx`, a 6-line
-        // paragraph split 3/3 across two columns instead moves its second half
-        // to the next page and leaves column 2 empty.
-        //
-        // The real defect is that trailing spacing is charged at a column
-        // bottom where it cannot be seen; fixing that belongs with §17.3.1.33
-        // and would move output for documents that have no section break at
-        // all.
+        // it admits is bounded.
         let at_page_top = state.cursor_y <= state.column_top;
         let avail = (state.bottom - state.cursor_y).max(Pt::ZERO);
-        // §17.3.1.24/§17.3.1.33: space_after and the bottom border space are
-        // only spent once, on the segment carrying the paragraph's last line.
-        let trailing_extra = cont_style.space_after + placed.bottom_border_space();
+        // §17.3.1.24/§17.3.1.33: the bottom border space is spent once, on the
+        // segment carrying the paragraph's last line.
+        //
+        // **`space_after` is deliberately not here** (issue #126). Trailing
+        // spacing is discarded at a fragmentation boundary — it exists to
+        // separate this paragraph from the next one, and at a page or column
+        // bottom there is nothing to separate it from, so requiring it to fit
+        // rejects a line that is perfectly visible. That is the whole of #126:
+        // a 16.85pt line whose bottom cleared the content limit by 6.76pt was
+        // pushed to the next page because the paragraph's own 10pt `w:after`
+        // did not also fit, stranding it there alone. Word and LibreOffice
+        // both keep the line and drop the space.
+        //
+        // The bottom border stays charged, because unlike whitespace it is
+        // drawn: a border that does not fit would be clipped or land in the
+        // margin.
+        //
+        // This only relaxes the *fit* test. The cursor still advances by the
+        // full `space_after` below, so content following on the same page is
+        // pushed down exactly as before, and the inter-paragraph gap is still
+        // charged when deciding whether the *next* paragraph fits — which is
+        // what correctly keeps a following paragraph off a page whose
+        // remaining room is smaller than the gap plus one line.
+        let trailing_extra = placed.bottom_border_space();
 
         // Count how many of this placement's lines fit, charging space_before
         // (first segment only, §17.3.1.33) and the trailing spacing on the last.
-        let mut used = if first_segment {
-            cont_style.space_before
-        } else {
-            Pt::ZERO
-        };
-        let mut n_fit = 0;
-        for i in 0..total {
-            let mut needed = used + placed.line_height(i);
-            if i + 1 == total {
-                needed += trailing_extra;
-            }
-            if needed > avail {
-                break;
-            }
-            used += placed.line_height(i);
-            n_fit += 1;
-        }
+        let n_fit = lines_that_fit(
+            total,
+            |i| placed.line_height(i),
+            if first_segment {
+                cont_style.space_before
+            } else {
+                Pt::ZERO
+            },
+            trailing_extra,
+            avail,
+        );
 
         // §17.3.1.44 widow/orphan, then §17.3.1.11/§17.3.1.44 unbreakable-prefix
         // clamp (drop cap / float-wrapped run kept intact on the first segment).
@@ -1989,7 +2030,21 @@ pub(crate) fn layout_section_with_clearance(
                         } else {
                             let mut para = placed.emit_full();
                             // Column/page overflow: advance column, then page.
-                            if state.cursor_y + para.size.height > state.bottom
+                            //
+                            // Measured **without** the paragraph's trailing
+                            // space (issue #126), for the reason given at the
+                            // `lines_that_fit` call site: `emit_full`'s height
+                            // is `space_before + Σ lines + space_after`, and
+                            // charging that last term here rejects a paragraph
+                            // whose text fits, over whitespace that a page
+                            // bottom discards. The split path had the same
+                            // defect; this is the single-segment twin of it.
+                            //
+                            // `cursor_y` below still advances by the full
+                            // height, so anything following on this page is
+                            // placed exactly as before.
+                            let fit_height = para.size.height - effective_style.space_after;
+                            if state.cursor_y + fit_height > state.bottom
                                 && !state.at_full_height_column_top()
                             {
                                 // `placed` (which borrows `effective_style`) is no
@@ -2428,6 +2483,75 @@ pub(crate) fn layout_section_with_clearance(
 
     // Flush remaining footnotes and push the last page.
     state.finalize(&ctx)
+}
+
+/// Issue #126: what a page bottom charges for, and what it does not.
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    /// Ten 10pt lines, so the arithmetic is readable.
+    fn fit(space_before: f32, trailing: f32, avail: f32) -> usize {
+        lines_that_fit(
+            10,
+            |_| Pt::new(10.0),
+            Pt::new(space_before),
+            Pt::new(trailing),
+            Pt::new(avail),
+        )
+    }
+
+    #[test]
+    fn lines_fill_the_available_space() {
+        assert_eq!(fit(0.0, 0.0, 100.0), 10, "all ten fit exactly");
+        assert_eq!(fit(0.0, 0.0, 99.9), 9, "one short of the tenth");
+        assert_eq!(fit(0.0, 0.0, 0.0), 0);
+    }
+
+    /// §17.3.1.33: charged once, ahead of the first line — so it costs the
+    /// paragraph a line only when it pushes past a boundary.
+    #[test]
+    fn space_before_is_charged_once_at_the_front() {
+        assert_eq!(fit(10.0, 0.0, 100.0), 9, "space_before displaces one line");
+        assert_eq!(fit(10.0, 0.0, 110.0), 10);
+    }
+
+    /// **The defect behind #126.** The paragraph's own trailing space must not
+    /// decide whether its last line is placed — this asserts the rule through
+    /// the parameter that survived: with no `trailing_extra`, a last line that
+    /// fits on its own is kept.
+    ///
+    /// Before the fix `trailing_extra` also carried `space_after`, so on the
+    /// reporter's document a 16.85pt line whose bottom cleared the content
+    /// limit by 6.76pt was rejected for want of 10pt of invisible whitespace,
+    /// and ended up alone on a page of its own.
+    #[test]
+    fn a_last_line_that_fits_is_kept_when_nothing_trails_it() {
+        assert_eq!(fit(0.0, 0.0, 100.0), 10, "exactly enough for ten lines");
+    }
+
+    /// …and a bottom border still reserves its space, because unlike
+    /// whitespace it is drawn. `trailing_extra` is exactly that today.
+    #[test]
+    fn trailing_extra_still_costs_the_last_line() {
+        assert_eq!(fit(0.0, 5.0, 100.0), 9, "the border does not fit with #10");
+        assert_eq!(fit(0.0, 5.0, 105.0), 10, "give it room and #10 returns");
+    }
+
+    /// It is charged against the **last** line only, not every line: nine
+    /// lines plus a border fit in less than ten lines' worth of space.
+    #[test]
+    fn trailing_extra_is_charged_once_not_per_line() {
+        assert_eq!(fit(0.0, 5.0, 95.0), 9, "9 lines + 5pt border = 95");
+    }
+
+    /// A paragraph too tall for the space still reports what fits, so the
+    /// caller can split it rather than loop.
+    #[test]
+    fn a_partial_fit_reports_the_lines_that_fit() {
+        assert_eq!(fit(0.0, 0.0, 55.0), 5);
+        assert_eq!(fit(0.0, 100.0, 55.0), 5, "trailing only affects the last");
+    }
 }
 
 #[cfg(test)]

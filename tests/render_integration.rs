@@ -741,3 +741,174 @@ fn centered_numbered_heading_is_centered() {
          label; got {delta} pt"
     );
 }
+
+// ── issue #126: what a page bottom charges for ──────────────────────────────
+//
+// A paragraph was stranded alone on its own page when it sat just above an
+// explicit page break. Two independent causes, both about vertical space that
+// nothing draws:
+//
+//   1. the paragraph's own `w:after` had to fit for its *last line* to be
+//      placed, so a line whose bottom cleared the content limit was pushed to
+//      the next page for want of invisible whitespace;
+//   2. a paragraph whose only content is `<w:br w:type="page"/>` had no height
+//      at all, so it could never be pushed to the next page and the break
+//      fired a page early.
+//
+// The reporter's own document reproduces both, but its pagination depends on
+// Calibri's metrics — it would pass here and drift on a host without that
+// face. These fixtures use `w:lineRule="exact"`, which takes font metrics out
+// of the arithmetic entirely: every line is exactly the height asked for, on
+// any host, so the page boundary lands in the same place everywhere.
+
+/// A page exactly `content_lines` × 20pt tall inside its margins, so a
+/// document of N such lines fills it precisely.
+///
+/// 20pt lines (`w:line="400" w:lineRule="exact"`), 40pt top and bottom
+/// margins, and a page height chosen by the caller.
+fn exact_line_docx(paragraphs: &str, content_lines: u32) -> Vec<u8> {
+    // page height = margins + N lines, in twips
+    let height = 800 + 800 + content_lines * 400;
+    docx_with_body(&format!(
+        r#"{paragraphs}
+  <w:sectPr>
+    <w:pgSz w:w="12240" w:h="{height}"/>
+    <w:pgMar w:top="800" w:right="800" w:bottom="800" w:left="800"
+             w:header="0" w:footer="0" w:gutter="0"/>
+  </w:sectPr>"#
+    ))
+}
+
+/// One paragraph of `text`, 20pt exact lines, with `after` twips of trailing
+/// space.
+fn exact_para(text: &str, after: u32) -> String {
+    format!(
+        r#"<w:p><w:pPr><w:spacing w:line="400" w:lineRule="exact" w:after="{after}"/></w:pPr>
+             <w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+    )
+}
+
+fn page_count(docx: &[u8]) -> usize {
+    let doc = dxpdf::docx::parse(docx).expect("fixture parses");
+    dxpdf::render::resolve_and_layout(doc).1.len()
+}
+
+/// Which page each paragraph's text landed on, 1-based.
+fn text_pages(docx: &[u8], needle: &str) -> Vec<usize> {
+    use dxpdf::render::layout::draw_command::DrawCommand;
+    let doc = dxpdf::docx::parse(docx).expect("fixture parses");
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
+    pages
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            p.commands
+                .iter()
+                .any(|c| matches!(c, DrawCommand::Text { text, .. } if text.contains(needle)))
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+/// **Cause 1.** Three 20pt lines in a page with room for exactly three, and
+/// the last paragraph carries 20pt of trailing space that cannot fit.
+///
+/// The trailing space is invisible and there is nothing below it to separate
+/// the paragraph from, so the third line stays. Charging it — what this engine
+/// did before #126 — moves that line to a page of its own.
+#[test]
+fn trailing_space_does_not_push_a_fitting_line_to_the_next_page() {
+    let docx = exact_line_docx(
+        &format!(
+            "{}{}{}",
+            exact_para("one", 0),
+            exact_para("two", 0),
+            // 400 twips = 20pt of space_after, a full line's worth, with only
+            // this line's own height left on the page.
+            exact_para("three", 400),
+        ),
+        3,
+    );
+    assert_eq!(
+        text_pages(&docx, "three"),
+        vec![1],
+        "stranded onto its own page"
+    );
+    assert_eq!(page_count(&docx), 1);
+}
+
+/// …and the rule is about *invisible* space only: a paragraph that genuinely
+/// needs more room than the page has still moves.
+#[test]
+fn a_line_that_does_not_fit_still_moves_to_the_next_page() {
+    let docx = exact_line_docx(
+        &format!(
+            "{}{}{}{}",
+            exact_para("one", 0),
+            exact_para("two", 0),
+            exact_para("three", 0),
+            exact_para("four", 0),
+        ),
+        3,
+    );
+    assert_eq!(text_pages(&docx, "four"), vec![2]);
+    assert_eq!(page_count(&docx), 2);
+}
+
+/// **Cause 2.** A paragraph whose only content is a page break still occupies
+/// one line, so it is subject to the same fit test as any other paragraph.
+///
+/// Here the page is full, so that line does not fit: the break paragraph moves
+/// to page 2 and its break then sends `after` to page 3 — leaving page 2
+/// carrying nothing but the mark. Word and LibreOffice both produce that blank
+/// page; before #126 this engine gave the paragraph no height, so the break
+/// fired on page 1 and the document came out a page short.
+#[test]
+fn a_break_only_paragraph_occupies_a_line_and_can_be_pushed_off_a_full_page() {
+    let break_para = r#"<w:p><w:pPr><w:spacing w:line="400" w:lineRule="exact" w:after="0"/></w:pPr>
+                          <w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let docx = exact_line_docx(
+        &format!(
+            "{}{}{}{}{}",
+            exact_para("one", 0),
+            exact_para("two", 0),
+            exact_para("three", 0),
+            break_para,
+            exact_para("after", 0),
+        ),
+        3,
+    );
+
+    assert_eq!(
+        text_pages(&docx, "three"),
+        vec![1],
+        "the full page keeps all three of its lines",
+    );
+    assert_eq!(
+        text_pages(&docx, "after"),
+        vec![3],
+        "the break paragraph took page 2, so its break lands `after` on page 3",
+    );
+    assert_eq!(page_count(&docx), 3);
+}
+
+/// The same document with room to spare: the break paragraph's line fits on
+/// page 1, so the break sends `after` to page 2 and no blank page appears.
+/// This is the control for the test above — without it, that one would pass
+/// for a version that simply always emits an extra page.
+#[test]
+fn a_break_only_paragraph_that_fits_does_not_add_a_page() {
+    let break_para = r#"<w:p><w:pPr><w:spacing w:line="400" w:lineRule="exact" w:after="0"/></w:pPr>
+                          <w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let docx = exact_line_docx(
+        &format!(
+            "{}{}{}",
+            exact_para("one", 0),
+            break_para,
+            exact_para("after", 0)
+        ),
+        3,
+    );
+    assert_eq!(text_pages(&docx, "after"), vec![2]);
+    assert_eq!(page_count(&docx), 2);
+}

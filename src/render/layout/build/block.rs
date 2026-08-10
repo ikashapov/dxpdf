@@ -84,12 +84,40 @@ pub(super) fn build_paragraph_block(
     // single empty page-chunk, which `section::layout_section` drops,
     // collapsing the line to zero height.
     //
+    // The test is "carries nothing that draws", not "is empty" (issue #126).
+    // A paragraph whose only content is `<w:br w:type="page"/>` has a
+    // *fragment* — so it slipped past an `is_empty()` check — but still has
+    // no text, and its mark still owns a line. Missing it, the paragraph
+    // became zero-height: it could not be pushed to the next page when its
+    // line did not fit, so the break fired a page early and the blank page
+    // Word and LibreOffice both produce never appeared.
+    //
+    // The rule was pinned against LibreOffice rather than inferred: in #126's
+    // attached render, `FINAL` sits at y=72.23 on its page — exactly where the
+    // first line of page 1 sits — so nothing is above it, the break
+    // paragraph's mark really did occupy the preceding page alone, and the
+    // mark precedes the break. The inter-paragraph gap is charged too:
+    // dropping it renders that document a page short of the reference.
+    //
+    // **Word reference render** — what this is *not* verified against, stated
+    // with its number because it is close. On `ELH_2025-12-18.docx` (local
+    // corpus, a photo report with 20 break-only paragraphs) this rule adds ten
+    // pages, 23 -> 33, and each decision misses by **1.51 pt**: cursor at
+    // 751.52, a 15.44 pt mark line, content bottom 765.45. That is correct
+    // arithmetic under the rule above, but 1.51 pt is inside the vertical
+    // drift #126's reporter measured independently — they saw this engine fit
+    // 27 lines where LibreOffice fits 28, before any break is involved. So
+    // whether that document *should* grow turns on a margin thinner than a
+    // known metrics difference. What would settle it: a Word or LibreOffice
+    // render of a document whose break-only paragraph lands within ~2 pt of
+    // the content bottom.
+    //
     // Table cells use §17.4.66 (trailing-empty-after-table is structural
     // and suppressed) in `build_cell_blocks` — that skip runs before this
     // function, so genuinely structural terminators never reach us.
     // Headers/footers have their own injection in
     // `build_header_footer_content` (§17.10.1) and do not call this.
-    if fragments.is_empty() {
+    if fragments.iter().all(Fragment::is_break_only) {
         let (family, mut size, ..) = resolve_paragraph_defaults(
             p,
             ctx.resolved,
@@ -103,7 +131,16 @@ pub(super) fn build_paragraph_block(
             }
         }
         let line_height = ctx.measurer.default_line_height(&family, size);
-        fragments.push(Fragment::LineBreak { line_height });
+        // **At the front, ahead of any break** — the position is load-bearing.
+        // `split_at_page_breaks` cuts at the break, so `[LineBreak, PageBreak]`
+        // yields `[[LineBreak], []]`: the mark's line is offered to the current
+        // page under the normal fit test (and moves to the next page when it
+        // does not fit, which is what leaves the blank page behind), and the
+        // empty trailing chunk defers the break to the following block.
+        // `[PageBreak, LineBreak]` fires the break first and puts the mark on
+        // the *next* page instead, which renders one page short of both
+        // reference implementations — checked against LibreOffice, not assumed.
+        fragments.insert(0, Fragment::LineBreak { line_height });
     }
 
     // Word suppresses Hyperlink character style (blue/underline) for ToC
@@ -576,6 +613,16 @@ mod tests {
         }
     }
 
+    /// A run whose only content is §17.3.3.1's explicit page break.
+    fn page_break_run() -> model::Inline {
+        model::Inline::TextRun(Box::new(model::TextRun {
+            style_id: None,
+            properties: model::RunProperties::default(),
+            content: vec![model::RunElement::PageBreak],
+            rsids: model::RevisionIds::default(),
+        }))
+    }
+
     fn text_run(s: &str) -> model::Inline {
         model::Inline::TextRun(Box::new(model::TextRun {
             style_id: None,
@@ -641,6 +688,71 @@ mod tests {
             assert!(
                 matches!(fragments.as_slice(), [Fragment::LineBreak { line_height }] if line_height.raw() > 0.0),
                 "exactly one LineBreak with a real height"
+            );
+        });
+    }
+
+    /// Issue #126: a paragraph whose only content is `<w:br w:type="page"/>`
+    /// is empty in every sense that matters — it draws nothing — but it does
+    /// have a fragment, so an `is_empty()` test misses it and the paragraph
+    /// collapses to zero height. Its mark still owns a line.
+    ///
+    /// The injected line goes **before** the break, and that is the assertion
+    /// with teeth: `split_at_page_breaks` cuts here, so this order offers the
+    /// mark's line to the current page and defers the break to the next block.
+    /// Reversed, the break fires first and the document renders one page short
+    /// of Word and LibreOffice.
+    #[test]
+    fn a_break_only_paragraph_gets_a_line_ahead_of_its_break() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut pending = None;
+            let block = build_paragraph_block(
+                &para(vec![page_break_run()]),
+                ctx,
+                state,
+                &mut pending,
+                None,
+                None,
+            )
+            .expect("a break-only paragraph still lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                matches!(
+                    fragments.as_slice(),
+                    [Fragment::LineBreak { line_height }, Fragment::PageBreak { .. }]
+                        if line_height.raw() > 0.0
+                ),
+                "line then break, in that order: {fragments:?}",
+            );
+        });
+    }
+
+    /// …and a paragraph that has real text *plus* a break keeps exactly what
+    /// it had. The text already owns the line; injecting another would add a
+    /// blank one.
+    #[test]
+    fn a_paragraph_with_text_and_a_break_gets_no_injected_line() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let mut pending = None;
+            let block = build_paragraph_block(
+                &para(vec![text_run("hi"), page_break_run()]),
+                ctx,
+                state,
+                &mut pending,
+                None,
+                None,
+            )
+            .expect("lays out");
+            let LayoutBlock::Paragraph { fragments, .. } = block else {
+                panic!("expected a paragraph block");
+            };
+            assert!(
+                !matches!(fragments.first(), Some(Fragment::LineBreak { .. })),
+                "no line injected ahead of real text: {fragments:?}",
             );
         });
     }
