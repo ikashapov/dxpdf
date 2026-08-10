@@ -7,6 +7,7 @@ use crate::model::{
     NumberingLevelDefinition, RunProperties,
 };
 use crate::render::resolve::locale::Locale;
+use crate::render::resolve::spellout;
 
 /// A resolved numbering level — ready for label generation.
 #[derive(Clone, Debug)]
@@ -135,9 +136,18 @@ pub fn format_list_label(
 ///
 /// `locale` decides only the three language-dependent formats; the rest are
 /// the same in every language, which is why they take it without using it.
+///
+/// Those three used to be spelled here, in English only. They now live whole
+/// in [`super::spellout`], which is also where issue #132's decision is
+/// recorded — why the words are hand-written rather than taken from CLDR, and
+/// what the one crate that would have supplied them cost when it was measured.
 fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
     match fmt {
-        NumberFormat::Decimal => n.to_string(),
+        // §17.18.59 `decimalHalfWidth` *is* decimal: "half-width Arabic
+        // numerals" names the ASCII digits, which is what `decimal` already
+        // writes. It is a separate spec value because `decimalFullWidth` is
+        // the one it contrasts with, not because it renders differently.
+        NumberFormat::Decimal | NumberFormat::DecimalHalfWidth => n.to_string(),
         NumberFormat::LowerLetter => to_letter_lower(n),
         NumberFormat::UpperLetter => to_letter_upper(n),
         NumberFormat::LowerRoman => to_roman_lower(n),
@@ -146,14 +156,66 @@ fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
         NumberFormat::RussianLower => to_russian_lower(n),
         NumberFormat::RussianUpper => to_russian_upper(n),
 
+        // ── §17.18.59 digit substitution ──────────────────────────────────
+        // Positional decimal, ten other characters. `decimalFullWidth2` is
+        // Word's second full-width value and writes the same ten as the
+        // first; the pair differs in font selection, not in numbering.
+        NumberFormat::DecimalFullWidth | NumberFormat::DecimalFullWidth2 => {
+            to_digit_set(n, &FULL_WIDTH_DIGITS)
+        }
+        NumberFormat::HindiNumbers => to_digit_set(n, &DEVANAGARI_DIGITS),
+        NumberFormat::ThaiNumbers => to_digit_set(n, &THAI_DIGITS),
+        NumberFormat::IdeographDigital => to_digit_set(n, &IDEOGRAPH_DIGITS),
+
+        // ── §17.18.59 decorated decimal ───────────────────────────────────
+        NumberFormat::DecimalZero => format!("{n:02}"),
+        NumberFormat::Hex => format!("{n:X}"),
+        NumberFormat::NumberInDash => format!("-{n}-"),
+        // `decimalEnclosedCircleChinese` is the same U+2460 series as
+        // `decimalEnclosedCircle`; Word tells them apart by the font it draws
+        // them with, which is not something a counter can carry.
+        NumberFormat::DecimalEnclosedCircle | NumberFormat::DecimalEnclosedCircleChinese => {
+            to_enclosed(n, '\u{2460}', 20)
+        }
+        NumberFormat::DecimalEnclosedParen => to_enclosed(n, '\u{2474}', 20),
+        NumberFormat::DecimalEnclosedFullstop => to_enclosed(n, '\u{2488}', 20),
+        NumberFormat::IdeographEnclosedCircle => to_enclosed(n, '\u{3280}', 10),
+
+        // ── §17.18.59 fixed alphabets ─────────────────────────────────────
+        NumberFormat::Aiueo => from_alphabet(n, &KATAKANA_GOJUON_HALF),
+        NumberFormat::AiueoFullWidth => from_alphabet(n, &KATAKANA_GOJUON),
+        NumberFormat::Iroha => from_alphabet(n, &KATAKANA_IROHA_HALF),
+        NumberFormat::IrohaFullWidth => from_alphabet(n, &KATAKANA_IROHA),
+        NumberFormat::Ganada => from_alphabet(n, &HANGUL_GANADA),
+        NumberFormat::Chosung => from_alphabet(n, &HANGUL_CHOSUNG),
+        NumberFormat::Hebrew2 => from_alphabet(n, &HEBREW_ALPHABET),
+        NumberFormat::ArabicAlpha => from_alphabet(n, &ARABIC_ALPHABET),
+        NumberFormat::HindiVowels => from_alphabet(n, &DEVANAGARI_VOWELS),
+        NumberFormat::HindiConsonants => from_alphabet(n, &DEVANAGARI_CONSONANTS),
+        NumberFormat::ThaiLetters => from_alphabet(n, &THAI_CONSONANTS),
+        NumberFormat::Chicago => from_alphabet(n, &CHICAGO_SYMBOLS),
+        NumberFormat::IdeographTraditional => from_alphabet(n, &HEAVENLY_STEMS),
+        NumberFormat::IdeographZodiac => from_alphabet(n, &EARTHLY_BRANCHES),
+        NumberFormat::IdeographZodiacTraditional => to_sexagenary(n),
+
+        // ── §17.18.59 additive numerals ───────────────────────────────────
+        NumberFormat::Hebrew1 => to_hebrew_numeral(n),
+        NumberFormat::ArabicAbjad => to_additive(n, &ABJAD_NUMERALS),
+
         // §17.9.27: the three formats that are written differently in every
-        // language. This engine spells one of them; for the rest the digits
-        // are the honest answer — see `Locale::spells_numbers`.
-        NumberFormat::Ordinal if locale.spells_numbers() => format_ordinal(n),
-        NumberFormat::CardinalText if locale.spells_numbers() => to_cardinal_text(n),
-        NumberFormat::OrdinalText if locale.spells_numbers() => to_ordinal_text(n),
-        NumberFormat::Ordinal | NumberFormat::CardinalText | NumberFormat::OrdinalText => {
-            n.to_string()
+        // language, delegated whole to `spellout`. A language it cannot spell
+        // answers `None` and gets the digits — not a degrade for its own sake:
+        // writing `1st` onto a Polish list is not an approximation of Polish,
+        // it is English text in a Polish document, and the digits Word itself
+        // falls back to are closer than another language's words.
+        NumberFormat::Ordinal => {
+            spellout::ordinal_numeric(n, locale).unwrap_or_else(|| n.to_string())
+        }
+        NumberFormat::CardinalText => {
+            spellout::cardinal(n, locale).unwrap_or_else(|| n.to_string())
+        }
+        NumberFormat::OrdinalText => {
+            spellout::ordinal_words(n, locale).unwrap_or_else(|| n.to_string())
         }
 
         // §17.18.59: `bullet` renders the level text, `none` renders nothing —
@@ -162,140 +224,6 @@ fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
         // the digit would be wrong if a future caller did reach them.
         NumberFormat::Bullet | NumberFormat::None => String::new(),
     }
-}
-
-/// §17.9.27 `cardinalText`: the number in English words, e.g. `1234` →
-/// "One Thousand Two Hundred Thirty-Four".
-///
-/// US English convention, which is what Word writes: tens and units joined by a
-/// hyphen, scale groups by a space, and **no** "and" before the final group.
-/// Each word capitalised. Unverified against a Word render; recorded here
-/// rather than guessed at each call site.
-///
-/// English-only by design, not yet a gap filled in: a non-English document
-/// gets digits instead (see `Locale::spells_numbers` for why digits are the
-/// honest fallback rather than English words). Real spelling in other
-/// languages needs CLDR data — tracked in issue #124.
-fn to_cardinal_text(n: u32) -> String {
-    const UNITS: [&str; 20] = [
-        "Zero",
-        "One",
-        "Two",
-        "Three",
-        "Four",
-        "Five",
-        "Six",
-        "Seven",
-        "Eight",
-        "Nine",
-        "Ten",
-        "Eleven",
-        "Twelve",
-        "Thirteen",
-        "Fourteen",
-        "Fifteen",
-        "Sixteen",
-        "Seventeen",
-        "Eighteen",
-        "Nineteen",
-    ];
-    const TENS: [&str; 10] = [
-        "", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety",
-    ];
-    /// Groups of a thousand, smallest first. `u32::MAX` needs three.
-    const SCALES: [&str; 4] = ["", "Thousand", "Million", "Billion"];
-
-    /// 1..=999 — never called with 0, so it never emits a stray "Zero".
-    fn under_thousand(n: u32) -> String {
-        match n {
-            0 => String::new(),
-            1..=19 => UNITS[n as usize].to_string(),
-            20..=99 => {
-                let (tens, unit) = (TENS[(n / 10) as usize], n % 10);
-                if unit == 0 {
-                    tens.to_string()
-                } else {
-                    format!("{tens}-{}", UNITS[unit as usize])
-                }
-            }
-            _ => {
-                let (hundreds, rest) = (UNITS[(n / 100) as usize], n % 100);
-                if rest == 0 {
-                    format!("{hundreds} Hundred")
-                } else {
-                    format!("{hundreds} Hundred {}", under_thousand(rest))
-                }
-            }
-        }
-    }
-
-    if n == 0 {
-        return UNITS[0].to_string();
-    }
-
-    // Split into thousand-groups, then emit largest-first.
-    let mut groups = Vec::new();
-    let mut rest = n;
-    while rest > 0 {
-        groups.push(rest % 1000);
-        rest /= 1000;
-    }
-    let mut words = Vec::new();
-    for (i, group) in groups.iter().enumerate().rev() {
-        if *group == 0 {
-            continue;
-        }
-        let scale = SCALES[i];
-        words.push(if scale.is_empty() {
-            under_thousand(*group)
-        } else {
-            format!("{} {scale}", under_thousand(*group))
-        });
-    }
-    words.join(" ")
-}
-
-/// §17.9.27 `ordinalText`: the number as an English ordinal in words, e.g.
-/// `21` → "Twenty-First".
-///
-/// Only the **final word** takes the ordinal form — "One Thousand Two Hundred
-/// Thirty-Four" becomes "…Thirty-Fourth", not "First Thousandth …" — so this
-/// spells the cardinal and rewrites its last word. The separator before that
-/// word (space or hyphen) is preserved exactly.
-fn to_ordinal_text(n: u32) -> String {
-    let cardinal = to_cardinal_text(n);
-    // ASCII throughout, so a byte index from `rfind` is a char boundary.
-    match cardinal.rfind([' ', '-']) {
-        Some(i) => format!("{}{}", &cardinal[..=i], ordinal_word(&cardinal[i + 1..])),
-        None => ordinal_word(&cardinal),
-    }
-}
-
-/// The ordinal form of one English number word.
-///
-/// The irregulars are listed; everything else — "Four", "Six", "Seven", "Ten",
-/// the teens, and the scale words "Hundred"/"Thousand"/"Million"/"Billion" —
-/// takes a plain `th`.
-fn ordinal_word(word: &str) -> String {
-    match word {
-        "One" => "First",
-        "Two" => "Second",
-        "Three" => "Third",
-        "Five" => "Fifth",
-        "Eight" => "Eighth",
-        "Nine" => "Ninth",
-        "Twelve" => "Twelfth",
-        "Twenty" => "Twentieth",
-        "Thirty" => "Thirtieth",
-        "Forty" => "Fortieth",
-        "Fifty" => "Fiftieth",
-        "Sixty" => "Sixtieth",
-        "Seventy" => "Seventieth",
-        "Eighty" => "Eightieth",
-        "Ninety" => "Ninetieth",
-        other => return format!("{other}th"),
-    }
-    .to_string()
 }
 
 /// Alphabetic numbering shared by the letter formats: Word repeats the
@@ -366,17 +294,290 @@ fn to_roman_upper(n: u32) -> String {
     to_roman_lower(n).to_uppercase()
 }
 
-fn format_ordinal(n: u32) -> String {
-    let suffix = match n % 100 {
-        11..=13 => "th",
-        _ => match n % 10 {
-            1 => "st",
-            2 => "nd",
-            3 => "rd",
-            _ => "th",
-        },
-    };
-    format!("{n}{suffix}")
+// ── §17.18.59 sequences that need no language data (issue #132) ─────────────
+//
+// Thirty-one of the spec's values are a digit set, a wrapper, an ordered
+// alphabet or a value table — all of which are *in the source below*, not in
+// CLDR. What separates them from the values still degrading to decimal is
+// stated on `StNumberFormat::Other`: those are spellout in a script that looks
+// like digits (`chineseCounting` writes 12 as 十二, twelve read aloud), and
+// spellout is a language question, which is `spellout.rs`'s.
+//
+// **Word reference render**: this environment has no Word to compare against,
+// so where the spec names a sequence without listing it — which is every one
+// of these — the tables are built from the sequence's own definition (the
+// gojūon order, the Iroha poem, the hijāʾī order, the sexagenary cycle) rather
+// than from an observed Word render. Each table below says which definition it
+// is. What would overturn one: a Word render of a list using that `w:numFmt`.
+//
+// **A label is only as visible as its font.** Producing `①` or `ア` is this
+// module's whole job, but painting it needs a typeface that covers it, and
+// this engine has no per-glyph fallback: a codepoint the resolved face lacks
+// is dropped, not substituted. That is general — a body run of `ASCII ① ア` in
+// the spec fallback face loses both non-ASCII characters the same way — so it
+// is not a numbering defect and is not fixed here (issue #139). It surfaces
+// for these formats because they are the first to emit anything outside a
+// Latin face's coverage on their own.
+//
+// It is also not the common case: §17.9.3 gives every level its own
+// `<w:rPr>`, and Word writes a covering font into it when it writes one of
+// these formats. Supplying that font is enough today — a level whose `rPr`
+// names one renders `① ② ③`, `ア イ ウ`, `甲子 乙丑` correctly, verified by
+// rendering exactly that. What is missing is only the fallback for a document
+// that names *no* covering font, which is a font-resolution question rather
+// than a numbering one.
+
+/// Positional decimal in another set of ten digits.
+fn to_digit_set(n: u32, digits: &[char; 10]) -> String {
+    // `n.to_string()` is ASCII, so a byte is a digit.
+    n.to_string()
+        .bytes()
+        .map(|b| digits[usize::from(b - b'0')])
+        .collect()
+}
+
+const FULL_WIDTH_DIGITS: [char; 10] = ['０', '１', '２', '３', '４', '５', '６', '７', '８', '９'];
+const DEVANAGARI_DIGITS: [char; 10] = ['०', '१', '२', '३', '४', '५', '६', '७', '८', '९'];
+const THAI_DIGITS: [char; 10] = ['๐', '๑', '๒', '๓', '๔', '๕', '๖', '๗', '๘', '๙'];
+/// Ideographic digits used *positionally*: 12 is 一二, not 十二.
+const IDEOGRAPH_DIGITS: [char; 10] = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+
+/// One character from a contiguous Unicode series of enclosed numbers —
+/// `first` is the glyph for 1, `len` how many the series has.
+///
+/// **Every such series runs out**: circled digits stop at ⑳, circled
+/// ideographs at ㊉. §17.18.59 does not say what a 21st item renders as, and
+/// the choice is made once here rather than per format: **plain decimal**. It
+/// is what Word falls back to for a format it cannot render at all, it is
+/// unambiguously a number, and the alternatives — wrapping back to ① (two
+/// items with the same label) or composing ②⓪ (not a number in any reading) —
+/// are both worse than a digit.
+fn to_enclosed(n: u32, first: char, len: u32) -> String {
+    if n == 0 || n > len {
+        return n.to_string();
+    }
+    char::from_u32(first as u32 + n - 1).map_or_else(|| n.to_string(), String::from)
+}
+
+/// The repeating scheme of [`alphabetic_repeat`], for alphabets whose items
+/// are not single `char`s — Devanagari's अं is a letter plus a combining mark.
+fn from_alphabet(n: u32, alphabet: &[&str]) -> String {
+    if n == 0 || alphabet.is_empty() {
+        return String::new();
+    }
+    let len = alphabet.len() as u32;
+    let idx = ((n - 1) % len) as usize;
+    let count = ((n - 1) / len) as usize + 1;
+    alphabet[idx].repeat(count)
+}
+
+/// Katakana in gojūon (a-i-u-e-o) order — the 46 base syllables, no voiced
+/// forms and no small kana, which is the order a Japanese dictionary uses.
+///
+/// ECMA-376 calls `aiueo` "hiragana"; Word writes katakana, and the
+/// half-/full-width pairing the two spec values exist to distinguish only
+/// exists for katakana — hiragana has no half-width form. Katakana is
+/// therefore the reading taken here.
+#[rustfmt::skip]
+const KATAKANA_GOJUON: [&str; 46] = [
+    "ア", "イ", "ウ", "エ", "オ", "カ", "キ", "ク", "ケ", "コ",
+    "サ", "シ", "ス", "セ", "ソ", "タ", "チ", "ツ", "テ", "ト",
+    "ナ", "ニ", "ヌ", "ネ", "ノ", "ハ", "ヒ", "フ", "ヘ", "ホ",
+    "マ", "ミ", "ム", "メ", "モ", "ヤ", "ユ", "ヨ",
+    "ラ", "リ", "ル", "レ", "ロ", "ワ", "ヲ", "ン",
+];
+
+#[rustfmt::skip]
+const KATAKANA_GOJUON_HALF: [&str; 46] = [
+    "ｱ", "ｲ", "ｳ", "ｴ", "ｵ", "ｶ", "ｷ", "ｸ", "ｹ", "ｺ",
+    "ｻ", "ｼ", "ｽ", "ｾ", "ｿ", "ﾀ", "ﾁ", "ﾂ", "ﾃ", "ﾄ",
+    "ﾅ", "ﾆ", "ﾇ", "ﾈ", "ﾉ", "ﾊ", "ﾋ", "ﾌ", "ﾍ", "ﾎ",
+    "ﾏ", "ﾐ", "ﾑ", "ﾒ", "ﾓ", "ﾔ", "ﾕ", "ﾖ",
+    "ﾗ", "ﾘ", "ﾙ", "ﾚ", "ﾛ", "ﾜ", "ｦ", "ﾝ",
+];
+
+/// Katakana in the order of the Iroha, the pangram poem that uses each of the
+/// 47 classical syllables once. ン is *not* in it — the poem predates the
+/// syllable — which is why this table is 47 long and the gojūon one 46.
+#[rustfmt::skip]
+const KATAKANA_IROHA: [&str; 47] = [
+    "イ", "ロ", "ハ", "ニ", "ホ", "ヘ", "ト", "チ", "リ", "ヌ",
+    "ル", "ヲ", "ワ", "カ", "ヨ", "タ", "レ", "ソ", "ツ", "ネ",
+    "ナ", "ラ", "ム", "ウ", "ヰ", "ノ", "オ", "ク", "ヤ", "マ",
+    "ケ", "フ", "コ", "エ", "テ", "ア", "サ", "キ", "ユ", "メ",
+    "ミ", "シ", "ヱ", "ヒ", "モ", "セ", "ス",
+];
+
+/// The Iroha half-width, except at positions 25 and 43: ヰ and ヱ are archaic
+/// and Unicode gives them **no** half-width form (U+FF66..U+FF9D has none), so
+/// they stay full-width. A blank or a substitute there would silently change
+/// which item a label names.
+#[rustfmt::skip]
+const KATAKANA_IROHA_HALF: [&str; 47] = [
+    "ｲ", "ﾛ", "ﾊ", "ﾆ", "ﾎ", "ﾍ", "ﾄ", "ﾁ", "ﾘ", "ﾇ",
+    "ﾙ", "ｦ", "ﾜ", "ｶ", "ﾖ", "ﾀ", "ﾚ", "ｿ", "ﾂ", "ﾈ",
+    "ﾅ", "ﾗ", "ﾑ", "ｳ", "ヰ", "ﾉ", "ｵ", "ｸ", "ﾔ", "ﾏ",
+    "ｹ", "ﾌ", "ｺ", "ｴ", "ﾃ", "ｱ", "ｻ", "ｷ", "ﾕ", "ﾒ",
+    "ﾐ", "ｼ", "ヱ", "ﾋ", "ﾓ", "ｾ", "ｽ",
+];
+
+/// Hangul **syllables** in ganada order — each consonant with the vowel ㅏ.
+#[rustfmt::skip]
+const HANGUL_GANADA: [&str; 14] = [
+    "가", "나", "다", "라", "마", "바", "사",
+    "아", "자", "차", "카", "타", "파", "하",
+];
+
+/// Hangul **leading jamo** — the same fourteen consonants, bare. `ganada` and
+/// `chosung` are the two spec values that differ in exactly this.
+#[rustfmt::skip]
+const HANGUL_CHOSUNG: [&str; 14] = [
+    "ㄱ", "ㄴ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅅ",
+    "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ",
+];
+
+/// The 22 Hebrew letters in alphabetical order, final forms excluded — this is
+/// `hebrew2`, the alphabet. `hebrew1` is the numeral system below.
+#[rustfmt::skip]
+const HEBREW_ALPHABET: [&str; 22] = [
+    "א", "ב", "ג", "ד", "ה", "ו", "ז", "ח", "ט", "י", "כ",
+    "ל", "מ", "נ", "ס", "ע", "פ", "צ", "ק", "ר", "ש", "ת",
+];
+
+/// The 28 Arabic letters in modern **hijāʾī** order (ا ب ت ث …), which is the
+/// alphabetical one. The abjadī order is a different sequence and belongs to
+/// `arabicAbjad`, which uses it for its numeral *values* rather than as a
+/// list.
+#[rustfmt::skip]
+const ARABIC_ALPHABET: [&str; 28] = [
+    "ا", "ب", "ت", "ث", "ج", "ح", "خ", "د", "ذ", "ر",
+    "ز", "س", "ش", "ص", "ض", "ط", "ظ", "ع", "غ", "ف",
+    "ق", "ك", "ل", "م", "ن", "ه", "و", "ي",
+];
+
+/// The independent Devanagari vowels, followed by anusvāra and visarga — the
+/// order Hindi teaching material calls the *svar*. The last two are a letter
+/// plus a combining mark, which is why this table is `&str` and not `char`.
+#[rustfmt::skip]
+const DEVANAGARI_VOWELS: [&str; 13] = [
+    "अ", "आ", "इ", "ई", "उ", "ऊ", "ऋ",
+    "ए", "ऐ", "ओ", "औ", "अं", "अः",
+];
+
+/// The 33 Devanagari consonants in varga order, ending with the four
+/// semivowels, three sibilants and ह.
+#[rustfmt::skip]
+const DEVANAGARI_CONSONANTS: [&str; 33] = [
+    "क", "ख", "ग", "घ", "ङ", "च", "छ", "ज", "झ", "ञ", "ट",
+    "ठ", "ड", "ढ", "ण", "त", "थ", "द", "ध", "न", "प", "फ",
+    "ब", "भ", "म", "य", "र", "ल", "व", "श", "ष", "स", "ह",
+];
+
+/// The 44 Thai consonants in alphabetical order, including the two obsolete
+/// letters ฃ and ฅ, which the alphabet still counts.
+#[rustfmt::skip]
+const THAI_CONSONANTS: [&str; 44] = [
+    "ก", "ข", "ฃ", "ค", "ฅ", "ฆ", "ง", "จ", "ฉ", "ช", "ซ",
+    "ฌ", "ญ", "ฎ", "ฏ", "ฐ", "ฑ", "ฒ", "ณ", "ด", "ต", "ถ",
+    "ท", "ธ", "น", "บ", "ป", "ผ", "ฝ", "พ", "ฟ", "ภ", "ม",
+    "ย", "ร", "ล", "ว", "ศ", "ษ", "ส", "ห", "ฬ", "อ", "ฮ",
+];
+
+/// The Chicago Manual of Style footnote sequence. Doubling on overflow is not
+/// this engine's invention — it is the manual's own rule, and it happens to be
+/// exactly [`alphabetic_repeat`]'s scheme: `*`, `†`, `‡`, `§`, `**`, `††`, …
+const CHICAGO_SYMBOLS: [&str; 4] = ["*", "†", "‡", "§"];
+
+/// The ten Heavenly Stems (天干) — `ideographTraditional`.
+#[rustfmt::skip]
+const HEAVENLY_STEMS: [&str; 10] = [
+    "甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸",
+];
+
+/// The twelve Earthly Branches (地支) — `ideographZodiac`.
+#[rustfmt::skip]
+const EARTHLY_BRANCHES: [&str; 12] = [
+    "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥",
+];
+
+/// The sexagenary cycle (干支) — `ideographZodiacTraditional`: stem *paired*
+/// with branch, 甲子, 乙丑, …, 癸亥, repeating every 60.
+///
+/// Not [`from_alphabet`]'s scheme, and the difference is the point: the cycle
+/// does not repeat a symbol on overflow, it advances both wheels
+/// independently, so item 61 is 甲子 again rather than 甲甲子子. Taking both
+/// indices modulo their own lengths gives that for free — 10 and 12 have
+/// lowest common multiple 60.
+fn to_sexagenary(n: u32) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let i = n - 1;
+    let stem = HEAVENLY_STEMS[(i % HEAVENLY_STEMS.len() as u32) as usize];
+    let branch = EARTHLY_BRANCHES[(i % EARTHLY_BRANCHES.len() as u32) as usize];
+    format!("{stem}{branch}")
+}
+
+/// Additive numerals: emit the largest symbol that fits, repeatedly. The shape
+/// [`to_roman_lower`] already has, with the table supplied.
+///
+/// **Bounded at 9999.** These are closed systems — Hebrew's largest symbol is
+/// ת (400) and the abjad's is غ (1000) — and neither has a notation above its
+/// top symbol other than repeating it. Word repeats; so does this, up to the
+/// point where repetition stops carrying information (25 ת's), past which the
+/// decimal is the honest answer rather than a wall of one letter. A list
+/// counter reaching five figures is not a numeral in any of these systems.
+fn to_additive(mut n: u32, table: &[(u32, char)]) -> String {
+    if n == 0 || n > 9_999 {
+        return n.to_string();
+    }
+    let mut s = String::new();
+    for &(value, symbol) in table {
+        while n >= value {
+            s.push(symbol);
+            n -= value;
+        }
+    }
+    s
+}
+
+#[rustfmt::skip]
+const HEBREW_NUMERALS: [(u32, char); 22] = [
+    (400, 'ת'), (300, 'ש'), (200, 'ר'), (100, 'ק'),
+    (90, 'צ'), (80, 'פ'), (70, 'ע'), (60, 'ס'), (50, 'נ'),
+    (40, 'מ'), (30, 'ל'), (20, 'כ'), (10, 'י'),
+    (9, 'ט'), (8, 'ח'), (7, 'ז'), (6, 'ו'), (5, 'ה'),
+    (4, 'ד'), (3, 'ג'), (2, 'ב'), (1, 'א'),
+];
+
+/// Abjad numerals in abjadī order — ا=1 … ي=10, ك=20 … ق=100, ر=200 … غ=1000.
+#[rustfmt::skip]
+const ABJAD_NUMERALS: [(u32, char); 28] = [
+    (1000, 'غ'), (900, 'ظ'), (800, 'ض'), (700, 'ذ'), (600, 'خ'), (500, 'ث'),
+    (400, 'ت'), (300, 'ش'), (200, 'ر'), (100, 'ق'),
+    (90, 'ص'), (80, 'ف'), (70, 'ع'), (60, 'س'), (50, 'ن'),
+    (40, 'م'), (30, 'ل'), (20, 'ك'), (10, 'ي'),
+    (9, 'ط'), (8, 'ح'), (7, 'ز'), (6, 'و'), (5, 'ه'),
+    (4, 'د'), (3, 'ج'), (2, 'ب'), (1, 'ا'),
+];
+
+/// §17.18.59 `hebrew1`: the Hebrew numeral system.
+///
+/// Plain addition, with the one substitution every Hebrew numeral has: 15 and
+/// 16 would spell יה and יו, which are forms of the Tetragrammaton, so they
+/// are written טו (9+6) and טז (9+7) instead. The rule applies to the last two
+/// digits at any magnitude — 115 is קטו, not קיה — which a suffix rewrite
+/// gets exactly right, because greedy addition emits at most one י and it is
+/// always immediately before the units.
+fn to_hebrew_numeral(n: u32) -> String {
+    let s = to_additive(n, &HEBREW_NUMERALS);
+    if let Some(rest) = s.strip_suffix("יה") {
+        format!("{rest}טו")
+    } else if let Some(rest) = s.strip_suffix("יו") {
+        format!("{rest}טז")
+    } else {
+        s
+    }
 }
 
 #[cfg(test)]
@@ -705,76 +906,6 @@ mod tests {
         );
     }
 
-    // ── §17.9.27 number words ────────────────────────────────────────────
-
-    #[test]
-    fn cardinal_text_spells_each_decade_boundary() {
-        for (n, want) in [
-            (0, "Zero"),
-            (1, "One"),
-            (12, "Twelve"),
-            (19, "Nineteen"),
-            (20, "Twenty"),
-            (21, "Twenty-One"),
-            (99, "Ninety-Nine"),
-            (100, "One Hundred"),
-            (101, "One Hundred One"),
-            (115, "One Hundred Fifteen"),
-            (999, "Nine Hundred Ninety-Nine"),
-        ] {
-            assert_eq!(to_cardinal_text(n), want, "{n}");
-        }
-    }
-
-    /// A zero group is skipped rather than spelled: 1,000,007 has no "Thousand"
-    /// in it at all. Getting this wrong yields "One Million Zero Thousand …".
-    #[test]
-    fn cardinal_text_skips_empty_scale_groups() {
-        assert_eq!(to_cardinal_text(1_000), "One Thousand");
-        assert_eq!(to_cardinal_text(1_000_007), "One Million Seven");
-        assert_eq!(
-            to_cardinal_text(1_234_567),
-            "One Million Two Hundred Thirty-Four Thousand Five Hundred Sixty-Seven",
-        );
-    }
-
-    /// The largest counter the type admits, so the scale table cannot run off
-    /// its end.
-    #[test]
-    fn cardinal_text_spells_the_whole_u32_range() {
-        assert_eq!(
-            to_cardinal_text(u32::MAX),
-            "Four Billion Two Hundred Ninety-Four Million Nine Hundred Sixty-Seven \
-             Thousand Two Hundred Ninety-Five",
-        );
-    }
-
-    /// §17.9.27 `ordinalText` changes the **last word only**, and the irregular
-    /// forms are where a naive `+ "th"` breaks.
-    #[test]
-    fn ordinal_text_rewrites_only_the_final_word() {
-        for (n, want) in [
-            (1, "First"),
-            (2, "Second"),
-            (3, "Third"),
-            (4, "Fourth"),
-            (5, "Fifth"),
-            (8, "Eighth"),
-            (9, "Ninth"),
-            (12, "Twelfth"),
-            (13, "Thirteenth"),
-            (20, "Twentieth"),
-            (21, "Twenty-First"),
-            (40, "Fortieth"),
-            (100, "One Hundredth"),
-            (101, "One Hundred First"),
-            (1_000, "One Thousandth"),
-            (1_021, "One Thousand Twenty-First"),
-        ] {
-            assert_eq!(to_ordinal_text(n), want, "{n}");
-        }
-    }
-
     /// §17.18.59: neither `bullet` nor `none` renders the counter. The `_ =>`
     /// arm this replaced printed the digit for both.
     #[test]
@@ -794,6 +925,223 @@ mod tests {
         ] {
             assert_eq!(format_number(3, fmt, Locale::CommaDecimal), "3", "{fmt:?}");
             assert_eq!(format_number(3, fmt, Locale::PointDecimal), "3", "{fmt:?}");
+        }
+    }
+
+    // ── §17.18.59 sequences (issue #132) ─────────────────────────────────
+
+    fn fmt(n: u32, f: NumberFormat) -> String {
+        format_number(n, f, Locale::English)
+    }
+
+    /// Every §17.18.59 value closed by issue #132 — the list the claim "these
+    /// need no language data" is made about, kept next to the test that
+    /// checks it.
+    const SEQUENCE_FORMATS: [NumberFormat; 31] = [
+        NumberFormat::DecimalFullWidth,
+        NumberFormat::DecimalFullWidth2,
+        NumberFormat::DecimalHalfWidth,
+        NumberFormat::HindiNumbers,
+        NumberFormat::ThaiNumbers,
+        NumberFormat::IdeographDigital,
+        NumberFormat::DecimalZero,
+        NumberFormat::Hex,
+        NumberFormat::NumberInDash,
+        NumberFormat::DecimalEnclosedFullstop,
+        NumberFormat::DecimalEnclosedParen,
+        NumberFormat::DecimalEnclosedCircle,
+        NumberFormat::DecimalEnclosedCircleChinese,
+        NumberFormat::IdeographEnclosedCircle,
+        NumberFormat::Aiueo,
+        NumberFormat::AiueoFullWidth,
+        NumberFormat::Iroha,
+        NumberFormat::IrohaFullWidth,
+        NumberFormat::Ganada,
+        NumberFormat::Chosung,
+        NumberFormat::Hebrew2,
+        NumberFormat::ArabicAlpha,
+        NumberFormat::HindiVowels,
+        NumberFormat::HindiConsonants,
+        NumberFormat::ThaiLetters,
+        NumberFormat::Chicago,
+        NumberFormat::IdeographTraditional,
+        NumberFormat::IdeographZodiac,
+        NumberFormat::IdeographZodiacTraditional,
+        NumberFormat::Hebrew1,
+        NumberFormat::ArabicAbjad,
+    ];
+
+    /// The claim issue #132's classification rests on, as a test: not one of
+    /// these formats reads the locale, so none of them needs CLDR.
+    #[test]
+    fn every_sequence_format_renders_the_same_in_every_language() {
+        for f in SEQUENCE_FORMATS {
+            let english = fmt(7, f);
+            assert!(!english.is_empty(), "{f:?} renders nothing for 7");
+            for locale in [
+                Locale::CommaDecimal,
+                Locale::PointDecimal,
+                Locale::Unrecognised,
+            ] {
+                assert_eq!(format_number(7, f, locale), english, "{f:?}/{locale:?}");
+            }
+        }
+    }
+
+    /// Digit substitution is positional — each decimal place is replaced on
+    /// its own, so 12 is two characters and not the word for twelve. That is
+    /// what separates `ideographDigital` (一二) from `chineseCounting` (十二),
+    /// which is still unsupported.
+    #[test]
+    fn digit_substitution_replaces_each_place_independently() {
+        assert_eq!(fmt(12, NumberFormat::DecimalFullWidth), "１２");
+        assert_eq!(fmt(12, NumberFormat::DecimalFullWidth2), "１２");
+        assert_eq!(fmt(12, NumberFormat::DecimalHalfWidth), "12");
+        assert_eq!(fmt(120, NumberFormat::HindiNumbers), "१२०");
+        assert_eq!(fmt(45, NumberFormat::ThaiNumbers), "๔๕");
+        assert_eq!(fmt(12, NumberFormat::IdeographDigital), "一二");
+        assert_eq!(fmt(10, NumberFormat::IdeographDigital), "一〇");
+    }
+
+    #[test]
+    fn decorated_decimals_pad_wrap_and_enclose() {
+        assert_eq!(fmt(1, NumberFormat::DecimalZero), "01");
+        assert_eq!(fmt(9, NumberFormat::DecimalZero), "09");
+        assert_eq!(fmt(10, NumberFormat::DecimalZero), "10");
+        assert_eq!(fmt(100, NumberFormat::DecimalZero), "100");
+
+        assert_eq!(fmt(9, NumberFormat::Hex), "9");
+        assert_eq!(fmt(10, NumberFormat::Hex), "A");
+        assert_eq!(fmt(255, NumberFormat::Hex), "FF");
+
+        assert_eq!(fmt(3, NumberFormat::NumberInDash), "-3-");
+
+        assert_eq!(fmt(1, NumberFormat::DecimalEnclosedCircle), "①");
+        assert_eq!(fmt(20, NumberFormat::DecimalEnclosedCircle), "⑳");
+        assert_eq!(fmt(1, NumberFormat::DecimalEnclosedParen), "⑴");
+        assert_eq!(fmt(20, NumberFormat::DecimalEnclosedParen), "⒇");
+        assert_eq!(fmt(1, NumberFormat::DecimalEnclosedFullstop), "⒈");
+        assert_eq!(fmt(20, NumberFormat::DecimalEnclosedFullstop), "⒛");
+        assert_eq!(fmt(1, NumberFormat::IdeographEnclosedCircle), "㊀");
+        assert_eq!(fmt(10, NumberFormat::IdeographEnclosedCircle), "㊉");
+
+        // The Chinese-locale circled form is the same series.
+        assert_eq!(
+            fmt(7, NumberFormat::DecimalEnclosedCircleChinese),
+            fmt(7, NumberFormat::DecimalEnclosedCircle),
+        );
+    }
+
+    /// The documented choice at the end of every enclosed series: a plain
+    /// decimal, not a wrap-around that would give two items the same label.
+    #[test]
+    fn an_enclosed_series_that_runs_out_falls_back_to_decimal() {
+        for f in [
+            NumberFormat::DecimalEnclosedCircle,
+            NumberFormat::DecimalEnclosedParen,
+            NumberFormat::DecimalEnclosedFullstop,
+        ] {
+            assert_eq!(fmt(21, f), "21", "{f:?}");
+        }
+        assert_eq!(fmt(11, NumberFormat::IdeographEnclosedCircle), "11");
+    }
+
+    /// Fixed alphabets cycle by repetition, exactly as `lowerLetter` does —
+    /// item `len + 1` is the first item doubled.
+    #[test]
+    fn fixed_alphabets_cycle_by_repeating_the_item() {
+        for (f, first, last, len) in [
+            (NumberFormat::Aiueo, "ｱ", "ﾝ", 46),
+            (NumberFormat::AiueoFullWidth, "ア", "ン", 46),
+            (NumberFormat::Iroha, "ｲ", "ｽ", 47),
+            (NumberFormat::IrohaFullWidth, "イ", "ス", 47),
+            (NumberFormat::Ganada, "가", "하", 14),
+            (NumberFormat::Chosung, "ㄱ", "ㅎ", 14),
+            (NumberFormat::Hebrew2, "א", "ת", 22),
+            (NumberFormat::ArabicAlpha, "ا", "ي", 28),
+            (NumberFormat::HindiVowels, "अ", "अः", 13),
+            (NumberFormat::HindiConsonants, "क", "ह", 33),
+            (NumberFormat::ThaiLetters, "ก", "ฮ", 44),
+            (NumberFormat::Chicago, "*", "§", 4),
+            (NumberFormat::IdeographTraditional, "甲", "癸", 10),
+            (NumberFormat::IdeographZodiac, "子", "亥", 12),
+        ] {
+            assert_eq!(fmt(1, f), first, "{f:?} first");
+            assert_eq!(fmt(len, f), last, "{f:?} at {len}");
+            assert_eq!(fmt(len + 1, f), first.repeat(2), "{f:?} overflow");
+        }
+    }
+
+    /// ヰ and ヱ have no half-width form in Unicode, so the half-width Iroha
+    /// keeps them full-width rather than dropping or substituting them — a
+    /// blank there would silently shift every later label.
+    #[test]
+    fn the_half_width_iroha_keeps_its_two_archaic_syllables() {
+        assert_eq!(fmt(25, NumberFormat::Iroha), "ヰ");
+        assert_eq!(fmt(43, NumberFormat::Iroha), "ヱ");
+        assert_eq!(fmt(25, NumberFormat::IrohaFullWidth), "ヰ");
+    }
+
+    /// The sexagenary cycle advances stem and branch independently, so it
+    /// repeats at 61 rather than doubling a symbol.
+    #[test]
+    fn the_sexagenary_cycle_advances_both_wheels() {
+        let f = NumberFormat::IdeographZodiacTraditional;
+        assert_eq!(fmt(1, f), "甲子");
+        assert_eq!(fmt(2, f), "乙丑");
+        assert_eq!(fmt(11, f), "甲戌");
+        assert_eq!(fmt(13, f), "丙子");
+        assert_eq!(fmt(60, f), "癸亥");
+        assert_eq!(fmt(61, f), "甲子", "the cycle repeats, it does not double");
+    }
+
+    /// §17.18.59 `hebrew1`, including the substitution every Hebrew numeral
+    /// makes: 15 and 16 are written 9+6 and 9+7 so they do not spell a form of
+    /// the divine name. The rule follows the last two digits at any magnitude.
+    #[test]
+    fn hebrew_numerals_add_and_avoid_the_divine_name() {
+        for (n, want) in [
+            (1, "א"),
+            (5, "ה"),
+            (6, "ו"),
+            (10, "י"),
+            (15, "טו"),
+            (16, "טז"),
+            (17, "יז"),
+            (26, "כו"),
+            (106, "קו"),
+            (115, "קטו"),
+            (116, "קטז"),
+            (400, "ת"),
+            (999, "תתקצט"),
+        ] {
+            assert_eq!(fmt(n, NumberFormat::Hebrew1), want, "{n}");
+        }
+    }
+
+    #[test]
+    fn abjad_numerals_add_their_symbols() {
+        for (n, want) in [
+            (1, "ا"),
+            (10, "ي"),
+            (11, "يا"),
+            (28, "كح"),
+            (100, "ق"),
+            (1000, "غ"),
+            (1999, "غظصط"),
+        ] {
+            assert_eq!(fmt(n, NumberFormat::ArabicAbjad), want, "{n}");
+        }
+    }
+
+    /// Both numeral systems are closed, so past the point where repeating the
+    /// largest symbol carries information they answer with the decimal.
+    #[test]
+    fn additive_numerals_past_their_range_render_as_digits() {
+        for f in [NumberFormat::Hebrew1, NumberFormat::ArabicAbjad] {
+            assert!(fmt(9_999, f).chars().count() > 1, "{f:?} in range");
+            assert_eq!(fmt(10_000, f), "10000", "{f:?}");
+            assert_eq!(fmt(u32::MAX, f), u32::MAX.to_string(), "{f:?}");
         }
     }
 

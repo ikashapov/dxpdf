@@ -13,6 +13,12 @@
 //! Neither symptom appears in `test-files/` or `test-cases/`: the corpus's one
 //! decimal tab is in an `en-US` document and no numbering definition in it uses
 //! a text format (counted, not assumed). The fixtures are therefore built here.
+//!
+//! Both halves have since grown a second round. Issue #128 made the separator
+//! region-aware, so `de-CH` and `de-DE` now disagree correctly; issue #132
+//! spelled German, French and Spanish number words, so the assertions that a
+//! German list gets `1, 2, 3` became assertions that it gets `Eins, Zwei,
+//! Drei`. That replacement, visible as a diff, is what those issues delivered.
 
 use std::io::Write;
 
@@ -551,15 +557,6 @@ fn english_ordinals_are_spelled_with_english_suffixes() {
     assert_eq!(labels("ordinal", "en-US"), ["1st", "2nd", "3rd"]);
 }
 
-/// §17.9.27 `ordinal` is language-dependent, and this engine knows the suffixes
-/// of exactly one language. Emitting `1st` onto a German list is not a degrade,
-/// it is a different language's text — so a language whose ordinals we cannot
-/// spell gets the digits, which is what Word writes when it has no rule either.
-#[test]
-fn a_german_document_does_not_get_english_ordinal_suffixes() {
-    assert_eq!(labels("ordinal", "de-DE"), ["1", "2", "3"]);
-}
-
 #[test]
 fn english_cardinal_text_is_spelled_out() {
     assert_eq!(labels("cardinalText", "en-US"), ["One", "Two", "Three"]);
@@ -570,10 +567,72 @@ fn english_ordinal_text_is_spelled_out() {
     assert_eq!(labels("ordinalText", "en-US"), ["First", "Second", "Third"]);
 }
 
+// ── issue #132: three more languages spelled ────────────────────────────────
+//
+// Issue #91's request, and #132's first acceptance criterion: a German
+// document's `cardinalText` must read *Eins, Zwei, Drei* and not `1, 2, 3`.
+// The tests these replace asserted the digits — that replacement, visible as a
+// diff, *is* the criterion.
+
 #[test]
-fn a_german_document_gets_digits_rather_than_english_number_words() {
-    assert_eq!(labels("cardinalText", "de-DE"), ["1", "2", "3"]);
-    assert_eq!(labels("ordinalText", "de-DE"), ["1", "2", "3"]);
+fn a_german_document_gets_german_number_words() {
+    assert_eq!(labels("cardinalText", "de-DE"), ["Eins", "Zwei", "Drei"]);
+    assert_eq!(
+        labels("ordinalText", "de-DE"),
+        ["Erste", "Zweite", "Dritte"]
+    );
+    assert_eq!(labels("ordinal", "de-DE"), ["1.", "2.", "3."]);
+}
+
+#[test]
+fn a_french_document_gets_french_number_words() {
+    assert_eq!(labels("cardinalText", "fr-FR"), ["Un", "Deux", "Trois"]);
+    assert_eq!(
+        labels("ordinalText", "fr-FR"),
+        ["Premier", "Deuxième", "Troisième"],
+    );
+    assert_eq!(labels("ordinal", "fr-FR"), ["1er", "2e", "3e"]);
+}
+
+#[test]
+fn a_spanish_document_gets_spanish_number_words() {
+    assert_eq!(labels("cardinalText", "es-ES"), ["Uno", "Dos", "Tres"]);
+    assert_eq!(
+        labels("ordinalText", "es-ES"),
+        ["Primero", "Segundo", "Tercero"],
+    );
+    assert_eq!(labels("ordinal", "es-ES"), ["1.º", "2.º", "3.º"]);
+}
+
+/// Every region of a spelled language spells it — the tag is classified by its
+/// primary subtag, which is the level at which number words are a language's
+/// and not a region's.
+#[test]
+fn a_regional_variant_of_a_spelled_language_still_spells_it() {
+    assert_eq!(labels("cardinalText", "de-AT"), ["Eins", "Zwei", "Drei"]);
+    assert_eq!(labels("cardinalText", "fr-CA"), ["Un", "Deux", "Trois"]);
+    assert_eq!(labels("cardinalText", "es-MX"), ["Uno", "Dos", "Tres"]);
+}
+
+/// §17.9.27 is language-dependent, and this engine now knows four languages.
+/// A fifth still gets the digits: emitting `1st` — or *Eins* — onto a Polish
+/// list is not a degrade, it is a different language's text, and the digits
+/// Word itself falls back to are closer than another language's words.
+#[test]
+fn a_language_without_number_words_still_gets_digits() {
+    for lang in ["pl-PL", "ja-JP", "it-IT"] {
+        assert_eq!(labels("ordinal", lang), ["1", "2", "3"], "ordinal/{lang}");
+        assert_eq!(
+            labels("cardinalText", lang),
+            ["1", "2", "3"],
+            "cardinalText/{lang}",
+        );
+        assert_eq!(
+            labels("ordinalText", lang),
+            ["1", "2", "3"],
+            "ordinalText/{lang}",
+        );
+    }
 }
 
 /// An unrecognised tag keeps today's behaviour here too: English words, because
@@ -607,20 +666,36 @@ fn a_numbering_levels_own_language_beats_the_paragraphs() {
     assert_eq!(got, ["One", "Two", "Three"]);
 }
 
-/// Formats that are not language-dependent are untouched by any of this.
+/// Formats that are not language-dependent are untouched by any of this —
+/// including the §17.18.59 sequences issue #132 added, which is also the
+/// end-to-end proof that those new `<w:numFmt>` values survive the parse seam
+/// instead of degrading to decimal on the way through.
 #[test]
 fn language_independent_number_formats_are_unchanged_by_locale() {
     for lang in ["en-US", "de-DE", "ja-JP", "zz-ZZ"] {
-        assert_eq!(labels("decimal", lang), ["1", "2", "3"], "decimal/{lang}");
-        assert_eq!(
-            labels("lowerRoman", lang),
-            ["i", "ii", "iii"],
-            "lowerRoman/{lang}"
-        );
-        assert_eq!(
-            labels("upperLetter", lang),
-            ["A", "B", "C"],
-            "upperLetter/{lang}"
-        );
+        for (format, want) in [
+            ("decimal", ["1", "2", "3"]),
+            ("lowerRoman", ["i", "ii", "iii"]),
+            ("upperLetter", ["A", "B", "C"]),
+            ("decimalZero", ["01", "02", "03"]),
+            ("decimalFullWidth", ["１", "２", "３"]),
+            ("decimalEnclosedCircle", ["①", "②", "③"]),
+            ("aiueoFullWidth", ["ア", "イ", "ウ"]),
+            ("chicago", ["*", "†", "‡"]),
+            ("hebrew1", ["א", "ב", "ג"]),
+            ("ideographZodiacTraditional", ["甲子", "乙丑", "丙寅"]),
+        ] {
+            assert_eq!(labels(format, lang), want, "{format}/{lang}");
+        }
+    }
+}
+
+/// …and the §17.18.59 values that are *still* unsupported keep degrading to
+/// decimal rather than failing the parse, which is the boundary the
+/// classification draws.
+#[test]
+fn an_unsupported_number_format_still_degrades_to_decimal() {
+    for format in ["japaneseCounting", "bahtText", "custom"] {
+        assert_eq!(labels(format, "en-US"), ["1", "2", "3"], "{format}");
     }
 }

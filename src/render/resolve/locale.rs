@@ -9,28 +9,38 @@ use crate::model::RunProperties;
 /// while the engine asks a language exactly two questions:
 ///
 /// * §17.18.85 — which character a `decimal` tab aligns its zone on;
-/// * §17.9.27 — whether `ordinal` / `cardinalText` / `ordinalText` can be
-///   rendered as words.
+/// * §17.9.27 — whose number words `ordinal` / `cardinalText` / `ordinalText`
+///   are written in.
 ///
 /// So this names the groups those two questions have distinct answers for, and
 /// stops. When a third question arrives, or when a language's number words are
 /// implemented, the enum gains a variant and the compiler finds every site that
 /// has to answer for it — which is the whole reason this is an enum and not a
-/// `&str` compared afresh at each call site.
+/// `&str` compared afresh at each call site. [`German`](Self::German),
+/// [`French`](Self::French) and [`Spanish`](Self::Spanish) are exactly that
+/// having happened: each was a `CommaDecimal` until issue #132 spelled its
+/// numbers.
 ///
 /// Only `w:lang/@w:val` is read. `@w:eastAsia` and `@w:bidi` name the languages
 /// of *other script runs* in the same document, and neither of the two
 /// questions above is asked of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Locale {
-    /// English, in any region — the one language whose number words this engine
-    /// spells. Also the answer for a document that declares no language at all,
-    /// which is what every document was assumed to be before `w:lang` was read.
+    /// English, in any region. Also the answer for a document that declares no
+    /// language at all, which is what every document was assumed to be before
+    /// `w:lang` was read.
     #[default]
     English,
-    /// A recognised language that writes a decimal **comma**: German, French,
-    /// Spanish, Italian, Portuguese, Russian, Polish, Dutch, the Nordics, and
-    /// most of Central and Eastern Europe.
+    /// German, in any region. Writes a decimal comma, and its number words are
+    /// spelled — see [`crate::render::resolve::spellout`].
+    German,
+    /// French, in any region. Writes a decimal comma; number words spelled.
+    French,
+    /// Spanish, in any region. Writes a decimal comma; number words spelled.
+    Spanish,
+    /// A recognised language that writes a decimal **comma** and whose number
+    /// words this engine does not spell: Italian, Portuguese, Russian, Polish,
+    /// Dutch, the Nordics, and most of Central and Eastern Europe.
     CommaDecimal,
     /// A recognised language that is not English and writes a decimal **point**:
     /// Japanese, Chinese, Korean, Hebrew, Thai, and most of South and
@@ -51,22 +61,8 @@ impl Locale {
     /// §17.18.85: the character a `decimal` tab stop aligns its zone on.
     pub fn decimal_separator(self) -> char {
         match self {
-            Locale::CommaDecimal => ',',
+            Locale::German | Locale::French | Locale::Spanish | Locale::CommaDecimal => ',',
             Locale::English | Locale::PointDecimal | Locale::Unrecognised => '.',
-        }
-    }
-
-    /// §17.9.27: whether this engine can render a number as words in this
-    /// language — which `ordinal`, `cardinalText` and `ordinalText` all need.
-    ///
-    /// A language that answers `false` gets digits. That is not a degrade for
-    /// its own sake: writing `1st` onto a German list is not an approximation
-    /// of German, it is English text in a German document, and the digits Word
-    /// itself falls back to are closer than another language's words.
-    pub fn spells_numbers(self) -> bool {
-        match self {
-            Locale::English | Locale::Unrecognised => true,
-            Locale::CommaDecimal | Locale::PointDecimal => false,
         }
     }
 
@@ -107,9 +103,10 @@ impl Locale {
     /// tags are case-insensitive even though Word writes them `ll-CC`.
     ///
     /// **Known simplification**, still true of *this function* — it stays
-    /// primary-subtag-only on purpose, since it also drives
-    /// [`spells_numbers`](Self::spells_numbers), a question region doesn't
-    /// change. But issue #128 closed the simplification for the one question
+    /// primary-subtag-only on purpose, since it also picks which language's
+    /// number words a label is spelled in, a question region doesn't change
+    /// (`de-AT` and `de-DE` both write *Eins*). But issue #128 closed the
+    /// simplification for the one question
     /// region *does* change: real §17.18.85 decimal-tab resolution no longer
     /// goes through this bucket alone.
     /// [`crate::i18n::decimal_separator_for_tag`] answers from real CLDR data
@@ -122,21 +119,29 @@ impl Locale {
     /// ways" is verified only for `es-MX` so far — other regions in that
     /// split are still open. Likewise still open: Arabic and Persian are
     /// bucketed point-decimal, right for their Latin-digit documents and
-    /// wrong for the Arabic-Indic `٫` some regions use — a numbering-system
-    /// digit-glyph question `decimal_separator_for_tag` doesn't answer,
-    /// tracked with the rest of §17.18.59's exotic formats in issue #132.
+    /// wrong for the Arabic-Indic `٫` some regions use. That one is a
+    /// *numbering-system* question — which digits the document is written in
+    /// — which `decimal_separator_for_tag` doesn't answer and which issue
+    /// #132 left where it found it: §17.18.59 has explicit values for the
+    /// digit sets (`hindiNumbers`, `thaiNumbers`, `decimalFullWidth`), all
+    /// rendered, but nothing says a `fa-IR` document's plain `decimal` should
+    /// switch script, and this engine does not infer it.
     pub fn from_tag(tag: &str) -> Self {
         let primary = tag.split('-').next().unwrap_or("").to_ascii_lowercase();
         match primary.as_str() {
             "en" => Locale::English,
 
+            // Writes a decimal comma, *and* has number words here. Matched
+            // ahead of the bucket below, which is otherwise where they'd land.
+            "de" => Locale::German,
+            "fr" => Locale::French,
+            "es" => Locale::Spanish,
+
             // Writes a decimal comma.
             "af" | "sq" | "hy" | "az" | "be" | "bs" | "bg" | "ca" | "hr" | "cs" | "da" | "nl"
-            | "et" | "eu" | "fi" | "fo" | "fr" | "gl" | "ka" | "de" | "el" | "hu" | "is" | "id"
-            | "it" | "kk" | "lb" | "lv" | "lt" | "mk" | "mn" | "nb" | "nn" | "no" | "pl" | "pt"
-            | "ro" | "ru" | "sr" | "sk" | "sl" | "es" | "sv" | "tr" | "uk" | "vi" => {
-                Locale::CommaDecimal
-            }
+            | "et" | "eu" | "fi" | "fo" | "gl" | "ka" | "el" | "hu" | "is" | "id" | "it" | "kk"
+            | "lb" | "lv" | "lt" | "mk" | "mn" | "nb" | "nn" | "no" | "pl" | "pt" | "ro" | "ru"
+            | "sr" | "sk" | "sl" | "sv" | "tr" | "uk" | "vi" => Locale::CommaDecimal,
 
             // Writes a decimal point, but is not English.
             "am" | "ar" | "bn" | "cy" | "fa" | "fil" | "ga" | "gu" | "he" | "hi" | "iw" | "ja"
@@ -181,11 +186,32 @@ mod tests {
     #[test]
     fn the_corpus_languages_classify_as_they_should() {
         // Every tag `test-files/` and `test-cases/` actually declares.
-        for tag in ["de-AT", "de-DE", "pl-PL", "it-IT", "ca-ES", "fr-FR"] {
+        for tag in ["pl-PL", "it-IT", "ca-ES"] {
             assert_eq!(Locale::from_tag(tag), Locale::CommaDecimal, "{tag}");
         }
+        for tag in ["de-AT", "de-DE"] {
+            assert_eq!(Locale::from_tag(tag), Locale::German, "{tag}");
+        }
+        assert_eq!(Locale::from_tag("fr-FR"), Locale::French);
         for tag in ["en-US", "en-GB"] {
             assert_eq!(Locale::from_tag(tag), Locale::English, "{tag}");
+        }
+    }
+
+    /// The three languages issue #132 spelled: they leave the comma bucket for
+    /// a variant of their own, and every region of each follows.
+    #[test]
+    fn the_spelled_languages_have_their_own_variants() {
+        for (tag, want) in [
+            ("de", Locale::German),
+            ("de-CH", Locale::German),
+            ("DE-at", Locale::German),
+            ("fr", Locale::French),
+            ("fr-CA", Locale::French),
+            ("es", Locale::Spanish),
+            ("es-MX", Locale::Spanish),
+        ] {
+            assert_eq!(Locale::from_tag(tag), want, "{tag}");
         }
     }
 
@@ -200,7 +226,7 @@ mod tests {
     /// still classifies rather than falling through to `Unrecognised`.
     #[test]
     fn an_unknown_region_still_resolves_by_its_primary_subtag() {
-        assert_eq!(Locale::from_tag("de-LI"), Locale::CommaDecimal);
+        assert_eq!(Locale::from_tag("de-LI"), Locale::German);
         assert_eq!(Locale::from_tag("en-ZZ"), Locale::English);
     }
 
@@ -215,34 +241,54 @@ mod tests {
     /// must answer identically, so an unfamiliar document renders unchanged.
     #[test]
     fn an_unrecognised_tag_answers_exactly_as_english_does() {
+        use crate::render::resolve::spellout;
         assert_eq!(
             Locale::Unrecognised.decimal_separator(),
             Locale::English.decimal_separator(),
         );
         assert_eq!(
-            Locale::Unrecognised.spells_numbers(),
-            Locale::English.spells_numbers(),
+            spellout::cardinal(21, Locale::Unrecognised),
+            spellout::cardinal(21, Locale::English),
         );
     }
 
     #[test]
     fn only_comma_languages_write_a_comma() {
-        assert_eq!(Locale::CommaDecimal.decimal_separator(), ',');
+        for locale in [
+            Locale::CommaDecimal,
+            Locale::German,
+            Locale::French,
+            Locale::Spanish,
+        ] {
+            assert_eq!(locale.decimal_separator(), ',', "{locale:?}");
+        }
         assert_eq!(Locale::English.decimal_separator(), '.');
         assert_eq!(Locale::PointDecimal.decimal_separator(), '.');
     }
 
+    /// §17.9.27: which languages have number words at all. The `Option` in
+    /// `spellout` is the answer `spells_numbers()` used to give as a bool.
     #[test]
-    fn only_english_spells_numbers() {
-        assert!(Locale::English.spells_numbers());
-        assert!(!Locale::CommaDecimal.spells_numbers());
-        assert!(!Locale::PointDecimal.spells_numbers());
+    fn only_the_four_spelled_languages_have_number_words() {
+        use crate::render::resolve::spellout;
+        for locale in [
+            Locale::English,
+            Locale::German,
+            Locale::French,
+            Locale::Spanish,
+            Locale::Unrecognised,
+        ] {
+            assert!(spellout::cardinal(1, locale).is_some(), "{locale:?}");
+        }
+        for locale in [Locale::CommaDecimal, Locale::PointDecimal] {
+            assert!(spellout::cardinal(1, locale).is_none(), "{locale:?}");
+        }
     }
 
     #[test]
     fn the_cascade_takes_the_first_layer_that_sets_a_tag() {
         let layers = [rp(None), rp(Some("de-DE")), rp(Some("en-US"))];
-        assert_eq!(Locale::from_cascade(layers.iter()), Locale::CommaDecimal);
+        assert_eq!(Locale::from_cascade(layers.iter()), Locale::German);
     }
 
     /// An empty `@w:val` sets nothing — it must not shadow a lower layer that
@@ -250,7 +296,7 @@ mod tests {
     #[test]
     fn an_empty_tag_falls_through_to_the_next_layer() {
         let layers = [rp(Some("")), rp(Some("de-DE"))];
-        assert_eq!(Locale::from_cascade(layers.iter()), Locale::CommaDecimal);
+        assert_eq!(Locale::from_cascade(layers.iter()), Locale::German);
     }
 
     /// A document that declares no language anywhere is English and silent —

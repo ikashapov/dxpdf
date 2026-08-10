@@ -19,6 +19,14 @@ pub enum Alignment {
 
 // ── Number Format ────────────────────────────────────────────────────────────
 
+/// §17.18.59 `ST_NumberFormat`, as far as this engine renders it.
+///
+/// Every variant is rendered by `crate::render::resolve::numbering`'s
+/// `format_number`, which is a **total** match — a new variant here is a
+/// compile error there until it is given a rendering. The spec values that are
+/// *not* here degrade to [`Decimal`](Self::Decimal) at the parse seam; which
+/// ones, and what data each would need, is recorded on
+/// `StNumberFormat::Other`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NumberFormat {
     Decimal,
@@ -33,6 +41,45 @@ pub enum NumberFormat {
     RussianUpper,
     RussianLower,
     None,
+
+    // Positional decimal in another digit set.
+    DecimalFullWidth,
+    DecimalFullWidth2,
+    DecimalHalfWidth,
+    HindiNumbers,
+    ThaiNumbers,
+    IdeographDigital,
+
+    // Decimal plus a pad, a wrapper, or an enclosed-glyph series.
+    DecimalZero,
+    Hex,
+    NumberInDash,
+    DecimalEnclosedFullstop,
+    DecimalEnclosedParen,
+    DecimalEnclosedCircle,
+    DecimalEnclosedCircleChinese,
+    IdeographEnclosedCircle,
+
+    // A fixed ordered alphabet, cycled with repetition.
+    Aiueo,
+    AiueoFullWidth,
+    Iroha,
+    IrohaFullWidth,
+    Ganada,
+    Chosung,
+    Hebrew2,
+    ArabicAlpha,
+    HindiVowels,
+    HindiConsonants,
+    ThaiLetters,
+    Chicago,
+    IdeographTraditional,
+    IdeographZodiac,
+    IdeographZodiacTraditional,
+
+    // Additive numerals over a fixed value table.
+    Hebrew1,
+    ArabicAbjad,
 }
 
 // ── Height Rule ──────────────────────────────────────────────────────────────
