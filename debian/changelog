@@ -1,0 +1,9 @@
+dxpdf (0.4.0-1) unstable; urgency=medium
+
+  * Initial Debian package, built upstream and attached to the GitHub release
+    rather than uploaded to the Debian archive (see issue #92). The archive
+    route needs a Skia that Debian itself packages; there is not one yet.
+  * Per-version upstream changes are in the GitHub release notes:
+    https://github.com/nerdy-pro/dxpdf/releases
+
+ -- Ilya Nixan <nixan@nerdy.pro>  Mon, 10 Aug 2026 19:00:00 +0000

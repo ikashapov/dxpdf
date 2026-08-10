@@ -2,7 +2,7 @@
 name = "dxpdf"
 version = "0.4.0"
 edition = "2021"
-description = "A fast DOCX-to-PDF converter powered by Skia"
+description = "Fast DOCX-to-PDF converter powered by Skia"
 license = "MIT"
 repository = "https://github.com/nerdy-pro/dxpdf"
 homepage = "https://nerdy.pro"
@@ -14,6 +14,81 @@ exclude = ["test-cases/", "test-files/", "scripts/", "output/", "plans/"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
+
+# Debian package (issue #92), built by `cargo deb` and attached to each GitHub
+# release by `.github/workflows/deb.yml`. This is an upstream-built `.deb`, not
+# an upload to the Debian archive, and the difference is not a matter of
+# polish: `skia-bindings` ships a 270 KB crate with no Skia in it and clones
+# the C++ tree during its build script — which is why `git` is a build
+# dependency of this package at all. Debian builds on machines with no network
+# and no vendored third-party C++, so the archive route stays closed until
+# somebody packages Skia for Debian. Nothing here changes that; it does mean a
+# Debian user can install the CLI today, and it shortens the job if that route
+# ever opens.
+#
+# `scripts/verify_deb.py` checks the resulting package and `tests/packaging.rs`
+# checks this table; between them, most of what is written below is enforced.
+[package.metadata.deb]
+maintainer = "Ilya Nixan <nixan@nerdy.pro>"
+copyright = "2025-2026 Ilya Nixan <nixan@nerdy.pro>"
+# `[package] license = "MIT"` names the licence; this ships its text, which
+# Policy §12.5 requires in /usr/share/doc/dxpdf/copyright. The 0 is how many
+# leading lines to skip — our LICENSE starts directly with the licence.
+license-file = ["LICENSE", "0"]
+# `text` is where the other document converters live (pandoc, docx2txt).
+section = "text"
+priority = "optional"
+# dpkg-shlibdeps, which reads the built binary's DT_NEEDED entries. It only
+# works on a Debian host, which is why CI builds inside a debian:12 container
+# rather than on the Ubuntu runner: the dependency list has to be computed
+# against the distribution the package claims to support.
+depends = "$auto"
+# Not `depends`: the package works without these, it just renders worse, and a
+# user with their own font set should not be made to take Liberation as well.
+#
+# What they actually buy, measured on a bookworm container with
+# `test-files/sample-docx-files-sample1.docx`: a bare install already has one
+# font family, because `libfontconfig1` pulls `fonts-dejavu-core` in as a hard
+# dependency — so the failure is not blank text, it is *wrong* text. That
+# document's request for Courier New resolved to DejaVu **Sans**, a
+# proportional face standing in for a monospace one. With `fonts-liberation2`
+# present it resolves to Liberation Mono, which is metric-compatible with
+# Courier New, and one of the three unmatched-font warnings goes away.
+# Liberation covers Arial, Times New Roman and Courier New — between them, most
+# of what a .docx asks for. The `|` alternative covers releases carrying only
+# the older package name.
+recommends = "fonts-liberation2 | fonts-liberation, fonts-dejavu-core"
+# Policy §12.7 requires one, and cargo-deb does not synthesise it — without
+# this key there is simply no changelog.Debian.gz in the package. It is
+# committed rather than generated so that `apt changelog dxpdf` says something
+# a human wrote; `tests/packaging.rs` fails if its top entry falls behind
+# `[package] version`, which is what stops it going stale.
+changelog = "debian/changelog"
+# There is deliberately no `description` key here: cargo-deb has none, so the
+# package synopsis is always `[package] description` above. That is why it no
+# longer opens with "A" — lintian's `description-synopsis-starts-with-article`,
+# which cannot be fixed anywhere but there.
+extended-description = """\
+dxpdf converts Word documents in Office Open XML format (.docx) to PDF. \
+Layout is performed by dxpdf itself and rendering by Skia, so no office suite \
+is required and nothing is sent over the network.
+
+Fonts are resolved through fontconfig from those installed on the machine, \
+together with any fonts embedded in the document."""
+# Explicit, because cargo-deb's default asset set also picks up C-ABI dynamic
+# libraries — and this crate is `crate-type = ["rlib", "cdylib"]`, so a release
+# build emits `libdxpdf.so` as well as the binary. That file is the body of the
+# PyO3 extension module: no soname, no headers, no ABI promise, and nothing
+# that should be in /usr/lib. `verify_deb.py` fails the build if it appears.
+assets = [
+    ["target/release/dxpdf", "usr/bin/", "755"],
+    ["man/dxpdf.1", "usr/share/man/man1/", "644"],
+    ["README.md", "usr/share/doc/dxpdf/README.md", "644"],
+    # Reasons for the lintian tags that cannot be fixed, shipped with the
+    # package so they travel with it. CI suppresses nothing else, so a new tag
+    # fails the build.
+    ["debian/dxpdf.lintian-overrides", "usr/share/lintian/overrides/dxpdf", "644"],
+]
 
 [dependencies]
 bitflags = "2"
@@ -156,6 +231,12 @@ subset-fonts = ["dep:fontcull"]
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 lopdf = { version = "0.44", default-features = false }
+# Reads `[package.metadata.deb]` back out of this file in `tests/packaging.rs`,
+# so a renamed asset fails at `cargo test` time instead of during a release
+# build. Already in `Cargo.lock` as a transitive dependency, so naming it here
+# only changes which line pulls it in — and being dev-only it reaches neither
+# the crate, the wheel, nor the `.deb`.
+toml = "1"
 
 [[bench]]
 name = "convert_bench"
