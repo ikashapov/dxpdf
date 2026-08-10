@@ -50,8 +50,15 @@ unicode-properties = "0.1.4"
 unicode-normalization = "0.1.25"
 # UAX #9 bidirectional text (issue #131). Not ICU4X, and deliberately so: all
 # three carry their Unicode tables in the binary, so unlike every other #124
-# phase this one adds no data marker to `src/i18n/data/icu_data.blob` and no
-# bytes to the Python wheel.
+# phase this one adds no data marker to `src/i18n/data/icu_data.blob`.
+#
+# That is not the same as free, and an earlier version of this comment claimed
+# it was. The tables land in the extension module instead, which the wheel
+# still carries: measured with `maturin build --release --features python` on
+# the merge commits either side of #131, 12,177,600 -> 12,223,941 bytes,
+# **+46,341 (+0.38%)**. Cheap — a seventh of what #130's segmenter models
+# cost — but not zero. (#132 then added +9,035 bytes with no dependency at all,
+# putting the whole of #124 at 11,688,534 -> 12,232,976, +4.66%.)
 #
 # `unicode-bidi` is Servo's, and already in `Cargo.lock` as a transitive dep of
 # the `lopdf` dev-dependency; naming it here only changes which line pulls it
