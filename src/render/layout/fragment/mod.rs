@@ -406,6 +406,21 @@ impl Fragment {
         matches!(self, Fragment::PageBreak { .. })
     }
 
+    /// True if this fragment only *moves* the flow and draws nothing —
+    /// §17.3.3.1's page and column breaks.
+    ///
+    /// A paragraph made entirely of these still has a paragraph mark, so it
+    /// still owns a line (§17.3.1.29). `build::block` uses this to decide
+    /// whether to inject that line: an `is_empty()` test misses a paragraph
+    /// whose sole content is `<w:br w:type="page"/>`, which is issue #126.
+    ///
+    /// `LineBreak` is deliberately **not** here. It is the injected mark line
+    /// itself, so counting it would make the predicate true again on a second
+    /// pass and inject twice.
+    pub fn is_break_only(&self) -> bool {
+        matches!(self, Fragment::PageBreak { .. } | Fragment::ColumnBreak)
+    }
+
     /// Get font properties if this is a text fragment.
     pub fn font_props(&self) -> Option<&FontProps> {
         match self {
