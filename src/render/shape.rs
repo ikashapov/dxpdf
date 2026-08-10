@@ -422,18 +422,51 @@ mod tests {
 
     /// A skin-tone modifier and a keycap sequence ligate by different GSUB
     /// mechanisms, with the same expectation.
+    ///
+    /// "Ligated" is asserted as **one cell wide**, not as one glyph. Those are
+    /// not the same claim, and the difference is not hypothetical: Skia m150
+    /// (skia-safe 0.99) began emitting the keycap as two glyphs — the composed
+    /// keycap at the origin, plus a zero-advance blank parked at the far edge
+    /// of the cell — where m145 emitted one. Nothing about the rendering
+    /// changed: total advance stayed one cell, `tests/emoji_e2e.rs` still sees
+    /// a single rasterized image with no constituent text beside it, and the
+    /// corpus pixel-diff on `sample-emoji.docx` is zero.
+    ///
+    /// A glyph count is therefore the wrong instrument — it measures how the
+    /// shaper chose to spell the answer rather than what gets drawn. Width
+    /// *is* the property that matters, because the failure this test exists to
+    /// catch is the sequence painting as its constituents side by side, which
+    /// is two or three cells wide.
     #[test]
     fn modifier_and_keycap_sequences_ligate() {
         let Some(tf) = emoji_typeface() else { return };
         let shaper = Shaper::new().expect("shaper");
+        const SIZE: f32 = 44.0;
         for (label, text) in [
             ("skin-tone modifier", "\u{1F44D}\u{1F3FF}"),
             ("keycap", "1\u{FE0F}\u{20E3}"),
         ] {
             let run = shaper
-                .shape(&tf, text, 44.0, RunDirection::LeftToRight)
+                .shape(&tf, text, SIZE, RunDirection::LeftToRight)
                 .expect("shape");
-            assert_eq!(run.glyphs.len(), 1, "{label} must ligate to one glyph");
+
+            // One cell, not one per codepoint. Generous tolerance: emoji cells
+            // are not exactly em-square in every font.
+            let cells = f32::from(run.total_advance) / SIZE;
+            assert!(
+                (0.5..=1.5).contains(&cells),
+                "{label} must occupy one cell, got {cells:.2} ({:?} at size {SIZE})",
+                run.total_advance,
+            );
+
+            // And it did ligate: fewer glyphs than codepoints, with everything
+            // past the first contributing no width.
+            assert!(
+                run.glyphs.len() < text.chars().count(),
+                "{label}: {} glyphs for {} codepoints is no ligation at all",
+                run.glyphs.len(),
+                text.chars().count(),
+            );
         }
     }
 
