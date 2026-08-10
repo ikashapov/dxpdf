@@ -223,6 +223,43 @@ fn debian_changelog_leads_with_the_current_version() {
 }
 
 #[test]
+fn lintian_overrides_name_tags_without_context() {
+    // Lintian prints a tag as `dxpdf: embedded-library expat [usr/bin/dxpdf]`,
+    // and pasting that straight back in is the obvious way to write an
+    // override — but the context is a property of one build. An override
+    // carrying it matched exactly on arm64 and came back as
+    // `mismatched-override` on amd64, which failed the release. A bare tag name
+    // matches every instance, and an override matching nothing is only a note.
+    let path = repo_root().join("debian/dxpdf.lintian-overrides");
+    let overrides = std::fs::read_to_string(&path).expect("lintian overrides file is missing");
+
+    for (n, line) in overrides.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let tag = line.strip_prefix("dxpdf: ").unwrap_or_else(|| {
+            panic!(
+                "{}:{} is not `dxpdf: <tag>`: {line:?}",
+                path.display(),
+                n + 1
+            )
+        });
+        assert!(
+            !tag.is_empty()
+                && tag
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "{}:{} carries context after the tag name: {line:?} — write `dxpdf: {}` alone, \
+             or it will mismatch on another architecture",
+            path.display(),
+            n + 1,
+            tag.split_whitespace().next().unwrap_or(tag),
+        );
+    }
+}
+
+#[test]
 fn verify_deb_script_is_executable_python() {
     // CI runs this as `python3 scripts/verify_deb.py`; a missing file there
     // fails the packaging job several minutes into a Skia build.
