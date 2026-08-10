@@ -190,3 +190,130 @@ jobs:
         if: matrix.target.os != 'windows'
         shell: bash
         run: python3 scripts/verify_wheel.py dist/*.whl
+
+  # The Debian package (issue #92). Built inside a debian:12 container rather
+  # than on the Ubuntu runner, for two reasons that both bite:
+  #
+  #   * `depends = "$auto"` runs dpkg-shlibdeps, which resolves the binary's
+  #     DT_NEEDED entries against the packages of whatever distribution it runs
+  #     on. Run on Ubuntu, it produces Ubuntu's answer.
+  #   * glibc is a floor, not a ceiling. Built on ubuntu-latest the package
+  #     requires glibc 2.39 and will not install on Debian 12 at all — which is
+  #     the audience the request came from. Bookworm's 2.36 covers Debian 12
+  #     and 13, Ubuntu 24.04+, and their derivatives.
+  #
+  # amd64 only here: the release matrix in `deb.yml` builds both architectures,
+  # and each one is a full Skia build. Keep the apt list, the clang version and
+  # the cargo-deb invocation in sync with that workflow — this job exists to
+  # catch a packaging break on the PR that causes it, so a divergence means it
+  # is validating something other than what gets published.
+  build-deb:
+    name: Build Debian package (amd64)
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    container: debian:12-slim
+    steps:
+      # Ahead of checkout, so the action finds git and makes a real clone
+      # instead of falling back to a source tarball.
+      #
+      # clang-19, not bookworm's default clang 14: Skia m150 uses C++20
+      # <ranges>, which clang 14 cannot compile against GCC 12's libstdc++ — it
+      # fails in SkPDFTag.cpp with "no matching function for call to object of
+      # type 'const std::ranges::views::_Reverse'". clang-19 is in bookworm
+      # main, so this needs no backports.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential clang-19 libclang-19-dev ninja-build python3 \
+            curl ca-certificates git pkg-config \
+            libfontconfig1-dev libfreetype-dev lintian
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Built from source rather than fetched by a third-party installer
+      # action: it is a couple of minutes against a Skia build that dominates
+      # this job anyway, and it keeps the release path free of an extra
+      # dependency.
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build package
+        run: cargo deb
+        env:
+          CC: clang-19
+          CXX: clang++-19
+
+      - name: Verify package contents
+        run: python3 scripts/verify_deb.py target/debian/*.deb
+
+      # No `--suppress-tags`: the only tags that are allowed to fire are the
+      # ones the package explains for itself in
+      # debian/dxpdf.lintian-overrides, which it ships to
+      # /usr/share/lintian/overrides/dxpdf. A new error or warning fails here.
+      - name: Lint package
+        run: lintian --fail-on error,warning --tag-display-limit 0 target/debian/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-amd64
+          path: target/debian/*.deb
+
+  # The acceptance test, and the reason it is a separate job: this container
+  # has no toolchain and no -dev packages, so it is the first machine in the
+  # pipeline that can prove the dependency list is complete. Running it in
+  # build-deb would prove nothing — everything the binary needs is already
+  # there because it was just used to compile it.
+  test-deb-install:
+    name: Install Debian package
+    runs-on: ubuntu-latest
+    needs: build-deb
+    container: debian:12-slim
+    steps:
+      - name: Install test prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git poppler-utils man-db groff-base
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb-amd64
+          path: pkg
+
+      # Debian's own container images carry
+      # /etc/dpkg/dpkg.cfg.d/docker, which sets `path-exclude
+      # /usr/share/man/*` to keep the image small. Leaving it in place would
+      # make dpkg silently drop the man page on install and this job would
+      # "prove" the package has none. No real Debian system has that file.
+      - name: Install the package the way a user would
+        run: |
+          rm -f /etc/dpkg/dpkg.cfg.d/docker
+          apt-get install -y ./pkg/*.deb
+
+      - name: Recommends were honoured
+        run: dpkg-query -W -f='${Package} ${Status}\n' fonts-liberation2
+
+      - name: The installed program answers for itself
+        run: |
+          dxpdf --version
+          dxpdf --help > /dev/null
+          test -s /usr/share/doc/dxpdf/copyright
+          test -s /usr/share/doc/dxpdf/changelog.Debian.gz
+          man --warnings -E UTF-8 -l /usr/share/man/man1/dxpdf.1.gz > /dev/null
+
+      # Conversion, not just startup: a package that installs and then cannot
+      # render is the failure mode a dependency list gets wrong.
+      - name: Convert a document
+        run: |
+          dxpdf test-files/sample-docx-files-sample1.docx -o /tmp/out.pdf
+          head -c 5 /tmp/out.pdf | grep -q '%PDF-'
+          chars=$(pdftotext /tmp/out.pdf - | tr -d '[:space:]' | wc -c)
+          echo "extracted $chars characters of text"
+          test "$chars" -gt 1000

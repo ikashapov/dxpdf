@@ -8,6 +8,11 @@ use dxpdf::{RenderOptions, DEFAULT_IMAGE_DPI};
 #[command(
     name = "dxpdf",
     about = "DOCX files to PDF converter",
+    // Without this, clap defines no `--version` at all. A packaged CLI is
+    // expected to answer it — it is the first thing a user runs after `apt
+    // install`, the first thing a bug report quotes, and what the Debian
+    // install test in CI uses as its smoke check.
+    version,
     allow_negative_numbers = true
 )]
 struct Cli {

@@ -123,6 +123,24 @@ magick compare -metric AE /tmp/before-1.png /tmp/after-1.png null:
 
 For any paint or subset change, pixel-diff before vs after — a passing test suite does not prove the output is unchanged.
 
+**Debian package** (issue #92) — `cargo deb` builds it from `[package.metadata.deb]` in `Cargo.toml`; `scripts/verify_deb.py` checks the result and `tests/packaging.rs` checks the inputs (man page in step with `--help`, `debian/changelog` in step with the version). CI builds amd64 on every PR and `deb.yml` builds both architectures per release.
+
+It has to be built **inside a `debian:12` container**, and both halves of that matter. `depends = "$auto"` runs `dpkg-shlibdeps`, which resolves the binary against the packages of whatever distribution it runs on. And glibc is a floor, not a ceiling: built on `ubuntu-latest` the package requires glibc 2.39 and will not install on Debian 12 at all. Bookworm's 2.36 reaches Debian 12 and 13, Ubuntu 24.04+, and derivatives — moving that base later silently drops users who have already installed. Use `clang-19`, not bookworm's default clang 14, which cannot compile Skia m150's C++20 `<ranges>` against GCC 12's libstdc++.
+
+```bash
+docker run --rm -v "$PWD:/w" -w /w debian:12-slim bash -c '
+  apt-get update && apt-get install -y --no-install-recommends \
+    build-essential clang-19 libclang-19-dev ninja-build python3 curl \
+    ca-certificates git pkg-config libfontconfig1-dev libfreetype-dev lintian
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+  . "$HOME/.cargo/env"; export CC=clang-19 CXX=clang++-19
+  cargo install cargo-deb --locked && cargo deb
+  python3 scripts/verify_deb.py target/debian/*.deb
+  lintian --fail-on error,warning target/debian/*.deb'
+```
+
+Two things that are not obvious from the files. The `assets` list is explicit because cargo-deb's default set also picks up C-ABI dynamic libraries, and `crate-type = ["rlib", "cdylib"]` means a release build emits `libdxpdf.so` — the PyO3 extension body, which has no business in `/usr/lib`. And when testing an install in a Debian *container*, delete `/etc/dpkg/dpkg.cfg.d/docker` first: it sets `path-exclude /usr/share/man/*`, so dpkg drops the man page and the test appears to prove the package has none.
+
 **Before handing work back**, run what CI runs (`.github/workflows/ci.yml`):
 
 ```bash

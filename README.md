@@ -32,6 +32,25 @@ Built by [nerdy.pro](https://nerdy.pro).
 cargo install dxpdf
 ```
 
+### Debian / Ubuntu
+
+Every [release](https://github.com/nerdy-pro/dxpdf/releases) ships a `.deb` for
+`amd64` and `arm64`:
+
+```bash
+curl -LO https://github.com/nerdy-pro/dxpdf/releases/download/v0.4.0/dxpdf_0.4.0-1_amd64.deb
+sudo apt install ./dxpdf_0.4.0-1_amd64.deb
+```
+
+Installs `dxpdf` to `/usr/bin` with a `dxpdf(1)` man page, and recommends
+`fonts-liberation2` — metric-compatible with Arial, Times New Roman and Courier
+New, so documents that ask for them lay out the way Word does.
+
+Built on Debian 12, so it installs on Debian 12 and 13, Ubuntu 24.04 and newer,
+and their derivatives. Not yet in the Debian archive itself
+([#92](https://github.com/nerdy-pro/dxpdf/issues/92)): that needs a Skia that
+Debian packages, and there is not one.
+
 ### Rust Library
 
 Add to your `Cargo.toml`:
