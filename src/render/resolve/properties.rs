@@ -258,29 +258,32 @@ mod tests {
         let base = RunProperties {
             bold: Some(true),
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
-            color: Some(Color::Rgb(0xFF0000)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
+            color: Dup::from(Some(Color::Rgb(0xFF0000))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
 
         assert_eq!(target.bold, Some(true));
         assert_eq!(target.italic, Some(true));
-        assert_eq!(target.font_size, Some(Dimension::<HalfPoints>::new(24)));
-        assert_eq!(target.color, Some(Color::Rgb(0xFF0000)));
+        assert_eq!(
+            target.font_size,
+            Dup::from(Some(Dimension::<HalfPoints>::new(24)))
+        );
+        assert_eq!(target.color, Dup::from(Some(Color::Rgb(0xFF0000))));
     }
 
     #[test]
     fn merge_run_target_values_not_overwritten() {
         let mut target = RunProperties {
             bold: Some(false),
-            font_size: Some(Dimension::<HalfPoints>::new(20)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(20))),
             ..Default::default()
         };
         let base = RunProperties {
             bold: Some(true),
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
@@ -288,7 +291,7 @@ mod tests {
         assert_eq!(target.bold, Some(false), "target's bold should win");
         assert_eq!(
             target.font_size,
-            Some(Dimension::<HalfPoints>::new(20)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(20))),
             "target's size should win"
         );
         assert_eq!(target.italic, Some(true), "italic should come from base");
@@ -302,7 +305,7 @@ mod tests {
 
         assert_eq!(target.bold, None);
         assert_eq!(target.italic, None);
-        assert_eq!(target.font_size, None);
+        assert_eq!(target.font_size, Dup::from(None));
     }
 
     #[test]
@@ -312,17 +315,17 @@ mod tests {
         // inherit. The merge must preserve `Some(UnderlineStyle::None)`
         // rather than overwriting it with the parent's `Single`.
         let mut target = RunProperties {
-            underline: Some(UnderlineStyle::None),
+            underline: Dup::from(Some(UnderlineStyle::None)),
             ..Default::default()
         };
         let base = RunProperties {
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
         assert_eq!(
             target.underline,
-            Some(UnderlineStyle::None),
+            Dup::from(Some(UnderlineStyle::None)),
             "explicit <w:u w:val=\"none\"/> must override the parent's Single"
         );
     }
@@ -332,11 +335,11 @@ mod tests {
         // Mirror invariant: when the child is silent, parent's underline wins.
         let mut target = RunProperties::default();
         let base = RunProperties {
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
-        assert_eq!(target.underline, Some(UnderlineStyle::Single));
+        assert_eq!(target.underline, Dup::from(Some(UnderlineStyle::Single)));
     }
 
     #[test]
@@ -380,21 +383,21 @@ mod tests {
                 east_asian: FontSlot::from_name("F"),
                 complex_script: FontSlot::from_name("F"),
             },
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             bold: Some(true),
             italic: Some(true),
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             strike: Some(StrikeStyle::Single),
-            color: Some(Color::Rgb(0)),
-            highlight: Some(HighlightColor::Yellow),
-            shading: Some(Shading {
+            color: Dup::from(Some(Color::Rgb(0))),
+            highlight: Dup::from(Some(HighlightColor::Yellow)),
+            shading: Dup::from(Some(Shading {
                 fill: Color::Rgb(0),
                 pattern: ShadingPattern::Clear,
                 color: Color::Rgb(0),
-            }),
-            vertical_align: Some(VerticalAlign::Superscript),
-            spacing: Some(Dimension::<Twips>::new(10)),
-            kerning: Some(Dimension::<HalfPoints>::new(2)),
+            })),
+            vertical_align: Dup::from(Some(VerticalAlign::Superscript)),
+            spacing: Dup::from(Some(Dimension::<Twips>::new(10))),
+            kerning: Dup::from(Some(Dimension::<HalfPoints>::new(2))),
             all_caps: Some(true),
             small_caps: Some(true),
             vanish: Some(true),
@@ -405,33 +408,33 @@ mod tests {
             imprint: Some(true),
             outline: Some(true),
             shadow: Some(true),
-            position: Some(Dimension::<HalfPoints>::new(5)),
-            lang: Some(Lang {
+            position: Dup::from(Some(Dimension::<HalfPoints>::new(5))),
+            lang: Dup::from(Some(Lang {
                 val: Some("en".into()),
                 east_asia: None,
                 bidi: None,
-            }),
-            border: Some(Border {
+            })),
+            border: Dup::from(Some(Border {
                 style: BorderStyle::Single,
                 width: Dimension::new(0),
                 space: Dimension::new(0),
                 color: Color::BLACK,
-            }),
-            text_scale: Some(TextScale::new(80)),
+            })),
+            text_scale: Dup::from(Some(TextScale::new(80))),
         };
         let mut target = RunProperties::default();
         merge_run_properties(&mut target, &base);
 
         assert!(target.bold.is_some());
         assert!(target.italic.is_some());
-        assert!(target.underline.is_some());
+        assert!(target.underline.cloned().is_some());
         assert!(target.strike.is_some());
-        assert!(target.color.is_some());
-        assert!(target.highlight.is_some());
-        assert!(target.shading.is_some());
-        assert!(target.vertical_align.is_some());
-        assert!(target.spacing.is_some());
-        assert!(target.kerning.is_some());
+        assert!(target.color.cloned().is_some());
+        assert!(target.highlight.cloned().is_some());
+        assert!(target.shading.cloned().is_some());
+        assert!(target.vertical_align.cloned().is_some());
+        assert!(target.spacing.cloned().is_some());
+        assert!(target.kerning.cloned().is_some());
         assert!(target.all_caps.is_some());
         assert!(target.small_caps.is_some());
         assert!(target.vanish.is_some());
@@ -442,15 +445,15 @@ mod tests {
         assert!(target.imprint.is_some());
         assert!(target.outline.is_some());
         assert!(target.shadow.is_some());
-        assert!(target.position.is_some());
-        assert!(target.lang.is_some());
-        assert!(target.border.is_some());
+        assert!(target.position.cloned().is_some());
+        assert!(target.lang.cloned().is_some());
+        assert!(target.border.cloned().is_some());
         assert!(target.fonts.ascii.explicit.is_some());
         assert!(target.fonts.high_ansi.explicit.is_some());
         assert!(target.fonts.east_asian.explicit.is_some());
         assert!(target.fonts.complex_script.explicit.is_some());
-        assert!(target.font_size.is_some());
-        assert_eq!(target.text_scale, Some(TextScale::new(80)));
+        assert!(target.font_size.cloned().is_some());
+        assert_eq!(target.text_scale, Dup::from(Some(TextScale::new(80))));
     }
 
     #[test]
@@ -458,15 +461,15 @@ mod tests {
         // §17.7.2: when both parent and child specify text_scale, the child's
         // value wins. Mirrors the standard merge semantics for run properties.
         let mut target = RunProperties {
-            text_scale: Some(TextScale::new(120)),
+            text_scale: Dup::from(Some(TextScale::new(120))),
             ..Default::default()
         };
         let base = RunProperties {
-            text_scale: Some(TextScale::new(80)),
+            text_scale: Dup::from(Some(TextScale::new(80))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
-        assert_eq!(target.text_scale, Some(TextScale::new(120)));
+        assert_eq!(target.text_scale, Dup::from(Some(TextScale::new(120))));
     }
 
     #[test]
@@ -474,11 +477,11 @@ mod tests {
         // No child override → parent's text_scale propagates.
         let mut target = RunProperties::default();
         let base = RunProperties {
-            text_scale: Some(TextScale::new(80)),
+            text_scale: Dup::from(Some(TextScale::new(80))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
-        assert_eq!(target.text_scale, Some(TextScale::new(80)));
+        assert_eq!(target.text_scale, Dup::from(Some(TextScale::new(80))));
     }
 
     // ── ParagraphProperties merging ──────────────────────────────────────

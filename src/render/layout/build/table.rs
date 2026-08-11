@@ -301,7 +301,7 @@ pub(super) fn build_table(
             // the grid slots are shrunk once, up front — so a per-row value
             // cannot be honoured without a per-row grid. Report it rather than
             // dropping it silently; the parsed value stays on the model.
-            let row_spacing = row.properties.cell_spacing.or_else(|| {
+            let row_spacing = row.properties.cell_spacing.cloned().or_else(|| {
                 row.property_exceptions
                     .as_ref()
                     .and_then(|e| e.cell_spacing)
@@ -327,7 +327,7 @@ pub(super) fn build_table(
                 // [MS-OE376] §2.4.77(c) notes Word requires `val = 0` whenever
                 // `hRule="auto"`, making `AtLeast(0)` a no-op on Word output.
                 // Other producers are not bound by that.
-                height_rule: row.properties.height.and_then(row_height_rule),
+                height_rule: row.properties.height.cloned().and_then(row_height_rule),
                 is_header: row.properties.is_header,
                 cant_split: row.properties.cant_split,
                 grid_before: row.properties.grid_before,

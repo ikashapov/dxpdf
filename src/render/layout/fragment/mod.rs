@@ -517,11 +517,11 @@ pub fn font_props_from_run(
 ) -> FontProps {
     let family = effective_font(&rp.fonts).unwrap_or(default_family);
 
-    let size = auto_fit.scale_font(rp.font_size.map(Pt::from).unwrap_or(default_size));
+    let size = auto_fit.scale_font(rp.font_size.cloned().map(Pt::from).unwrap_or(default_size));
 
-    let char_spacing = rp.spacing.map(Pt::from).unwrap_or(Pt::ZERO);
+    let char_spacing = rp.spacing.cloned().map(Pt::from).unwrap_or(Pt::ZERO);
 
-    let text_scale = rp.text_scale.map_or(1.0, |s| s.as_factor());
+    let text_scale = rp.text_scale.cloned().map_or(1.0, |s| s.as_factor());
 
     FontProps {
         family: Rc::from(family),
@@ -535,7 +535,7 @@ pub fn font_props_from_run(
         // (explicit "no underline" override), `Some(_actual_style_)` —
         // collapses here into "draw / don't draw"; only the third case
         // draws.
-        underline: matches!(rp.underline, Some(s) if s != UnderlineStyle::None),
+        underline: matches!(rp.underline.get(), Some(s) if *s != UnderlineStyle::None),
         // §17.3.2.30. Kept tri-state all the way to level resolution, for the
         // same reason `bold` and `italic` are kept tri-state all the way to
         // face selection: what the cascade left absent is not what it turned
@@ -690,6 +690,7 @@ mod mark_line_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Dup;
     use crate::model::UnderlineStyle;
     use crate::render::fonts::Toggle;
 
@@ -762,7 +763,7 @@ mod tests {
 
     fn rp_with_underline(style: Option<UnderlineStyle>) -> RunProperties {
         RunProperties {
-            underline: style,
+            underline: Dup::from(style),
             ..RunProperties::default()
         }
     }
@@ -820,7 +821,7 @@ mod tests {
     fn font_props_text_scale_compressed() {
         // <w:w w:val="80"/> → 0.8× horizontal scale.
         let rp = RunProperties {
-            text_scale: Some(crate::model::TextScale::new(80)),
+            text_scale: Dup::from(Some(crate::model::TextScale::new(80))),
             ..RunProperties::default()
         };
         let fp = font_props_from_run(
@@ -836,7 +837,7 @@ mod tests {
     fn font_props_text_scale_expanded() {
         // <w:w w:val="150"/> → 1.5× horizontal scale.
         let rp = RunProperties {
-            text_scale: Some(crate::model::TextScale::new(150)),
+            text_scale: Dup::from(Some(crate::model::TextScale::new(150))),
             ..RunProperties::default()
         };
         let fp = font_props_from_run(

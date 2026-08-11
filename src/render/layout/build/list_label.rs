@@ -27,6 +27,7 @@
 //! `w:bidi` — the stops, the pen, and the alignment-suppression rule together
 //! — and there is no reference corpus here to check that against.
 
+use crate::model::Dup;
 use std::rc::Rc;
 
 use crate::i18n::bidi::BidiLevel;
@@ -355,7 +356,7 @@ fn inject_text_label(
     // resolved as a separate scalar because it isn't part of
     // `FontProps`.
     let label_color = cascade
-        .pick(|rp| rp.color)
+        .pick(|rp| rp.color.cloned())
         .map(|c| {
             crate::render::resolve::color::resolve_color(
                 c,
@@ -591,13 +592,13 @@ impl<'a> ListLabelRunPropertyCascade<'a> {
 
         model::RunProperties {
             fonts,
-            font_size: self.pick(|rp| rp.font_size),
+            font_size: Dup::from(self.pick(|rp| rp.font_size.cloned())),
             bold: self.pick(|rp| rp.bold),
             italic: self.pick(|rp| rp.italic),
-            underline: self.pick(|rp| rp.underline),
-            color: self.pick(|rp| rp.color),
-            spacing: self.pick(|rp| rp.spacing),
-            text_scale: self.pick(|rp| rp.text_scale),
+            underline: Dup::from(self.pick(|rp| rp.underline.cloned())),
+            color: Dup::from(self.pick(|rp| rp.color.cloned())),
+            spacing: Dup::from(self.pick(|rp| rp.spacing.cloned())),
+            text_scale: Dup::from(self.pick(|rp| rp.text_scale.cloned())),
             ..Default::default()
         }
     }
@@ -943,7 +944,7 @@ mod tests {
     #[test]
     fn centered_spacer_is_never_underlined() {
         let level_rpr = RunProperties {
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         let resolved = resolved_with(vec![ResolvedNumberingLevel {
@@ -1382,7 +1383,7 @@ mod tests {
 
     fn rp_with_underline(u: UnderlineStyle) -> RunProperties {
         RunProperties {
-            underline: Some(u),
+            underline: Dup::from(Some(u)),
             ..Default::default()
         }
     }
@@ -1424,7 +1425,7 @@ mod tests {
         };
         assert_eq!(cascade.pick(|rp| rp.bold), Some(true));
         assert_eq!(
-            cascade.pick(|rp| rp.underline),
+            cascade.pick(|rp| rp.underline.cloned()),
             Some(UnderlineStyle::Single)
         );
     }
@@ -1440,7 +1441,7 @@ mod tests {
             paragraph_style: Some(&style),
         };
         assert_eq!(
-            cascade.pick(|rp| rp.underline),
+            cascade.pick(|rp| rp.underline.cloned()),
             Some(UnderlineStyle::Double)
         );
     }
@@ -1483,7 +1484,7 @@ mod tests {
             paragraph_style: None,
         };
         let effective = cascade.resolve();
-        assert_eq!(effective.underline, Some(UnderlineStyle::Single));
+        assert_eq!(effective.underline, Dup::from(Some(UnderlineStyle::Single)));
     }
 
     /// `FontSet` (non-`Copy`) cascade rule: the resolved `fonts` is
@@ -1585,7 +1586,7 @@ mod tests {
     #[test]
     fn label_font_inherits_char_spacing_from_level() {
         let level = RunProperties {
-            spacing: Some(Dimension::<Twips>::new(40)),
+            spacing: Dup::from(Some(Dimension::<Twips>::new(40))),
             ..Default::default()
         };
         let cascade = ListLabelRunPropertyCascade {
@@ -1608,7 +1609,7 @@ mod tests {
     #[test]
     fn label_font_inherits_text_scale_from_level() {
         let level = RunProperties {
-            text_scale: Some(TextScale::new(150)),
+            text_scale: Dup::from(Some(TextScale::new(150))),
             ..Default::default()
         };
         let cascade = ListLabelRunPropertyCascade {
@@ -1632,7 +1633,7 @@ mod tests {
         let level = RunProperties {
             bold: Some(true),
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)), // 12 pt
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))), // 12 pt
             fonts: FontSet {
                 ascii: FontSlot::from_name("Verdana"),
                 ..Default::default()
@@ -1695,18 +1696,18 @@ mod tests {
 
         let level = RunProperties {
             bold: Some(true),
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         let mark = RunProperties {
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
-            spacing: Some(Dimension::<Twips>::new(40)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
+            spacing: Dup::from(Some(Dimension::<Twips>::new(40))),
             ..Default::default()
         };
         let style = RunProperties {
-            color: Some(Color::Rgb(0x112233)),
-            text_scale: Some(TextScale::new(120)),
+            color: Dup::from(Some(Color::Rgb(0x112233))),
+            text_scale: Dup::from(Some(TextScale::new(120))),
             fonts: FontSet {
                 ascii: FontSlot::from_name("Calibri"),
                 ..Default::default()
@@ -1722,24 +1723,28 @@ mod tests {
         assert_eq!(effective.bold, Some(true), "from level");
         assert_eq!(
             effective.underline,
-            Some(UnderlineStyle::Single),
+            Dup::from(Some(UnderlineStyle::Single)),
             "from level"
         );
         assert_eq!(effective.italic, Some(true), "from mark");
         assert_eq!(
             effective.font_size,
-            Some(Dimension::<HalfPoints>::new(24)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             "from mark"
         );
         assert_eq!(
             effective.spacing,
-            Some(Dimension::<Twips>::new(40)),
+            Dup::from(Some(Dimension::<Twips>::new(40))),
             "from mark"
         );
-        assert_eq!(effective.color, Some(Color::Rgb(0x112233)), "from style");
+        assert_eq!(
+            effective.color,
+            Dup::from(Some(Color::Rgb(0x112233))),
+            "from style"
+        );
         assert_eq!(
             effective.text_scale,
-            Some(TextScale::new(120)),
+            Dup::from(Some(TextScale::new(120))),
             "from style"
         );
         assert_eq!(

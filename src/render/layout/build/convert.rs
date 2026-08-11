@@ -63,6 +63,7 @@ pub(super) fn resolve_paragraph_defaults(
     let mut default_size = resolved
         .doc_defaults_run
         .font_size
+        .cloned()
         .map(Pt::from)
         .unwrap_or(SPEC_DEFAULT_FONT_SIZE);
     let mut default_color = base_color.unwrap_or(RgbColor::BLACK);
@@ -89,10 +90,10 @@ pub(super) fn resolve_paragraph_defaults(
     if let Some(f) = effective_font(&run_defaults.fonts) {
         default_family = f.to_string();
     }
-    if let Some(fs) = run_defaults.font_size {
+    if let Some(fs) = run_defaults.font_size.cloned() {
         default_size = Pt::from(fs);
     }
-    if let Some(c) = run_defaults.color {
+    if let Some(c) = run_defaults.color.cloned() {
         default_color = resolve_color(c, ColorContext::Text);
     }
 
@@ -268,6 +269,7 @@ pub(super) fn doc_font_size(ctx: &BuildContext) -> Pt {
     ctx.resolved
         .doc_defaults_run
         .font_size
+        .cloned()
         .map(Pt::from)
         .unwrap_or(SPEC_DEFAULT_FONT_SIZE)
 }

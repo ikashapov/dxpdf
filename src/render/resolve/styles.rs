@@ -241,7 +241,7 @@ mod tests {
                 }),
                 Some(RunProperties {
                     bold: Some(false),
-                    font_size: Some(Dimension::<HalfPoints>::new(24)),
+                    font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
                     ..Default::default()
                 }),
             ),
@@ -252,7 +252,10 @@ mod tests {
 
         assert_eq!(normal.paragraph.alignment, Some(Alignment::Start));
         assert_eq!(normal.run.bold, Some(false));
-        assert_eq!(normal.run.font_size, Some(Dimension::<HalfPoints>::new(24)));
+        assert_eq!(
+            normal.run.font_size,
+            Dup::from(Some(Dimension::<HalfPoints>::new(24)))
+        );
     }
 
     #[test]
@@ -267,7 +270,7 @@ mod tests {
                         ..Default::default()
                     }),
                     Some(RunProperties {
-                        font_size: Some(Dimension::<HalfPoints>::new(24)),
+                        font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
                         bold: Some(false),
                         ..Default::default()
                     }),
@@ -300,7 +303,7 @@ mod tests {
         assert_eq!(h1.run.bold, Some(true), "child overrides parent");
         assert_eq!(
             h1.run.font_size,
-            Some(Dimension::<HalfPoints>::new(24)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             "inherited from Normal"
         );
     }
@@ -314,7 +317,7 @@ mod tests {
                     None,
                     None,
                     Some(RunProperties {
-                        font_size: Some(Dimension::<HalfPoints>::new(20)),
+                        font_size: Dup::from(Some(Dimension::<HalfPoints>::new(20))),
                         bold: Some(false),
                         italic: Some(false),
                         ..Default::default()
@@ -352,7 +355,7 @@ mod tests {
         assert_eq!(leaf.run.bold, Some(true), "from Mid");
         assert_eq!(
             leaf.run.font_size,
-            Some(Dimension::<HalfPoints>::new(20)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(20))),
             "from Base"
         );
     }
@@ -420,7 +423,7 @@ mod tests {
                 ..Default::default()
             },
             doc_defaults_run: RunProperties {
-                font_size: Some(Dimension::<HalfPoints>::new(22)),
+                font_size: Dup::from(Some(Dimension::<HalfPoints>::new(22))),
                 ..Default::default()
             },
             styles: [(StyleId::new("Normal"), style(None, None, None))]
@@ -440,7 +443,7 @@ mod tests {
         // Run doc defaults ARE merged during resolution.
         assert_eq!(
             normal.run.font_size,
-            Some(Dimension::<HalfPoints>::new(22)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(22))),
             "should inherit from doc defaults"
         );
     }
@@ -449,7 +452,7 @@ mod tests {
     fn style_overrides_doc_defaults() {
         let sheet = StyleSheet {
             doc_defaults_run: RunProperties {
-                font_size: Some(Dimension::<HalfPoints>::new(22)),
+                font_size: Dup::from(Some(Dimension::<HalfPoints>::new(22))),
                 bold: Some(false),
                 ..Default::default()
             },
@@ -475,7 +478,7 @@ mod tests {
         assert_eq!(strong.run.bold, Some(true), "style overrides doc default");
         assert_eq!(
             strong.run.font_size,
-            Some(Dimension::<HalfPoints>::new(22)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(22))),
             "inherited from doc default"
         );
     }

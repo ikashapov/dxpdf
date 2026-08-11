@@ -190,7 +190,7 @@ fn sample1_has_direct_formatting() {
         if let Block::Paragraph(p) = block {
             for inline in &p.content {
                 if let Inline::TextRun(run) = inline {
-                    if let Some(sz) = run.properties.font_size {
+                    if let Some(sz) = run.properties.font_size.cloned() {
                         sizes.insert(sz.raw());
                     }
                 }

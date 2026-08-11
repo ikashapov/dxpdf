@@ -79,7 +79,7 @@ impl Locale {
     pub fn first_tag<'a>(layers: impl IntoIterator<Item = &'a RunProperties>) -> Option<&'a str> {
         layers.into_iter().find_map(|rp| {
             rp.lang
-                .as_ref()
+                .get()
                 .and_then(|l| l.val.as_deref())
                 .filter(|tag| !tag.is_empty())
         })
@@ -163,15 +163,16 @@ impl Locale {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Dup;
     use crate::model::Lang;
 
     fn rp(tag: Option<&str>) -> RunProperties {
         RunProperties {
-            lang: tag.map(|t| Lang {
+            lang: Dup::from(tag.map(|t| Lang {
                 val: Some(t.to_string()),
                 east_asia: None,
                 bidi: None,
-            }),
+            })),
             ..Default::default()
         }
     }

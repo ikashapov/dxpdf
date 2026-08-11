@@ -229,7 +229,7 @@ mod tests {
     fn resolve_resolves_styles() {
         let mut doc = empty_doc();
         doc.styles.doc_defaults_run = RunProperties {
-            font_size: Some(Dimension::<HalfPoints>::new(22)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(22))),
             ..Default::default()
         };
         doc.styles.styles.insert(
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(normal.paragraph.alignment, Some(Alignment::Start));
         assert_eq!(
             normal.run.font_size,
-            Some(Dimension::<HalfPoints>::new(22)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(22))),
             "should inherit doc default"
         );
     }

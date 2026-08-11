@@ -151,13 +151,13 @@ fn rpr_repeated_sz_and_color_take_the_last() {
         })
         .expect("expected a run");
     assert_eq!(
-        run.properties.font_size.map(|d| d.raw()),
+        run.properties.font_size.get().map(|d| d.raw()),
         Some(48),
         "§17.3.2.38"
     );
     assert_eq!(
-        run.properties.color,
-        Some(Color::Rgb(0x0000FF)),
+        run.properties.color.get(),
+        Some(&Color::Rgb(0x0000FF)),
         "§17.3.2.6"
     );
 }
@@ -189,7 +189,7 @@ fn trpr_repeated_trheight_takes_the_last() {
     );
     let row = &first_table(&doc).rows[0];
     assert_eq!(
-        row.properties.height.map(|h| h.value.raw()),
+        row.properties.height.get().map(|h| h.value.raw()),
         Some(900),
         "§17.4.81"
     );

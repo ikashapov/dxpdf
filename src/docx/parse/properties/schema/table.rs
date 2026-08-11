@@ -366,22 +366,22 @@ impl From<TrHeightXml> for TableRowHeight {
 impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
         Self {
-            height: Dup::from(x.tr_height).into_value().map(Into::into),
+            height: Dup::from(x.tr_height).map(Into::into),
             is_header: last_toggle(x.tbl_header),
             cant_split: last_toggle(x.cant_split),
-            justification: Dup::from(x.jc).into_value().map(|v| Alignment::from(v.val)),
-            cnf_style: Dup::from(x.cnf_style).into_value().map(CnfStyle::from),
+            justification: Dup::from(x.jc).map(|v| Alignment::from(v.val)),
+            cnf_style: Dup::from(x.cnf_style).map(CnfStyle::from),
             grid_before: Dup::from(x.grid_before)
                 .into_value()
                 .map(|v| v.val)
                 .unwrap_or(0),
-            w_before: Dup::from(x.w_before).into_value().map(Into::into),
+            w_before: Dup::from(x.w_before).map(Into::into),
             grid_after: Dup::from(x.grid_after)
                 .into_value()
                 .map(|v| v.val)
                 .unwrap_or(0),
-            w_after: Dup::from(x.w_after).into_value().map(Into::into),
-            cell_spacing: Dup::from(x.tbl_cell_spacing).into_value().map(Into::into),
+            w_after: Dup::from(x.w_after).map(Into::into),
+            cell_spacing: Dup::from(x.tbl_cell_spacing).map(Into::into),
         }
     }
 }
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn tr_pr_height_with_rule() {
         let tr = parse_tr_pr(r#"<trPr><trHeight val="440" hRule="atLeast"/></trPr>"#);
-        let h = tr.height.unwrap();
+        let h = tr.height.cloned().unwrap();
         assert_eq!(h.value.raw(), 440);
         assert_eq!(h.rule, HeightRule::AtLeast);
     }
@@ -678,7 +678,7 @@ mod tests {
     fn tr_pr_grid_after_and_w_after() {
         let tr = parse_tr_pr(r#"<trPr><gridAfter val="2"/><wAfter w="500" type="dxa"/></trPr>"#);
         assert_eq!(tr.grid_after, 2);
-        match tr.w_after.unwrap() {
+        match tr.w_after.cloned().unwrap() {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 500),
             other => panic!("expected Twips, got {other:?}"),
         }
@@ -688,7 +688,7 @@ mod tests {
     fn tr_pr_grid_before_and_w_before() {
         let tr = parse_tr_pr(r#"<trPr><gridBefore val="1"/><wBefore w="38" type="dxa"/></trPr>"#);
         assert_eq!(tr.grid_before, 1);
-        match tr.w_before.unwrap() {
+        match tr.w_before.cloned().unwrap() {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 38),
             other => panic!("expected Twips, got {other:?}"),
         }
@@ -699,8 +699,8 @@ mod tests {
         let tr = parse_tr_pr(r#"<trPr/>"#);
         assert_eq!(tr.grid_before, 0);
         assert_eq!(tr.grid_after, 0);
-        assert!(tr.w_before.is_none());
-        assert!(tr.w_after.is_none());
+        assert!(tr.w_before.is_absent());
+        assert!(tr.w_after.is_absent());
     }
 
     // ── tcPr ──
@@ -801,7 +801,7 @@ mod tests {
         )
         .unwrap()
         .into();
-        assert!(tr.cell_spacing.is_some(), "row-level §17.4.42");
+        assert!(tr.cell_spacing.cloned().is_some(), "row-level §17.4.42");
 
         let ex: crate::docx::model::TableRowPropertyExceptions =
             quick_xml::de::from_str::<TblPrExXml>(
@@ -844,7 +844,12 @@ mod tests {
                  <trHeight val="200"/><trHeight val="500"/>
                </trPr>"#,
         );
-        assert_eq!(tr.height.map(|h| h.value.raw()), Some(500), "\u{a7}17.4.81");
+        assert_eq!(
+            tr.height.get().map(|h| h.value.raw()),
+            Some(500),
+            "\u{a7}17.4.81"
+        );
+        assert_eq!(tr.height.all().len(), 2, "both occurrences reach the model");
     }
 
     #[test]

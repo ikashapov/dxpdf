@@ -1,3 +1,4 @@
+use crate::model::Dup;
 use std::rc::Rc;
 
 use crate::i18n::bidi::BidiLevel;
@@ -519,9 +520,9 @@ pub(super) fn build_fragments(
 
     // §17.7.2: table style run properties override Normal.
     if let Some(ts) = table_style {
-        if let Some(fs) = ts.run.font_size {
+        if let Some(fs) = ts.run.font_size.cloned() {
             default_size = Pt::from(fs);
-            run_defaults.font_size = Some(fs);
+            run_defaults.font_size = Dup::from(Some(fs));
         }
     }
 
@@ -534,10 +535,10 @@ pub(super) fn build_fragments(
             let mut overlay = rp.clone();
             merge_run_properties(&mut overlay, &run_defaults);
             run_defaults = overlay;
-            if let Some(fs) = run_defaults.font_size {
+            if let Some(fs) = run_defaults.font_size.cloned() {
                 default_size = Pt::from(fs);
             }
-            if let Some(color) = run_defaults.color {
+            if let Some(color) = run_defaults.color.cloned() {
                 default_color = resolve_color(color, ColorContext::Text);
             }
         }
