@@ -18,7 +18,7 @@
 
 use std::io::Write;
 
-use dxpdf::model::{Alignment, Block, Color, TableMeasure};
+use dxpdf::model::{Alignment, Block, Color, TableMeasure, VmlColor, VmlDashStyle};
 
 /// Minimal in-memory DOCX around the given body XML. Local rather than shared
 /// with `tests/integration.rs` so this file stands alone.
@@ -233,4 +233,47 @@ fn the_committed_fixture_parses_and_resolves() {
     );
     // And it must render, not merely parse.
     dxpdf::convert(&bytes).expect("fixture must convert");
+}
+
+/// VML was the last place in the parser where a repeated child could fail a
+/// document: the five common children reached the model behind a
+/// `#[serde(flatten)]`, and serde cannot collect repeated keys into a sequence
+/// across that boundary. The fixture's `<v:roundrect>` repeats two of them.
+#[test]
+fn the_fixture_vml_shape_tolerates_repeated_children() {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-files/duplicate-children.docx"
+    ))
+    .expect("fixture present — rebuild with scripts/make_duplicate_children_fixture.py");
+    let doc = dxpdf::docx::parse(&bytes).expect("a repeated VML child must not fail the parse");
+
+    let pict = doc
+        .body
+        .iter()
+        .filter_map(|b| match b {
+            Block::Paragraph(p) => Some(p),
+            _ => None,
+        })
+        .flat_map(|p| p.content.iter())
+        .find_map(|i| match i {
+            dxpdf::model::Inline::Pict(p) => Some(p),
+            _ => None,
+        })
+        .expect("the fixture carries a <w:pict>");
+
+    let common = pict.primitives[0].common();
+    assert_eq!(
+        common.stroke.as_ref().and_then(|s| s.dash_style),
+        Some(VmlDashStyle::Dash),
+        "§14.1.2.21: the last <v:stroke> wins"
+    );
+    assert!(
+        matches!(
+            common.fill.as_ref().and_then(|f| f.color.as_ref()),
+            Some(&VmlColor::Rgb(0, 0, 0xFF))
+        ),
+        "§14.1.2.5: the last <v:fill> wins, got {:?}",
+        common.fill.as_ref().map(|f| &f.color)
+    );
 }

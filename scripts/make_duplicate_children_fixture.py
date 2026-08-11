@@ -11,6 +11,12 @@ This fixture repeats one child in each bag the converter models, so a
 regression that makes any of them fatal again shows up in
 `tests/parse_test_files.rs` without anyone writing a new test.
 
+The `<v:roundrect>` covers the same ground for VML, which was the last place
+in the parser where a repeated child could fail a document — its common
+children reached the model behind a `#[serde(flatten)]`, and serde cannot
+collect repeated keys into a sequence across that boundary. See
+`docx::parse::vml::schema::CommonAttrsXml`.
+
 **Every duplicate here disagrees with itself**, deliberately: the two
 occurrences carry different values, so the fixture pins *which* one wins
 (the last) rather than merely proving the parse survived. `tests/
@@ -97,6 +103,13 @@ BODY = """
 <w:p><w:pPr><w:pStyle w:val="ElementsDeStyle"/></w:pPr>
 <w:r><w:t>a style name whose byte 4 splits a codepoint</w:t></w:r></w:p>
 
+<w:p><w:r><w:pict>
+  <v:roundrect id="rr" style="width:60pt;height:30pt" arcsize="0.2">
+    <v:stroke dashstyle="dot"/><v:stroke dashstyle="dash"/>
+    <v:fill type="solid" color="#ff0000"/><v:fill type="solid" color="#0000ff"/>
+  </v:roundrect>
+</w:pict></w:r></w:p>
+
 <w:sectPr><w:pgSz w:w="11906" w:h="16838"/>
 <w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"
          w:header="709" w:footer="709" w:gutter="0"/></w:sectPr>
@@ -104,7 +117,8 @@ BODY = """
 
 DOCUMENT = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    ' xmlns:v="urn:schemas-microsoft-com:vml">'
     f"<w:body>{BODY}</w:body></w:document>"
 )
 
