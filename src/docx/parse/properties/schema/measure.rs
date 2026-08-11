@@ -64,6 +64,25 @@ where
     Ok(measure)
 }
 
+/// Deserializes a list of `TableMeasureXml` elements while verifying that no explicit
+/// measurement value is negative.
+pub(crate) fn deserialize_vec_nonnegative_table_measure<'de, D>(
+    deserializer: D,
+) -> Result<Vec<TableMeasureXml>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let measures = Vec::<TableMeasureXml>::deserialize(deserializer)?;
+    for value in &measures {
+        if value.w.as_ref().is_some_and(IntegerMeasure::is_negative) {
+            return Err(serde::de::Error::custom(
+                "negative value is not valid for this OOXML table measurement",
+            ));
+        }
+    }
+    Ok(measures)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

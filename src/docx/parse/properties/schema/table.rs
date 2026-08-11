@@ -21,7 +21,10 @@ use crate::docx::parse::primitives::{last_toggle, OnOff};
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
 use super::insets::EdgeInsetsTwipsXml;
-use super::measure::{deserialize_optional_nonnegative_table_measure, TableMeasureXml};
+use super::measure::{
+    deserialize_optional_nonnegative_table_measure, deserialize_vec_nonnegative_table_measure,
+    TableMeasureXml,
+};
 use super::shading::ShdXml;
 
 // ── tblPr ───────────────────────────────────────────────────────────────
@@ -382,32 +385,37 @@ impl From<TrPrXml> for TableRowProperties {
 
 // ── tcPr ───────────────────────────────────────────────────────────────
 
+/// Table cell property bag (§17.4.70 `w:tcPr`).
+///
+/// Child properties are deserialized as `Vec<T>` to tolerate duplicate XML elements
+/// (such as repeated `<w:tcMar>` or `<w:tcBorders>` emitted by Word/LibreOffice)
+/// without failing deserialization. Per OOXML §17.7.2, the last occurrence wins.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TcPrXml {
     #[serde(rename = "tcBorders", default)]
-    tc_borders: Option<TableCellBordersXml>,
+    tc_borders: Vec<TableCellBordersXml>,
     #[serde(rename = "tcMar", default)]
-    tc_mar: Option<EdgeInsetsTwipsXml>,
+    tc_mar: Vec<EdgeInsetsTwipsXml>,
     #[serde(
         rename = "tcW",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    tc_w: Option<TableMeasureXml>,
+    tc_w: Vec<TableMeasureXml>,
     #[serde(rename = "shd", default)]
-    shd: Option<ShdXml>,
+    shd: Vec<ShdXml>,
     #[serde(rename = "vAlign", default)]
-    v_align: Option<ValAttr<StVerticalJc>>,
+    v_align: Vec<ValAttr<StVerticalJc>>,
     #[serde(rename = "vMerge", default)]
-    v_merge: Option<VMergeXml>,
+    v_merge: Vec<VMergeXml>,
     #[serde(rename = "gridSpan", default)]
-    grid_span: Option<ValAttr<u32>>,
+    grid_span: Vec<ValAttr<u32>>,
     #[serde(rename = "textDirection", default)]
-    text_direction: Option<ValAttr<StTextDirection>>,
+    text_direction: Vec<ValAttr<StTextDirection>>,
     #[serde(rename = "noWrap", default)]
     no_wrap: Vec<OnOff>,
     #[serde(rename = "cnfStyle", default)]
-    cnf_style: Option<CnfStyleXml>,
+    cnf_style: Vec<CnfStyleXml>,
 }
 
 /// `<w:vMerge/>` — absent `@val` means "continue"; `@val="restart"` starts a
@@ -437,20 +445,24 @@ impl From<VMergeXml> for VerticalMerge {
 impl From<TcPrXml> for TableCellProperties {
     fn from(x: TcPrXml) -> Self {
         Self {
-            width: x.tc_w.map(Into::into),
-            borders: x.tc_borders.map(Into::into),
-            shading: x.shd.map(Into::into),
-            margins: x.tc_mar.map(Into::into),
+            width: x.tc_w.into_iter().last().map(Into::into),
+            borders: x.tc_borders.into_iter().last().map(Into::into),
+            shading: x.shd.into_iter().last().map(Into::into),
+            margins: x.tc_mar.into_iter().last().map(Into::into),
             vertical_align: x
                 .v_align
+                .into_iter()
+                .last()
                 .map(|v| crate::docx::model::CellVerticalAlign::from(v.val)),
-            vertical_merge: x.v_merge.map(Into::into),
-            grid_span: x.grid_span.map(|v| v.val),
+            vertical_merge: x.v_merge.into_iter().last().map(Into::into),
+            grid_span: x.grid_span.into_iter().last().map(|v| v.val),
             text_direction: x
                 .text_direction
+                .into_iter()
+                .last()
                 .map(|v| crate::docx::model::TextDirection::from(v.val)),
             no_wrap: last_toggle(x.no_wrap),
-            cnf_style: x.cnf_style.map(CnfStyle::from),
+            cnf_style: x.cnf_style.into_iter().last().map(CnfStyle::from),
         }
     }
 }
@@ -790,5 +802,17 @@ mod tests {
             .unwrap()
             .into();
         assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.41");
+    }
+
+    #[test]
+    fn tc_pr_duplicate_tc_mar_does_not_fail() {
+        let tc = parse_tc_pr(
+            r#"<tcPr>
+                <tcMar><top w="100" type="dxa"/></tcMar>
+                <tcMar><bottom w="200" type="dxa"/></tcMar>
+            </tcPr>"#,
+        );
+        assert!(tc.margins.is_some());
+        assert_eq!(tc.margins.unwrap().bottom.map(|d| d.raw()), Some(200));
     }
 }
