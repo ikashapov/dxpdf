@@ -1,3 +1,18 @@
+dxpdf (0.5.0-1) unstable; urgency=medium
+
+  * Internationalisation: UAX #14 line breaking, UAX #9 bidirectional text with
+    rule L4 mirroring, region-aware decimal separators, localized DATE/TIME
+    field pictures, and §17.18.59 number formats spelled out in English,
+    German, French and Spanish.
+  * First release to ship this package. amd64 and arm64, built on Debian 12.
+  * Pagination fixes that move page counts on existing documents: a paragraph
+    is no longer stranded alone before an explicit page break, a paragraph mark
+    is measured in its own font rather than the paragraph default, and the line
+    fitter no longer overruns its container when it breaks back to an earlier
+    opportunity.
+
+ -- Ilya Nixan <nixan@nerdy.pro>  Tue, 11 Aug 2026 09:00:00 +0000
+
 dxpdf (0.4.0-1) unstable; urgency=medium
 
   * Initial Debian package, built upstream and attached to the GitHub release
