@@ -8,7 +8,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Emu};
@@ -112,7 +112,8 @@ pub struct GraphicFrameLocksXml {
 
 impl From<CNvGraphicFramePrXml> for GraphicFrameLocks {
     fn from(x: CNvGraphicFramePrXml) -> Self {
-        last(x.locks)
+        Dup::from(x.locks)
+            .into_value()
             .map(|l| Self {
                 no_change_aspect: l.no_change_aspect.map(|b| b.0),
                 no_drilldown: l.no_drilldown.map(|b| b.0),
@@ -152,11 +153,13 @@ impl GraphicXml {
         self,
         ctx: &mut crate::docx::parse::body::ConvertCtx,
     ) -> Option<GraphicContent> {
-        let data = last(self.data)?;
-        if let Some(pic) = last(data.pic) {
+        let data = Dup::from(self.data).into_value()?;
+        if let Some(pic) = Dup::from(data.pic).into_value() {
             Some(GraphicContent::Picture(pic.into()))
         } else {
-            last(data.wsp).map(|w| GraphicContent::WordProcessingShape(w.into_model(ctx)))
+            Dup::from(data.wsp)
+                .into_value()
+                .map(|w| GraphicContent::WordProcessingShape(w.into_model(ctx)))
         }
     }
 }
@@ -213,10 +216,12 @@ impl InlineXml {
         );
         Image {
             extent: Size::new(self.extent.cx, self.extent.cy),
-            effect_extent: last(self.effect_extent).map(Into::into),
+            effect_extent: Dup::from(self.effect_extent).into_value().map(Into::into),
             doc_properties: self.doc_pr.into(),
-            graphic_frame_locks: last(self.cnv_gfp).map(Into::into),
-            graphic: last(self.graphic).and_then(|g| g.into_content(ctx)),
+            graphic_frame_locks: Dup::from(self.cnv_gfp).into_value().map(Into::into),
+            graphic: Dup::from(self.graphic)
+                .into_value()
+                .and_then(|g| g.into_content(ctx)),
             placement: ImagePlacement::Inline { distance },
         }
     }
@@ -509,23 +514,27 @@ impl AnchorXml {
             self.dist_b.unwrap_or_default(),
             self.dist_l.unwrap_or_default(),
         );
-        let simple_pos = last(self.simple_pos).map(|s| Offset::new(s.x, s.y));
+        let simple_pos = Dup::from(self.simple_pos)
+            .into_value()
+            .map(|s| Offset::new(s.x, s.y));
         let use_simple_pos = self.simple_pos_attr.map(|b| b.0);
-        let horizontal_position = position(last(self.pos_h));
-        let vertical_position = position(last(self.pos_v));
+        let horizontal_position = position(Dup::from(self.pos_h).into_value());
+        let vertical_position = position(Dup::from(self.pos_v).into_value());
         let wrap = pick_wrap(
-            last(self.wrap_none),
-            last(self.wrap_square),
-            last(self.wrap_tight),
-            last(self.wrap_through),
-            last(self.wrap_top_and_bottom),
+            Dup::from(self.wrap_none).into_value(),
+            Dup::from(self.wrap_square).into_value(),
+            Dup::from(self.wrap_tight).into_value(),
+            Dup::from(self.wrap_through).into_value(),
+            Dup::from(self.wrap_top_and_bottom).into_value(),
         );
         Image {
             extent: Size::new(self.extent.cx, self.extent.cy),
-            effect_extent: last(self.effect_extent).map(Into::into),
+            effect_extent: Dup::from(self.effect_extent).into_value().map(Into::into),
             doc_properties: self.doc_pr.into(),
-            graphic_frame_locks: last(self.cnv_gfp).map(Into::into),
-            graphic: last(self.graphic).and_then(|g| g.into_content(ctx)),
+            graphic_frame_locks: Dup::from(self.cnv_gfp).into_value().map(Into::into),
+            graphic: Dup::from(self.graphic)
+                .into_value()
+                .and_then(|g| g.into_content(ctx)),
             placement: ImagePlacement::Anchor(AnchorProperties {
                 distance,
                 simple_pos,
@@ -555,13 +564,13 @@ fn position(p: Option<PositionXml>) -> AnchorPosition {
         };
     };
     let rel = p.relative_from.into();
-    if let Some(a) = last(p.align) {
+    if let Some(a) = Dup::from(p.align).into_value() {
         return AnchorPosition::Align {
             relative_from: rel,
             alignment: a.value.into(),
         };
     }
-    if let Some(o) = last(p.pos_offset) {
+    if let Some(o) = Dup::from(p.pos_offset).into_value() {
         let offset = o.value.trim().parse::<i64>().unwrap_or_else(|_| {
             log::warn!("posOffset: invalid EMU offset {:?}; using 0", o.value);
             0
@@ -607,7 +616,7 @@ fn pick_wrap(
                 t.dist_l.unwrap_or_default(),
             ),
             wrap_text: t.wrap_text.into(),
-            polygon: last(t.polygon).and_then(polygon),
+            polygon: Dup::from(t.polygon).into_value().and_then(polygon),
         };
     }
     if let Some(th) = through {
@@ -619,7 +628,7 @@ fn pick_wrap(
                 th.dist_l.unwrap_or_default(),
             ),
             wrap_text: th.wrap_text.into(),
-            polygon: last(th.polygon).and_then(polygon),
+            polygon: Dup::from(th.polygon).into_value().and_then(polygon),
         };
     }
     if let Some(tb) = top_and_bottom {
@@ -632,7 +641,7 @@ fn pick_wrap(
 }
 
 fn polygon(p: WrapPolygonXml) -> Option<WrapPolygon> {
-    let start = last(p.start)?;
+    let start = Dup::from(p.start).into_value()?;
     Some(WrapPolygon {
         edited: p.edited.map(|b| b.0),
         start: Offset::new(start.x, start.y),

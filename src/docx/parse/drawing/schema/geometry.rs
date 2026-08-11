@@ -7,7 +7,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::{Deserialize, Deserializer};
 
 use crate::docx::dimension::{Dimension, Emu};
@@ -260,16 +260,25 @@ impl From<StPathFillMode> for PathFillMode {
 impl From<CustomGeometryXml> for CustomGeometry {
     fn from(x: CustomGeometryXml) -> Self {
         Self {
-            av_list: last(x.av_lst).map(guides).unwrap_or_default(),
-            gd_list: last(x.gd_lst).map(guides).unwrap_or_default(),
-            ah_list: last(x.ah_lst)
+            av_list: Dup::from(x.av_lst)
+                .into_value()
+                .map(guides)
+                .unwrap_or_default(),
+            gd_list: Dup::from(x.gd_lst)
+                .into_value()
+                .map(guides)
+                .unwrap_or_default(),
+            ah_list: Dup::from(x.ah_lst)
+                .into_value()
                 .map(|a| a.handles.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
-            cxn_list: last(x.cxn_lst)
+            cxn_list: Dup::from(x.cxn_lst)
+                .into_value()
                 .map(|c| c.sites.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
-            rect: last(x.rect).map(Into::into),
-            paths: last(x.path_lst)
+            rect: Dup::from(x.rect).into_value().map(Into::into),
+            paths: Dup::from(x.path_lst)
+                .into_value()
                 .map(|p| p.paths.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
         }

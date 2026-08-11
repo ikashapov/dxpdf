@@ -6,7 +6,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg, ThousandthPercent};
@@ -184,15 +184,16 @@ impl From<RelativeRectXml> for RelativeRect {
 
 impl From<GradFillXml> for GradientFill {
     fn from(x: GradFillXml) -> Self {
-        let stops = last(x.gs_lst)
+        let stops = Dup::from(x.gs_lst)
+            .into_value()
             .map(|l| l.stops.into_iter().map(Into::into).collect())
             .unwrap_or_default();
-        let shade_properties = if let Some(lin) = last(x.lin) {
+        let shade_properties = if let Some(lin) = Dup::from(x.lin).into_value() {
             GradientShadeProperties::Linear {
                 angle: lin.angle.unwrap_or_default(),
                 scaled: lin.scaled.map(|o| o.0),
             }
-        } else if let Some(path) = last(x.path) {
+        } else if let Some(path) = Dup::from(x.path).into_value() {
             GradientShadeProperties::Path {
                 // An omitted `@path` still denotes a path (radial-family)
                 // gradient; default to `circle`, which is what the shade
@@ -201,7 +202,7 @@ impl From<GradFillXml> for GradientFill {
                     .path_type
                     .map(Into::into)
                     .unwrap_or(PathShadeType::Circle),
-                fill_to_rect: last(path.fill_to_rect).map(Into::into),
+                fill_to_rect: Dup::from(path.fill_to_rect).into_value().map(Into::into),
             }
         } else {
             GradientShadeProperties::Linear {
@@ -214,7 +215,7 @@ impl From<GradFillXml> for GradientFill {
             shade_properties,
             flip: x.flip.map(Into::into),
             rot_with_shape: x.rot_with_shape.map(|o| o.0),
-            tile_rect: last(x.tile_rect).map(Into::into),
+            tile_rect: Dup::from(x.tile_rect).into_value().map(Into::into),
         }
     }
 }
@@ -341,14 +342,17 @@ impl From<StRectAlignment> for RectAlignment {
 impl From<BlipFillXml> for BlipFill {
     fn from(x: BlipFillXml) -> Self {
         use crate::docx::model::RelId;
-        let blip = last(x.blip).map(|b| Blip {
+        let blip = Dup::from(x.blip).into_value().map(|b| Blip {
             embed: b.embed.map(RelId::new),
             link: b.link.map(RelId::new),
             compression: b.cstate.map(Into::into),
         });
-        let fill_kind = match (last(x.stretch), last(x.tile)) {
+        let fill_kind = match (
+            Dup::from(x.stretch).into_value(),
+            Dup::from(x.tile).into_value(),
+        ) {
             (Some(s), _) => BlipFillKind::Stretch(StretchFill {
-                fill_rect: last(s.fill_rect).map(Into::into),
+                fill_rect: Dup::from(s.fill_rect).into_value().map(Into::into),
             }),
             (None, Some(t)) => BlipFillKind::Tile(TileFill {
                 tx: t.tx,
@@ -364,7 +368,7 @@ impl From<BlipFillXml> for BlipFill {
             rotate_with_shape: x.rot_with_shape.map(|o| o.0),
             dpi: x.dpi,
             blip,
-            src_rect: last(x.src_rect).map(Into::into),
+            src_rect: Dup::from(x.src_rect).into_value().map(Into::into),
             fill_kind,
         }
     }
@@ -394,8 +398,8 @@ impl From<PattFillXml> for PatternFill {
     fn from(x: PattFillXml) -> Self {
         Self {
             preset: x.prst.map(Into::into),
-            fg_color: last(x.fg_clr).map(|c| c.color.into()),
-            bg_color: last(x.bg_clr).map(|c| c.color.into()),
+            fg_color: Dup::from(x.fg_clr).into_value().map(|c| c.color.into()),
+            bg_color: Dup::from(x.bg_clr).into_value().map(|c| c.color.into()),
         }
     }
 }

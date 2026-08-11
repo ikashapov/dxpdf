@@ -255,7 +255,8 @@ pub(super) fn build_table(
                     let span = cell.properties.grid_span.cloned().unwrap_or(1) as usize;
                     let mut grid_start = row.properties.grid_before as usize;
                     for ci in 0..col_idx {
-                        grid_start += row.cells[ci].properties.grid_span.cloned().unwrap_or(1) as usize;
+                        grid_start +=
+                            row.cells[ci].properties.grid_span.cloned().unwrap_or(1) as usize;
                     }
                     // A row may address more grid columns than `tblGrid` declares —
                     // a `gridBefore` past the end, or simply more `<w:tc>` than
@@ -548,7 +549,8 @@ fn build_table_cell(
     let valign = cell
         .properties
         .vertical_align
-        .cloned().or_else(|| {
+        .cloned()
+        .or_else(|| {
             cond.cell_properties
                 .as_ref()
                 .and_then(|tcp| tcp.vertical_align.cloned())

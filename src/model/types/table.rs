@@ -1,8 +1,8 @@
 //! Table types — table, row, cell properties, borders, positioning.
 
 use crate::model::dimension::{Dimension, ThousandthPercent, Twips};
-use crate::model::Dup;
 use crate::model::geometry::{EdgeInsets, PartialEdgeInsets};
+use crate::model::Dup;
 
 use super::content::Block;
 use super::formatting::{

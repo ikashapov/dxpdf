@@ -4,6 +4,7 @@
 //! direct formatting, style id, mark-run properties, and an optional
 //! nested `<w:sectPr>` (§17.6.18 "last-paragraph-of-section" marker).
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, Twips};
@@ -17,7 +18,7 @@ use crate::docx::parse::primitives::st_enums::{
     StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::{last, last_toggle, OnOff};
+use crate::docx::parse::primitives::{last_toggle, OnOff};
 
 use super::border::ParagraphBordersXml;
 use super::cnf_style::CnfStyleXml;
@@ -289,9 +290,11 @@ use crate::docx::parse::primitives::AttrBool;
 
 impl PPrXml {
     pub(crate) fn split(self) -> ParsedPPr {
-        let style_id = last(self.p_style).map(|v| StyleId::new(v.val));
+        let style_id = Dup::from(self.p_style)
+            .into_value()
+            .map(|v| StyleId::new(v.val));
 
-        let (run_properties, _run_style_id) = match last(self.r_pr) {
+        let (run_properties, _run_style_id) = match Dup::from(self.r_pr).into_value() {
             Some(r) => {
                 let (rp, sid) = r.split();
                 (Some(rp), sid)
@@ -301,18 +304,23 @@ impl PPrXml {
         // rStyle inside pPr/rPr applies to the paragraph mark only; the
         // legacy parser discards this style id too.
 
-        let section_properties = last(self.sect_pr).map(Into::into);
+        let section_properties = Dup::from(self.sect_pr).into_value().map(Into::into);
 
         let properties = ParagraphProperties {
-            alignment: last(self.jc).map(|j| Alignment::from(j.val)),
-            indentation: last(self.ind).map(Into::into),
-            spacing: last(self.spacing).map(Into::into),
-            numbering: last(self.num_pr).and_then(numbering_ref),
-            tabs: last(self.tabs)
+            alignment: Dup::from(self.jc)
+                .into_value()
+                .map(|j| Alignment::from(j.val)),
+            indentation: Dup::from(self.ind).into_value().map(Into::into),
+            spacing: Dup::from(self.spacing).into_value().map(Into::into),
+            numbering: Dup::from(self.num_pr).into_value().and_then(numbering_ref),
+            tabs: Dup::from(self.tabs)
+                .into_value()
                 .map(<Vec<TabStop>>::from)
                 .unwrap_or_default(),
-            borders: last(self.p_bdr).map(ParagraphBorders::from),
-            shading: last(self.shd).map(Shading::from),
+            borders: Dup::from(self.p_bdr)
+                .into_value()
+                .map(ParagraphBorders::from),
+            shading: Dup::from(self.shd).into_value().map(Shading::from),
             keep_next: last_toggle(self.keep_next),
             keep_lines: last_toggle(self.keep_lines),
             widow_control: last_toggle(self.widow_control),
@@ -321,10 +329,14 @@ impl PPrXml {
             contextual_spacing: last_toggle(self.contextual_spacing),
             bidi: last_toggle(self.bidi),
             word_wrap: last_toggle(self.word_wrap),
-            outline_level: last(self.outline_lvl).and_then(|v| OutlineLevel::from_ooxml(v.val)),
-            text_alignment: last(self.text_alignment).map(|v| TextAlignment::from(v.val)),
-            cnf_style: last(self.cnf_style).map(CnfStyle::from),
-            frame_properties: last(self.frame_pr).map(FrameKind::from),
+            outline_level: Dup::from(self.outline_lvl)
+                .into_value()
+                .and_then(|v| OutlineLevel::from_ooxml(v.val)),
+            text_alignment: Dup::from(self.text_alignment)
+                .into_value()
+                .map(|v| TextAlignment::from(v.val)),
+            cnf_style: Dup::from(self.cnf_style).into_value().map(CnfStyle::from),
+            frame_properties: Dup::from(self.frame_pr).into_value().map(FrameKind::from),
             auto_space_de: last_toggle(self.auto_space_de),
             auto_space_dn: last_toggle(self.auto_space_dn),
         };
@@ -339,10 +351,10 @@ impl PPrXml {
 }
 
 fn numbering_ref(x: NumPrXml) -> Option<NumberingReference> {
-    let num_id = last(x.num_id)?;
+    let num_id = Dup::from(x.num_id).into_value()?;
     Some(NumberingReference {
         num_id: num_id.val,
-        level: last(x.ilvl).map(|v| v.val).unwrap_or(0),
+        level: Dup::from(x.ilvl).into_value().map(|v| v.val).unwrap_or(0),
     })
 }
 

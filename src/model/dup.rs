@@ -185,7 +185,11 @@ mod tests {
     fn map_preserves_every_occurrence() {
         let d = Dup::from(vec![1, 2, 3]).map(|n| n * 10);
         assert_eq!(d.all(), &[10, 20, 30], "map is a functor, not a resolution");
-        assert_eq!(d.get(), Some(&30), "and the policy still applies at the read");
+        assert_eq!(
+            d.get(),
+            Some(&30),
+            "and the policy still applies at the read"
+        );
     }
 
     #[test]

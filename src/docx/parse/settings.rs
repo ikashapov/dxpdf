@@ -1,6 +1,6 @@
 //! Parser for `word/settings.xml`.
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Twips};
@@ -53,14 +53,14 @@ struct StringVal {
 impl From<SettingsXml> for DocumentSettings {
     fn from(x: SettingsXml) -> Self {
         let mut s = DocumentSettings::default();
-        if let Some(t) = last(x.default_tab_stop) {
+        if let Some(t) = Dup::from(x.default_tab_stop).into_value() {
             s.default_tab_stop = t.val;
         }
-        if let Some(OnOff(on)) = last(x.even_and_odd_headers) {
+        if let Some(OnOff(on)) = Dup::from(x.even_and_odd_headers).into_value() {
             s.even_and_odd_headers = on;
         }
-        if let Some(r) = last(x.rsids) {
-            if let Some(root) = last(r.rsid_root) {
+        if let Some(r) = Dup::from(x.rsids).into_value() {
+            if let Some(root) = Dup::from(r.rsid_root).into_value() {
                 s.rsid_root = RevisionSaveId::from_hex(&root.val);
             }
             s.rsids = r

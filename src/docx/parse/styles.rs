@@ -1,7 +1,7 @@
 //! Parser for `word/styles.xml` — parses style definitions as-is.
 //! No inheritance resolution — `basedOn` references are preserved.
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::error::Result;
@@ -208,12 +208,18 @@ impl From<StylesXml> for StyleSheet {
     fn from(x: StylesXml) -> Self {
         let mut sheet = StyleSheet::default();
 
-        if let Some(dd) = last(x.doc_defaults) {
-            if let Some(r) = last(dd.r_pr_default).and_then(|d| last(d.r_pr)) {
+        if let Some(dd) = Dup::from(x.doc_defaults).into_value() {
+            if let Some(r) = Dup::from(dd.r_pr_default)
+                .into_value()
+                .and_then(|d| Dup::from(d.r_pr).into_value())
+            {
                 let (rp, _) = r.split();
                 sheet.doc_defaults_run = rp;
             }
-            if let Some(p) = last(dd.p_pr_default).and_then(|d| last(d.p_pr)) {
+            if let Some(p) = Dup::from(dd.p_pr_default)
+                .into_value()
+                .and_then(|d| Dup::from(d.p_pr).into_value())
+            {
                 sheet.doc_defaults_paragraph = p.split().properties;
             }
         }
@@ -224,7 +230,7 @@ impl From<StylesXml> for StyleSheet {
             }
         }
 
-        sheet.latent_styles = last(x.latent_styles).map(Into::into);
+        sheet.latent_styles = Dup::from(x.latent_styles).into_value().map(Into::into);
         sheet
     }
 }
@@ -238,26 +244,29 @@ fn convert_style(s: StyleXml) -> Option<(StyleId, Style)> {
         Option<ParagraphProperties>,
         Option<RunProperties>,
     ) = (None, None);
-    if let Some(p) = last(s.p_pr) {
+    if let Some(p) = Dup::from(s.p_pr).into_value() {
         let parsed = p.split();
         paragraph_properties = Some(parsed.properties);
         run_properties_from_ppr = parsed.run_properties;
     }
 
-    let run_properties = last(s.r_pr)
+    let run_properties = Dup::from(s.r_pr)
+        .into_value()
         .map(|r| r.split().0)
         .or(run_properties_from_ppr);
 
-    let table_properties = last(s.tbl_pr).map(|t| t.split().0);
+    let table_properties = Dup::from(s.tbl_pr).into_value().map(|t| t.split().0);
 
     let table_style_overrides = s.tbl_style_pr.into_iter().map(convert_override).collect();
 
     Some((
         id,
         Style {
-            name: last(s.name).map(|v| v.val),
+            name: Dup::from(s.name).into_value().map(|v| v.val),
             style_type,
-            based_on: last(s.based_on).map(|v| StyleId::new(v.val)),
+            based_on: Dup::from(s.based_on)
+                .into_value()
+                .map(|v| StyleId::new(v.val)),
             is_default,
             paragraph_properties,
             run_properties,
@@ -270,11 +279,11 @@ fn convert_style(s: StyleXml) -> Option<(StyleId, Style)> {
 fn convert_override(x: TblStylePrXml) -> TableStyleOverride {
     TableStyleOverride {
         override_type: x.ty.into(),
-        paragraph_properties: last(x.p_pr).map(|p| p.split().properties),
-        run_properties: last(x.r_pr).map(|r| r.split().0),
-        table_properties: last(x.tbl_pr).map(|t| t.split().0),
-        table_row_properties: last(x.tr_pr).map(Into::into),
-        table_cell_properties: last(x.tc_pr).map(Into::into),
+        paragraph_properties: Dup::from(x.p_pr).into_value().map(|p| p.split().properties),
+        run_properties: Dup::from(x.r_pr).into_value().map(|r| r.split().0),
+        table_properties: Dup::from(x.tbl_pr).into_value().map(|t| t.split().0),
+        table_row_properties: Dup::from(x.tr_pr).into_value().map(Into::into),
+        table_cell_properties: Dup::from(x.tc_pr).into_value().map(Into::into),
     }
 }
 

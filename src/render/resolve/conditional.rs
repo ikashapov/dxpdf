@@ -392,7 +392,13 @@ mod tests {
             &overrides,
         );
         assert!(result.cell_properties.is_some());
-        assert!(result.cell_properties.as_ref().unwrap().shading.cloned().is_some());
+        assert!(result
+            .cell_properties
+            .as_ref()
+            .unwrap()
+            .shading
+            .cloned()
+            .is_some());
         assert!(result.run_properties.as_ref().unwrap().bold == Some(true));
     }
 
@@ -547,7 +553,13 @@ mod tests {
         // declares no banding override still gets the base layer.
         let result = resolve_cell_conditional(&pos(2, 2), None, &overrides);
         assert_eq!(
-            result.cell_properties.unwrap().shading.cloned().unwrap().fill,
+            result
+                .cell_properties
+                .unwrap()
+                .shading
+                .cloned()
+                .unwrap()
+                .fill,
             Color::Rgb(0xFF0000)
         );
         assert_eq!(result.run_properties.unwrap().bold, Some(true));
@@ -593,7 +605,13 @@ mod tests {
             ];
             let result = resolve_cell_conditional(&pos(r, c), None, &overrides);
             assert_eq!(
-                result.cell_properties.unwrap().shading.cloned().unwrap().fill,
+                result
+                    .cell_properties
+                    .unwrap()
+                    .shading
+                    .cloned()
+                    .unwrap()
+                    .fill,
                 Color::Rgb(0x9BBB59),
                 "{region:?} must outrank wholeTable"
             );
@@ -616,7 +634,13 @@ mod tests {
         ];
         let result = resolve_cell_conditional(&pos(0, 2), None, &overrides);
         assert_eq!(
-            result.cell_properties.unwrap().shading.cloned().unwrap().fill,
+            result
+                .cell_properties
+                .unwrap()
+                .shading
+                .cloned()
+                .unwrap()
+                .fill,
             Color::Rgb(0xFF0000),
             "shading falls through from wholeTable"
         );
@@ -650,7 +674,13 @@ mod tests {
         ];
         let result = resolve_cell_conditional(&pos(1, 1), None, &overrides);
         assert_eq!(
-            result.cell_properties.unwrap().shading.cloned().unwrap().fill,
+            result
+                .cell_properties
+                .unwrap()
+                .shading
+                .cloned()
+                .unwrap()
+                .fill,
             Color::Rgb(0x9BBB59),
             "row banding must still override column banding, and both the base"
         );

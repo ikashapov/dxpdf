@@ -8,7 +8,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::{
@@ -47,7 +47,7 @@ impl PictXml {
     /// VML text box content (same iterator threading as shape).
     pub(crate) fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> Pict {
         Pict {
-            shape_type: last(self.shape_type).map(Into::into),
+            shape_type: Dup::from(self.shape_type).into_value().map(Into::into),
             primitives: self
                 .primitives
                 .into_iter()
@@ -262,9 +262,10 @@ impl From<ShapeTypeXml> for VmlShapeType {
             path: parse_path_commands(x.path),
             filled: x.filled.map(|b| b.0),
             stroked: x.stroked.map(|b| b.0),
-            stroke: last(x.stroke).map(Into::into),
-            vml_path: last(x.vml_path).map(Into::into),
-            formulas: last(x.formulas)
+            stroke: Dup::from(x.stroke).into_value().map(Into::into),
+            vml_path: Dup::from(x.vml_path).into_value().map(Into::into),
+            formulas: Dup::from(x.formulas)
+                .into_value()
                 .map(|f| {
                     f.entries
                         .into_iter()
@@ -272,7 +273,7 @@ impl From<ShapeTypeXml> for VmlShapeType {
                         .collect()
                 })
                 .unwrap_or_default(),
-            lock: last(x.lock).map(Into::into),
+            lock: Dup::from(x.lock).into_value().map(Into::into),
         }
     }
 }
@@ -315,16 +316,18 @@ impl ShapeXml {
                 style: parse_style(self.style),
                 fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
-                stroke: last(self.stroke).map(Into::into),
-                text_box: last(self.textbox).map(|t| t.into_model(ctx)),
-                wrap: last(self.wrap).map(Into::into),
-                image_data: last(self.imagedata).map(Into::into),
-                fill: last(self.fill).map(Into::into),
+                stroke: Dup::from(self.stroke).into_value().map(Into::into),
+                text_box: Dup::from(self.textbox)
+                    .into_value()
+                    .map(|t| t.into_model(ctx)),
+                wrap: Dup::from(self.wrap).into_value().map(Into::into),
+                image_data: Dup::from(self.imagedata).into_value().map(Into::into),
+                fill: Dup::from(self.fill).into_value().map(Into::into),
             },
             shape_type_ref: self
                 .ty
                 .map(|s| VmlShapeId::new(s.strip_prefix('#').unwrap_or(&s))),
-            vml_path: last(self.vml_path).map(Into::into),
+            vml_path: Dup::from(self.vml_path).into_value().map(Into::into),
         }
     }
 }
@@ -373,11 +376,13 @@ impl RectXml {
                 style: parse_style(self.style),
                 fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
-                stroke: last(self.stroke).map(Into::into),
-                text_box: last(self.textbox).map(|t| t.into_model(ctx)),
-                wrap: last(self.wrap).map(Into::into),
-                image_data: last(self.imagedata).map(Into::into),
-                fill: last(self.fill).map(Into::into),
+                stroke: Dup::from(self.stroke).into_value().map(Into::into),
+                text_box: Dup::from(self.textbox)
+                    .into_value()
+                    .map(|t| t.into_model(ctx)),
+                wrap: Dup::from(self.wrap).into_value().map(Into::into),
+                image_data: Dup::from(self.imagedata).into_value().map(Into::into),
+                fill: Dup::from(self.fill).into_value().map(Into::into),
             },
         }
     }
@@ -646,7 +651,8 @@ pub(crate) struct TxbxContentXml {
 
 impl TextBoxXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlTextBox {
-        let content: Vec<Block> = last(self.content)
+        let content: Vec<Block> = Dup::from(self.content)
+            .into_value()
             .map(|c| {
                 let (blocks, _) = crate::docx::parse::body::convert_container(c.children, ctx);
                 blocks

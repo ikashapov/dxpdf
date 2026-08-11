@@ -5,13 +5,14 @@
 //! via the `split` method — the style id is routed separately because the
 //! property cascade applies it before direct formatting.
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, HalfPoints, Twips, Unit};
 use crate::docx::model::{RunProperties, StrikeStyle, StyleId, TextScale, UnderlineStyle};
 use crate::docx::parse::primitives::st_enums::{StHighlightColor, StUnderline, StVerticalAlignRun};
 use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
-use crate::docx::parse::primitives::{last, last_toggle, HexColor, OnOff};
+use crate::docx::parse::primitives::{last_toggle, HexColor, OnOff};
 
 use super::border::BorderXml;
 use super::fonts::RFontsXml;
@@ -139,20 +140,27 @@ impl RPrXml {
     /// the cascade (§17.7.2), so it stays separate from the direct-formatting
     /// `RunProperties`.
     pub(crate) fn split(self) -> (RunProperties, Option<StyleId>) {
-        let style_id = last(self.r_style).map(|v| StyleId::new(v.val));
+        let style_id = Dup::from(self.r_style)
+            .into_value()
+            .map(|v| StyleId::new(v.val));
         let props = RunProperties {
-            fonts: last(self.r_fonts).map(Into::into).unwrap_or_default(),
-            font_size: last(self.sz).map(|s| s.val),
+            fonts: Dup::from(self.r_fonts)
+                .into_value()
+                .map(Into::into)
+                .unwrap_or_default(),
+            font_size: Dup::from(self.sz).into_value().map(|s| s.val),
             bold: last_toggle(self.b),
             italic: last_toggle(self.i),
-            underline: last(self.u).and_then(resolve_underline),
+            underline: Dup::from(self.u).into_value().and_then(resolve_underline),
             strike: resolve_strike(self.strike, self.dstrike),
-            color: last(self.color).map(|c| c.val.into()),
-            highlight: last(self.highlight).map(|h| h.val.into()),
-            shading: last(self.shd).map(Into::into),
-            vertical_align: last(self.vert_align).map(|v| v.val.into()),
-            spacing: last(self.spacing).map(|s| s.val),
-            kerning: last(self.kern).map(|k| k.val),
+            color: Dup::from(self.color).into_value().map(|c| c.val.into()),
+            highlight: Dup::from(self.highlight).into_value().map(|h| h.val.into()),
+            shading: Dup::from(self.shd).into_value().map(Into::into),
+            vertical_align: Dup::from(self.vert_align)
+                .into_value()
+                .map(|v| v.val.into()),
+            spacing: Dup::from(self.spacing).into_value().map(|s| s.val),
+            kerning: Dup::from(self.kern).into_value().map(|k| k.val),
             all_caps: last_toggle(self.caps),
             small_caps: last_toggle(self.small_caps),
             vanish: last_toggle(self.vanish),
@@ -163,10 +171,12 @@ impl RPrXml {
             imprint: last_toggle(self.imprint),
             outline: last_toggle(self.outline),
             shadow: last_toggle(self.shadow),
-            position: last(self.position).map(|p| p.val),
-            lang: last(self.lang).map(Into::into),
-            border: last(self.bdr).map(Into::into),
-            text_scale: last(self.char_scale).map(|v| TextScale::new(v.val)),
+            position: Dup::from(self.position).into_value().map(|p| p.val),
+            lang: Dup::from(self.lang).into_value().map(Into::into),
+            border: Dup::from(self.bdr).into_value().map(Into::into),
+            text_scale: Dup::from(self.char_scale)
+                .into_value()
+                .map(|v| TextScale::new(v.val)),
         };
         (props, style_id)
     }

@@ -17,8 +17,9 @@
 //! # The policy, and why it is a choice and not a citation
 //!
 //! Every duplicable child element is typed `Vec<T>`, which quick-xml + serde
-//! accumulate natively, and collapsed with [`last`] at the XML→domain seam:
-//! **the last occurrence wins, the rest are discarded.**
+//! accumulate natively, and carried into the model as [`crate::model::Dup`],
+//! which resolves **the last occurrence wins** at the point of use rather than
+//! here. Nothing is discarded at the seam.
 //!
 //! ECMA-376 does not decide this. §17.7.2 defines last-wins for *toggle
 //! properties* resolving through the style cascade — that is the rule
@@ -38,9 +39,9 @@
 //!
 //! **What would settle it:** a Word reference render of a cell whose `w:tcPr`
 //! holds two `<w:tcMar>` with different values. If Word takes the first, or
-//! merges them field-by-field, this function is what changes — one place, and
-//! every call site follows. Until then last-wins is an assumption held in one
-//! function on purpose.
+//! merges them field-by-field, [`crate::model::Dup::get`] is what changes — one
+//! place, and every read follows. Until then last-wins is an assumption held in
+//! one function on purpose, and [`crate::model::Dup::all`] keeps the evidence.
 //!
 //! # What this deliberately does not do
 //!
@@ -51,43 +52,3 @@
 //! constraint (a non-negative measurement, say) is checked **after** collapsing,
 //! so a discarded occurrence cannot fail a document whose surviving value is
 //! fine.
-
-/// Collapse a child element the schema allows at most once but producers
-/// sometimes repeat: keep the last occurrence, discard the rest.
-///
-/// The module doc explains why last, and what evidence would change it.
-/// Returns `None` for an absent element, so the style cascade can supply an
-/// inherited value — the same contract `Option<T>` had before.
-pub(crate) fn last<T>(items: Vec<T>) -> Option<T> {
-    items.into_iter().next_back()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn absent_is_none() {
-        assert_eq!(last(Vec::<u8>::new()), None);
-    }
-
-    #[test]
-    fn a_single_occurrence_is_itself() {
-        assert_eq!(last(vec![7]), Some(7));
-    }
-
-    #[test]
-    fn the_last_occurrence_wins() {
-        assert_eq!(last(vec![1, 2, 3]), Some(3));
-        // Order matters: this is the whole policy, so pin both directions.
-        assert_eq!(last(vec![3, 2, 1]), Some(1));
-    }
-
-    #[test]
-    fn it_agrees_with_last_toggle_on_the_same_input() {
-        use crate::docx::parse::primitives::{last_toggle, OnOff};
-        let toggles = vec![OnOff(true), OnOff(false)];
-        assert_eq!(last_toggle(toggles.clone()), Some(false));
-        assert_eq!(last(toggles).map(|OnOff(b)| b), Some(false));
-    }
-}

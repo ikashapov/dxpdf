@@ -74,7 +74,7 @@ mod tests {
 
     fn flag(xml: &str) -> Option<bool> {
         let t: Toggle = quick_xml::de::from_str(xml).unwrap();
-        crate::docx::parse::primitives::last(t.flag).map(|o| o.0)
+        crate::model::Dup::from(t.flag).into_value().map(|o| o.0)
     }
 
     #[test]

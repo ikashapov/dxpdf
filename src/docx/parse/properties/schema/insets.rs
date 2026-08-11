@@ -4,7 +4,7 @@
 //! Each side is `<w:top w:w="N" w:type="dxa"/>` etc. Only `dxa` (twips) is
 //! meaningful for cell padding; other `@type` values are ignored here.
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, Twips};
@@ -39,10 +39,22 @@ struct SideXml {
 impl From<EdgeInsetsTwipsXml> for EdgeInsets<Twips> {
     fn from(x: EdgeInsetsTwipsXml) -> Self {
         Self::new(
-            last(x.top).and_then(|s| s.w).unwrap_or_default(),
-            last(x.right).and_then(|s| s.w).unwrap_or_default(),
-            last(x.bottom).and_then(|s| s.w).unwrap_or_default(),
-            last(x.left).and_then(|s| s.w).unwrap_or_default(),
+            Dup::from(x.top)
+                .into_value()
+                .and_then(|s| s.w)
+                .unwrap_or_default(),
+            Dup::from(x.right)
+                .into_value()
+                .and_then(|s| s.w)
+                .unwrap_or_default(),
+            Dup::from(x.bottom)
+                .into_value()
+                .and_then(|s| s.w)
+                .unwrap_or_default(),
+            Dup::from(x.left)
+                .into_value()
+                .and_then(|s| s.w)
+                .unwrap_or_default(),
         )
     }
 }
@@ -62,10 +74,10 @@ impl From<EdgeInsetsTwipsXml> for EdgeInsets<Twips> {
 impl From<EdgeInsetsTwipsXml> for PartialEdgeInsets<Twips> {
     fn from(x: EdgeInsetsTwipsXml) -> Self {
         Self::new(
-            last(x.top).and_then(|s| s.w),
-            last(x.right).and_then(|s| s.w),
-            last(x.bottom).and_then(|s| s.w),
-            last(x.left).and_then(|s| s.w),
+            Dup::from(x.top).into_value().and_then(|s| s.w),
+            Dup::from(x.right).into_value().and_then(|s| s.w),
+            Dup::from(x.bottom).into_value().and_then(|s| s.w),
+            Dup::from(x.left).into_value().and_then(|s| s.w),
         )
     }
 }

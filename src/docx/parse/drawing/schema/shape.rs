@@ -11,7 +11,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::{Deserialize, Deserializer};
 
 use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg, ThousandthPercent};
@@ -64,26 +64,28 @@ pub struct SpPrXml {
 
 impl From<SpPrXml> for ShapeProperties {
     fn from(x: SpPrXml) -> Self {
-        let geometry = if let Some(p) = last(x.prst_geom) {
+        let geometry = if let Some(p) = Dup::from(x.prst_geom).into_value() {
             Some(ShapeGeometry::Preset(p.into()))
         } else {
-            last(x.cust_geom).map(|c| ShapeGeometry::Custom(c.into()))
+            Dup::from(x.cust_geom)
+                .into_value()
+                .map(|c| ShapeGeometry::Custom(c.into()))
         };
         let fill = pick_fill(
-            last(x.no_fill),
-            last(x.grp_fill),
-            last(x.solid_fill),
-            last(x.grad_fill),
-            last(x.blip_fill),
-            last(x.patt_fill),
+            Dup::from(x.no_fill).into_value(),
+            Dup::from(x.grp_fill).into_value(),
+            Dup::from(x.solid_fill).into_value(),
+            Dup::from(x.grad_fill).into_value(),
+            Dup::from(x.blip_fill).into_value(),
+            Dup::from(x.patt_fill).into_value(),
         );
         Self {
             bw_mode: x.bw_mode.map(Into::into),
-            transform: last(x.xfrm).map(Into::into),
+            transform: Dup::from(x.xfrm).into_value().map(Into::into),
             geometry,
             fill,
-            outline: last(x.ln).map(Into::into),
-            effect_list: last(x.effect_lst).map(Into::into),
+            outline: Dup::from(x.ln).into_value().map(Into::into),
+            effect_list: Dup::from(x.effect_lst).into_value().map(Into::into),
         }
     }
 }
@@ -151,8 +153,8 @@ impl From<XfrmXml> for Transform2D {
             rotation: x.rot,
             flip_h: x.flip_h.map(|b| b.0),
             flip_v: x.flip_v.map(|b| b.0),
-            offset: last(x.off).map(|o| Offset::new(o.x, o.y)),
-            extent: last(x.ext).map(|e| Size::new(e.cx, e.cy)),
+            offset: Dup::from(x.off).into_value().map(|o| Offset::new(o.x, o.y)),
+            extent: Dup::from(x.ext).into_value().map(|e| Size::new(e.cx, e.cy)),
         }
     }
 }
@@ -171,7 +173,8 @@ impl From<PrstGeomXml> for PresetGeometryDef {
     fn from(x: PrstGeomXml) -> Self {
         Self {
             preset: x.prst.0,
-            adjust_values: last(x.av_lst)
+            adjust_values: Dup::from(x.av_lst)
+                .into_value()
                 .map(|l| {
                     l.guides
                         .into_iter()
@@ -438,15 +441,17 @@ pub struct NormAutofitXml {
 
 impl From<BodyPrXml> for BodyProperties {
     fn from(x: BodyPrXml) -> Self {
-        let auto_fit = if last(x.no_autofit).is_some() {
+        let auto_fit = if Dup::from(x.no_autofit).into_value().is_some() {
             Some(TextAutoFit::NoAutoFit)
-        } else if let Some(na) = last(x.norm_autofit) {
+        } else if let Some(na) = Dup::from(x.norm_autofit).into_value() {
             Some(TextAutoFit::NormalAutoFit(NormalAutoFit {
                 font_scale: na.font_scale,
                 line_spacing_reduction: na.ln_spc_reduction,
             }))
         } else {
-            last(x.sp_autofit).map(|_| TextAutoFit::SpAutoFit)
+            Dup::from(x.sp_autofit)
+                .into_value()
+                .map(|_| TextAutoFit::SpAutoFit)
         };
         Self {
             rotation: x.rot,
@@ -580,31 +585,32 @@ impl WspXml {
         self,
         ctx: &mut crate::docx::parse::body::ConvertCtx,
     ) -> WordProcessingShape {
-        let txbx_content: Vec<Block> = last(self.txbx)
-            .and_then(|t| last(t.content))
+        let txbx_content: Vec<Block> = Dup::from(self.txbx)
+            .into_value()
+            .and_then(|t| Dup::from(t.content).into_value())
             .map(|c| {
                 let (blocks, _) = crate::docx::parse::body::convert_container(c.children, ctx);
                 blocks
             })
             .unwrap_or_default();
         let (style_line_ref, style_fill_ref, style_effect_ref, style_font_ref) =
-            match last(self.style) {
+            match Dup::from(self.style).into_value() {
                 Some(s) => (
-                    last(s.ln_ref).map(Into::into),
-                    last(s.fill_ref).map(Into::into),
-                    last(s.effect_ref).map(Into::into),
-                    last(s.font_ref).map(Into::into),
+                    Dup::from(s.ln_ref).into_value().map(Into::into),
+                    Dup::from(s.fill_ref).into_value().map(Into::into),
+                    Dup::from(s.effect_ref).into_value().map(Into::into),
+                    Dup::from(s.font_ref).into_value().map(Into::into),
                 ),
                 None => (None, None, None, None),
             };
         WordProcessingShape {
-            cnv_pr: last(self.cnv_pr).map(Into::into),
-            shape_properties: last(self.sp_pr).map(Into::into),
+            cnv_pr: Dup::from(self.cnv_pr).into_value().map(Into::into),
+            shape_properties: Dup::from(self.sp_pr).into_value().map(Into::into),
             style_line_ref,
             style_effect_ref,
             style_fill_ref,
             style_font_ref,
-            body_pr: last(self.body_pr).map(Into::into),
+            body_pr: Dup::from(self.body_pr).into_value().map(Into::into),
             txbx_content,
         }
     }

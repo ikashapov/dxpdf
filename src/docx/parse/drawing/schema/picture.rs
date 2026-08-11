@@ -6,7 +6,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::{CnvPicProperties, DocProperties, NvPicProperties, PicLocks, Picture};
@@ -88,7 +88,7 @@ impl From<PictureXml> for Picture {
         Self {
             nv_pic_pr: x.nv_pic_pr.into(),
             blip_fill: x.blip_fill.into(),
-            shape_properties: last(x.sp_pr).map(Into::into),
+            shape_properties: Dup::from(x.sp_pr).into_value().map(Into::into),
         }
     }
 }
@@ -97,7 +97,7 @@ impl From<NvPicPrXml> for NvPicProperties {
     fn from(x: NvPicPrXml) -> Self {
         Self {
             cnv_pr: x.cnv_pr.into(),
-            cnv_pic_pr: last(x.cnv_pic_pr).map(Into::into),
+            cnv_pic_pr: Dup::from(x.cnv_pic_pr).into_value().map(Into::into),
         }
     }
 }
@@ -118,7 +118,7 @@ impl From<CNvPicPrXml> for CnvPicProperties {
     fn from(x: CNvPicPrXml) -> Self {
         Self {
             prefer_relative_resize: x.prefer_relative_resize.map(|b| b.0),
-            pic_locks: last(x.pic_locks).map(Into::into),
+            pic_locks: Dup::from(x.pic_locks).into_value().map(Into::into),
         }
     }
 }

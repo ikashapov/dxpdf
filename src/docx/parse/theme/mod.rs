@@ -6,7 +6,7 @@
 
 mod script;
 
-use crate::docx::parse::primitives::last;
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::error::Result;
@@ -136,10 +136,10 @@ struct SysClr {
 
 impl ColorChoice {
     fn resolve(self) -> Option<u32> {
-        if let Some(s) = last(self.srgb) {
+        if let Some(s) = Dup::from(self.srgb).into_value() {
             return s.val.rgb();
         }
-        if let Some(s) = last(self.sys) {
+        if let Some(s) = Dup::from(self.sys).into_value() {
             return s.last_clr.and_then(HexColor::rgb);
         }
         None
@@ -183,31 +183,32 @@ struct ScriptFontXml {
 impl From<ThemeXml> for Theme {
     fn from(x: ThemeXml) -> Self {
         let mut theme = Theme::default();
-        if let Some(elements) = last(x.theme_elements) {
-            if let Some(cs) = last(elements.clr_scheme) {
+        if let Some(elements) = Dup::from(x.theme_elements).into_value() {
+            if let Some(cs) = Dup::from(elements.clr_scheme).into_value() {
                 theme.color_scheme = cs.into();
             }
-            if let Some(fs) = last(elements.font_scheme) {
-                if let Some(major) = last(fs.major) {
+            if let Some(fs) = Dup::from(elements.font_scheme).into_value() {
+                if let Some(major) = Dup::from(fs.major).into_value() {
                     theme.major_font = major.into();
                 }
-                if let Some(minor) = last(fs.minor) {
+                if let Some(minor) = Dup::from(fs.minor).into_value() {
                     theme.minor_font = minor.into();
                 }
             }
-            if let Some(fmt) = last(elements.fmt_scheme) {
-                if let Some(list) = last(fmt.fill_style_lst) {
+            if let Some(fmt) = Dup::from(elements.fmt_scheme).into_value() {
+                if let Some(list) = Dup::from(fmt.fill_style_lst).into_value() {
                     theme.fill_styles = list.fills.into_iter().map(Into::into).collect();
                 }
-                if let Some(list) = last(fmt.ln_style_lst) {
+                if let Some(list) = Dup::from(fmt.ln_style_lst).into_value() {
                     theme.line_styles = list.lines.into_iter().map(Outline::from).collect();
                 }
-                if let Some(list) = last(fmt.effect_style_lst) {
+                if let Some(list) = Dup::from(fmt.effect_style_lst).into_value() {
                     theme.effect_styles = list
                         .effect_styles
                         .into_iter()
                         .map(|es| {
-                            last(es.effect_lst)
+                            Dup::from(es.effect_lst)
+                                .into_value()
                                 .map(EffectList::from)
                                 .unwrap_or_default()
                         })
@@ -222,18 +223,21 @@ impl From<ThemeXml> for Theme {
 impl From<ClrSchemeXml> for ThemeColorScheme {
     fn from(x: ClrSchemeXml) -> Self {
         let mut s = ThemeColorScheme::default();
-        assign(&mut s.dark1, last(x.dk1));
-        assign(&mut s.light1, last(x.lt1));
-        assign(&mut s.dark2, last(x.dk2));
-        assign(&mut s.light2, last(x.lt2));
-        assign(&mut s.accent1, last(x.accent1));
-        assign(&mut s.accent2, last(x.accent2));
-        assign(&mut s.accent3, last(x.accent3));
-        assign(&mut s.accent4, last(x.accent4));
-        assign(&mut s.accent5, last(x.accent5));
-        assign(&mut s.accent6, last(x.accent6));
-        assign(&mut s.hyperlink, last(x.hlink));
-        assign(&mut s.followed_hyperlink, last(x.fol_hlink));
+        assign(&mut s.dark1, Dup::from(x.dk1).into_value());
+        assign(&mut s.light1, Dup::from(x.lt1).into_value());
+        assign(&mut s.dark2, Dup::from(x.dk2).into_value());
+        assign(&mut s.light2, Dup::from(x.lt2).into_value());
+        assign(&mut s.accent1, Dup::from(x.accent1).into_value());
+        assign(&mut s.accent2, Dup::from(x.accent2).into_value());
+        assign(&mut s.accent3, Dup::from(x.accent3).into_value());
+        assign(&mut s.accent4, Dup::from(x.accent4).into_value());
+        assign(&mut s.accent5, Dup::from(x.accent5).into_value());
+        assign(&mut s.accent6, Dup::from(x.accent6).into_value());
+        assign(&mut s.hyperlink, Dup::from(x.hlink).into_value());
+        assign(
+            &mut s.followed_hyperlink,
+            Dup::from(x.fol_hlink).into_value(),
+        );
         s
     }
 }
@@ -247,9 +251,18 @@ fn assign(slot: &mut u32, choice: Option<ColorChoice>) {
 impl From<FontCollectionXml> for ThemeFontScheme {
     fn from(x: FontCollectionXml) -> Self {
         Self {
-            latin: last(x.latin).map(|t| t.typeface).unwrap_or_default(),
-            east_asian: last(x.ea).map(|t| t.typeface).unwrap_or_default(),
-            complex_script: last(x.cs).map(|t| t.typeface).unwrap_or_default(),
+            latin: Dup::from(x.latin)
+                .into_value()
+                .map(|t| t.typeface)
+                .unwrap_or_default(),
+            east_asian: Dup::from(x.ea)
+                .into_value()
+                .map(|t| t.typeface)
+                .unwrap_or_default(),
+            complex_script: Dup::from(x.cs)
+                .into_value()
+                .map(|t| t.typeface)
+                .unwrap_or_default(),
             script_fonts: x
                 .fonts
                 .into_iter()

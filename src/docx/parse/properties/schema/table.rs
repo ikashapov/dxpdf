@@ -4,8 +4,8 @@
 //! id travels separately for cascade reasons, matching the legacy parser's
 //! signature.
 
-use serde::{Deserialize, Deserializer};
 use crate::model::Dup;
+use serde::{Deserialize, Deserializer};
 
 use crate::docx::model::dimension::Twips;
 use crate::docx::model::{
@@ -17,7 +17,7 @@ use crate::docx::parse::primitives::st_enums::{
     StXAlign, StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::{last, last_toggle, OnOff};
+use crate::docx::parse::primitives::{last_toggle, OnOff};
 
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
@@ -210,29 +210,43 @@ pub(crate) struct TblPrExXml {
 impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
     fn from(x: TblPrExXml) -> Self {
         Self {
-            borders: last(x.tbl_borders).map(Into::into),
-            cell_spacing: last(x.tbl_cell_spacing).map(Into::into),
+            borders: Dup::from(x.tbl_borders).into_value().map(Into::into),
+            cell_spacing: Dup::from(x.tbl_cell_spacing).into_value().map(Into::into),
         }
     }
 }
 
 impl TblPrXml {
     pub(crate) fn split(self) -> (TableProperties, Option<StyleId>) {
-        let style_id = last(self.tbl_style).map(|v| StyleId::new(v.val));
+        let style_id = Dup::from(self.tbl_style)
+            .into_value()
+            .map(|v| StyleId::new(v.val));
         let props = TableProperties {
             style_id: style_id.clone(),
-            alignment: last(self.jc).map(|v| Alignment::from(v.val)),
-            width: last(self.tbl_w).map(Into::into),
-            layout: last(self.tbl_layout).map(|v| crate::docx::model::TableLayout::from(v.ty)),
-            indent: last(self.tbl_ind).map(Into::into),
-            borders: last(self.tbl_borders).map(Into::into),
-            cell_margins: last(self.tbl_cell_mar).map(Into::into),
-            cell_spacing: last(self.tbl_cell_spacing).map(Into::into),
-            look: last(self.tbl_look).map(Into::into),
-            style_row_band_size: last(self.tbl_style_row_band_size).map(|v| v.val),
-            style_col_band_size: last(self.tbl_style_col_band_size).map(|v| v.val),
-            positioning: last(self.tblp_pr).map(Into::into),
-            overlap: last(self.tbl_overlap).map(|v| crate::docx::model::TableOverlap::from(v.val)),
+            alignment: Dup::from(self.jc)
+                .into_value()
+                .map(|v| Alignment::from(v.val)),
+            width: Dup::from(self.tbl_w).into_value().map(Into::into),
+            layout: Dup::from(self.tbl_layout)
+                .into_value()
+                .map(|v| crate::docx::model::TableLayout::from(v.ty)),
+            indent: Dup::from(self.tbl_ind).into_value().map(Into::into),
+            borders: Dup::from(self.tbl_borders).into_value().map(Into::into),
+            cell_margins: Dup::from(self.tbl_cell_mar).into_value().map(Into::into),
+            cell_spacing: Dup::from(self.tbl_cell_spacing)
+                .into_value()
+                .map(Into::into),
+            look: Dup::from(self.tbl_look).into_value().map(Into::into),
+            style_row_band_size: Dup::from(self.tbl_style_row_band_size)
+                .into_value()
+                .map(|v| v.val),
+            style_col_band_size: Dup::from(self.tbl_style_col_band_size)
+                .into_value()
+                .map(|v| v.val),
+            positioning: Dup::from(self.tblp_pr).into_value().map(Into::into),
+            overlap: Dup::from(self.tbl_overlap)
+                .into_value()
+                .map(|v| crate::docx::model::TableOverlap::from(v.val)),
         };
         (props, style_id)
     }
@@ -363,16 +377,22 @@ impl From<TrHeightXml> for TableRowHeight {
 impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
         Self {
-            height: last(x.tr_height).map(Into::into),
+            height: Dup::from(x.tr_height).into_value().map(Into::into),
             is_header: last_toggle(x.tbl_header),
             cant_split: last_toggle(x.cant_split),
-            justification: last(x.jc).map(|v| Alignment::from(v.val)),
-            cnf_style: last(x.cnf_style).map(CnfStyle::from),
-            grid_before: last(x.grid_before).map(|v| v.val).unwrap_or(0),
-            w_before: last(x.w_before).map(Into::into),
-            grid_after: last(x.grid_after).map(|v| v.val).unwrap_or(0),
-            w_after: last(x.w_after).map(Into::into),
-            cell_spacing: last(x.tbl_cell_spacing).map(Into::into),
+            justification: Dup::from(x.jc).into_value().map(|v| Alignment::from(v.val)),
+            cnf_style: Dup::from(x.cnf_style).into_value().map(CnfStyle::from),
+            grid_before: Dup::from(x.grid_before)
+                .into_value()
+                .map(|v| v.val)
+                .unwrap_or(0),
+            w_before: Dup::from(x.w_before).into_value().map(Into::into),
+            grid_after: Dup::from(x.grid_after)
+                .into_value()
+                .map(|v| v.val)
+                .unwrap_or(0),
+            w_after: Dup::from(x.w_after).into_value().map(Into::into),
+            cell_spacing: Dup::from(x.tbl_cell_spacing).into_value().map(Into::into),
         }
     }
 }
@@ -719,7 +739,10 @@ mod tests {
     #[test]
     fn tc_pr_vertical_align() {
         let tc = parse_tc_pr(r#"<tcPr><vAlign val="center"/></tcPr>"#);
-        assert_eq!(tc.vertical_align, Dup::from(Some(CellVerticalAlign::Center)));
+        assert_eq!(
+            tc.vertical_align,
+            Dup::from(Some(CellVerticalAlign::Center))
+        );
     }
 
     #[test]
@@ -861,10 +884,7 @@ mod tests {
             tc.margins.all().first().unwrap().top.map(|d| d.raw()),
             Some(100)
         );
-        assert_eq!(
-            tc.margins.get().unwrap().bottom.map(|d| d.raw()),
-            Some(200)
-        );
+        assert_eq!(tc.margins.get().unwrap().bottom.map(|d| d.raw()), Some(200));
     }
 
     #[test]

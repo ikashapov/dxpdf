@@ -145,7 +145,9 @@ mod tests {
             if let Ok(value) = result {
                 panic!(
                     "{raw:?} must be rejected, got {:?}",
-                    crate::docx::parse::primitives::last(value.value).map(TableMeasure::from)
+                    crate::model::Dup::from(value.value)
+                        .into_value()
+                        .map(TableMeasure::from)
                 );
             }
         }
