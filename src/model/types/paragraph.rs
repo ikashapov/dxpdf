@@ -1,6 +1,7 @@
 //! Paragraph types — paragraph properties, spacing, indentation, frames.
 
 use crate::model::dimension::{Dimension, Twips};
+use crate::model::Dup;
 
 use super::formatting::{
     Alignment, CnfStyle, HeightRule, ParagraphBorders, Shading, TabStop, TableAnchor, TableXAlign,
@@ -30,7 +31,10 @@ pub struct ParagraphProperties {
     pub spacing: Option<ParagraphSpacing>,
     pub numbering: Option<NumberingReference>,
     pub tabs: Vec<TabStop>,
-    pub borders: Option<ParagraphBorders>,
+    /// §17.3.1.24 `<w:pBdr>`. `Dup` because a producer may repeat the element
+    /// inside one `<w:pPr>`; the sides *within* one `<w:pBdr>` stay plain so
+    /// [`ParagraphBorders`] keeps `Copy`. See `model::dup` for where the line is.
+    pub borders: Dup<ParagraphBorders>,
     pub shading: Option<Shading>,
     pub keep_next: Option<bool>,
     pub keep_lines: Option<bool>,

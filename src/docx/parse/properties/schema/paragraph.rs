@@ -317,9 +317,7 @@ impl PPrXml {
                 .into_value()
                 .map(<Vec<TabStop>>::from)
                 .unwrap_or_default(),
-            borders: Dup::from(self.p_bdr)
-                .into_value()
-                .map(ParagraphBorders::from),
+            borders: Dup::from(self.p_bdr).map(ParagraphBorders::from),
             shading: Dup::from(self.shd).into_value().map(Shading::from),
             keep_next: last_toggle(self.keep_next),
             keep_lines: last_toggle(self.keep_lines),
@@ -455,7 +453,10 @@ mod tests {
             </pPr>"#,
         );
         let p = r.properties;
-        assert_eq!(p.borders.unwrap().top.unwrap().style, BorderStyle::Single);
+        assert_eq!(
+            p.borders.get().unwrap().top.unwrap().style,
+            BorderStyle::Single
+        );
         assert_eq!(p.shading.unwrap().pattern, ShadingPattern::Solid);
         assert_eq!(p.tabs.len(), 1);
         assert_eq!(p.tabs[0].position.raw(), 1440);
