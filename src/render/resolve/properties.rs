@@ -174,24 +174,35 @@ pub fn overlay_table_properties(
     // field to `TableProperties` without deciding how it layers is a visible
     // omission here, not a silent one. `table_properties_overlay_covers_every_field`
     // pins it.
-    take(&mut out.alignment, overlay.alignment);
-    take(&mut out.width, overlay.width);
-    take(&mut out.layout, overlay.layout);
-    take(&mut out.indent, overlay.indent);
-    take(&mut out.borders, overlay.borders);
-    take(&mut out.cell_margins, overlay.cell_margins);
-    take(&mut out.cell_spacing, overlay.cell_spacing);
-    take(&mut out.look, overlay.look);
-    take(&mut out.style_row_band_size, overlay.style_row_band_size);
-    take(&mut out.style_col_band_size, overlay.style_col_band_size);
-    take(&mut out.positioning, overlay.positioning);
-    take(&mut out.overlap, overlay.overlap);
+    take(&mut out.alignment, overlay.alignment.clone());
+    take(&mut out.width, overlay.width.clone());
+    take(&mut out.layout, overlay.layout.clone());
+    take(&mut out.indent, overlay.indent.clone());
+    take(&mut out.borders, overlay.borders.clone());
+    take(&mut out.cell_margins, overlay.cell_margins.clone());
+    take(&mut out.cell_spacing, overlay.cell_spacing.clone());
+    take(&mut out.look, overlay.look.clone());
+    take(
+        &mut out.style_row_band_size,
+        overlay.style_row_band_size.clone(),
+    );
+    take(
+        &mut out.style_col_band_size,
+        overlay.style_col_band_size.clone(),
+    );
+    take(&mut out.positioning, overlay.positioning.clone());
+    take(&mut out.overlap, overlay.overlap.clone());
     out
 }
 
-/// If `overlay` specifies a value, it replaces `target`.
-fn take<T>(target: &mut Option<T>, overlay: Option<T>) {
-    if overlay.is_some() {
+/// §17.7.6: if `overlay` specifies a value, it replaces `target`.
+///
+/// The overlay twin of [`merge_opt`], and generic over the same [`Unset`] trait
+/// so it reads both carriers. For a [`Dup`] the replacement is wholesale: an
+/// overlay that set the property brings *all* of its occurrences and drops the
+/// target's, which is what "replaces" has always meant here.
+fn take<T: Unset>(target: &mut T, overlay: T) {
+    if !overlay.is_unset() {
         *target = overlay;
     }
 }
@@ -701,36 +712,36 @@ mod tests {
         use crate::model::geometry::EdgeInsets;
         let overlay = TableProperties {
             style_id: Some(StyleId::new("Ignored")),
-            alignment: Some(Alignment::Center),
-            width: Some(TableMeasure::Auto),
-            layout: Some(TableLayout::Fixed),
-            indent: Some(TableMeasure::Twips(Dimension::new(120))),
-            borders: Some(TableBorders {
+            alignment: Dup::from(Some(Alignment::Center)),
+            width: Dup::from(Some(TableMeasure::Auto)),
+            layout: Dup::from(Some(TableLayout::Fixed)),
+            indent: Dup::from(Some(TableMeasure::Twips(Dimension::new(120)))),
+            borders: Dup::from(Some(TableBorders {
                 top: None,
                 bottom: None,
                 left: None,
                 right: None,
                 inside_h: None,
                 inside_v: None,
-            }),
-            cell_margins: Some(EdgeInsets {
+            })),
+            cell_margins: Dup::from(Some(EdgeInsets {
                 top: Dimension::new(1),
                 right: Dimension::new(2),
                 bottom: Dimension::new(3),
                 left: Dimension::new(4),
-            }),
-            cell_spacing: Some(TableMeasure::Twips(Dimension::new(30))),
-            look: Some(TableLook {
+            })),
+            cell_spacing: Dup::from(Some(TableMeasure::Twips(Dimension::new(30)))),
+            look: Dup::from(Some(TableLook {
                 first_row: Some(true),
                 last_row: None,
                 first_column: None,
                 last_column: None,
                 no_h_band: None,
                 no_v_band: None,
-            }),
-            style_row_band_size: Some(2),
-            style_col_band_size: Some(3),
-            positioning: Some(TablePositioning {
+            })),
+            style_row_band_size: Dup::from(Some(2)),
+            style_col_band_size: Dup::from(Some(3)),
+            positioning: Dup::from(Some(TablePositioning {
                 left_from_text: None,
                 right_from_text: None,
                 top_from_text: None,
@@ -741,8 +752,8 @@ mod tests {
                 y_align: None,
                 x: Some(Dimension::new(5)),
                 y: None,
-            }),
-            overlap: Some(TableOverlap::Never),
+            })),
+            overlap: Dup::from(Some(TableOverlap::Never)),
         };
         let out = overlay_table_properties(None, &overlay);
 
@@ -750,10 +761,10 @@ mod tests {
         assert_eq!(out.width, overlay.width);
         assert_eq!(out.layout, overlay.layout);
         assert_eq!(out.indent, overlay.indent);
-        assert!(out.borders.is_some(), "borders overlaid"); // no PartialEq on TableBorders
+        assert!(out.borders.cloned().is_some(), "borders overlaid"); // no PartialEq on TableBorders
         assert_eq!(out.cell_margins, overlay.cell_margins);
         assert_eq!(out.cell_spacing, overlay.cell_spacing);
-        assert!(out.look.is_some(), "look overlaid"); // no PartialEq on TableLook
+        assert!(out.look.cloned().is_some(), "look overlaid"); // no PartialEq on TableLook
         assert_eq!(out.style_row_band_size, overlay.style_row_band_size);
         assert_eq!(out.style_col_band_size, overlay.style_col_band_size);
         assert_eq!(out.positioning, overlay.positioning);
@@ -772,21 +783,25 @@ mod tests {
     fn table_properties_overlay_wins_but_only_where_specified() {
         use crate::model::geometry::EdgeInsets;
         let base = TableProperties {
-            alignment: Some(Alignment::Start),
-            cell_margins: Some(EdgeInsets {
+            alignment: Dup::from(Some(Alignment::Start)),
+            cell_margins: Dup::from(Some(EdgeInsets {
                 top: Dimension::new(9),
                 right: Dimension::new(9),
                 bottom: Dimension::new(9),
                 left: Dimension::new(9),
-            }),
+            })),
             ..Default::default()
         };
         let overlay = TableProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             ..Default::default()
         };
         let out = overlay_table_properties(Some(base.clone()), &overlay);
-        assert_eq!(out.alignment, Some(Alignment::Center), "overlay wins");
+        assert_eq!(
+            out.alignment,
+            Dup::from(Some(Alignment::Center)),
+            "overlay wins"
+        );
         assert_eq!(
             out.cell_margins, base.cell_margins,
             "what the overlay omits falls through to the base"

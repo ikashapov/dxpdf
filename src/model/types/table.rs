@@ -19,24 +19,26 @@ pub struct Table {
 
 #[derive(Clone, Debug, Default)]
 pub struct TableProperties {
-    /// §17.4.63: table style reference.
+    /// §17.4.63: table style reference. Stays `Option`: `split` returns it
+    /// separately because the cascade applies it *before* direct formatting,
+    /// so it is consumed at the seam rather than carried.
     pub style_id: Option<super::identifiers::StyleId>,
-    pub alignment: Option<Alignment>,
-    pub width: Option<TableMeasure>,
-    pub layout: Option<TableLayout>,
-    pub indent: Option<TableMeasure>,
-    pub borders: Option<TableBorders>,
-    pub cell_margins: Option<EdgeInsets<Twips>>,
-    pub cell_spacing: Option<TableMeasure>,
-    pub look: Option<TableLook>,
+    pub alignment: Dup<Alignment>,
+    pub width: Dup<TableMeasure>,
+    pub layout: Dup<TableLayout>,
+    pub indent: Dup<TableMeasure>,
+    pub borders: Dup<TableBorders>,
+    pub cell_margins: Dup<EdgeInsets<Twips>>,
+    pub cell_spacing: Dup<TableMeasure>,
+    pub look: Dup<TableLook>,
     /// §17.4.68: number of rows in each row band for conditional formatting.
-    pub style_row_band_size: Option<u32>,
+    pub style_row_band_size: Dup<u32>,
     /// §17.4.67: number of columns in each column band for conditional formatting.
-    pub style_col_band_size: Option<u32>,
+    pub style_col_band_size: Dup<u32>,
     /// §17.4.58: floating table positioning properties.
-    pub positioning: Option<TablePositioning>,
+    pub positioning: Dup<TablePositioning>,
     /// §17.4.57: whether this floating table can overlap other floating tables.
-    pub overlap: Option<TableOverlap>,
+    pub overlap: Dup<TableOverlap>,
 }
 
 /// §17.4.58: floating table positioning.

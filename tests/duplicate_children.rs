@@ -173,11 +173,11 @@ fn tblpr_repeated_children_take_the_last() {
     );
     let props = &first_table(&doc).properties;
     assert!(
-        matches!(props.width, Some(TableMeasure::Twips(d)) if d.raw() == 5000),
+        matches!(props.width.get(), Some(TableMeasure::Twips(d)) if d.raw() == 5000),
         "§17.4.63, got {:?}",
         props.width
     );
-    assert_eq!(props.alignment, Some(Alignment::Center), "§17.4.29");
+    assert_eq!(props.alignment.get(), Some(&Alignment::Center), "§17.4.29");
 }
 
 #[test]
