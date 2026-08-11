@@ -117,45 +117,65 @@ impl VmlPrimitiveXml {
 
 /// Common attributes + child elements shared by every VML primitive
 /// (§14.1.2.18 CoreAttributes plus `<v:stroke>` / `<v:textbox>` /
-/// `<v:wrap>` / `<v:imagedata>`). Each per-primitive schema struct
-/// embeds this via `#[serde(flatten)]` so we don't repeat the eight
-/// field declarations across nine primitive types.
+/// `<v:wrap>` / `<v:imagedata>` / `<v:fill>`).
 ///
-/// **The one place duplicate children are not tolerated.** Everywhere else a
-/// duplicable child element is `Vec<T>` collapsed by
-/// [`crate::docx::parse::primitives::duplicates::last`], so a producer that
-/// repeats one cannot fail the parse. That is impossible behind a
-/// `#[serde(flatten)]` boundary: flatten buffers the element into a map and
-/// serde's `FlatMapDeserializer` has no way to collect repeated keys into a
-/// sequence, so a `Vec` field here fails with *"invalid type: map, expected a
-/// sequence"* on documents that parse fine today. These five stay `Option<T>`
-/// and a repeated `<v:stroke>` remains fatal.
+/// **A carrier, never a deserialization target.** Every primitive declares
+/// these nine fields itself and builds one of these to convert; this type owns
+/// only the mapping — `parse_style`, `parse_color`, the [`Dup`] collapse, and
+/// the `ctx` threading a text box needs — so that logic exists once rather
+/// than ten times. It deliberately does not derive `Deserialize`.
 ///
-/// Closing the gap means removing the flatten, which is what
-/// [`RectXml`] already did for an unrelated reason — its inlined copies of
-/// these fields *are* `Vec`. Do that per primitive if a real document ever
-/// needs it; nine copies of eight fields is the price, and the note on
-/// `RectXml` explains why that trade was already worth making once.
-#[derive(Deserialize, Default)]
+/// It used to, embedded by seven primitives via `#[serde(flatten)]`, and that
+/// boundary made two things fatal that are fine everywhere else:
+///
+/// * A **repeated child**. Elsewhere a duplicable child is `Vec<T>` collapsed
+///   at the read, so repeating one cannot fail the parse (see
+///   [`crate::docx::parse::primitives::duplicates`]). Flatten buffers the
+///   element into a map and serde's `FlatMapDeserializer` cannot collect
+///   repeated keys into a sequence, so these five had to stay `Option<T>` and
+///   a second `<v:stroke>` failed the document with *"duplicate field"*.
+/// * **Nested `<v:textbox><w:txbxContent>`**. The same buffering fails on the
+///   inner block sequence with *"invalid type: map, expected a sequence"* —
+///   the failure [`RectXml`] was inlined to escape, on XML that parses
+///   correctly the moment the boundary is gone.
+///
+/// Both are covered by `every_primitive_tolerates_a_repeated_stroke` and
+/// `every_primitive_keeps_its_textbox_content`. Do not reintroduce the
+/// flatten to save the field declarations; the declarations are the price.
+#[derive(Default)]
 pub(crate) struct CommonAttrsXml {
-    #[serde(rename = "@id", default)]
     pub id: Option<String>,
-    #[serde(rename = "@style", default)]
     pub style: Option<String>,
-    #[serde(rename = "@fillcolor", default)]
     pub fillcolor: Option<String>,
-    #[serde(rename = "@stroked", default)]
     pub stroked: Option<VmlBool>,
-    #[serde(rename = "stroke", default)]
-    pub stroke: Option<StrokeXml>,
-    #[serde(rename = "textbox", default)]
-    pub textbox: Option<TextBoxXml>,
-    #[serde(rename = "wrap", default)]
-    pub wrap: Option<WrapXml>,
-    #[serde(rename = "imagedata", default)]
-    pub imagedata: Option<ImageDataXml>,
-    #[serde(rename = "fill", default)]
-    pub fill: Option<FillXml>,
+    pub stroke: Vec<StrokeXml>,
+    pub textbox: Vec<TextBoxXml>,
+    pub wrap: Vec<WrapXml>,
+    pub imagedata: Vec<ImageDataXml>,
+    pub fill: Vec<FillXml>,
+}
+
+/// Move a primitive's inlined common fields into the shared carrier.
+///
+/// Every primitive declares the nine fields itself — that is what keeps them
+/// off a flatten boundary, and [`CommonAttrsXml`] says why that matters. The
+/// declarations are duplicated on purpose; only the forwarding is shared, so
+/// a tenth common child cannot be wired into one primitive and silently
+/// missed on another.
+macro_rules! common_attrs {
+    ($s:ident) => {
+        CommonAttrsXml {
+            id: $s.id,
+            style: $s.style,
+            fillcolor: $s.fillcolor,
+            stroked: $s.stroked,
+            stroke: $s.stroke,
+            textbox: $s.textbox,
+            wrap: $s.wrap,
+            imagedata: $s.imagedata,
+            fill: $s.fill,
+        }
+    };
 }
 
 /// VML §14.1.2.5 `<v:fill>` — every primitive can carry one. Fields
@@ -214,11 +234,13 @@ impl CommonAttrsXml {
             style: parse_style(self.style),
             fill_color: self.fillcolor.as_deref().and_then(parse_color),
             stroked: self.stroked.map(|b| b.0),
-            stroke: self.stroke.map(Into::into),
-            text_box: self.textbox.map(|t| t.into_model(ctx)),
-            wrap: self.wrap.map(Into::into),
-            image_data: self.imagedata.map(Into::into),
-            fill: self.fill.map(Into::into),
+            stroke: Dup::from(self.stroke).into_value().map(Into::into),
+            text_box: Dup::from(self.textbox)
+                .into_value()
+                .map(|t| t.into_model(ctx)),
+            wrap: Dup::from(self.wrap).into_value().map(Into::into),
+            image_data: Dup::from(self.imagedata).into_value().map(Into::into),
+            fill: Dup::from(self.fill).into_value().map(Into::into),
         }
     }
 }
@@ -311,23 +333,11 @@ pub(crate) struct ShapeXml {
 impl ShapeXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlShape {
         VmlShape {
-            common: crate::model::VmlCommonAttrs {
-                id: self.id.map(VmlShapeId::new),
-                style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(parse_color),
-                stroked: self.stroked.map(|b| b.0),
-                stroke: Dup::from(self.stroke).into_value().map(Into::into),
-                text_box: Dup::from(self.textbox)
-                    .into_value()
-                    .map(|t| t.into_model(ctx)),
-                wrap: Dup::from(self.wrap).into_value().map(Into::into),
-                image_data: Dup::from(self.imagedata).into_value().map(Into::into),
-                fill: Dup::from(self.fill).into_value().map(Into::into),
-            },
             shape_type_ref: self
                 .ty
                 .map(|s| VmlShapeId::new(s.strip_prefix('#').unwrap_or(&s))),
             vml_path: Dup::from(self.vml_path).into_value().map(Into::into),
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -337,15 +347,11 @@ impl ShapeXml {
 
 /// VML §14.1.2.16 `<v:rect>`.
 ///
-/// Common attrs are inlined here (rather than via
-/// `#[serde(flatten)]` on a `CommonAttrsXml`) because quick-xml's
-/// serde drops the deeply-nested `<v:textbox><w:txbxContent>...`
-/// when the field carrying `<v:textbox>` lives behind a flatten
-/// boundary — the rect's textbox content silently vanishes. Inlining
-/// keeps every child element on the same struct level so it parses
-/// faithfully. The other primitives keep `flatten` because they
-/// don't host text-box content in practice (or do but were simpler
-/// to wire that way).
+/// Common attrs are inlined here, as on every other primitive — this was the
+/// first one to need it, because quick-xml's serde could not read the
+/// deeply-nested `<v:textbox><w:txbxContent>` while the field carrying
+/// `<v:textbox>` lived behind a `#[serde(flatten)]` boundary. See
+/// [`CommonAttrsXml`] for the full account and the second failure it caused.
 #[derive(Deserialize)]
 pub(crate) struct RectXml {
     #[serde(rename = "@id", default)]
@@ -371,19 +377,7 @@ pub(crate) struct RectXml {
 impl RectXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlRect {
         VmlRect {
-            common: VmlCommonAttrs {
-                id: self.id.map(VmlShapeId::new),
-                style: parse_style(self.style),
-                fill_color: self.fillcolor.as_deref().and_then(parse_color),
-                stroked: self.stroked.map(|b| b.0),
-                stroke: Dup::from(self.stroke).into_value().map(Into::into),
-                text_box: Dup::from(self.textbox)
-                    .into_value()
-                    .map(|t| t.into_model(ctx)),
-                wrap: Dup::from(self.wrap).into_value().map(Into::into),
-                image_data: Dup::from(self.imagedata).into_value().map(Into::into),
-                fill: Dup::from(self.fill).into_value().map(Into::into),
-            },
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -391,8 +385,24 @@ impl RectXml {
 /// VML §14.1.2.17 `<v:roundrect>`.
 #[derive(Deserialize)]
 pub(crate) struct RoundRectXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
     /// `@arcsize` — corner radius as a fraction (e.g. "10923f" = ~16.7%
     /// in the spec's fixed-point format, or a plain decimal). We accept
     /// floats; downstream layout clamps to [0, 1].
@@ -403,8 +413,8 @@ pub(crate) struct RoundRectXml {
 impl RoundRectXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlRoundRect {
         VmlRoundRect {
-            common: self.common.into_model(ctx),
             arcsize: self.arcsize,
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -412,14 +422,30 @@ impl RoundRectXml {
 /// VML §14.1.2.13 `<v:oval>`.
 #[derive(Deserialize)]
 pub(crate) struct OvalXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
 }
 
 impl OvalXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlOval {
         VmlOval {
-            common: self.common.into_model(ctx),
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -428,8 +454,24 @@ impl OvalXml {
 /// comma-separated lengths (e.g. "10pt,20pt").
 #[derive(Deserialize)]
 pub(crate) struct LineXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
     #[serde(rename = "@from", default)]
     pub from: Option<String>,
     #[serde(rename = "@to", default)]
@@ -439,9 +481,9 @@ pub(crate) struct LineXml {
 impl LineXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlLine {
         VmlLine {
-            common: self.common.into_model(ctx),
             from: self.from.as_deref().and_then(parse_vml_point),
             to: self.to.as_deref().and_then(parse_vml_point),
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -450,8 +492,24 @@ impl LineXml {
 /// separated list of x,y pairs.
 #[derive(Deserialize)]
 pub(crate) struct PolyLineXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
     #[serde(rename = "@points", default)]
     pub points: Option<String>,
 }
@@ -459,12 +517,12 @@ pub(crate) struct PolyLineXml {
 impl PolyLineXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlPolyLine {
         VmlPolyLine {
-            common: self.common.into_model(ctx),
             points: self
                 .points
                 .as_deref()
                 .map(parse_vml_points)
                 .unwrap_or_default(),
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -472,8 +530,24 @@ impl PolyLineXml {
 /// VML §14.1.2.3 `<v:arc>`.
 #[derive(Deserialize)]
 pub(crate) struct ArcXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
     #[serde(rename = "@startangle", default)]
     pub start_angle: Option<f32>,
     #[serde(rename = "@endangle", default)]
@@ -483,9 +557,9 @@ pub(crate) struct ArcXml {
 impl ArcXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlArc {
         VmlArc {
-            common: self.common.into_model(ctx),
             start_angle: self.start_angle,
             end_angle: self.end_angle,
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
@@ -493,8 +567,24 @@ impl ArcXml {
 /// VML §14.1.2.7 `<v:curve>` — cubic Bezier with two control points.
 #[derive(Deserialize)]
 pub(crate) struct CurveXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
     #[serde(rename = "@from", default)]
     pub from: Option<String>,
     #[serde(rename = "@control1", default)]
@@ -508,22 +598,38 @@ pub(crate) struct CurveXml {
 impl CurveXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlCurve {
         VmlCurve {
-            common: self.common.into_model(ctx),
             from: self.from.as_deref().and_then(parse_vml_point),
             control1: self.control1.as_deref().and_then(parse_vml_point),
             control2: self.control2.as_deref().and_then(parse_vml_point),
             to: self.to.as_deref().and_then(parse_vml_point),
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
 
 /// VML §14.1.2.10 `<v:image>` — image element. `@src` carries the
 /// path; rels (`<v:imagedata r:id>`) are still picked up via the
-/// shared `CommonAttrsXml.imagedata`, so either form works.
+/// inlined `imagedata` child, so either form works.
 #[derive(Deserialize)]
 pub(crate) struct ImageXml {
-    #[serde(flatten)]
-    pub common: CommonAttrsXml,
+    #[serde(rename = "@id", default)]
+    pub id: Option<String>,
+    #[serde(rename = "@style", default)]
+    pub style: Option<String>,
+    #[serde(rename = "@fillcolor", default)]
+    pub fillcolor: Option<String>,
+    #[serde(rename = "@stroked", default)]
+    pub stroked: Option<VmlBool>,
+    #[serde(rename = "stroke", default)]
+    pub stroke: Vec<StrokeXml>,
+    #[serde(rename = "textbox", default)]
+    pub textbox: Vec<TextBoxXml>,
+    #[serde(rename = "wrap", default)]
+    pub wrap: Vec<WrapXml>,
+    #[serde(rename = "imagedata", default)]
+    pub imagedata: Vec<ImageDataXml>,
+    #[serde(rename = "fill", default)]
+    pub fill: Vec<FillXml>,
     #[serde(rename = "@src", default)]
     pub src: Option<String>,
 }
@@ -531,20 +637,22 @@ pub(crate) struct ImageXml {
 impl ImageXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlImage {
         VmlImage {
-            common: self.common.into_model(ctx),
             src: self.src,
+            common: common_attrs!(self).into_model(ctx),
         }
     }
 }
 
 /// VML §14.1.2.9 `<v:group>` — recursive shape grouping.
 ///
-/// The common attribute fields are inlined here (rather than via
-/// `#[serde(flatten)]` like the other primitives) because flatten
-/// fights with `$value` for child capture: with flatten enabled,
-/// quick-xml's serde resolver routes `<rect>`/`<oval>`/etc. through
-/// the flattened struct first, which rejects them as unknown fields
-/// and drops them. Inlining keeps the children path clean.
+/// The only primitive that carries **no** common child elements: `$value`
+/// claims every child for the recursive primitive list, so a `<v:stroke>` on a
+/// group lands in [`VmlPrimitiveXml::Other`] and is dropped. That is why this
+/// one builds [`VmlCommonAttrs`] directly from its four attributes instead of
+/// going through [`CommonAttrsXml`] like the other nine. Inlining was
+/// originally forced here for a different reason — `#[serde(flatten)]` fought
+/// `$value` for child capture, routing `<rect>`/`<oval>`/etc. through the
+/// flattened struct, which rejected them as unknown fields and dropped them.
 #[derive(Deserialize)]
 pub(crate) struct GroupXml {
     #[serde(rename = "@id", default)]
@@ -1235,6 +1343,83 @@ mod tests {
         };
         let tb = r.common.text_box.as_ref().expect("textbox parsed");
         assert_eq!(tb.content.len(), 1, "textbox should contain one paragraph");
+    }
+
+    /// The elements that used to reach the model through a
+    /// `#[serde(flatten)]` on `CommonAttrsXml`. Flatten buffers children into
+    /// a map, which cost these two things that `<v:rect>` and `<v:shape>`
+    /// never lost — hence the two tests below.
+    const FLATTENED_PRIMITIVES: [&str; 7] = [
+        "roundrect",
+        "oval",
+        "line",
+        "polyline",
+        "arc",
+        "curve",
+        "image",
+    ];
+
+    /// A repeated child the VML schema allows once must not fail the parse,
+    /// and must resolve to the last occurrence — the policy
+    /// `primitives::duplicates` records for the `w:` property bags. Behind a
+    /// flatten boundary serde's `FlatMapDeserializer` cannot collect repeated
+    /// keys into a sequence, so these five children stayed `Option` and a
+    /// second `<v:stroke>` failed the whole conversion.
+    #[test]
+    fn every_primitive_tolerates_a_repeated_stroke() {
+        for element in FLATTENED_PRIMITIVES {
+            let p = parse(&format!(
+                r#"<pict>
+                    <{element} id="x" style="width:50pt;height:30pt">
+                        <stroke dashstyle="dot"/>
+                        <stroke dashstyle="dash"/>
+                    </{element}>
+                </pict>"#
+            ));
+            let stroke = p.primitives[0]
+                .common()
+                .stroke
+                .as_ref()
+                .unwrap_or_else(|| panic!("<v:{element}> dropped its stroke"));
+            assert_eq!(
+                stroke.dash_style,
+                Some(VmlDashStyle::Dash),
+                "<v:{element}>: the last occurrence must win"
+            );
+        }
+    }
+
+    /// The same boundary also broke deeply-nested
+    /// `<v:textbox><w:txbxContent>` — the failure `RectXml` was inlined to
+    /// escape, pinned for `<v:rect>` by `rect_textbox_content_is_populated`.
+    /// Behind flatten the identical inner XML fails with *"invalid type: map,
+    /// expected a sequence"*, so a text box on any of these seven was fatal to
+    /// the document, not merely dropped.
+    #[test]
+    fn every_primitive_keeps_its_textbox_content() {
+        for element in FLATTENED_PRIMITIVES {
+            let p = parse(&format!(
+                r#"<pict>
+                    <{element} id="x" style="width:100pt;height:50pt">
+                        <textbox>
+                            <txbxContent>
+                                <w:p><w:r><w:t>Inside the {element}</w:t></w:r></w:p>
+                            </txbxContent>
+                        </textbox>
+                    </{element}>
+                </pict>"#
+            ));
+            let tb = p.primitives[0]
+                .common()
+                .text_box
+                .as_ref()
+                .unwrap_or_else(|| panic!("<v:{element}> dropped its textbox"));
+            assert_eq!(
+                tb.content.len(),
+                1,
+                "<v:{element}>: textbox content must survive"
+            );
+        }
     }
 
     #[test]
