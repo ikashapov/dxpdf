@@ -430,7 +430,7 @@ fn all_files_have_page_size() {
     for name in ALL_FILES {
         let doc = load(name);
         assert!(
-            doc.final_section.page_size.is_some(),
+            doc.final_section.page_size.get().is_some(),
             "{name}: final section should have page size"
         );
     }
@@ -441,7 +441,7 @@ fn all_files_have_margins() {
     for name in ALL_FILES {
         let doc = load(name);
         assert!(
-            doc.final_section.page_margins.is_some(),
+            doc.final_section.page_margins.get().is_some(),
             "{name}: final section should have page margins"
         );
     }

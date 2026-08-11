@@ -475,7 +475,7 @@ mod tests {
     fn nested_sect_pr_routed_separately() {
         let r = parse(r#"<pPr><sectPr><pgSz w="12240" h="15840"/></sectPr></pPr>"#);
         let sp = r.section_properties.unwrap();
-        assert_eq!(sp.page_size.unwrap().width.unwrap().raw(), 12240);
+        assert_eq!(sp.page_size.get().unwrap().width.unwrap().raw(), 12240);
     }
 
     #[test]

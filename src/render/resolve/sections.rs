@@ -164,7 +164,7 @@ mod tests {
     fn section_break_splits_into_two_sections() {
         let mut doc = empty_doc();
         let break_props = SectionProperties {
-            section_type: Some(SectionType::NextPage),
+            section_type: Dup::from(Some(SectionType::NextPage)),
             ..Default::default()
         };
         doc.body = vec![
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(sections[1].blocks.len(), 1, "second section has 'after'");
         assert_eq!(
             sections[0].properties.section_type,
-            Some(SectionType::NextPage)
+            Dup::from(Some(SectionType::NextPage))
         );
     }
 
@@ -305,7 +305,7 @@ mod tests {
         doc.headers.insert(s2d.clone(), block("S2 default"));
 
         let s1_break = SectionProperties {
-            section_type: Some(SectionType::NextPage),
+            section_type: Dup::from(Some(SectionType::NextPage)),
             header_refs: SectionHeaderFooterRefs {
                 default: Some(s1d),
                 first: Some(s1f.clone()),
@@ -355,7 +355,7 @@ mod tests {
         doc.headers.insert(s2f.clone(), block("S2 first"));
 
         let s1_break = SectionProperties {
-            section_type: Some(SectionType::NextPage),
+            section_type: Dup::from(Some(SectionType::NextPage)),
             header_refs: SectionHeaderFooterRefs {
                 default: None,
                 first: None,
@@ -364,7 +364,7 @@ mod tests {
             ..Default::default()
         };
         let s2_break = SectionProperties {
-            section_type: Some(SectionType::NextPage),
+            section_type: Dup::from(Some(SectionType::NextPage)),
             header_refs: SectionHeaderFooterRefs {
                 default: None,
                 first: Some(s2f),
@@ -400,7 +400,7 @@ mod tests {
         doc.footers.insert(s1f.clone(), block("first"));
 
         let s1_break = SectionProperties {
-            section_type: Some(SectionType::NextPage),
+            section_type: Dup::from(Some(SectionType::NextPage)),
             footer_refs: SectionHeaderFooterRefs {
                 default: Some(s1d),
                 first: Some(s1f),

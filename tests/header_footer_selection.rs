@@ -391,12 +391,12 @@ fn pg_num_type_start_two_makes_first_page_even_for_selection() {
             first: None,
             even: Some(r_even),
         },
-        page_number_type: Some(PageNumberType {
+        page_number_type: Dup::from(Some(PageNumberType {
             format: None,
             start: Some(2),
             chap_style: None,
             chap_sep: None,
-        }),
+        })),
         ..Default::default()
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
@@ -446,12 +446,12 @@ fn pg_num_type_start_renders_in_page_field_in_header() {
             first: None,
             even: None,
         },
-        page_number_type: Some(PageNumberType {
+        page_number_type: Dup::from(Some(PageNumberType {
             format: None,
             start: Some(5),
             chap_style: None,
             chap_sep: None,
-        }),
+        })),
         ..Default::default()
     };
     doc.body = vec![para("p1"), para_after_page_break("p2")];
@@ -486,7 +486,7 @@ fn pg_num_type_continues_across_sections_without_start() {
     doc.settings.even_and_odd_headers = true;
 
     let s1_break = SectionProperties {
-        section_type: Some(SectionType::NextPage),
+        section_type: Dup::from(Some(SectionType::NextPage)),
         header_refs: SectionHeaderFooterRefs {
             default: Some(r_default.clone()),
             first: None,
@@ -535,7 +535,7 @@ fn pg_num_type_start_resets_on_second_section() {
     doc.settings.even_and_odd_headers = true;
 
     let s1_break = SectionProperties {
-        section_type: Some(SectionType::NextPage),
+        section_type: Dup::from(Some(SectionType::NextPage)),
         header_refs: SectionHeaderFooterRefs {
             default: Some(r_default.clone()),
             first: None,
@@ -549,12 +549,12 @@ fn pg_num_type_start_resets_on_second_section() {
             first: None,
             even: Some(r_even),
         },
-        page_number_type: Some(PageNumberType {
+        page_number_type: Dup::from(Some(PageNumberType {
             format: None,
             start: Some(10),
             chap_style: None,
             chap_sep: None,
-        }),
+        })),
         ..Default::default()
     };
     doc.body = vec![
@@ -742,7 +742,7 @@ fn continuous_break_doc(first: SectionProperties, second: SectionProperties) -> 
 
 fn continuous(props: SectionProperties) -> SectionProperties {
     SectionProperties {
-        section_type: Some(SectionType::Continuous),
+        section_type: Dup::from(Some(SectionType::Continuous)),
         ..props
     }
 }
