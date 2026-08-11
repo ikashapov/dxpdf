@@ -14,7 +14,7 @@ Built by [nerdy.pro](https://nerdy.pro).
 
 ## Key Features
 
-- **Fast** — typical business documents convert in ~150 ms, a 173-page document in under 400 ms
+- **Fast** — business documents convert in 55–170 ms depending on how their fonts resolve, a 171-page document in about 420 ms
 - **High fidelity** — parse → resolve → layout → subset → paint pipeline with pixel-accurate baseline positioning
 - **Compact output** — embedded fonts are subsetted to the glyphs actually used, so PDFs stay small
 - **Type-safe** — compile-time dimensional type system (`Twips`, `Pt`, `Emu`) prevents unit mixing bugs
@@ -22,6 +22,8 @@ Built by [nerdy.pro](https://nerdy.pro).
 - **Cross-platform** — runs natively on macOS, Linux, and Windows
 - **Three interfaces** — use as a CLI tool, Rust library (`use dxpdf;`), or Python package (`import dxpdf`)
 - **Unicode-aware** — grapheme-correct segmentation, plus full-color emoji including ZWJ, skin-tone, keycap and flag sequences shaped through Skia's HarfBuzz
+- **Internationalised** — UAX #14 line breaking (including Thai, Lao, Khmer and Burmese), UAX #9 bidirectional text, and CLDR-driven numbers and dates that follow the document's own `w:lang`
+- **Packaged** — `cargo install`, `pip install`, or a `.deb` for Debian and Ubuntu
 - **ISO 29500 compliant** — validated against the Office Open XML specification
 
 ## Installation
@@ -38,8 +40,8 @@ Every [release](https://github.com/nerdy-pro/dxpdf/releases) ships a `.deb` for
 `amd64` and `arm64`:
 
 ```bash
-curl -LO https://github.com/nerdy-pro/dxpdf/releases/download/v0.4.0/dxpdf_0.4.0-1_amd64.deb
-sudo apt install ./dxpdf_0.4.0-1_amd64.deb
+curl -LO https://github.com/nerdy-pro/dxpdf/releases/download/v0.5.0/dxpdf_0.5.0-1_amd64.deb
+sudo apt install ./dxpdf_0.5.0-1_amd64.deb
 ```
 
 Installs `dxpdf` to `/usr/bin` with a `dxpdf(1)` man page, and recommends
@@ -57,7 +59,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dxpdf = "0.4.0"
+dxpdf = "0.5.0"
 ```
 
 ### Python Package
@@ -152,30 +154,40 @@ dxpdf handles the most common DOCX features found in real-world business documen
 | **Navigation** | Clickable PDF link annotations with URL resolution, bookmarks and internal cross-references as named destinations, and a PDF outline built from heading levels |
 | **Page layout** | Multiple page sizes/margins, section breaks, multi-column sections, portrait and landscape orientation |
 | **Pagination** | Automatic page breaking, paragraph splitting across pages with keep-lines and widow/orphan control, word wrapping, line spacing modes, footnotes, endnotes, floating image text flow |
-| **Internationalisation** | `w:lang`-driven decimal separator for decimal tab stops and number-word spelling |
+| **Internationalisation** | UAX #14 line breaking incl. the scripts written without spaces (Thai, Lao, Khmer, Burmese); UAX #9 bidirectional text with rule L4 mirroring; `w:lang`-driven decimal separators, DATE/TIME field pictures, and numbers spelled out in English, German, French and Spanish |
 
 ## Performance Benchmarks
 
-Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.4.0**,
+Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.5.0**,
 against fixtures committed in `test-files/` so the numbers are reproducible.
 Times are rounded to 5 ms — run-to-run spread on a normally loaded machine is
 around ±10 ms, so smaller differences are not meaningful:
 
 | Fixture | Pages | Input | Conversion time | Peak RSS |
 |---|---|---|---|---|
-| `sample-docx-files-sample3` | 3 | 34 KB | **135 ms** | 50 MB |
-| `sample-docx-files-sample-4` | 7 | 10 KB | **135 ms** | 48 MB |
-| `sample-docx-files-sample1` | 9 | 1.3 MB | **165 ms** | 61 MB |
-| `sample-docx-files-sample4` | 173 | 14 MB | **370 ms** | 161 MB |
+| `sample-docx-files-sample3` | 3 | 34 KB | **170 ms** | 55 MB |
+| `sample-docx-files-sample-4` | 7 | 10 KB | **170 ms** | 52 MB |
+| `sample-docx-files-sample1` | 9 | 1.3 MB | **55 ms** | 42 MB |
+| `sample-docx-files-sample4` | 171 | 14 MB | **420 ms** | 159 MB |
 
-**A fixed font-registry build dominates small documents.** Enumerating the
-host's fonts and indexing their PostScript/style names costs a flat 90–110 ms
-on every render regardless of input size — on the 7-page fixture that is ~70%
-of total runtime, against 1.7 ms to parse and 12 ms to lay out. Conversion
-scales well with document size (173 pages costs under 3× a 7-page document),
-but there is a floor of roughly 130 ms per process that no small document
-beats. For batch work, that cost is per render rather than per process, so it
-is the single biggest lever available and is tracked as known work.
+**Font resolution, not document size, decides what a conversion costs.** Notice
+that the 9-page fixture converts in a third of the time the 3-page one does,
+though it carries forty times the input. The difference is entirely in how its
+fonts resolve.
+
+The font registry is built in tiers and lazily. A document whose every font is
+embedded or already present on the host never reaches the expensive tier —
+`sample1` spends **~4 ms** there. One that has to fall back to the host
+metadata index, matching on PostScript and style names, pays **~120–185 ms**,
+once, and that then dominates everything else it does: on `sample3` the
+registry is roughly five times parse, layout, subsetting and painting put
+together. (Per-phase figures from `RUST_LOG=debug`, single runs with logging
+on, so read them as proportions rather than as timings.)
+
+So the useful question for a batch workload is not how large the documents are
+but whether they name fonts the host has. Documents written by Word normally
+embed or name available faces and land on the fast side; the slow side is worth
+measuring for yourself before sizing anything.
 
 To measure your own workload, run `cargo bench` for the Criterion suites, or
 use the release binary with `RUST_LOG=debug` for a per-phase breakdown of
@@ -248,7 +260,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 12 partial, 8 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **74 entries fully implemented, 11 partial, 12 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -394,6 +406,7 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | SmartArt, charts | ❌ |
 | Bookmarks and internal cross-references | ✅ `w:bookmarkStart` → PDF named destinations; internal hyperlinks → GoTo link annotations |
 | PDF outline sidebar (`/Outlines`) | ✅ §17.3.1.19 `w:outlineLvl` → structure-element headers; levels 7–9 clamp to `H6` (ISO 32000-1 stops there) and headings in headers, footers and notes are excluded |
+| Line breaking | ✅ UAX #14 via ICU4X, per paragraph rather than per run, so a token split across `<w:r>` boundaries still breaks where the algorithm says. The four scripts UAX #14 hands to "complex context analysis" (Thai, Lao, Khmer, Burmese) get LSTM word boundaries; a token no rule may break is cut at the container edge rather than overflowing it |
 | Bidirectional text (`w:bidi`, `w:rtl`) | ✅ §17.3.1.6 / §17.3.2.30 UAX #9 levels resolved per paragraph, reordered per line, with rule L4 mirroring; `w:jc` and `w:ind` resolve against the base direction |
 | Bidirectional tab stops and numbering labels | ❌ §17.3.1.37 stop positions are not mirrored under `w:bidi`, so a line reorders within each tab-delimited segment and a label before its suffix tab stays at the left |
 | `w:bidiVisual` (mirrored table columns) | ❌ not parsed |
@@ -409,7 +422,11 @@ Validated against ISO 29500 (Office Open XML). **69 entries fully implemented, 1
 | [`zip`](https://crates.io/crates/zip) | DOCX ZIP archive reading |
 | [`skia-safe`](https://crates.io/crates/skia-safe) | PDF rendering, text measurement, link annotations, and HarfBuzz emoji shaping via the `textlayout` feature |
 | [`unicode-segmentation`](https://crates.io/crates/unicode-segmentation), [`unicode-properties`](https://crates.io/crates/unicode-properties), [`unicode-normalization`](https://crates.io/crates/unicode-normalization) | Grapheme clusters, emoji properties, NFC normalization |
+| [`unicode-bidi`](https://crates.io/crates/unicode-bidi) + [`unicode-bidi-mirroring`](https://crates.io/crates/unicode-bidi-mirroring) | UAX #9 embedding levels and rule L4 mirroring. Their Unicode tables are compiled in, so they add no locale data |
+| [`unicode-joining-type`](https://crates.io/crates/unicode-joining-type) | Which scripts need shaping to be legible at all — the predicate that keeps HarfBuzz off Latin |
+| `icu_*` ([`icu_segmenter`](https://crates.io/crates/icu_segmenter), [`icu_decimal`](https://crates.io/crates/icu_decimal), [`icu_datetime`](https://crates.io/crates/icu_datetime), [`icu_calendar`](https://crates.io/crates/icu_calendar), …) | ICU4X: UAX #14 line breaking, region-aware decimal separators, and localized date/time picture names. Locale data ships as one trimmed blob loaded through [`icu_provider_blob`](https://crates.io/crates/icu_provider_blob), not as each crate's built-in `compiled_data` |
 | [`fontcull`](https://crates.io/crates/fontcull) (optional) | Font subsetting — `subset-fonts` feature, on by default |
+| `fontcull-skrifa`, `fontcull-write-fonts`, `fontcull-read-fonts` + [`kurbo`](https://crates.io/crates/kurbo) | OpenType table reading and writing — baking a variable-font instance's coordinates into the bytes the PDF embeds |
 | [`clap`](https://crates.io/crates/clap) | CLI argument parsing |
 | [`thiserror`](https://crates.io/crates/thiserror) | Error types |
 | [`log`](https://crates.io/crates/log) + [`env_logger`](https://crates.io/crates/env_logger) | Logging for unsupported features (`RUST_LOG=warn`) |
@@ -439,7 +456,7 @@ Notable gaps: Indic reordering, mirrored tab stops under `w:bidi`, automatic hyp
 
 ### How fast is dxpdf?
 
-On an Apple M3 Max a typical multi-page business document converts in about 150 ms, and a 173-page, 14 MB document in under 400 ms. Most of the cost on small documents is a fixed 90–110 ms font-registry build rather than the document itself, so runtime is fairly flat until documents get large. See [Performance Benchmarks](#performance-benchmarks) for measured figures and how to benchmark your own workload.
+On an Apple M3 Max the committed fixtures convert in 55–170 ms, and a 171-page, 14 MB document in about 420 ms. Document size matters less than you would expect: what dominates a small conversion is how its fonts resolve, since a document naming faces the host has to look up in its metadata index pays roughly 120–185 ms once, where one whose fonts are embedded or already present pays about 4 ms. See [Performance Benchmarks](#performance-benchmarks) for measured figures and how to benchmark your own workload.
 
 ### What platforms does dxpdf support?
 
