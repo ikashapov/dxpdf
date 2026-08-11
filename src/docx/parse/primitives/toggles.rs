@@ -37,12 +37,15 @@ impl<'de> Deserialize<'de> for OnOff {
 }
 
 /// OOXML §17.7.2 — when the same toggle element repeats inside one container,
-/// the last occurrence wins. Schema structs collect repeated toggles into a
-/// `Vec<OnOff>` (rather than `Option<OnOff>`, which serde rejects as a
-/// duplicate field) because third-party writers (notably LibreOffice/AOO) emit
-/// redundant duplicates like `<w:b/><w:b/>`. This collapses the list to the
-/// final value, or `None` when the toggle is absent so the style cascade can
-/// supply an inherited value.
+/// the last occurrence wins. Collapses the list to the final value, or `None`
+/// when the toggle is absent so the style cascade can supply an inherited
+/// value.
+///
+/// This is [`super::last`] specialised to unwrap `OnOff`, and it is the one
+/// case where last-wins is the *spec's* rule rather than this parser's choice:
+/// §17.7.2 defines it for toggle properties and says nothing about any other
+/// repeated element. See [`super::duplicates`] for the general policy and why
+/// it does not inherit this citation.
 pub(crate) fn last_toggle(toggles: Vec<OnOff>) -> Option<bool> {
     toggles.into_iter().next_back().map(|OnOff(b)| b)
 }
@@ -66,12 +69,12 @@ mod tests {
     #[derive(Deserialize)]
     struct Toggle {
         #[serde(rename = "flag", default)]
-        flag: Option<OnOff>,
+        flag: Vec<OnOff>,
     }
 
     fn flag(xml: &str) -> Option<bool> {
         let t: Toggle = quick_xml::de::from_str(xml).unwrap();
-        t.flag.map(|o| o.0)
+        crate::docx::parse::primitives::last(t.flag).map(|o| o.0)
     }
 
     #[test]

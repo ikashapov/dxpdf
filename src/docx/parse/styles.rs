@@ -1,6 +1,7 @@
 //! Parser for `word/styles.xml` — parses style definitions as-is.
 //! No inheritance resolution — `basedOn` references are preserved.
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::error::Result;
@@ -22,9 +23,9 @@ pub fn parse_styles(data: &[u8]) -> Result<StyleSheet> {
 #[derive(Deserialize, Default)]
 struct StylesXml {
     #[serde(rename = "docDefaults", default)]
-    doc_defaults: Option<DocDefaultsXml>,
+    doc_defaults: Vec<DocDefaultsXml>,
     #[serde(rename = "latentStyles", default)]
-    latent_styles: Option<LatentStylesXml>,
+    latent_styles: Vec<LatentStylesXml>,
     #[serde(rename = "style", default)]
     styles: Vec<StyleXml>,
 }
@@ -32,21 +33,21 @@ struct StylesXml {
 #[derive(Deserialize)]
 struct DocDefaultsXml {
     #[serde(rename = "rPrDefault", default)]
-    r_pr_default: Option<RPrDefaultXml>,
+    r_pr_default: Vec<RPrDefaultXml>,
     #[serde(rename = "pPrDefault", default)]
-    p_pr_default: Option<PPrDefaultXml>,
+    p_pr_default: Vec<PPrDefaultXml>,
 }
 
 #[derive(Deserialize)]
 struct RPrDefaultXml {
     #[serde(rename = "rPr", default)]
-    r_pr: Option<RPrXml>,
+    r_pr: Vec<RPrXml>,
 }
 
 #[derive(Deserialize)]
 struct PPrDefaultXml {
     #[serde(rename = "pPr", default)]
-    p_pr: Option<PPrXml>,
+    p_pr: Vec<PPrXml>,
 }
 
 #[derive(Deserialize)]
@@ -60,15 +61,15 @@ struct StyleXml {
     default: Option<AttrBool>,
 
     #[serde(rename = "name", default)]
-    name: Option<ValString>,
+    name: Vec<ValString>,
     #[serde(rename = "basedOn", default)]
-    based_on: Option<ValString>,
+    based_on: Vec<ValString>,
     #[serde(rename = "pPr", default)]
-    p_pr: Option<PPrXml>,
+    p_pr: Vec<PPrXml>,
     #[serde(rename = "rPr", default)]
-    r_pr: Option<RPrXml>,
+    r_pr: Vec<RPrXml>,
     #[serde(rename = "tblPr", default)]
-    tbl_pr: Option<TblPrXml>,
+    tbl_pr: Vec<TblPrXml>,
     #[serde(rename = "tblStylePr", default)]
     tbl_style_pr: Vec<TblStylePrXml>,
 }
@@ -82,15 +83,15 @@ struct TblStylePrXml {
     #[serde(rename = "@type")]
     ty: StTblStylePrType,
     #[serde(rename = "pPr", default)]
-    p_pr: Option<PPrXml>,
+    p_pr: Vec<PPrXml>,
     #[serde(rename = "rPr", default)]
-    r_pr: Option<RPrXml>,
+    r_pr: Vec<RPrXml>,
     #[serde(rename = "tblPr", default)]
-    tbl_pr: Option<TblPrXml>,
+    tbl_pr: Vec<TblPrXml>,
     #[serde(rename = "trPr", default)]
-    tr_pr: Option<TrPrXml>,
+    tr_pr: Vec<TrPrXml>,
     #[serde(rename = "tcPr", default)]
-    tc_pr: Option<TcPrXml>,
+    tc_pr: Vec<TcPrXml>,
 }
 
 #[derive(Deserialize)]
@@ -207,12 +208,12 @@ impl From<StylesXml> for StyleSheet {
     fn from(x: StylesXml) -> Self {
         let mut sheet = StyleSheet::default();
 
-        if let Some(dd) = x.doc_defaults {
-            if let Some(r) = dd.r_pr_default.and_then(|d| d.r_pr) {
+        if let Some(dd) = last(x.doc_defaults) {
+            if let Some(r) = last(dd.r_pr_default).and_then(|d| last(d.r_pr)) {
                 let (rp, _) = r.split();
                 sheet.doc_defaults_run = rp;
             }
-            if let Some(p) = dd.p_pr_default.and_then(|d| d.p_pr) {
+            if let Some(p) = last(dd.p_pr_default).and_then(|d| last(d.p_pr)) {
                 sheet.doc_defaults_paragraph = p.split().properties;
             }
         }
@@ -223,7 +224,7 @@ impl From<StylesXml> for StyleSheet {
             }
         }
 
-        sheet.latent_styles = x.latent_styles.map(Into::into);
+        sheet.latent_styles = last(x.latent_styles).map(Into::into);
         sheet
     }
 }
@@ -237,24 +238,26 @@ fn convert_style(s: StyleXml) -> Option<(StyleId, Style)> {
         Option<ParagraphProperties>,
         Option<RunProperties>,
     ) = (None, None);
-    if let Some(p) = s.p_pr {
+    if let Some(p) = last(s.p_pr) {
         let parsed = p.split();
         paragraph_properties = Some(parsed.properties);
         run_properties_from_ppr = parsed.run_properties;
     }
 
-    let run_properties = s.r_pr.map(|r| r.split().0).or(run_properties_from_ppr);
+    let run_properties = last(s.r_pr)
+        .map(|r| r.split().0)
+        .or(run_properties_from_ppr);
 
-    let table_properties = s.tbl_pr.map(|t| t.split().0);
+    let table_properties = last(s.tbl_pr).map(|t| t.split().0);
 
     let table_style_overrides = s.tbl_style_pr.into_iter().map(convert_override).collect();
 
     Some((
         id,
         Style {
-            name: s.name.map(|v| v.val),
+            name: last(s.name).map(|v| v.val),
             style_type,
-            based_on: s.based_on.map(|v| StyleId::new(v.val)),
+            based_on: last(s.based_on).map(|v| StyleId::new(v.val)),
             is_default,
             paragraph_properties,
             run_properties,
@@ -267,11 +270,11 @@ fn convert_style(s: StyleXml) -> Option<(StyleId, Style)> {
 fn convert_override(x: TblStylePrXml) -> TableStyleOverride {
     TableStyleOverride {
         override_type: x.ty.into(),
-        paragraph_properties: x.p_pr.map(|p| p.split().properties),
-        run_properties: x.r_pr.map(|r| r.split().0),
-        table_properties: x.tbl_pr.map(|t| t.split().0),
-        table_row_properties: x.tr_pr.map(Into::into),
-        table_cell_properties: x.tc_pr.map(Into::into),
+        paragraph_properties: last(x.p_pr).map(|p| p.split().properties),
+        run_properties: last(x.r_pr).map(|r| r.split().0),
+        table_properties: last(x.tbl_pr).map(|t| t.split().0),
+        table_row_properties: last(x.tr_pr).map(Into::into),
+        table_cell_properties: last(x.tc_pr).map(Into::into),
     }
 }
 

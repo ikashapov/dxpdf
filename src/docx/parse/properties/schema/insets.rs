@@ -4,22 +4,23 @@
 //! Each side is `<w:top w:w="N" w:type="dxa"/>` etc. Only `dxa` (twips) is
 //! meaningful for cell padding; other `@type` values are ignored here.
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, Twips};
 use crate::docx::model::geometry::{EdgeInsets, PartialEdgeInsets};
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct EdgeInsetsTwipsXml {
     #[serde(default)]
-    top: Option<SideXml>,
+    top: Vec<SideXml>,
     #[serde(default)]
-    bottom: Option<SideXml>,
+    bottom: Vec<SideXml>,
     #[serde(default, alias = "start")]
-    left: Option<SideXml>,
+    left: Vec<SideXml>,
     #[serde(default, alias = "end")]
-    right: Option<SideXml>,
+    right: Vec<SideXml>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -38,10 +39,10 @@ struct SideXml {
 impl From<EdgeInsetsTwipsXml> for EdgeInsets<Twips> {
     fn from(x: EdgeInsetsTwipsXml) -> Self {
         Self::new(
-            x.top.and_then(|s| s.w).unwrap_or_default(),
-            x.right.and_then(|s| s.w).unwrap_or_default(),
-            x.bottom.and_then(|s| s.w).unwrap_or_default(),
-            x.left.and_then(|s| s.w).unwrap_or_default(),
+            last(x.top).and_then(|s| s.w).unwrap_or_default(),
+            last(x.right).and_then(|s| s.w).unwrap_or_default(),
+            last(x.bottom).and_then(|s| s.w).unwrap_or_default(),
+            last(x.left).and_then(|s| s.w).unwrap_or_default(),
         )
     }
 }
@@ -61,10 +62,10 @@ impl From<EdgeInsetsTwipsXml> for EdgeInsets<Twips> {
 impl From<EdgeInsetsTwipsXml> for PartialEdgeInsets<Twips> {
     fn from(x: EdgeInsetsTwipsXml) -> Self {
         Self::new(
-            x.top.and_then(|s| s.w),
-            x.right.and_then(|s| s.w),
-            x.bottom.and_then(|s| s.w),
-            x.left.and_then(|s| s.w),
+            last(x.top).and_then(|s| s.w),
+            last(x.right).and_then(|s| s.w),
+            last(x.bottom).and_then(|s| s.w),
+            last(x.left).and_then(|s| s.w),
         )
     }
 }

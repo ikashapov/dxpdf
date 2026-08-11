@@ -6,6 +6,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::model::{CnvPicProperties, DocProperties, NvPicProperties, PicLocks, Picture};
@@ -20,7 +21,7 @@ pub(crate) struct PictureXml {
     #[serde(rename = "blipFill")]
     pub(crate) blip_fill: BlipFillXml,
     #[serde(rename = "spPr", default)]
-    pub(crate) sp_pr: Option<SpPrXml>,
+    pub(crate) sp_pr: Vec<SpPrXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,7 +29,7 @@ pub struct NvPicPrXml {
     #[serde(rename = "cNvPr")]
     pub cnv_pr: CNvPrXml,
     #[serde(rename = "cNvPicPr", default)]
-    pub cnv_pic_pr: Option<CNvPicPrXml>,
+    pub cnv_pic_pr: Vec<CNvPicPrXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,7 +52,7 @@ pub struct CNvPicPrXml {
     #[serde(rename = "@preferRelativeResize", default)]
     pub prefer_relative_resize: Option<AttrBool>,
     #[serde(rename = "picLocks", default)]
-    pub pic_locks: Option<PicLocksXml>,
+    pub pic_locks: Vec<PicLocksXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,7 +88,7 @@ impl From<PictureXml> for Picture {
         Self {
             nv_pic_pr: x.nv_pic_pr.into(),
             blip_fill: x.blip_fill.into(),
-            shape_properties: x.sp_pr.map(Into::into),
+            shape_properties: last(x.sp_pr).map(Into::into),
         }
     }
 }
@@ -96,7 +97,7 @@ impl From<NvPicPrXml> for NvPicProperties {
     fn from(x: NvPicPrXml) -> Self {
         Self {
             cnv_pr: x.cnv_pr.into(),
-            cnv_pic_pr: x.cnv_pic_pr.map(Into::into),
+            cnv_pic_pr: last(x.cnv_pic_pr).map(Into::into),
         }
     }
 }
@@ -117,7 +118,7 @@ impl From<CNvPicPrXml> for CnvPicProperties {
     fn from(x: CNvPicPrXml) -> Self {
         Self {
             prefer_relative_resize: x.prefer_relative_resize.map(|b| b.0),
-            pic_locks: x.pic_locks.map(Into::into),
+            pic_locks: last(x.pic_locks).map(Into::into),
         }
     }
 }

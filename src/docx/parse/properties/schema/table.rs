@@ -5,6 +5,7 @@
 //! signature.
 
 use serde::{Deserialize, Deserializer};
+use crate::model::Dup;
 
 use crate::docx::model::dimension::Twips;
 use crate::docx::model::{
@@ -16,15 +17,12 @@ use crate::docx::parse::primitives::st_enums::{
     StXAlign, StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::{last_toggle, OnOff};
+use crate::docx::parse::primitives::{last, last_toggle, OnOff};
 
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
 use super::insets::EdgeInsetsTwipsXml;
-use super::measure::{
-    deserialize_optional_nonnegative_table_measure, deserialize_vec_nonnegative_table_measure,
-    TableMeasureXml,
-};
+use super::measure::{deserialize_vec_nonnegative_table_measure, TableMeasureXml};
 use super::shading::ShdXml;
 
 // ── tblPr ───────────────────────────────────────────────────────────────
@@ -32,39 +30,39 @@ use super::shading::ShdXml;
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TblPrXml {
     #[serde(rename = "tblStyle", default)]
-    tbl_style: Option<ValString>,
+    tbl_style: Vec<ValString>,
     #[serde(rename = "tblBorders", default)]
-    tbl_borders: Option<TableBordersXml>,
+    tbl_borders: Vec<TableBordersXml>,
     #[serde(rename = "tblCellMar", default)]
-    tbl_cell_mar: Option<EdgeInsetsTwipsXml>,
+    tbl_cell_mar: Vec<EdgeInsetsTwipsXml>,
     #[serde(rename = "jc", default)]
-    jc: Option<ValAttr<StJc>>,
+    jc: Vec<ValAttr<StJc>>,
     #[serde(
         rename = "tblW",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    tbl_w: Option<TableMeasureXml>,
+    tbl_w: Vec<TableMeasureXml>,
     #[serde(rename = "tblLayout", default)]
-    tbl_layout: Option<TblLayoutXml>,
+    tbl_layout: Vec<TblLayoutXml>,
     #[serde(rename = "tblInd", default)]
-    tbl_ind: Option<TableMeasureXml>,
+    tbl_ind: Vec<TableMeasureXml>,
     #[serde(
         rename = "tblCellSpacing",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    tbl_cell_spacing: Option<TableMeasureXml>,
+    tbl_cell_spacing: Vec<TableMeasureXml>,
     #[serde(rename = "tblLook", default)]
-    tbl_look: Option<TblLookXml>,
+    tbl_look: Vec<TblLookXml>,
     #[serde(rename = "tblStyleRowBandSize", default)]
-    tbl_style_row_band_size: Option<ValAttr<u32>>,
+    tbl_style_row_band_size: Vec<ValAttr<u32>>,
     #[serde(rename = "tblStyleColBandSize", default)]
-    tbl_style_col_band_size: Option<ValAttr<u32>>,
+    tbl_style_col_band_size: Vec<ValAttr<u32>>,
     #[serde(rename = "tblpPr", default)]
-    tblp_pr: Option<TblpPrXml>,
+    tblp_pr: Vec<TblpPrXml>,
     #[serde(rename = "tblOverlap", default)]
-    tbl_overlap: Option<ValAttr<StTblOverlap>>,
+    tbl_overlap: Vec<ValAttr<StTblOverlap>>,
 }
 
 /// `<w:tblLayout w:type="fixed"/>` — note `@type` (not `@val`).
@@ -199,46 +197,42 @@ pub(crate) struct TblpPrXml {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TblPrExXml {
     #[serde(rename = "tblBorders", default)]
-    tbl_borders: Option<TableBordersXml>,
+    tbl_borders: Vec<TableBordersXml>,
     /// §17.4.41: per-row override of the table's `tblCellSpacing`.
     #[serde(
         rename = "tblCellSpacing",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    tbl_cell_spacing: Option<TableMeasureXml>,
+    tbl_cell_spacing: Vec<TableMeasureXml>,
 }
 
 impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
     fn from(x: TblPrExXml) -> Self {
         Self {
-            borders: x.tbl_borders.map(Into::into),
-            cell_spacing: x.tbl_cell_spacing.map(Into::into),
+            borders: last(x.tbl_borders).map(Into::into),
+            cell_spacing: last(x.tbl_cell_spacing).map(Into::into),
         }
     }
 }
 
 impl TblPrXml {
     pub(crate) fn split(self) -> (TableProperties, Option<StyleId>) {
-        let style_id = self.tbl_style.map(|v| StyleId::new(v.val));
+        let style_id = last(self.tbl_style).map(|v| StyleId::new(v.val));
         let props = TableProperties {
             style_id: style_id.clone(),
-            alignment: self.jc.map(|v| Alignment::from(v.val)),
-            width: self.tbl_w.map(Into::into),
-            layout: self
-                .tbl_layout
-                .map(|v| crate::docx::model::TableLayout::from(v.ty)),
-            indent: self.tbl_ind.map(Into::into),
-            borders: self.tbl_borders.map(Into::into),
-            cell_margins: self.tbl_cell_mar.map(Into::into),
-            cell_spacing: self.tbl_cell_spacing.map(Into::into),
-            look: self.tbl_look.map(Into::into),
-            style_row_band_size: self.tbl_style_row_band_size.map(|v| v.val),
-            style_col_band_size: self.tbl_style_col_band_size.map(|v| v.val),
-            positioning: self.tblp_pr.map(Into::into),
-            overlap: self
-                .tbl_overlap
-                .map(|v| crate::docx::model::TableOverlap::from(v.val)),
+            alignment: last(self.jc).map(|v| Alignment::from(v.val)),
+            width: last(self.tbl_w).map(Into::into),
+            layout: last(self.tbl_layout).map(|v| crate::docx::model::TableLayout::from(v.ty)),
+            indent: last(self.tbl_ind).map(Into::into),
+            borders: last(self.tbl_borders).map(Into::into),
+            cell_margins: last(self.tbl_cell_mar).map(Into::into),
+            cell_spacing: last(self.tbl_cell_spacing).map(Into::into),
+            look: last(self.tbl_look).map(Into::into),
+            style_row_band_size: last(self.tbl_style_row_band_size).map(|v| v.val),
+            style_col_band_size: last(self.tbl_style_col_band_size).map(|v| v.val),
+            positioning: last(self.tblp_pr).map(Into::into),
+            overlap: last(self.tbl_overlap).map(|v| crate::docx::model::TableOverlap::from(v.val)),
         };
         (props, style_id)
     }
@@ -300,7 +294,7 @@ impl From<TblpPrXml> for TablePositioning {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TrPrXml {
     #[serde(rename = "trHeight", default)]
-    tr_height: Option<TrHeightXml>,
+    tr_height: Vec<TrHeightXml>,
     // `Vec<OnOff>` (not `Option`) tolerates duplicated toggles per §17.7.2
     // last-wins — see `RPrXml` / `PPrXml` for the rationale.
     #[serde(rename = "tblHeader", default)]
@@ -308,32 +302,32 @@ pub(crate) struct TrPrXml {
     #[serde(rename = "cantSplit", default)]
     cant_split: Vec<OnOff>,
     #[serde(rename = "jc", default)]
-    jc: Option<ValAttr<StJc>>,
+    jc: Vec<ValAttr<StJc>>,
     #[serde(rename = "cnfStyle", default)]
-    cnf_style: Option<CnfStyleXml>,
+    cnf_style: Vec<CnfStyleXml>,
     #[serde(rename = "gridBefore", default)]
-    grid_before: Option<ValAttr<u32>>,
+    grid_before: Vec<ValAttr<u32>>,
     #[serde(
         rename = "wBefore",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    w_before: Option<TableMeasureXml>,
+    w_before: Vec<TableMeasureXml>,
     #[serde(rename = "gridAfter", default)]
-    grid_after: Option<ValAttr<u32>>,
+    grid_after: Vec<ValAttr<u32>>,
     #[serde(
         rename = "wAfter",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    w_after: Option<TableMeasureXml>,
+    w_after: Vec<TableMeasureXml>,
     /// §17.4.42: row-level override of the table's `tblCellSpacing`.
     #[serde(
         rename = "tblCellSpacing",
         default,
-        deserialize_with = "deserialize_optional_nonnegative_table_measure"
+        deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
-    tbl_cell_spacing: Option<TableMeasureXml>,
+    tbl_cell_spacing: Vec<TableMeasureXml>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -369,16 +363,16 @@ impl From<TrHeightXml> for TableRowHeight {
 impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
         Self {
-            height: x.tr_height.map(Into::into),
+            height: last(x.tr_height).map(Into::into),
             is_header: last_toggle(x.tbl_header),
             cant_split: last_toggle(x.cant_split),
-            justification: x.jc.map(|v| Alignment::from(v.val)),
-            cnf_style: x.cnf_style.map(CnfStyle::from),
-            grid_before: x.grid_before.map(|v| v.val).unwrap_or(0),
-            w_before: x.w_before.map(Into::into),
-            grid_after: x.grid_after.map(|v| v.val).unwrap_or(0),
-            w_after: x.w_after.map(Into::into),
-            cell_spacing: x.tbl_cell_spacing.map(Into::into),
+            justification: last(x.jc).map(|v| Alignment::from(v.val)),
+            cnf_style: last(x.cnf_style).map(CnfStyle::from),
+            grid_before: last(x.grid_before).map(|v| v.val).unwrap_or(0),
+            w_before: last(x.w_before).map(Into::into),
+            grid_after: last(x.grid_after).map(|v| v.val).unwrap_or(0),
+            w_after: last(x.w_after).map(Into::into),
+            cell_spacing: last(x.tbl_cell_spacing).map(Into::into),
         }
     }
 }
@@ -443,26 +437,28 @@ impl From<VMergeXml> for VerticalMerge {
 }
 
 impl From<TcPrXml> for TableCellProperties {
+    /// Every duplicable child is carried into the model whole; `Dup::get`
+    /// applies last-wins where a consumer reads it. See `model::dup`.
     fn from(x: TcPrXml) -> Self {
         Self {
-            width: x.tc_w.into_iter().last().map(Into::into),
-            borders: x.tc_borders.into_iter().last().map(Into::into),
-            shading: x.shd.into_iter().last().map(Into::into),
-            margins: x.tc_mar.into_iter().last().map(Into::into),
+            width: x.tc_w.into_iter().map(Into::into).collect(),
+            borders: x.tc_borders.into_iter().map(Into::into).collect(),
+            shading: x.shd.into_iter().map(Into::into).collect(),
+            margins: x.tc_mar.into_iter().map(Into::into).collect(),
             vertical_align: x
                 .v_align
                 .into_iter()
-                .last()
-                .map(|v| crate::docx::model::CellVerticalAlign::from(v.val)),
-            vertical_merge: x.v_merge.into_iter().last().map(Into::into),
-            grid_span: x.grid_span.into_iter().last().map(|v| v.val),
+                .map(|v| crate::docx::model::CellVerticalAlign::from(v.val))
+                .collect(),
+            vertical_merge: x.v_merge.into_iter().map(Into::into).collect(),
+            grid_span: x.grid_span.into_iter().map(|v| v.val).collect(),
             text_direction: x
                 .text_direction
                 .into_iter()
-                .last()
-                .map(|v| crate::docx::model::TextDirection::from(v.val)),
+                .map(|v| crate::docx::model::TextDirection::from(v.val))
+                .collect(),
             no_wrap: last_toggle(x.no_wrap),
-            cnf_style: x.cnf_style.into_iter().last().map(CnfStyle::from),
+            cnf_style: x.cnf_style.into_iter().map(CnfStyle::from).collect(),
         }
     }
 }
@@ -713,35 +709,35 @@ mod tests {
                 <tcBorders><top val="single"/><tl2br val="dotted"/></tcBorders>
             </tcPr>"#,
         );
-        match tc.width.unwrap() {
+        match tc.width.cloned().unwrap() {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 2500),
             other => panic!("expected Twips, got {other:?}"),
         }
-        assert!(tc.borders.unwrap().tl2br.is_some());
+        assert!(tc.borders.cloned().unwrap().tl2br.is_some());
     }
 
     #[test]
     fn tc_pr_vertical_align() {
         let tc = parse_tc_pr(r#"<tcPr><vAlign val="center"/></tcPr>"#);
-        assert_eq!(tc.vertical_align, Some(CellVerticalAlign::Center));
+        assert_eq!(tc.vertical_align, Dup::from(Some(CellVerticalAlign::Center)));
     }
 
     #[test]
     fn tc_pr_v_merge_restart_and_continue() {
         let tc = parse_tc_pr(r#"<tcPr><vMerge val="restart"/></tcPr>"#);
-        assert_eq!(tc.vertical_merge, Some(VerticalMerge::Restart));
+        assert_eq!(tc.vertical_merge, Dup::from(Some(VerticalMerge::Restart)));
 
         let tc = parse_tc_pr(r#"<tcPr><vMerge/></tcPr>"#);
-        assert_eq!(tc.vertical_merge, Some(VerticalMerge::Continue));
+        assert_eq!(tc.vertical_merge, Dup::from(Some(VerticalMerge::Continue)));
     }
 
     #[test]
     fn tc_pr_grid_span_and_text_direction() {
         let tc = parse_tc_pr(r#"<tcPr><gridSpan val="3"/><textDirection val="tbRl"/></tcPr>"#);
-        assert_eq!(tc.grid_span, Some(3));
+        assert_eq!(tc.grid_span, Dup::from(Some(3)));
         assert_eq!(
             tc.text_direction,
-            Some(TextDirection::TopToBottomRightToLeft)
+            Dup::from(Some(TextDirection::TopToBottomRightToLeft))
         );
     }
 
@@ -749,7 +745,7 @@ mod tests {
     fn tc_pr_no_wrap_and_cnf_style() {
         let tc = parse_tc_pr(r#"<tcPr><noWrap/><cnfStyle val="100000000000"/></tcPr>"#);
         assert_eq!(tc.no_wrap, Some(true));
-        assert_eq!(tc.cnf_style, Some(CnfStyle::FIRST_ROW));
+        assert_eq!(tc.cnf_style, Dup::from(Some(CnfStyle::FIRST_ROW)));
     }
 
     /// §17.4.81 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
@@ -804,6 +800,34 @@ mod tests {
         assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.41");
     }
 
+    /// A duplicated **non-toggle** child is schema-invalid and Word opens it
+    /// anyway; see `primitives::duplicates` for why the last one wins.
+    #[test]
+    fn tbl_pr_duplicate_non_toggle_children_are_tolerated_last_wins() {
+        let (tbl, _) = parse_tbl_pr(
+            r#"<tblPr>
+                 <jc val="left"/><jc val="center"/>
+                 <tblW w="1000" type="dxa"/><tblW w="5000" type="dxa"/>
+               </tblPr>"#,
+        );
+        assert_eq!(tbl.alignment, Some(Alignment::Center), "\u{a7}17.4.29");
+        assert!(
+            matches!(tbl.width, Some(TableMeasure::Twips(d)) if d.raw() == 5000),
+            "\u{a7}17.4.63, got {:?}",
+            tbl.width
+        );
+    }
+
+    #[test]
+    fn tr_pr_duplicate_non_toggle_children_are_tolerated_last_wins() {
+        let tr = parse_tr_pr(
+            r#"<trPr>
+                 <trHeight val="200"/><trHeight val="500"/>
+               </trPr>"#,
+        );
+        assert_eq!(tr.height.map(|h| h.value.raw()), Some(500), "\u{a7}17.4.81");
+    }
+
     #[test]
     fn tc_pr_duplicate_tc_mar_does_not_fail() {
         let tc = parse_tc_pr(
@@ -812,7 +836,41 @@ mod tests {
                 <tcMar><bottom w="200" type="dxa"/></tcMar>
             </tcPr>"#,
         );
-        assert!(tc.margins.is_some());
-        assert_eq!(tc.margins.unwrap().bottom.map(|d| d.raw()), Some(200));
+        assert!(!tc.margins.is_absent());
+        assert_eq!(
+            tc.margins.get().unwrap().bottom.map(|d| d.raw()),
+            Some(200),
+            "last occurrence wins at the point of use"
+        );
+    }
+
+    /// The point of `Dup`: the parser discards nothing, so a consumer that
+    /// wants a different rule than last-wins can still have one.
+    #[test]
+    fn both_occurrences_reach_the_model() {
+        let tc = parse_tc_pr(
+            r#"<tcPr>
+                <tcMar><top w="100" type="dxa"/></tcMar>
+                <tcMar><bottom w="200" type="dxa"/></tcMar>
+            </tcPr>"#,
+        );
+        assert!(tc.margins.is_duplicated(), "the document repeated w:tcMar");
+        assert_eq!(tc.margins.all().len(), 2, "neither occurrence was dropped");
+        // first-wins is reachable downstream without touching the parser
+        assert_eq!(
+            tc.margins.all().first().unwrap().top.map(|d| d.raw()),
+            Some(100)
+        );
+        assert_eq!(
+            tc.margins.get().unwrap().bottom.map(|d| d.raw()),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn an_unrepeated_child_is_not_flagged_as_duplicated() {
+        let tc = parse_tc_pr(r#"<tcPr><tcMar><top w="100" type="dxa"/></tcMar></tcPr>"#);
+        assert!(!tc.margins.is_duplicated());
+        assert_eq!(tc.margins.all().len(), 1);
     }
 }

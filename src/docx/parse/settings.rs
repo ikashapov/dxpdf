@@ -1,5 +1,6 @@
 //! Parser for `word/settings.xml`.
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Twips};
@@ -18,17 +19,17 @@ pub fn parse_settings(data: &[u8]) -> Result<DocumentSettings> {
 #[derive(Deserialize, Default)]
 struct SettingsXml {
     #[serde(rename = "defaultTabStop", default)]
-    default_tab_stop: Option<DimensionVal<Twips>>,
+    default_tab_stop: Vec<DimensionVal<Twips>>,
     #[serde(rename = "evenAndOddHeaders", default)]
-    even_and_odd_headers: Option<OnOff>,
+    even_and_odd_headers: Vec<OnOff>,
     #[serde(default)]
-    rsids: Option<RsidsXml>,
+    rsids: Vec<RsidsXml>,
 }
 
 #[derive(Deserialize, Default)]
 struct RsidsXml {
     #[serde(rename = "rsidRoot", default)]
-    rsid_root: Option<StringVal>,
+    rsid_root: Vec<StringVal>,
     #[serde(rename = "rsid", default)]
     rsids: Vec<StringVal>,
 }
@@ -52,14 +53,14 @@ struct StringVal {
 impl From<SettingsXml> for DocumentSettings {
     fn from(x: SettingsXml) -> Self {
         let mut s = DocumentSettings::default();
-        if let Some(t) = x.default_tab_stop {
+        if let Some(t) = last(x.default_tab_stop) {
             s.default_tab_stop = t.val;
         }
-        if let Some(OnOff(on)) = x.even_and_odd_headers {
+        if let Some(OnOff(on)) = last(x.even_and_odd_headers) {
             s.even_and_odd_headers = on;
         }
-        if let Some(r) = x.rsids {
-            if let Some(root) = r.rsid_root {
+        if let Some(r) = last(x.rsids) {
+            if let Some(root) = last(r.rsid_root) {
                 s.rsid_root = RevisionSaveId::from_hex(&root.val);
             }
             s.rsids = r

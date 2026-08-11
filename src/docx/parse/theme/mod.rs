@@ -6,6 +6,7 @@
 
 mod script;
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::error::Result;
@@ -29,27 +30,27 @@ pub fn parse_theme(data: &[u8]) -> Result<Theme> {
 #[derive(Deserialize, Default)]
 struct ThemeXml {
     #[serde(rename = "themeElements", default)]
-    theme_elements: Option<ThemeElementsXml>,
+    theme_elements: Vec<ThemeElementsXml>,
 }
 
 #[derive(Deserialize, Default)]
 struct ThemeElementsXml {
     #[serde(rename = "clrScheme", default)]
-    clr_scheme: Option<ClrSchemeXml>,
+    clr_scheme: Vec<ClrSchemeXml>,
     #[serde(rename = "fontScheme", default)]
-    font_scheme: Option<FontSchemeXml>,
+    font_scheme: Vec<FontSchemeXml>,
     #[serde(rename = "fmtScheme", default)]
-    fmt_scheme: Option<FmtSchemeXml>,
+    fmt_scheme: Vec<FmtSchemeXml>,
 }
 
 #[derive(Deserialize, Default)]
 struct FmtSchemeXml {
     #[serde(rename = "fillStyleLst", default)]
-    fill_style_lst: Option<FillStyleLstXml>,
+    fill_style_lst: Vec<FillStyleLstXml>,
     #[serde(rename = "lnStyleLst", default)]
-    ln_style_lst: Option<LnStyleLstXml>,
+    ln_style_lst: Vec<LnStyleLstXml>,
     #[serde(rename = "effectStyleLst", default)]
-    effect_style_lst: Option<EffectStyleLstXml>,
+    effect_style_lst: Vec<EffectStyleLstXml>,
 }
 
 /// §20.1.4.1.13 CT_FillStyleList — theme fill styles (spec requires ≥3). Each
@@ -79,35 +80,35 @@ struct EffectStyleLstXml {
 #[derive(Deserialize, Default)]
 struct EffectStyleXml {
     #[serde(rename = "effectLst", default)]
-    effect_lst: Option<EffectListXml>,
+    effect_lst: Vec<EffectListXml>,
 }
 
 #[derive(Deserialize, Default)]
 struct ClrSchemeXml {
     #[serde(default)]
-    dk1: Option<ColorChoice>,
+    dk1: Vec<ColorChoice>,
     #[serde(default)]
-    lt1: Option<ColorChoice>,
+    lt1: Vec<ColorChoice>,
     #[serde(default)]
-    dk2: Option<ColorChoice>,
+    dk2: Vec<ColorChoice>,
     #[serde(default)]
-    lt2: Option<ColorChoice>,
+    lt2: Vec<ColorChoice>,
     #[serde(default)]
-    accent1: Option<ColorChoice>,
+    accent1: Vec<ColorChoice>,
     #[serde(default)]
-    accent2: Option<ColorChoice>,
+    accent2: Vec<ColorChoice>,
     #[serde(default)]
-    accent3: Option<ColorChoice>,
+    accent3: Vec<ColorChoice>,
     #[serde(default)]
-    accent4: Option<ColorChoice>,
+    accent4: Vec<ColorChoice>,
     #[serde(default)]
-    accent5: Option<ColorChoice>,
+    accent5: Vec<ColorChoice>,
     #[serde(default)]
-    accent6: Option<ColorChoice>,
+    accent6: Vec<ColorChoice>,
     #[serde(default)]
-    hlink: Option<ColorChoice>,
+    hlink: Vec<ColorChoice>,
     #[serde(rename = "folHlink", default)]
-    fol_hlink: Option<ColorChoice>,
+    fol_hlink: Vec<ColorChoice>,
 }
 
 /// A slot's single color-choice element. §20.1.2.3 defines several; we resolve
@@ -116,9 +117,9 @@ struct ClrSchemeXml {
 #[derive(Deserialize, Default)]
 struct ColorChoice {
     #[serde(rename = "srgbClr", default)]
-    srgb: Option<SrgbClr>,
+    srgb: Vec<SrgbClr>,
     #[serde(rename = "sysClr", default)]
-    sys: Option<SysClr>,
+    sys: Vec<SysClr>,
 }
 
 #[derive(Deserialize)]
@@ -135,10 +136,10 @@ struct SysClr {
 
 impl ColorChoice {
     fn resolve(self) -> Option<u32> {
-        if let Some(s) = self.srgb {
+        if let Some(s) = last(self.srgb) {
             return s.val.rgb();
         }
-        if let Some(s) = self.sys {
+        if let Some(s) = last(self.sys) {
             return s.last_clr.and_then(HexColor::rgb);
         }
         None
@@ -148,19 +149,19 @@ impl ColorChoice {
 #[derive(Deserialize, Default)]
 struct FontSchemeXml {
     #[serde(rename = "majorFont", default)]
-    major: Option<FontCollectionXml>,
+    major: Vec<FontCollectionXml>,
     #[serde(rename = "minorFont", default)]
-    minor: Option<FontCollectionXml>,
+    minor: Vec<FontCollectionXml>,
 }
 
 #[derive(Deserialize, Default)]
 struct FontCollectionXml {
     #[serde(default)]
-    latin: Option<TypefaceXml>,
+    latin: Vec<TypefaceXml>,
     #[serde(default)]
-    ea: Option<TypefaceXml>,
+    ea: Vec<TypefaceXml>,
     #[serde(default)]
-    cs: Option<TypefaceXml>,
+    cs: Vec<TypefaceXml>,
     #[serde(rename = "font", default)]
     fonts: Vec<ScriptFontXml>,
 }
@@ -182,30 +183,34 @@ struct ScriptFontXml {
 impl From<ThemeXml> for Theme {
     fn from(x: ThemeXml) -> Self {
         let mut theme = Theme::default();
-        if let Some(elements) = x.theme_elements {
-            if let Some(cs) = elements.clr_scheme {
+        if let Some(elements) = last(x.theme_elements) {
+            if let Some(cs) = last(elements.clr_scheme) {
                 theme.color_scheme = cs.into();
             }
-            if let Some(fs) = elements.font_scheme {
-                if let Some(major) = fs.major {
+            if let Some(fs) = last(elements.font_scheme) {
+                if let Some(major) = last(fs.major) {
                     theme.major_font = major.into();
                 }
-                if let Some(minor) = fs.minor {
+                if let Some(minor) = last(fs.minor) {
                     theme.minor_font = minor.into();
                 }
             }
-            if let Some(fmt) = elements.fmt_scheme {
-                if let Some(list) = fmt.fill_style_lst {
+            if let Some(fmt) = last(elements.fmt_scheme) {
+                if let Some(list) = last(fmt.fill_style_lst) {
                     theme.fill_styles = list.fills.into_iter().map(Into::into).collect();
                 }
-                if let Some(list) = fmt.ln_style_lst {
+                if let Some(list) = last(fmt.ln_style_lst) {
                     theme.line_styles = list.lines.into_iter().map(Outline::from).collect();
                 }
-                if let Some(list) = fmt.effect_style_lst {
+                if let Some(list) = last(fmt.effect_style_lst) {
                     theme.effect_styles = list
                         .effect_styles
                         .into_iter()
-                        .map(|es| es.effect_lst.map(EffectList::from).unwrap_or_default())
+                        .map(|es| {
+                            last(es.effect_lst)
+                                .map(EffectList::from)
+                                .unwrap_or_default()
+                        })
                         .collect();
                 }
             }
@@ -217,18 +222,18 @@ impl From<ThemeXml> for Theme {
 impl From<ClrSchemeXml> for ThemeColorScheme {
     fn from(x: ClrSchemeXml) -> Self {
         let mut s = ThemeColorScheme::default();
-        assign(&mut s.dark1, x.dk1);
-        assign(&mut s.light1, x.lt1);
-        assign(&mut s.dark2, x.dk2);
-        assign(&mut s.light2, x.lt2);
-        assign(&mut s.accent1, x.accent1);
-        assign(&mut s.accent2, x.accent2);
-        assign(&mut s.accent3, x.accent3);
-        assign(&mut s.accent4, x.accent4);
-        assign(&mut s.accent5, x.accent5);
-        assign(&mut s.accent6, x.accent6);
-        assign(&mut s.hyperlink, x.hlink);
-        assign(&mut s.followed_hyperlink, x.fol_hlink);
+        assign(&mut s.dark1, last(x.dk1));
+        assign(&mut s.light1, last(x.lt1));
+        assign(&mut s.dark2, last(x.dk2));
+        assign(&mut s.light2, last(x.lt2));
+        assign(&mut s.accent1, last(x.accent1));
+        assign(&mut s.accent2, last(x.accent2));
+        assign(&mut s.accent3, last(x.accent3));
+        assign(&mut s.accent4, last(x.accent4));
+        assign(&mut s.accent5, last(x.accent5));
+        assign(&mut s.accent6, last(x.accent6));
+        assign(&mut s.hyperlink, last(x.hlink));
+        assign(&mut s.followed_hyperlink, last(x.fol_hlink));
         s
     }
 }
@@ -242,9 +247,9 @@ fn assign(slot: &mut u32, choice: Option<ColorChoice>) {
 impl From<FontCollectionXml> for ThemeFontScheme {
     fn from(x: FontCollectionXml) -> Self {
         Self {
-            latin: x.latin.map(|t| t.typeface).unwrap_or_default(),
-            east_asian: x.ea.map(|t| t.typeface).unwrap_or_default(),
-            complex_script: x.cs.map(|t| t.typeface).unwrap_or_default(),
+            latin: last(x.latin).map(|t| t.typeface).unwrap_or_default(),
+            east_asian: last(x.ea).map(|t| t.typeface).unwrap_or_default(),
+            complex_script: last(x.cs).map(|t| t.typeface).unwrap_or_default(),
             script_fonts: x
                 .fonts
                 .into_iter()

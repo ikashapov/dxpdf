@@ -1,6 +1,7 @@
 //! Parser for `word/numbering.xml` — single-pass serde over the whole file.
 //! Picture bullets' `<w:pict>` contents are deserialized via the VML schema.
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::error::Result;
@@ -56,23 +57,23 @@ struct LvlXml {
     #[serde(rename = "@ilvl")]
     ilvl: u8,
     #[serde(rename = "numFmt", default)]
-    num_fmt: Option<ValAttr<StNumberFormat>>,
+    num_fmt: Vec<ValAttr<StNumberFormat>>,
     #[serde(rename = "lvlText", default)]
-    lvl_text: Option<ValString>,
+    lvl_text: Vec<ValString>,
     #[serde(rename = "start", default)]
-    start: Option<ValAttr<u32>>,
+    start: Vec<ValAttr<u32>>,
     #[serde(rename = "lvlJc", default)]
-    lvl_jc: Option<ValAttr<StJc>>,
+    lvl_jc: Vec<ValAttr<StJc>>,
     #[serde(rename = "suff", default)]
-    suff: Option<ValAttr<StLevelSuffix>>,
+    suff: Vec<ValAttr<StLevelSuffix>>,
     #[serde(rename = "isLgl", default)]
-    is_lgl: Option<OnOff>,
+    is_lgl: Vec<OnOff>,
     #[serde(rename = "pPr", default)]
-    p_pr: Option<PPrXml>,
+    p_pr: Vec<PPrXml>,
     #[serde(rename = "rPr", default)]
-    r_pr: Option<RPrXml>,
+    r_pr: Vec<RPrXml>,
     #[serde(rename = "lvlPicBulletId", default)]
-    lvl_pic_bullet_id: Option<ValAttr<i64>>,
+    lvl_pic_bullet_id: Vec<ValAttr<i64>>,
 }
 
 /// §17.18.53 ST_LevelSuffix.
@@ -99,7 +100,7 @@ struct NumXml {
     #[serde(rename = "@numId")]
     num_id: i64,
     #[serde(rename = "abstractNumId", default)]
-    abstract_num_id: Option<ValAttr<i64>>,
+    abstract_num_id: Vec<ValAttr<i64>>,
     #[serde(rename = "lvlOverride", default)]
     overrides: Vec<LvlOverrideXml>,
 }
@@ -109,9 +110,9 @@ struct LvlOverrideXml {
     #[serde(rename = "@ilvl")]
     ilvl: u8,
     #[serde(rename = "startOverride", default)]
-    start_override: Option<ValAttr<u32>>,
+    start_override: Vec<ValAttr<u32>>,
     #[serde(rename = "lvl", default)]
-    lvl: Option<LvlXml>,
+    lvl: Vec<LvlXml>,
 }
 
 #[derive(Deserialize)]
@@ -119,7 +120,7 @@ struct NumPicBulletXml {
     #[serde(rename = "@numPicBulletId")]
     num_pic_bullet_id: i64,
     #[serde(rename = "pict", default)]
-    pict: Option<crate::docx::parse::vml::schema::PictXml>,
+    pict: Vec<crate::docx::parse::vml::schema::PictXml>,
 }
 
 #[derive(Deserialize)]
@@ -161,7 +162,7 @@ impl From<NumberingXml> for NumberingDefinitions {
                 }
                 NumberingChildXml::NumPicBullet(bullet) => {
                     let id = NumPicBulletId::new(bullet.num_pic_bullet_id);
-                    let pict = bullet.pict.map(|p| p.into_model(&mut ctx));
+                    let pict = last(bullet.pict).map(|p| p.into_model(&mut ctx));
                     defs.pic_bullets.insert(id, NumPicBullet { id, pict });
                 }
                 NumberingChildXml::Unknown => {}
@@ -173,18 +174,20 @@ impl From<NumberingXml> for NumberingDefinitions {
 
 impl From<LvlXml> for NumberingLevelDefinition {
     fn from(x: LvlXml) -> Self {
-        let (indentation, run_properties) = extract_level_properties(x.p_pr, x.r_pr);
+        let (indentation, run_properties) = extract_level_properties(last(x.p_pr), last(x.r_pr));
         Self {
             level: x.ilvl,
-            format: x.num_fmt.map(|v| NumberFormat::from(v.val)),
-            level_text: x.lvl_text.map(|v| v.val).unwrap_or_default(),
-            start: x.start.map(|v| v.val),
-            justification: x.lvl_jc.map(|v| Alignment::from(v.val)),
+            format: last(x.num_fmt).map(|v| NumberFormat::from(v.val)),
+            level_text: last(x.lvl_text).map(|v| v.val).unwrap_or_default(),
+            start: last(x.start).map(|v| v.val),
+            justification: last(x.lvl_jc).map(|v| Alignment::from(v.val)),
             indentation,
             run_properties,
-            lvl_pic_bullet_id: x.lvl_pic_bullet_id.map(|v| NumPicBulletId::new(v.val)),
-            suffix: x.suff.map(|v| LevelSuffix::from(v.val)).unwrap_or_default(),
-            is_legal: x.is_lgl.map(|OnOff(b)| b).unwrap_or(false),
+            lvl_pic_bullet_id: last(x.lvl_pic_bullet_id).map(|v| NumPicBulletId::new(v.val)),
+            suffix: last(x.suff)
+                .map(|v| LevelSuffix::from(v.val))
+                .unwrap_or_default(),
+            is_legal: last(x.is_lgl).map(|OnOff(b)| b).unwrap_or(false),
         }
     }
 }
@@ -199,8 +202,7 @@ fn extract_level_properties(
 }
 
 fn convert_num(n: NumXml) -> NumberingInstance {
-    let abstract_num_id = n
-        .abstract_num_id
+    let abstract_num_id = last(n.abstract_num_id)
         .map(|v| AbstractNumId::new(v.val))
         .unwrap_or_else(|| {
             log::warn!(
@@ -213,13 +215,13 @@ fn convert_num(n: NumXml) -> NumberingInstance {
         .overrides
         .into_iter()
         .map(|o| {
-            let definition = o.lvl.map(|mut lvl| {
+            let definition = last(o.lvl).map(|mut lvl| {
                 lvl.ilvl = o.ilvl; // the override's @ilvl wins over the inner lvl's
                 NumberingLevelDefinition::from(lvl)
             });
             LevelOverride {
                 level: o.ilvl,
-                start_override: o.start_override.map(|v| v.val),
+                start_override: last(o.start_override).map(|v| v.val),
                 definition,
             }
         })

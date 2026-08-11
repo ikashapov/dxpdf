@@ -11,6 +11,7 @@
 use crate::docx::error::Result;
 use crate::docx::model::*;
 use crate::docx::parse::body_schema::*;
+use crate::docx::parse::primitives::last;
 use crate::docx::parse::serde_xml::from_xml;
 use crate::docx::whitespace_workaround::restore_whitespace_sentinels;
 
@@ -89,7 +90,7 @@ pub(crate) fn convert_container(
             }
             BlockChildXml::Sdt(sdt) => {
                 // Flatten SDT wrapper — treat its content as block-level.
-                if let Some(content) = sdt.content {
+                if let Some(content) = last(sdt.content) {
                     let (nested_blocks, nested_sect) = convert_container(content.children, ctx);
                     blocks.extend(nested_blocks);
                     if nested_sect.is_some() {
@@ -122,7 +123,7 @@ fn convert_paragraph(p: ParaXml, ctx: &mut ConvertCtx) -> (Paragraph, Option<Sec
     // collects all matching children; since `pPr` is named on the struct
     // *and* in the enum, serde prefers the dedicated field — but just in
     // case, we merge from both sources).
-    let p_pr = p.p_pr.or_else(|| {
+    let p_pr = last(p.p_pr).or_else(|| {
         p.content.iter().find_map(|c| {
             if let ParaChildXml::PPr(pp) = c {
                 Some((**pp).clone())
@@ -167,7 +168,7 @@ fn extend_from_run(r: RunXml, out: &mut Vec<Inline>, ctx: &mut ConvertCtx) {
         r_pr: hex_rsid(r.rsid_r_pr.as_deref()),
         del: hex_rsid(r.rsid_del.as_deref()),
     };
-    let (props, style_id) = r.r_pr.map(|rp| rp.split()).unwrap_or_default();
+    let (props, style_id) = last(r.r_pr).map(|rp| rp.split()).unwrap_or_default();
 
     let mut acc: Vec<RunElement> = Vec::new();
     let flush = |acc: &mut Vec<RunElement>, out: &mut Vec<Inline>| {
@@ -378,7 +379,7 @@ fn convert_alt_content(a: AltContentXml, ctx: &mut ConvertCtx) -> AlternateConte
             Some(McChoice { requires, content })
         })
         .collect();
-    let fallback = a.fallback.map(|f| convert_mc_content(f.content, ctx));
+    let fallback = last(a.fallback).map(|f| convert_mc_content(f.content, ctx));
     AlternateContent { choices, fallback }
 }
 
@@ -423,16 +424,15 @@ fn drawing_to_image(
     d: crate::docx::parse::body_schema::DrawingXml,
     ctx: &mut ConvertCtx,
 ) -> Option<Image> {
-    if let Some(inline) = d.inline {
+    if let Some(inline) = last(d.inline) {
         return Some(inline.into_image(ctx));
     }
-    d.anchor.map(|a| a.into_image(ctx))
+    last(d.anchor).map(|a| a.into_image(ctx))
 }
 
 fn convert_table(t: TableXml, ctx: &mut ConvertCtx) -> Table {
-    let (properties, _style_id) = t.tbl_pr.map(|tp| tp.split()).unwrap_or_default();
-    let grid = t
-        .tbl_grid
+    let (properties, _style_id) = last(t.tbl_pr).map(|tp| tp.split()).unwrap_or_default();
+    let grid = last(t.tbl_grid)
         .map(|g| {
             g.cols
                 .into_iter()
@@ -464,7 +464,7 @@ fn collect_table_rows(children: Vec<TableChildXml>) -> Vec<TableRowXml> {
         match child {
             TableChildXml::Row(r) => rows.push(*r),
             TableChildXml::Sdt(s) => {
-                if let Some(content) = s.content {
+                if let Some(content) = last(s.content) {
                     rows.extend(collect_table_rows(content.children));
                 }
             }
@@ -497,8 +497,10 @@ fn convert_table_row(r: TableRowXml, ctx: &mut ConvertCtx) -> TableRow {
         del: hex_rsid(r.rsid_del.as_deref()),
         tr: hex_rsid(r.rsid_tr.as_deref()),
     };
-    let properties = r.tr_pr.map(TableRowProperties::from).unwrap_or_default();
-    let property_exceptions = r.tbl_pr_ex.map(Into::into);
+    let properties = last(r.tr_pr)
+        .map(TableRowProperties::from)
+        .unwrap_or_default();
+    let property_exceptions = last(r.tbl_pr_ex).map(Into::into);
     let cells = collect_row_cells(r.children)
         .into_iter()
         .map(|c| convert_table_cell(c, ctx))
@@ -523,7 +525,7 @@ fn collect_row_cells(children: Vec<RowChildXml>) -> Vec<TableCellXml> {
         match child {
             RowChildXml::Cell(c) => cells.push(*c),
             RowChildXml::Sdt(s) => {
-                if let Some(content) = s.content {
+                if let Some(content) = last(s.content) {
                     cells.extend(collect_row_cells(content.children));
                 }
             }
@@ -546,7 +548,9 @@ fn collect_row_cells(children: Vec<RowChildXml>) -> Vec<TableCellXml> {
 }
 
 fn convert_table_cell(c: TableCellXml, ctx: &mut ConvertCtx) -> TableCell {
-    let properties = c.tc_pr.map(TableCellProperties::from).unwrap_or_default();
+    let properties = last(c.tc_pr)
+        .map(TableCellProperties::from)
+        .unwrap_or_default();
     let (content, _final_sect) = convert_container(c.content, ctx);
     TableCell {
         properties,
@@ -803,7 +807,7 @@ mod tests {
             </w:tr>
         "#;
         let row: TableRowXml = quick_xml::de::from_str(xml).expect("row must parse");
-        assert!(row.tr_pr.is_some(), "trPr still captured on the parent");
+        assert!(!row.tr_pr.is_empty(), "trPr still captured on the parent");
         let cells = collect_row_cells(row.children);
         assert_eq!(cells.len(), 5, "3 bare + 2 sdt-wrapped cells recovered");
     }

@@ -17,7 +17,7 @@ use crate::docx::parse::primitives::st_enums::{
     StYAlign,
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
-use crate::docx::parse::primitives::{last_toggle, OnOff};
+use crate::docx::parse::primitives::{last, last_toggle, OnOff};
 
 use super::border::ParagraphBordersXml;
 use super::cnf_style::CnfStyleXml;
@@ -36,42 +36,47 @@ pub(crate) struct ParsedPPr {
     pub section_properties: Option<crate::docx::model::SectionProperties>,
 }
 
+/// Schema for the `<w:pPr>` element (§17.3.1).
+///
+/// Every child is typed `Vec<T>`, not `Option<T>`, so a producer that repeats
+/// one cannot fail the parse; `split` collapses each with `last`/`last_toggle`.
+/// The policy and the reasoning behind "last wins" are in
+/// `crate::docx::parse::primitives::duplicates`.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct PPrXml {
     #[serde(rename = "pStyle", default)]
-    p_style: Option<ValString>,
+    p_style: Vec<ValString>,
     #[serde(default)]
-    ind: Option<IndXml>,
+    ind: Vec<IndXml>,
     #[serde(default)]
-    spacing: Option<SpacingXml>,
+    spacing: Vec<SpacingXml>,
     #[serde(default)]
-    jc: Option<ValAttr<StJc>>,
+    jc: Vec<ValAttr<StJc>>,
     #[serde(default)]
-    shd: Option<ShdXml>,
+    shd: Vec<ShdXml>,
     #[serde(rename = "outlineLvl", default)]
-    outline_lvl: Option<ValAttr<u8>>,
+    outline_lvl: Vec<ValAttr<u8>>,
     #[serde(rename = "numPr", default)]
-    num_pr: Option<NumPrXml>,
+    num_pr: Vec<NumPrXml>,
     #[serde(default)]
-    tabs: Option<TabsXml>,
+    tabs: Vec<TabsXml>,
     #[serde(rename = "pBdr", default)]
-    p_bdr: Option<ParagraphBordersXml>,
+    p_bdr: Vec<ParagraphBordersXml>,
     #[serde(rename = "rPr", default)]
-    r_pr: Option<RPrXml>,
+    r_pr: Vec<RPrXml>,
     #[serde(rename = "sectPr", default)]
-    sect_pr: Option<SectPrXml>,
+    sect_pr: Vec<SectPrXml>,
     #[serde(rename = "textAlignment", default)]
-    text_alignment: Option<ValAttr<StTextAlignment>>,
+    text_alignment: Vec<ValAttr<StTextAlignment>>,
     #[serde(rename = "cnfStyle", default)]
-    cnf_style: Option<CnfStyleXml>,
+    cnf_style: Vec<CnfStyleXml>,
     #[serde(rename = "framePr", default)]
-    frame_pr: Option<FramePrXml>,
+    frame_pr: Vec<FramePrXml>,
 
-    // OnOff toggles. Typed as `Vec<OnOff>` (not `Option<OnOff>`) so a duplicated
-    // toggle — which LibreOffice/AOO emit, e.g. `<w:keepNext/><w:keepNext/>` —
-    // doesn't trip serde's "duplicate field" error and fail the whole parse.
-    // §17.7.2 last-wins is applied via `last_toggle` in `split`. Same rationale
-    // as `RPrXml`'s run toggles.
+    // OnOff toggles, collapsed by `last_toggle` rather than `last` so the
+    // `OnOff` wrapper comes off at the same time. §17.7.2 is the citation for
+    // these and only these; every other child above is `Vec` under this
+    // parser's own policy, in `primitives::duplicates`.
     #[serde(rename = "keepNext", default)]
     keep_next: Vec<OnOff>,
     #[serde(rename = "keepLines", default)]
@@ -183,12 +188,12 @@ impl From<SpacingXml> for ParagraphSpacing {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct NumPrXml {
     #[serde(default)]
-    ilvl: Option<ValAttr<u8>>,
+    ilvl: Vec<ValAttr<u8>>,
     #[serde(rename = "numId", default)]
-    num_id: Option<ValAttr<i64>>,
+    num_id: Vec<ValAttr<i64>>,
 }
 
 /// `<w:framePr>` — legacy frame positioning. Splits by `@dropCap`:
@@ -284,9 +289,9 @@ use crate::docx::parse::primitives::AttrBool;
 
 impl PPrXml {
     pub(crate) fn split(self) -> ParsedPPr {
-        let style_id = self.p_style.map(|v| StyleId::new(v.val));
+        let style_id = last(self.p_style).map(|v| StyleId::new(v.val));
 
-        let (run_properties, _run_style_id) = match self.r_pr {
+        let (run_properties, _run_style_id) = match last(self.r_pr) {
             Some(r) => {
                 let (rp, sid) = r.split();
                 (Some(rp), sid)
@@ -296,16 +301,18 @@ impl PPrXml {
         // rStyle inside pPr/rPr applies to the paragraph mark only; the
         // legacy parser discards this style id too.
 
-        let section_properties = self.sect_pr.map(Into::into);
+        let section_properties = last(self.sect_pr).map(Into::into);
 
         let properties = ParagraphProperties {
-            alignment: self.jc.map(|j| Alignment::from(j.val)),
-            indentation: self.ind.map(Into::into),
-            spacing: self.spacing.map(Into::into),
-            numbering: self.num_pr.and_then(numbering_ref),
-            tabs: self.tabs.map(<Vec<TabStop>>::from).unwrap_or_default(),
-            borders: self.p_bdr.map(ParagraphBorders::from),
-            shading: self.shd.map(Shading::from),
+            alignment: last(self.jc).map(|j| Alignment::from(j.val)),
+            indentation: last(self.ind).map(Into::into),
+            spacing: last(self.spacing).map(Into::into),
+            numbering: last(self.num_pr).and_then(numbering_ref),
+            tabs: last(self.tabs)
+                .map(<Vec<TabStop>>::from)
+                .unwrap_or_default(),
+            borders: last(self.p_bdr).map(ParagraphBorders::from),
+            shading: last(self.shd).map(Shading::from),
             keep_next: last_toggle(self.keep_next),
             keep_lines: last_toggle(self.keep_lines),
             widow_control: last_toggle(self.widow_control),
@@ -314,12 +321,10 @@ impl PPrXml {
             contextual_spacing: last_toggle(self.contextual_spacing),
             bidi: last_toggle(self.bidi),
             word_wrap: last_toggle(self.word_wrap),
-            outline_level: self
-                .outline_lvl
-                .and_then(|v| OutlineLevel::from_ooxml(v.val)),
-            text_alignment: self.text_alignment.map(|v| TextAlignment::from(v.val)),
-            cnf_style: self.cnf_style.map(CnfStyle::from),
-            frame_properties: self.frame_pr.map(FrameKind::from),
+            outline_level: last(self.outline_lvl).and_then(|v| OutlineLevel::from_ooxml(v.val)),
+            text_alignment: last(self.text_alignment).map(|v| TextAlignment::from(v.val)),
+            cnf_style: last(self.cnf_style).map(CnfStyle::from),
+            frame_properties: last(self.frame_pr).map(FrameKind::from),
             auto_space_de: last_toggle(self.auto_space_de),
             auto_space_dn: last_toggle(self.auto_space_dn),
         };
@@ -334,10 +339,10 @@ impl PPrXml {
 }
 
 fn numbering_ref(x: NumPrXml) -> Option<NumberingReference> {
-    let num_id = x.num_id?;
+    let num_id = last(x.num_id)?;
     Some(NumberingReference {
         num_id: num_id.val,
-        level: x.ilvl.map(|v| v.val).unwrap_or(0),
+        level: last(x.ilvl).map(|v| v.val).unwrap_or(0),
     })
 }
 
@@ -527,5 +532,30 @@ mod tests {
         // When duplicates disagree, the last one wins.
         let r = parse(r#"<pPr><widowControl val="1"/><widowControl val="0"/></pPr>"#);
         assert_eq!(r.properties.widow_control, Some(false));
+    }
+
+    /// A duplicated **non-toggle** child is schema-invalid and Word opens it
+    /// anyway; see `primitives::duplicates` for why the last one wins.
+    #[test]
+    fn duplicate_non_toggle_children_are_tolerated_last_wins() {
+        let r = parse(
+            r#"<pPr>
+                 <jc val="left"/><jc val="center"/>
+                 <ind left="100"/><ind left="720"/>
+               </pPr>"#,
+        );
+        assert_eq!(
+            r.properties.alignment,
+            Some(Alignment::Center),
+            "§17.3.1.13"
+        );
+        assert_eq!(
+            r.properties
+                .indentation
+                .and_then(|i| i.start)
+                .map(|d| d.raw()),
+            Some(720),
+            "§17.3.1.12"
+        );
     }
 }

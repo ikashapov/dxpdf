@@ -5,11 +5,13 @@
 //! (e.g., `Dimension<U>`) but never leak serde into the model layer.
 
 pub mod colors;
+pub(crate) mod duplicates;
 pub(crate) mod integer_measure;
 pub mod st_enums;
 pub mod toggles;
 pub mod units;
 
 pub use colors::{HexColor, RgbHexU32};
+pub(crate) use duplicates::last;
 pub(crate) use toggles::last_toggle;
 pub use toggles::{AttrBool, OnOff};

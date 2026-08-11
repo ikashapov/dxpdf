@@ -6,6 +6,7 @@
 //! accepts both modern (`start`/`end`) and legacy (`left`/`right`) side
 //! names per OOXML bidi handling.
 
+use crate::docx::parse::primitives::last;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, EighthPoints, Points};
@@ -47,94 +48,94 @@ impl From<BorderXml> for Border {
 }
 
 /// `<w:pBdr>` — five sides plus `between`.
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct ParagraphBordersXml {
     #[serde(default)]
-    top: Option<BorderXml>,
+    top: Vec<BorderXml>,
     #[serde(default)]
-    bottom: Option<BorderXml>,
+    bottom: Vec<BorderXml>,
     #[serde(default, alias = "start")]
-    left: Option<BorderXml>,
+    left: Vec<BorderXml>,
     #[serde(default, alias = "end")]
-    right: Option<BorderXml>,
+    right: Vec<BorderXml>,
     #[serde(default)]
-    between: Option<BorderXml>,
+    between: Vec<BorderXml>,
 }
 
 impl From<ParagraphBordersXml> for ParagraphBorders {
     fn from(x: ParagraphBordersXml) -> Self {
         Self {
-            top: x.top.map(Into::into),
-            bottom: x.bottom.map(Into::into),
-            left: x.left.map(Into::into),
-            right: x.right.map(Into::into),
-            between: x.between.map(Into::into),
+            top: last(x.top).map(Into::into),
+            bottom: last(x.bottom).map(Into::into),
+            left: last(x.left).map(Into::into),
+            right: last(x.right).map(Into::into),
+            between: last(x.between).map(Into::into),
         }
     }
 }
 
 /// `<w:tblBorders>` — six sides (adds `insideH`, `insideV`).
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TableBordersXml {
     #[serde(default)]
-    top: Option<BorderXml>,
+    top: Vec<BorderXml>,
     #[serde(default)]
-    bottom: Option<BorderXml>,
+    bottom: Vec<BorderXml>,
     #[serde(default, alias = "start")]
-    left: Option<BorderXml>,
+    left: Vec<BorderXml>,
     #[serde(default, alias = "end")]
-    right: Option<BorderXml>,
+    right: Vec<BorderXml>,
     #[serde(rename = "insideH", default)]
-    inside_h: Option<BorderXml>,
+    inside_h: Vec<BorderXml>,
     #[serde(rename = "insideV", default)]
-    inside_v: Option<BorderXml>,
+    inside_v: Vec<BorderXml>,
 }
 
 impl From<TableBordersXml> for TableBorders {
     fn from(x: TableBordersXml) -> Self {
         Self {
-            top: x.top.map(Into::into),
-            bottom: x.bottom.map(Into::into),
-            left: x.left.map(Into::into),
-            right: x.right.map(Into::into),
-            inside_h: x.inside_h.map(Into::into),
-            inside_v: x.inside_v.map(Into::into),
+            top: last(x.top).map(Into::into),
+            bottom: last(x.bottom).map(Into::into),
+            left: last(x.left).map(Into::into),
+            right: last(x.right).map(Into::into),
+            inside_h: last(x.inside_h).map(Into::into),
+            inside_v: last(x.inside_v).map(Into::into),
         }
     }
 }
 
 /// `<w:tcBorders>` — eight sides (adds diagonal `tl2br`, `tr2bl`).
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TableCellBordersXml {
     #[serde(default)]
-    top: Option<BorderXml>,
+    top: Vec<BorderXml>,
     #[serde(default)]
-    bottom: Option<BorderXml>,
+    bottom: Vec<BorderXml>,
     #[serde(default, alias = "start")]
-    left: Option<BorderXml>,
+    left: Vec<BorderXml>,
     #[serde(default, alias = "end")]
-    right: Option<BorderXml>,
+    right: Vec<BorderXml>,
     #[serde(rename = "insideH", default)]
-    inside_h: Option<BorderXml>,
+    inside_h: Vec<BorderXml>,
     #[serde(rename = "insideV", default)]
-    inside_v: Option<BorderXml>,
+    inside_v: Vec<BorderXml>,
     #[serde(rename = "tl2br", default)]
-    tl2br: Option<BorderXml>,
+    tl2br: Vec<BorderXml>,
     #[serde(rename = "tr2bl", default)]
-    tr2bl: Option<BorderXml>,
+    tr2bl: Vec<BorderXml>,
 }
 
 impl From<TableCellBordersXml> for TableCellBorders {
     fn from(x: TableCellBordersXml) -> Self {
         Self {
-            top: x.top.map(Into::into),
-            bottom: x.bottom.map(Into::into),
-            left: x.left.map(Into::into),
-            right: x.right.map(Into::into),
-            inside_h: x.inside_h.map(Into::into),
-            inside_v: x.inside_v.map(Into::into),
-            tl2br: x.tl2br.map(Into::into),
-            tr2bl: x.tr2bl.map(Into::into),
+            top: last(x.top).map(Into::into),
+            bottom: last(x.bottom).map(Into::into),
+            left: last(x.left).map(Into::into),
+            right: last(x.right).map(Into::into),
+            inside_h: last(x.inside_h).map(Into::into),
+            inside_v: last(x.inside_v).map(Into::into),
+            tl2br: last(x.tl2br).map(Into::into),
+            tr2bl: last(x.tr2bl).map(Into::into),
         }
     }
 }

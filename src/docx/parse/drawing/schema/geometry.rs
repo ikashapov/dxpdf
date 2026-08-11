@@ -7,6 +7,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use crate::docx::parse::primitives::last;
 use serde::{Deserialize, Deserializer};
 
 use crate::docx::dimension::{Dimension, Emu};
@@ -21,17 +22,17 @@ use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dime
 #[derive(Debug, Deserialize, Default)]
 pub struct CustomGeometryXml {
     #[serde(rename = "avLst", default)]
-    pub av_lst: Option<GdListXml>,
+    pub av_lst: Vec<GdListXml>,
     #[serde(rename = "gdLst", default)]
-    pub gd_lst: Option<GdListXml>,
+    pub gd_lst: Vec<GdListXml>,
     #[serde(rename = "ahLst", default)]
-    pub ah_lst: Option<AhListXml>,
+    pub ah_lst: Vec<AhListXml>,
     #[serde(rename = "cxnLst", default)]
-    pub cxn_lst: Option<CxnListXml>,
+    pub cxn_lst: Vec<CxnListXml>,
     #[serde(rename = "rect", default)]
-    pub rect: Option<TextRectXml>,
+    pub rect: Vec<TextRectXml>,
     #[serde(rename = "pathLst", default)]
-    pub path_lst: Option<PathListXml>,
+    pub path_lst: Vec<PathListXml>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -259,19 +260,16 @@ impl From<StPathFillMode> for PathFillMode {
 impl From<CustomGeometryXml> for CustomGeometry {
     fn from(x: CustomGeometryXml) -> Self {
         Self {
-            av_list: x.av_lst.map(guides).unwrap_or_default(),
-            gd_list: x.gd_lst.map(guides).unwrap_or_default(),
-            ah_list: x
-                .ah_lst
+            av_list: last(x.av_lst).map(guides).unwrap_or_default(),
+            gd_list: last(x.gd_lst).map(guides).unwrap_or_default(),
+            ah_list: last(x.ah_lst)
                 .map(|a| a.handles.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
-            cxn_list: x
-                .cxn_lst
+            cxn_list: last(x.cxn_lst)
                 .map(|c| c.sites.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
-            rect: x.rect.map(Into::into),
-            paths: x
-                .path_lst
+            rect: last(x.rect).map(Into::into),
+            paths: last(x.path_lst)
                 .map(|p| p.paths.into_iter().map(Into::into).collect())
                 .unwrap_or_default(),
         }

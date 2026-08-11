@@ -252,10 +252,10 @@ pub(super) fn build_table(
                     // Compute available width for nested content.
                     // §17.4.17: gridBefore offsets the row's first cell to the
                     // right by that many grid columns; subsequent spans accumulate.
-                    let span = cell.properties.grid_span.unwrap_or(1) as usize;
+                    let span = cell.properties.grid_span.cloned().unwrap_or(1) as usize;
                     let mut grid_start = row.properties.grid_before as usize;
                     for ci in 0..col_idx {
-                        grid_start += row.cells[ci].properties.grid_span.unwrap_or(1) as usize;
+                        grid_start += row.cells[ci].properties.grid_span.cloned().unwrap_or(1) as usize;
                     }
                     // A row may address more grid columns than `tblGrid` declares —
                     // a `gridBefore` past the end, or simply more `<w:tc>` than
@@ -270,7 +270,7 @@ pub(super) fn build_table(
                     // padding contribution is the resolved left+right insets.
                     let table_default =
                         default_cell_margins.unwrap_or(crate::model::geometry::EdgeInsets::ZERO);
-                    let resolved_h = match cell.properties.margins {
+                    let resolved_h = match cell.properties.margins.get() {
                         Some(partial) => partial.resolve_against(table_default),
                         None => table_default,
                     };
@@ -484,7 +484,7 @@ fn build_table_cell(
     // collapsing missing sides to 0 produces text that hugs the cell borders
     // instead of carrying the table's intended padding.
     let table_default = style_cell_margins.unwrap_or(crate::model::geometry::EdgeInsets::ZERO);
-    let resolved_margins = match cell.properties.margins {
+    let resolved_margins = match cell.properties.margins.get() {
         Some(partial) => partial.resolve_against(table_default),
         None => table_default,
     };
@@ -499,11 +499,12 @@ fn build_table_cell(
     let shading = cell
         .properties
         .shading
+        .get()
         .map(|s| resolve_color(s.fill, ColorContext::Background))
         .or_else(|| {
             cond.cell_properties
                 .as_ref()
-                .and_then(|tcp| tcp.shading.as_ref())
+                .and_then(|tcp| tcp.shading.get())
                 .map(|s| resolve_color(s.fill, ColorContext::Background))
         });
 
@@ -512,8 +513,8 @@ fn build_table_cell(
     let cond_borders = cond
         .cell_properties
         .as_ref()
-        .and_then(|tcp| tcp.borders.as_ref());
-    let direct_borders = cell.properties.borders.as_ref();
+        .and_then(|tcp| tcp.borders.get());
+    let direct_borders = cell.properties.borders.get();
 
     let cell_borders = match (direct_borders, cond_borders) {
         (Some(db), _) => {
@@ -547,10 +548,10 @@ fn build_table_cell(
     let valign = cell
         .properties
         .vertical_align
-        .or_else(|| {
+        .cloned().or_else(|| {
             cond.cell_properties
                 .as_ref()
-                .and_then(|tcp| tcp.vertical_align)
+                .and_then(|tcp| tcp.vertical_align.cloned())
         })
         .map(|va| match va {
             model::CellVerticalAlign::Bottom => crate::render::layout::table::CellVAlign::Bottom,
@@ -584,10 +585,10 @@ fn build_table_cell(
     TableCellInput {
         blocks: cell_blocks,
         margins: cell_margins,
-        grid_span: cell.properties.grid_span.unwrap_or(1),
+        grid_span: cell.properties.grid_span.cloned().unwrap_or(1),
         shading,
         cell_borders,
-        vertical_merge: cell.properties.vertical_merge.map(|vm| match vm {
+        vertical_merge: cell.properties.vertical_merge.cloned().map(|vm| match vm {
             model::VerticalMerge::Restart => {
                 crate::render::layout::table::VerticalMergeState::Restart
             }
