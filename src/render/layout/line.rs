@@ -225,7 +225,24 @@ pub fn fit_lines_with_first(
             line_text_height = Pt::ZERO;
             line_ascent = Pt::ZERO;
             last_break_point = None;
-            // Don't advance i — re-evaluate this fragment on the new line.
+            // Resume *at the break*, not at the fragment that overflowed.
+            //
+            // `break_at` is usually `i` — no earlier opportunity, so the new
+            // line starts with the fragment that did not fit and this rewinds
+            // nothing. When there *was* an earlier opportunity it can be far
+            // behind, and then everything between it and `i` belongs to the
+            // new line and has to be measured onto it. Resuming at `i` left
+            // that span inside the line's `[start, end)` range — so it painted
+            // — while contributing nothing to the width, after which the line
+            // could not overflow again and swallowed the rest of the
+            // paragraph. That is how a Windows path in a 167.80 pt footer cell
+            // became one 295 pt line running 91 pt past the edge of the page.
+            //
+            // Termination is unchanged: `line_start` still only ever moves
+            // forward, and the next pass has `i == line_start`, where the
+            // `line_start < i` guard sends an over-wide fragment down the
+            // "first on the line, allow it" path instead of breaking again.
+            i = break_at;
             continue;
         }
 
@@ -415,6 +432,61 @@ mod tests {
         assert_eq!(lines[0].end, 1); // "hello " on first line
         assert_eq!(lines[1].start, 1);
         assert_eq!(lines[1].end, 3); // "world " + "end" on second line
+    }
+
+    /// Breaking back to an earlier opportunity must re-measure everything
+    /// between it and the fragment that overflowed.
+    ///
+    /// The fitter accumulates forward, and on overflow it rewinds to the last
+    /// opportunity. That opportunity can be many fragments behind — here the
+    /// space after `"Z:`, with an unbreakable run of clusters after it. The
+    /// rewind moved `line_start` back but left the cursor where the overflow
+    /// was found, so every fragment in between stayed inside the new line's
+    /// range — painted — while contributing nothing to its width. The line
+    /// then never overflowed again and swallowed the rest of the paragraph.
+    ///
+    /// This is issue-shaped rather than theoretical: it is why a Windows path
+    /// in a 167.80 pt footer cell laid out as one 295 pt line, 91 pt past the
+    /// right edge of the page.
+    #[test]
+    fn a_backward_break_re_measures_the_fragments_it_rewinds_over() {
+        // 10 glued clusters of 10pt each behind one opportunity.
+        let mut frags = vec![text_frag("head ", 10.0)];
+        frags.extend((0..10).map(|_| glued_frag("x", 10.0)));
+
+        let lines = fit_lines(&frags, Pt::new(50.0));
+
+        // `head ` alone, then the unbreakable run cut into 50pt lines.
+        assert_eq!(lines[0].start, 0);
+        assert_eq!(
+            lines[0].end, 1,
+            "the opportunity after `head ` is the first break"
+        );
+        for line in &lines[1..] {
+            let measured: f32 = frags[line.start..line.end]
+                .iter()
+                .map(|f| f.width().raw())
+                .sum();
+            assert!(
+                measured <= 50.0,
+                "line [{}..{}) holds {measured}pt of fragments in a 50pt line",
+                line.start,
+                line.end,
+            );
+            assert!(
+                (line.width.raw() - measured).abs() < 0.01,
+                "line [{}..{}) records width {} but its fragments measure {measured}",
+                line.start,
+                line.end,
+                line.width.raw(),
+            );
+        }
+        let covered: usize = lines.iter().map(|l| l.end - l.start).sum();
+        assert_eq!(
+            covered,
+            frags.len(),
+            "every fragment lands on exactly one line"
+        );
     }
 
     /// A token UAX #14 refuses to break inside stays whole even though it is
