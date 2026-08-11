@@ -38,13 +38,14 @@ pub struct ResolvedStyle {
 /// Deliberately excludes `TOC Heading` (the heading *above* a ToC, not an
 /// entry) and `toc` with no level, neither of which is an entry style.
 fn is_toc_entry_name(name: &str) -> bool {
-    // OOXML style names compare case-insensitively.
-    let rest = if name.len() >= 4 && name[..4].eq_ignore_ascii_case("toc ") {
-        &name[4..]
-    } else {
-        return false;
-    };
-    matches!(rest.parse::<u8>(), Ok(1..=9))
+    // OOXML style names compare case-insensitively. Safely check prefix without
+    // panicking when a localized style name contains multi-byte UTF-8 characters.
+    if let Some(prefix) = name.get(..4) {
+        if prefix.eq_ignore_ascii_case("toc ") {
+            return matches!(name[4..].parse::<u8>(), Ok(1..=9));
+        }
+    }
+    false
 }
 
 /// Resolve all styles in the stylesheet by walking `basedOn` chains.
@@ -509,6 +510,11 @@ mod tests {
             "toc 1x",
             "table of contents",
             "TOCustom", // the false positive the old styleId prefix test hit
+            // Multi-byte non-ASCII UTF-8 style names (including cases where byte index 4 is not a char boundary):
+            "Éléments de style",
+            "Заголовок 1",
+            "引用",
+            "Título 1",
             "",
         ] {
             assert!(
