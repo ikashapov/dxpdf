@@ -3,6 +3,7 @@
 //! Parses `word/fontTable.xml` to discover embedded font references,
 //! then de-obfuscates `.odttf` files per §17.8.3.3.
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::error::{ParseError, Result};
@@ -81,7 +82,7 @@ fn parse_font_table(data: &[u8]) -> Result<Vec<FontEmbedRef>> {
             (EmbeddedFontVariant::Italic, font.embed_italic),
             (EmbeddedFontVariant::BoldItalic, font.embed_bold_italic),
         ] {
-            if let Some(e) = embed {
+            if let Some(e) = Dup::from(embed).into_value() {
                 refs.push(FontEmbedRef {
                     family: font.name.clone(),
                     variant,
@@ -105,13 +106,13 @@ struct FontEntryXml {
     #[serde(rename = "@name")]
     name: String,
     #[serde(rename = "embedRegular", default)]
-    embed_regular: Option<EmbedXml>,
+    embed_regular: Vec<EmbedXml>,
     #[serde(rename = "embedBold", default)]
-    embed_bold: Option<EmbedXml>,
+    embed_bold: Vec<EmbedXml>,
     #[serde(rename = "embedItalic", default)]
-    embed_italic: Option<EmbedXml>,
+    embed_italic: Vec<EmbedXml>,
     #[serde(rename = "embedBoldItalic", default)]
-    embed_bold_italic: Option<EmbedXml>,
+    embed_bold_italic: Vec<EmbedXml>,
 }
 
 #[derive(Deserialize)]

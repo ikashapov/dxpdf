@@ -2,6 +2,7 @@
 
 use crate::model::dimension::{Dimension, ThousandthPercent, Twips};
 use crate::model::geometry::{EdgeInsets, PartialEdgeInsets};
+use crate::model::Dup;
 
 use super::content::Block;
 use super::formatting::{
@@ -161,22 +162,24 @@ pub struct TableCell {
 /// Table cell properties — only fields explicitly present in the XML are `Some`.
 #[derive(Clone, Debug, Default)]
 pub struct TableCellProperties {
-    pub width: Option<TableMeasure>,
-    pub borders: Option<TableCellBorders>,
-    pub shading: Option<Shading>,
+    pub width: Dup<TableMeasure>,
+    pub borders: Dup<TableCellBorders>,
+    pub shading: Dup<Shading>,
     /// §17.4.42 `<w:tcMar>` — per-cell margin override. Each side is `Some`
     /// only when explicitly present in the XML; missing sides inherit from
     /// the table-level `<w:tblCellMar>` via `PartialEdgeInsets::resolve_against`.
-    pub margins: Option<PartialEdgeInsets<Twips>>,
-    pub vertical_align: Option<CellVerticalAlign>,
-    /// Vertical merge (w:vMerge): None = not present, Some(Restart) or Some(Continue).
-    pub vertical_merge: Option<VerticalMerge>,
-    /// Horizontal span (w:gridSpan): None = not present, Some(n) = spans n columns.
-    pub grid_span: Option<u32>,
-    pub text_direction: Option<TextDirection>,
+    pub margins: Dup<PartialEdgeInsets<Twips>>,
+    pub vertical_align: Dup<CellVerticalAlign>,
+    /// Vertical merge (w:vMerge): absent = not present, else Restart or Continue.
+    pub vertical_merge: Dup<VerticalMerge>,
+    /// Horizontal span (w:gridSpan): absent = not present, else spans n columns.
+    pub grid_span: Dup<u32>,
+    pub text_direction: Dup<TextDirection>,
+    /// §17.7.2 toggle — collapsed at the seam by `last_toggle`, because for a
+    /// toggle last-wins is the spec's own rule rather than this parser's choice.
     pub no_wrap: Option<bool>,
     /// §17.3.1.8: table conditional formatting applied to this cell.
-    pub cnf_style: Option<CnfStyle>,
+    pub cnf_style: Dup<CnfStyle>,
 }
 
 /// Vertical merge state from `w:vMerge` attribute.

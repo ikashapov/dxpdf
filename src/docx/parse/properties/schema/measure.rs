@@ -45,27 +45,15 @@ impl From<TableMeasureXml> for TableMeasure {
     }
 }
 
-pub(crate) fn deserialize_optional_nonnegative_table_measure<'de, D>(
-    deserializer: D,
-) -> Result<Option<TableMeasureXml>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let measure = Option::<TableMeasureXml>::deserialize(deserializer)?;
-    if measure
-        .as_ref()
-        .and_then(|value| value.w.as_ref())
-        .is_some_and(IntegerMeasure::is_negative)
-    {
-        return Err(serde::de::Error::custom(
-            "negative value is not valid for this OOXML table measurement",
-        ));
-    }
-    Ok(measure)
-}
-
-/// Deserializes a list of `TableMeasureXml` elements while verifying that no explicit
-/// measurement value is negative.
+/// Deserialize a possibly-repeated table measurement, rejecting a negative
+/// value on the occurrence that survives.
+///
+/// Validation runs **after** last-wins collapsing, not across the whole list.
+/// The two rules have to agree: if a discarded occurrence could fail the
+/// document, then `<w:tcW w="-100"/><w:tcW w="500"/>` would be fatal even
+/// though the effective width is a perfectly legal 500 — the parser would be
+/// ignoring an element for its value while honouring it for its validity.
+/// See `crate::docx::parse::primitives::duplicates` for the collapsing policy.
 pub(crate) fn deserialize_vec_nonnegative_table_measure<'de, D>(
     deserializer: D,
 ) -> Result<Vec<TableMeasureXml>, D::Error>
@@ -73,12 +61,14 @@ where
     D: serde::Deserializer<'de>,
 {
     let measures = Vec::<TableMeasureXml>::deserialize(deserializer)?;
-    for value in &measures {
-        if value.w.as_ref().is_some_and(IntegerMeasure::is_negative) {
-            return Err(serde::de::Error::custom(
-                "negative value is not valid for this OOXML table measurement",
-            ));
-        }
+    if measures
+        .last()
+        .and_then(|value| value.w.as_ref())
+        .is_some_and(IntegerMeasure::is_negative)
+    {
+        return Err(serde::de::Error::custom(
+            "negative value is not valid for this OOXML table measurement",
+        ));
     }
     Ok(measures)
 }
@@ -92,9 +82,9 @@ mod tests {
         #[serde(
             rename = "tblW",
             default,
-            deserialize_with = "deserialize_optional_nonnegative_table_measure"
+            deserialize_with = "deserialize_vec_nonnegative_table_measure"
         )]
-        value: Option<TableMeasureXml>,
+        value: Vec<TableMeasureXml>,
     }
 
     fn parse(xml: &str) -> TableMeasure {
@@ -155,7 +145,9 @@ mod tests {
             if let Ok(value) = result {
                 panic!(
                     "{raw:?} must be rejected, got {:?}",
-                    value.value.map(TableMeasure::from)
+                    crate::model::Dup::from(value.value)
+                        .into_value()
+                        .map(TableMeasure::from)
                 );
             }
         }

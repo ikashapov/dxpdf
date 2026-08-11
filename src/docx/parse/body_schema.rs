@@ -79,7 +79,7 @@ pub(crate) struct IgnoredXml {}
 #[derive(Deserialize, Default)]
 pub(crate) struct SdtBlockXml {
     #[serde(rename = "sdtContent", default)]
-    pub content: Option<SdtBlockContentXml>,
+    pub content: Vec<SdtBlockContentXml>,
 }
 
 #[derive(Deserialize, Default)]
@@ -104,7 +104,7 @@ pub(crate) struct ParaXml {
     pub rsid_del: Option<String>,
 
     #[serde(rename = "pPr", default)]
-    pub p_pr: Option<PPrXml>,
+    pub p_pr: Vec<PPrXml>,
     #[serde(rename = "$value", default)]
     pub content: Vec<ParaChildXml>,
 }
@@ -181,7 +181,7 @@ pub(crate) struct RunXml {
     pub rsid_del: Option<String>,
 
     #[serde(rename = "rPr", default)]
-    pub r_pr: Option<RPrXml>,
+    pub r_pr: Vec<RPrXml>,
     #[serde(rename = "$value", default)]
     pub content: Vec<RunChildXml>,
 }
@@ -349,9 +349,9 @@ pub(crate) struct BookmarkEndXml {
 #[derive(Deserialize)]
 pub(crate) struct DrawingXml {
     #[serde(rename = "inline", default)]
-    pub inline: Option<crate::docx::parse::drawing::schema::anchor::InlineXml>,
+    pub inline: Vec<crate::docx::parse::drawing::schema::anchor::InlineXml>,
     #[serde(rename = "anchor", default)]
-    pub anchor: Option<crate::docx::parse::drawing::schema::anchor::AnchorXml>,
+    pub anchor: Vec<crate::docx::parse::drawing::schema::anchor::AnchorXml>,
 }
 
 // ── hyperlink ──────────────────────────────────────────────────────────────
@@ -383,7 +383,7 @@ pub(crate) struct AltContentXml {
     #[serde(rename = "Choice", default)]
     pub choices: Vec<ChoiceXml>,
     #[serde(rename = "Fallback", default)]
-    pub fallback: Option<FallbackXml>,
+    pub fallback: Vec<FallbackXml>,
 }
 
 #[derive(Deserialize)]
@@ -415,9 +415,9 @@ pub(crate) enum McContentXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct TableXml {
     #[serde(rename = "tblPr", default)]
-    pub tbl_pr: Option<TblPrXml>,
+    pub tbl_pr: Vec<TblPrXml>,
     #[serde(rename = "tblGrid", default)]
-    pub tbl_grid: Option<TblGridXml>,
+    pub tbl_grid: Vec<TblGridXml>,
     /// All direct children of `<w:tbl>` in document order. `<w:tblPr>` and
     /// `<w:tblGrid>` are also captured here (serde's `$value` collects every
     /// child) and must be ignored when extracting rows; the dedicated
@@ -492,7 +492,7 @@ pub(crate) enum TableChildXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct SdtRowXml {
     #[serde(rename = "sdtContent", default)]
-    pub content: Option<SdtRowContentXml>,
+    pub content: Vec<SdtRowContentXml>,
 }
 
 #[derive(Deserialize, Default)]
@@ -521,7 +521,7 @@ pub(crate) struct RowTrackChangeXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct CustomXmlRowXml {
     #[serde(rename = "customXmlPr", default)]
-    pub custom_xml_pr: Option<IgnoredXml>,
+    pub custom_xml_pr: Vec<IgnoredXml>,
     #[serde(rename = "$value", default)]
     pub children: Vec<TableChildXml>,
 }
@@ -558,9 +558,9 @@ pub(crate) struct TableRowXml {
     /// `<w:trPr>` inside `<w:tr>`. Also absorbed by `$value` below (via
     /// `RowChildXml::TblPrEx`); this dedicated field is canonical.
     #[serde(rename = "tblPrEx", default)]
-    pub tbl_pr_ex: Option<TblPrExXml>,
+    pub tbl_pr_ex: Vec<TblPrExXml>,
     #[serde(rename = "trPr", default)]
-    pub tr_pr: Option<TrPrXml>,
+    pub tr_pr: Vec<TrPrXml>,
     /// All direct children of `<w:tr>` in document order. `<w:tc>` cells may
     /// be interleaved with `<w:sdt>` / `<w:customXml>` wrappers (each of
     /// which nests further cells), so — like `<w:tbl>` — the row cannot use a
@@ -625,7 +625,7 @@ pub(crate) enum RowChildXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct SdtCellXml {
     #[serde(rename = "sdtContent", default)]
-    pub content: Option<SdtCellContentXml>,
+    pub content: Vec<SdtCellContentXml>,
 }
 
 #[derive(Deserialize, Default)]
@@ -640,7 +640,7 @@ pub(crate) struct SdtCellContentXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct CustomXmlCellXml {
     #[serde(rename = "customXmlPr", default)]
-    pub custom_xml_pr: Option<IgnoredXml>,
+    pub custom_xml_pr: Vec<IgnoredXml>,
     #[serde(rename = "$value", default)]
     pub children: Vec<RowChildXml>,
 }
@@ -648,7 +648,7 @@ pub(crate) struct CustomXmlCellXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct TableCellXml {
     #[serde(rename = "tcPr", default)]
-    pub tc_pr: Option<TcPrXml>,
+    pub tc_pr: Vec<TcPrXml>,
     #[serde(rename = "$value", default)]
     pub content: Vec<BlockChildXml>,
 }

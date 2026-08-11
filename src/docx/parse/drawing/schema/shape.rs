@@ -11,6 +11,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use crate::model::Dup;
 use serde::{Deserialize, Deserializer};
 
 use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg, ThousandthPercent};
@@ -37,52 +38,54 @@ pub struct SpPrXml {
     #[serde(rename = "@bwMode", default)]
     pub bw_mode: Option<StBlackWhiteMode>,
     #[serde(rename = "xfrm", default)]
-    pub xfrm: Option<XfrmXml>,
+    pub xfrm: Vec<XfrmXml>,
     #[serde(rename = "prstGeom", default)]
-    pub prst_geom: Option<PrstGeomXml>,
+    pub prst_geom: Vec<PrstGeomXml>,
     #[serde(rename = "custGeom", default)]
-    pub cust_geom: Option<CustomGeometryXml>,
+    pub cust_geom: Vec<CustomGeometryXml>,
     // Six fill variants — flatten by routing through DrawingFillXml.
     #[serde(rename = "noFill", default)]
-    pub no_fill: Option<super::fill::Empty>,
+    pub no_fill: Vec<super::fill::Empty>,
     #[serde(rename = "solidFill", default)]
-    pub solid_fill: Option<super::fill::SolidFillXml>,
+    pub solid_fill: Vec<super::fill::SolidFillXml>,
     #[serde(rename = "gradFill", default)]
-    pub grad_fill: Option<super::fill::GradFillXml>,
+    pub grad_fill: Vec<super::fill::GradFillXml>,
     #[serde(rename = "blipFill", default)]
-    pub blip_fill: Option<super::fill::BlipFillXml>,
+    pub blip_fill: Vec<super::fill::BlipFillXml>,
     #[serde(rename = "pattFill", default)]
-    pub patt_fill: Option<super::fill::PattFillXml>,
+    pub patt_fill: Vec<super::fill::PattFillXml>,
     #[serde(rename = "grpFill", default)]
-    pub grp_fill: Option<super::fill::Empty>,
+    pub grp_fill: Vec<super::fill::Empty>,
     #[serde(rename = "ln", default)]
-    pub ln: Option<OutlineXml>,
+    pub ln: Vec<OutlineXml>,
     #[serde(rename = "effectLst", default)]
-    pub effect_lst: Option<EffectListXml>,
+    pub effect_lst: Vec<EffectListXml>,
 }
 
 impl From<SpPrXml> for ShapeProperties {
     fn from(x: SpPrXml) -> Self {
-        let geometry = if let Some(p) = x.prst_geom {
+        let geometry = if let Some(p) = Dup::from(x.prst_geom).into_value() {
             Some(ShapeGeometry::Preset(p.into()))
         } else {
-            x.cust_geom.map(|c| ShapeGeometry::Custom(c.into()))
+            Dup::from(x.cust_geom)
+                .into_value()
+                .map(|c| ShapeGeometry::Custom(c.into()))
         };
         let fill = pick_fill(
-            x.no_fill,
-            x.grp_fill,
-            x.solid_fill,
-            x.grad_fill,
-            x.blip_fill,
-            x.patt_fill,
+            Dup::from(x.no_fill).into_value(),
+            Dup::from(x.grp_fill).into_value(),
+            Dup::from(x.solid_fill).into_value(),
+            Dup::from(x.grad_fill).into_value(),
+            Dup::from(x.blip_fill).into_value(),
+            Dup::from(x.patt_fill).into_value(),
         );
         Self {
             bw_mode: x.bw_mode.map(Into::into),
-            transform: x.xfrm.map(Into::into),
+            transform: Dup::from(x.xfrm).into_value().map(Into::into),
             geometry,
             fill,
-            outline: x.ln.map(Into::into),
-            effect_list: x.effect_lst.map(Into::into),
+            outline: Dup::from(x.ln).into_value().map(Into::into),
+            effect_list: Dup::from(x.effect_lst).into_value().map(Into::into),
         }
     }
 }
@@ -122,9 +125,9 @@ pub struct XfrmXml {
     #[serde(rename = "@flipV", default)]
     pub flip_v: Option<AttrBool>,
     #[serde(rename = "off", default)]
-    pub off: Option<OffXml>,
+    pub off: Vec<OffXml>,
     #[serde(rename = "ext", default)]
-    pub ext: Option<ExtXml>,
+    pub ext: Vec<ExtXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,8 +153,8 @@ impl From<XfrmXml> for Transform2D {
             rotation: x.rot,
             flip_h: x.flip_h.map(|b| b.0),
             flip_v: x.flip_v.map(|b| b.0),
-            offset: x.off.map(|o| Offset::new(o.x, o.y)),
-            extent: x.ext.map(|e| Size::new(e.cx, e.cy)),
+            offset: Dup::from(x.off).into_value().map(|o| Offset::new(o.x, o.y)),
+            extent: Dup::from(x.ext).into_value().map(|e| Size::new(e.cx, e.cy)),
         }
     }
 }
@@ -163,15 +166,15 @@ pub struct PrstGeomXml {
     #[serde(rename = "@prst")]
     pub prst: PresetShapeTypeXml,
     #[serde(rename = "avLst", default)]
-    pub av_lst: Option<super::geometry::GdListXml>,
+    pub av_lst: Vec<super::geometry::GdListXml>,
 }
 
 impl From<PrstGeomXml> for PresetGeometryDef {
     fn from(x: PrstGeomXml) -> Self {
         Self {
             preset: x.prst.0,
-            adjust_values: x
-                .av_lst
+            adjust_values: Dup::from(x.av_lst)
+                .into_value()
                 .map(|l| {
                     l.guides
                         .into_iter()
@@ -418,11 +421,11 @@ pub struct BodyPrXml {
     pub vert_overflow: Option<StTextVertOverflowType>,
     // Auto-fit choice — at most one present.
     #[serde(rename = "noAutofit", default)]
-    pub no_autofit: Option<super::fill::Empty>,
+    pub no_autofit: Vec<super::fill::Empty>,
     #[serde(rename = "normAutofit", default)]
-    pub norm_autofit: Option<NormAutofitXml>,
+    pub norm_autofit: Vec<NormAutofitXml>,
     #[serde(rename = "spAutoFit", default)]
-    pub sp_autofit: Option<super::fill::Empty>,
+    pub sp_autofit: Vec<super::fill::Empty>,
 }
 
 /// §20.1.2.1.18 CT_TextNormalAutofit. Both attributes are `ST_TextFontScalePercentOrPercentString`
@@ -438,15 +441,17 @@ pub struct NormAutofitXml {
 
 impl From<BodyPrXml> for BodyProperties {
     fn from(x: BodyPrXml) -> Self {
-        let auto_fit = if x.no_autofit.is_some() {
+        let auto_fit = if Dup::from(x.no_autofit).into_value().is_some() {
             Some(TextAutoFit::NoAutoFit)
-        } else if let Some(na) = x.norm_autofit {
+        } else if let Some(na) = Dup::from(x.norm_autofit).into_value() {
             Some(TextAutoFit::NormalAutoFit(NormalAutoFit {
                 font_scale: na.font_scale,
                 line_spacing_reduction: na.ln_spc_reduction,
             }))
         } else {
-            x.sp_autofit.map(|_| TextAutoFit::SpAutoFit)
+            Dup::from(x.sp_autofit)
+                .into_value()
+                .map(|_| TextAutoFit::SpAutoFit)
         };
         Self {
             rotation: x.rot,
@@ -468,19 +473,19 @@ impl From<BodyPrXml> for BodyProperties {
 #[derive(Deserialize)]
 pub(crate) struct WspXml {
     #[serde(rename = "cNvPr", default)]
-    pub(crate) cnv_pr: Option<CNvPrXml>,
+    pub(crate) cnv_pr: Vec<CNvPrXml>,
     #[serde(rename = "cNvSpPr", default)]
-    pub(crate) cnv_sp_pr: Option<super::fill::Empty>,
+    pub(crate) cnv_sp_pr: Vec<super::fill::Empty>,
     #[serde(rename = "cNvCnPr", default)]
-    pub(crate) cnv_cn_pr: Option<super::fill::Empty>,
+    pub(crate) cnv_cn_pr: Vec<super::fill::Empty>,
     #[serde(rename = "spPr", default)]
-    pub(crate) sp_pr: Option<SpPrXml>,
+    pub(crate) sp_pr: Vec<SpPrXml>,
     #[serde(rename = "style", default)]
-    pub(crate) style: Option<ShapeStyleXml>,
+    pub(crate) style: Vec<ShapeStyleXml>,
     #[serde(rename = "bodyPr", default)]
-    pub(crate) body_pr: Option<BodyPrXml>,
+    pub(crate) body_pr: Vec<BodyPrXml>,
     #[serde(rename = "txbx", default)]
-    pub(crate) txbx: Option<TxbxXml>,
+    pub(crate) txbx: Vec<TxbxXml>,
 }
 
 // ── wps:style (§20.1.4.1.4 CT_ShapeStyle) ─────────────────────────────────
@@ -493,15 +498,15 @@ pub(crate) struct WspXml {
 #[derive(Deserialize, Default)]
 pub(crate) struct ShapeStyleXml {
     #[serde(rename = "lnRef", default)]
-    pub(crate) ln_ref: Option<StyleMatrixRefXml>,
+    pub(crate) ln_ref: Vec<StyleMatrixRefXml>,
     #[serde(rename = "fillRef", default)]
-    pub(crate) fill_ref: Option<StyleMatrixRefXml>,
+    pub(crate) fill_ref: Vec<StyleMatrixRefXml>,
     #[serde(rename = "effectRef", default)]
-    pub(crate) effect_ref: Option<StyleMatrixRefXml>,
+    pub(crate) effect_ref: Vec<StyleMatrixRefXml>,
     /// §20.1.4.1.17 a:fontRef — `@idx` is `ST_FontCollectionIndex` (a string
     /// enum, unlike the numeric matrix refs above), plus an optional color.
     #[serde(rename = "fontRef", default)]
-    pub(crate) font_ref: Option<FontRefXml>,
+    pub(crate) font_ref: Vec<FontRefXml>,
 }
 
 /// §20.1.4.1.17 CT_FontReference.
@@ -564,7 +569,7 @@ impl From<StyleMatrixRefXml> for StyleMatrixRef {
 #[derive(Deserialize, Default)]
 pub(crate) struct TxbxXml {
     #[serde(rename = "txbxContent", default)]
-    pub(crate) content: Option<TxbxContentXml>,
+    pub(crate) content: Vec<TxbxContentXml>,
 }
 
 #[derive(Deserialize, Default)]
@@ -580,31 +585,32 @@ impl WspXml {
         self,
         ctx: &mut crate::docx::parse::body::ConvertCtx,
     ) -> WordProcessingShape {
-        let txbx_content: Vec<Block> = self
-            .txbx
-            .and_then(|t| t.content)
+        let txbx_content: Vec<Block> = Dup::from(self.txbx)
+            .into_value()
+            .and_then(|t| Dup::from(t.content).into_value())
             .map(|c| {
                 let (blocks, _) = crate::docx::parse::body::convert_container(c.children, ctx);
                 blocks
             })
             .unwrap_or_default();
-        let (style_line_ref, style_fill_ref, style_effect_ref, style_font_ref) = match self.style {
-            Some(s) => (
-                s.ln_ref.map(Into::into),
-                s.fill_ref.map(Into::into),
-                s.effect_ref.map(Into::into),
-                s.font_ref.map(Into::into),
-            ),
-            None => (None, None, None, None),
-        };
+        let (style_line_ref, style_fill_ref, style_effect_ref, style_font_ref) =
+            match Dup::from(self.style).into_value() {
+                Some(s) => (
+                    Dup::from(s.ln_ref).into_value().map(Into::into),
+                    Dup::from(s.fill_ref).into_value().map(Into::into),
+                    Dup::from(s.effect_ref).into_value().map(Into::into),
+                    Dup::from(s.font_ref).into_value().map(Into::into),
+                ),
+                None => (None, None, None, None),
+            };
         WordProcessingShape {
-            cnv_pr: self.cnv_pr.map(Into::into),
-            shape_properties: self.sp_pr.map(Into::into),
+            cnv_pr: Dup::from(self.cnv_pr).into_value().map(Into::into),
+            shape_properties: Dup::from(self.sp_pr).into_value().map(Into::into),
             style_line_ref,
             style_effect_ref,
             style_fill_ref,
             style_font_ref,
-            body_pr: self.body_pr.map(Into::into),
+            body_pr: Dup::from(self.body_pr).into_value().map(Into::into),
             txbx_content,
         }
     }

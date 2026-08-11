@@ -4,6 +4,8 @@
 //! and the complete DOCX document model. No parsing logic, no external dependencies.
 
 pub mod dimension;
+pub mod dup;
 pub mod geometry;
 pub mod types;
+pub use dup::Dup;
 pub use types::*;

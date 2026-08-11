@@ -8,6 +8,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Emu};
@@ -90,7 +91,7 @@ impl From<DocPrXml> for DocProperties {
 #[derive(Debug, Deserialize)]
 pub struct CNvGraphicFramePrXml {
     #[serde(rename = "graphicFrameLocks", default)]
-    pub locks: Option<GraphicFrameLocksXml>,
+    pub locks: Vec<GraphicFrameLocksXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,7 +112,8 @@ pub struct GraphicFrameLocksXml {
 
 impl From<CNvGraphicFramePrXml> for GraphicFrameLocks {
     fn from(x: CNvGraphicFramePrXml) -> Self {
-        x.locks
+        Dup::from(x.locks)
+            .into_value()
             .map(|l| Self {
                 no_change_aspect: l.no_change_aspect.map(|b| b.0),
                 no_drilldown: l.no_drilldown.map(|b| b.0),
@@ -135,15 +137,15 @@ impl From<CNvGraphicFramePrXml> for GraphicFrameLocks {
 #[derive(Deserialize)]
 pub(crate) struct GraphicXml {
     #[serde(rename = "graphicData", default)]
-    pub(crate) data: Option<GraphicDataXml>,
+    pub(crate) data: Vec<GraphicDataXml>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct GraphicDataXml {
     #[serde(rename = "pic", default)]
-    pub(crate) pic: Option<PictureXml>,
+    pub(crate) pic: Vec<PictureXml>,
     #[serde(rename = "wsp", default)]
-    pub(crate) wsp: Option<WspXml>,
+    pub(crate) wsp: Vec<WspXml>,
 }
 
 impl GraphicXml {
@@ -151,11 +153,12 @@ impl GraphicXml {
         self,
         ctx: &mut crate::docx::parse::body::ConvertCtx,
     ) -> Option<GraphicContent> {
-        let data = self.data?;
-        if let Some(pic) = data.pic {
+        let data = Dup::from(self.data).into_value()?;
+        if let Some(pic) = Dup::from(data.pic).into_value() {
             Some(GraphicContent::Picture(pic.into()))
         } else {
-            data.wsp
+            Dup::from(data.wsp)
+                .into_value()
                 .map(|w| GraphicContent::WordProcessingShape(w.into_model(ctx)))
         }
     }
@@ -194,13 +197,13 @@ pub(crate) struct InlineXml {
     #[serde(rename = "extent")]
     pub extent: ExtentXml,
     #[serde(rename = "effectExtent", default)]
-    pub effect_extent: Option<EffectExtentXml>,
+    pub effect_extent: Vec<EffectExtentXml>,
     #[serde(rename = "docPr")]
     pub doc_pr: DocPrXml,
     #[serde(rename = "cNvGraphicFramePr", default)]
-    pub cnv_gfp: Option<CNvGraphicFramePrXml>,
+    pub cnv_gfp: Vec<CNvGraphicFramePrXml>,
     #[serde(rename = "graphic", default)]
-    pub graphic: Option<GraphicXml>,
+    pub graphic: Vec<GraphicXml>,
 }
 
 impl InlineXml {
@@ -213,10 +216,12 @@ impl InlineXml {
         );
         Image {
             extent: Size::new(self.extent.cx, self.extent.cy),
-            effect_extent: self.effect_extent.map(Into::into),
+            effect_extent: Dup::from(self.effect_extent).into_value().map(Into::into),
             doc_properties: self.doc_pr.into(),
-            graphic_frame_locks: self.cnv_gfp.map(Into::into),
-            graphic: self.graphic.and_then(|g| g.into_content(ctx)),
+            graphic_frame_locks: Dup::from(self.cnv_gfp).into_value().map(Into::into),
+            graphic: Dup::from(self.graphic)
+                .into_value()
+                .and_then(|g| g.into_content(ctx)),
             placement: ImagePlacement::Inline { distance },
         }
     }
@@ -271,34 +276,34 @@ pub(crate) struct AnchorXml {
     pub hidden: Option<AttrBool>,
 
     #[serde(rename = "simplePos", default)]
-    pub simple_pos: Option<SimplePosXml>,
+    pub simple_pos: Vec<SimplePosXml>,
     #[serde(rename = "positionH", default)]
-    pub pos_h: Option<PositionXml>,
+    pub pos_h: Vec<PositionXml>,
     #[serde(rename = "positionV", default)]
-    pub pos_v: Option<PositionXml>,
+    pub pos_v: Vec<PositionXml>,
 
     // Wrap variants — at most one present.
     #[serde(rename = "wrapNone", default)]
-    pub wrap_none: Option<super::fill::Empty>,
+    pub wrap_none: Vec<super::fill::Empty>,
     #[serde(rename = "wrapSquare", default)]
-    pub wrap_square: Option<WrapSquareXml>,
+    pub wrap_square: Vec<WrapSquareXml>,
     #[serde(rename = "wrapTight", default)]
-    pub wrap_tight: Option<WrapTightThroughXml>,
+    pub wrap_tight: Vec<WrapTightThroughXml>,
     #[serde(rename = "wrapThrough", default)]
-    pub wrap_through: Option<WrapTightThroughXml>,
+    pub wrap_through: Vec<WrapTightThroughXml>,
     #[serde(rename = "wrapTopAndBottom", default)]
-    pub wrap_top_and_bottom: Option<WrapTopAndBottomXml>,
+    pub wrap_top_and_bottom: Vec<WrapTopAndBottomXml>,
 
     #[serde(rename = "extent")]
     pub extent: ExtentXml,
     #[serde(rename = "effectExtent", default)]
-    pub effect_extent: Option<EffectExtentXml>,
+    pub effect_extent: Vec<EffectExtentXml>,
     #[serde(rename = "docPr")]
     pub doc_pr: DocPrXml,
     #[serde(rename = "cNvGraphicFramePr", default)]
-    pub cnv_gfp: Option<CNvGraphicFramePrXml>,
+    pub cnv_gfp: Vec<CNvGraphicFramePrXml>,
     #[serde(rename = "graphic", default)]
-    pub graphic: Option<GraphicXml>,
+    pub graphic: Vec<GraphicXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,9 +321,9 @@ pub struct PositionXml {
     #[serde(rename = "@relativeFrom")]
     pub relative_from: StRelFrom,
     #[serde(rename = "posOffset", default)]
-    pub pos_offset: Option<PosOffsetXml>,
+    pub pos_offset: Vec<PosOffsetXml>,
     #[serde(rename = "align", default)]
-    pub align: Option<AlignXml>,
+    pub align: Vec<AlignXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,7 +449,7 @@ pub struct WrapTightThroughXml {
     )]
     pub dist_r: Option<Dimension<Emu>>,
     #[serde(rename = "wrapPolygon", default)]
-    pub polygon: Option<WrapPolygonXml>,
+    pub polygon: Vec<WrapPolygonXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,7 +473,7 @@ pub struct WrapPolygonXml {
     #[serde(rename = "@edited", default)]
     pub edited: Option<AttrBool>,
     #[serde(rename = "start", default)]
-    pub start: Option<Point2DXml>,
+    pub start: Vec<Point2DXml>,
     #[serde(rename = "lineTo", default)]
     pub line_to: Vec<Point2DXml>,
 }
@@ -509,23 +514,27 @@ impl AnchorXml {
             self.dist_b.unwrap_or_default(),
             self.dist_l.unwrap_or_default(),
         );
-        let simple_pos = self.simple_pos.map(|s| Offset::new(s.x, s.y));
+        let simple_pos = Dup::from(self.simple_pos)
+            .into_value()
+            .map(|s| Offset::new(s.x, s.y));
         let use_simple_pos = self.simple_pos_attr.map(|b| b.0);
-        let horizontal_position = position(self.pos_h);
-        let vertical_position = position(self.pos_v);
+        let horizontal_position = position(Dup::from(self.pos_h).into_value());
+        let vertical_position = position(Dup::from(self.pos_v).into_value());
         let wrap = pick_wrap(
-            self.wrap_none,
-            self.wrap_square,
-            self.wrap_tight,
-            self.wrap_through,
-            self.wrap_top_and_bottom,
+            Dup::from(self.wrap_none).into_value(),
+            Dup::from(self.wrap_square).into_value(),
+            Dup::from(self.wrap_tight).into_value(),
+            Dup::from(self.wrap_through).into_value(),
+            Dup::from(self.wrap_top_and_bottom).into_value(),
         );
         Image {
             extent: Size::new(self.extent.cx, self.extent.cy),
-            effect_extent: self.effect_extent.map(Into::into),
+            effect_extent: Dup::from(self.effect_extent).into_value().map(Into::into),
             doc_properties: self.doc_pr.into(),
-            graphic_frame_locks: self.cnv_gfp.map(Into::into),
-            graphic: self.graphic.and_then(|g| g.into_content(ctx)),
+            graphic_frame_locks: Dup::from(self.cnv_gfp).into_value().map(Into::into),
+            graphic: Dup::from(self.graphic)
+                .into_value()
+                .and_then(|g| g.into_content(ctx)),
             placement: ImagePlacement::Anchor(AnchorProperties {
                 distance,
                 simple_pos,
@@ -555,13 +564,13 @@ fn position(p: Option<PositionXml>) -> AnchorPosition {
         };
     };
     let rel = p.relative_from.into();
-    if let Some(a) = p.align {
+    if let Some(a) = Dup::from(p.align).into_value() {
         return AnchorPosition::Align {
             relative_from: rel,
             alignment: a.value.into(),
         };
     }
-    if let Some(o) = p.pos_offset {
+    if let Some(o) = Dup::from(p.pos_offset).into_value() {
         let offset = o.value.trim().parse::<i64>().unwrap_or_else(|_| {
             log::warn!("posOffset: invalid EMU offset {:?}; using 0", o.value);
             0
@@ -607,7 +616,7 @@ fn pick_wrap(
                 t.dist_l.unwrap_or_default(),
             ),
             wrap_text: t.wrap_text.into(),
-            polygon: t.polygon.and_then(polygon),
+            polygon: Dup::from(t.polygon).into_value().and_then(polygon),
         };
     }
     if let Some(th) = through {
@@ -619,7 +628,7 @@ fn pick_wrap(
                 th.dist_l.unwrap_or_default(),
             ),
             wrap_text: th.wrap_text.into(),
-            polygon: th.polygon.and_then(polygon),
+            polygon: Dup::from(th.polygon).into_value().and_then(polygon),
         };
     }
     if let Some(tb) = top_and_bottom {
@@ -632,7 +641,7 @@ fn pick_wrap(
 }
 
 fn polygon(p: WrapPolygonXml) -> Option<WrapPolygon> {
-    let start = p.start?;
+    let start = Dup::from(p.start).into_value()?;
     Some(WrapPolygon {
         edited: p.edited.map(|b| b.0),
         start: Offset::new(start.x, start.y),

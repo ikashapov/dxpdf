@@ -6,6 +6,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Emu, SixtieThousandthDeg, ThousandthPercent};
@@ -75,13 +76,13 @@ pub struct GradFillXml {
     #[serde(rename = "@rotWithShape", default)]
     pub rot_with_shape: Option<AttrBool>,
     #[serde(rename = "gsLst", default)]
-    pub gs_lst: Option<GsLstXml>,
+    pub gs_lst: Vec<GsLstXml>,
     #[serde(rename = "lin", default)]
-    pub lin: Option<LinShadeXml>,
+    pub lin: Vec<LinShadeXml>,
     #[serde(rename = "path", default)]
-    pub path: Option<PathShadeXml>,
+    pub path: Vec<PathShadeXml>,
     #[serde(rename = "tileRect", default)]
-    pub tile_rect: Option<RelativeRectXml>,
+    pub tile_rect: Vec<RelativeRectXml>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -117,7 +118,7 @@ pub struct PathShadeXml {
     #[serde(rename = "@path", default)]
     pub path_type: Option<StPathShadeType>,
     #[serde(rename = "fillToRect", default)]
-    pub fill_to_rect: Option<RelativeRectXml>,
+    pub fill_to_rect: Vec<RelativeRectXml>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -183,16 +184,16 @@ impl From<RelativeRectXml> for RelativeRect {
 
 impl From<GradFillXml> for GradientFill {
     fn from(x: GradFillXml) -> Self {
-        let stops = x
-            .gs_lst
+        let stops = Dup::from(x.gs_lst)
+            .into_value()
             .map(|l| l.stops.into_iter().map(Into::into).collect())
             .unwrap_or_default();
-        let shade_properties = if let Some(lin) = x.lin {
+        let shade_properties = if let Some(lin) = Dup::from(x.lin).into_value() {
             GradientShadeProperties::Linear {
                 angle: lin.angle.unwrap_or_default(),
                 scaled: lin.scaled.map(|o| o.0),
             }
-        } else if let Some(path) = x.path {
+        } else if let Some(path) = Dup::from(x.path).into_value() {
             GradientShadeProperties::Path {
                 // An omitted `@path` still denotes a path (radial-family)
                 // gradient; default to `circle`, which is what the shade
@@ -201,7 +202,7 @@ impl From<GradFillXml> for GradientFill {
                     .path_type
                     .map(Into::into)
                     .unwrap_or(PathShadeType::Circle),
-                fill_to_rect: path.fill_to_rect.map(Into::into),
+                fill_to_rect: Dup::from(path.fill_to_rect).into_value().map(Into::into),
             }
         } else {
             GradientShadeProperties::Linear {
@@ -214,7 +215,7 @@ impl From<GradFillXml> for GradientFill {
             shade_properties,
             flip: x.flip.map(Into::into),
             rot_with_shape: x.rot_with_shape.map(|o| o.0),
-            tile_rect: x.tile_rect.map(Into::into),
+            tile_rect: Dup::from(x.tile_rect).into_value().map(Into::into),
         }
     }
 }
@@ -237,13 +238,13 @@ pub struct BlipFillXml {
     #[serde(rename = "@dpi", default)]
     pub dpi: Option<u32>,
     #[serde(rename = "blip", default)]
-    pub blip: Option<BlipXml>,
+    pub blip: Vec<BlipXml>,
     #[serde(rename = "srcRect", default)]
-    pub src_rect: Option<RelativeRectXml>,
+    pub src_rect: Vec<RelativeRectXml>,
     #[serde(rename = "stretch", default)]
-    pub stretch: Option<StretchXml>,
+    pub stretch: Vec<StretchXml>,
     #[serde(rename = "tile", default)]
-    pub tile: Option<TileXml>,
+    pub tile: Vec<TileXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,7 +260,7 @@ pub struct BlipXml {
 #[derive(Debug, Deserialize, Default)]
 pub struct StretchXml {
     #[serde(rename = "fillRect", default)]
-    pub fill_rect: Option<RelativeRectXml>,
+    pub fill_rect: Vec<RelativeRectXml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,14 +342,17 @@ impl From<StRectAlignment> for RectAlignment {
 impl From<BlipFillXml> for BlipFill {
     fn from(x: BlipFillXml) -> Self {
         use crate::docx::model::RelId;
-        let blip = x.blip.map(|b| Blip {
+        let blip = Dup::from(x.blip).into_value().map(|b| Blip {
             embed: b.embed.map(RelId::new),
             link: b.link.map(RelId::new),
             compression: b.cstate.map(Into::into),
         });
-        let fill_kind = match (x.stretch, x.tile) {
+        let fill_kind = match (
+            Dup::from(x.stretch).into_value(),
+            Dup::from(x.tile).into_value(),
+        ) {
             (Some(s), _) => BlipFillKind::Stretch(StretchFill {
-                fill_rect: s.fill_rect.map(Into::into),
+                fill_rect: Dup::from(s.fill_rect).into_value().map(Into::into),
             }),
             (None, Some(t)) => BlipFillKind::Tile(TileFill {
                 tx: t.tx,
@@ -364,7 +368,7 @@ impl From<BlipFillXml> for BlipFill {
             rotate_with_shape: x.rot_with_shape.map(|o| o.0),
             dpi: x.dpi,
             blip,
-            src_rect: x.src_rect.map(Into::into),
+            src_rect: Dup::from(x.src_rect).into_value().map(Into::into),
             fill_kind,
         }
     }
@@ -378,9 +382,9 @@ pub struct PattFillXml {
     #[serde(rename = "@prst", default)]
     pub prst: Option<StPresetPatternVal>,
     #[serde(rename = "fgClr", default)]
-    pub fg_clr: Option<ColorParent>,
+    pub fg_clr: Vec<ColorParent>,
     #[serde(rename = "bgClr", default)]
-    pub bg_clr: Option<ColorParent>,
+    pub bg_clr: Vec<ColorParent>,
 }
 
 /// `<a:fgClr>` / `<a:bgClr>` wrap a single color-choice child.
@@ -394,8 +398,8 @@ impl From<PattFillXml> for PatternFill {
     fn from(x: PattFillXml) -> Self {
         Self {
             preset: x.prst.map(Into::into),
-            fg_color: x.fg_clr.map(|c| c.color.into()),
-            bg_color: x.bg_clr.map(|c| c.color.into()),
+            fg_color: Dup::from(x.fg_clr).into_value().map(|c| c.color.into()),
+            bg_color: Dup::from(x.bg_clr).into_value().map(|c| c.color.into()),
         }
     }
 }

@@ -6,6 +6,7 @@
 //! accepts both modern (`start`/`end`) and legacy (`left`/`right`) side
 //! names per OOXML bidi handling.
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, EighthPoints, Points};
@@ -47,94 +48,94 @@ impl From<BorderXml> for Border {
 }
 
 /// `<w:pBdr>` — five sides plus `between`.
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct ParagraphBordersXml {
     #[serde(default)]
-    top: Option<BorderXml>,
+    top: Vec<BorderXml>,
     #[serde(default)]
-    bottom: Option<BorderXml>,
+    bottom: Vec<BorderXml>,
     #[serde(default, alias = "start")]
-    left: Option<BorderXml>,
+    left: Vec<BorderXml>,
     #[serde(default, alias = "end")]
-    right: Option<BorderXml>,
+    right: Vec<BorderXml>,
     #[serde(default)]
-    between: Option<BorderXml>,
+    between: Vec<BorderXml>,
 }
 
 impl From<ParagraphBordersXml> for ParagraphBorders {
     fn from(x: ParagraphBordersXml) -> Self {
         Self {
-            top: x.top.map(Into::into),
-            bottom: x.bottom.map(Into::into),
-            left: x.left.map(Into::into),
-            right: x.right.map(Into::into),
-            between: x.between.map(Into::into),
+            top: Dup::from(x.top).into_value().map(Into::into),
+            bottom: Dup::from(x.bottom).into_value().map(Into::into),
+            left: Dup::from(x.left).into_value().map(Into::into),
+            right: Dup::from(x.right).into_value().map(Into::into),
+            between: Dup::from(x.between).into_value().map(Into::into),
         }
     }
 }
 
 /// `<w:tblBorders>` — six sides (adds `insideH`, `insideV`).
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TableBordersXml {
     #[serde(default)]
-    top: Option<BorderXml>,
+    top: Vec<BorderXml>,
     #[serde(default)]
-    bottom: Option<BorderXml>,
+    bottom: Vec<BorderXml>,
     #[serde(default, alias = "start")]
-    left: Option<BorderXml>,
+    left: Vec<BorderXml>,
     #[serde(default, alias = "end")]
-    right: Option<BorderXml>,
+    right: Vec<BorderXml>,
     #[serde(rename = "insideH", default)]
-    inside_h: Option<BorderXml>,
+    inside_h: Vec<BorderXml>,
     #[serde(rename = "insideV", default)]
-    inside_v: Option<BorderXml>,
+    inside_v: Vec<BorderXml>,
 }
 
 impl From<TableBordersXml> for TableBorders {
     fn from(x: TableBordersXml) -> Self {
         Self {
-            top: x.top.map(Into::into),
-            bottom: x.bottom.map(Into::into),
-            left: x.left.map(Into::into),
-            right: x.right.map(Into::into),
-            inside_h: x.inside_h.map(Into::into),
-            inside_v: x.inside_v.map(Into::into),
+            top: Dup::from(x.top).into_value().map(Into::into),
+            bottom: Dup::from(x.bottom).into_value().map(Into::into),
+            left: Dup::from(x.left).into_value().map(Into::into),
+            right: Dup::from(x.right).into_value().map(Into::into),
+            inside_h: Dup::from(x.inside_h).into_value().map(Into::into),
+            inside_v: Dup::from(x.inside_v).into_value().map(Into::into),
         }
     }
 }
 
 /// `<w:tcBorders>` — eight sides (adds diagonal `tl2br`, `tr2bl`).
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TableCellBordersXml {
     #[serde(default)]
-    top: Option<BorderXml>,
+    top: Vec<BorderXml>,
     #[serde(default)]
-    bottom: Option<BorderXml>,
+    bottom: Vec<BorderXml>,
     #[serde(default, alias = "start")]
-    left: Option<BorderXml>,
+    left: Vec<BorderXml>,
     #[serde(default, alias = "end")]
-    right: Option<BorderXml>,
+    right: Vec<BorderXml>,
     #[serde(rename = "insideH", default)]
-    inside_h: Option<BorderXml>,
+    inside_h: Vec<BorderXml>,
     #[serde(rename = "insideV", default)]
-    inside_v: Option<BorderXml>,
+    inside_v: Vec<BorderXml>,
     #[serde(rename = "tl2br", default)]
-    tl2br: Option<BorderXml>,
+    tl2br: Vec<BorderXml>,
     #[serde(rename = "tr2bl", default)]
-    tr2bl: Option<BorderXml>,
+    tr2bl: Vec<BorderXml>,
 }
 
 impl From<TableCellBordersXml> for TableCellBorders {
     fn from(x: TableCellBordersXml) -> Self {
         Self {
-            top: x.top.map(Into::into),
-            bottom: x.bottom.map(Into::into),
-            left: x.left.map(Into::into),
-            right: x.right.map(Into::into),
-            inside_h: x.inside_h.map(Into::into),
-            inside_v: x.inside_v.map(Into::into),
-            tl2br: x.tl2br.map(Into::into),
-            tr2bl: x.tr2bl.map(Into::into),
+            top: Dup::from(x.top).into_value().map(Into::into),
+            bottom: Dup::from(x.bottom).into_value().map(Into::into),
+            left: Dup::from(x.left).into_value().map(Into::into),
+            right: Dup::from(x.right).into_value().map(Into::into),
+            inside_h: Dup::from(x.inside_h).into_value().map(Into::into),
+            inside_v: Dup::from(x.inside_v).into_value().map(Into::into),
+            tl2br: Dup::from(x.tl2br).into_value().map(Into::into),
+            tr2bl: Dup::from(x.tr2bl).into_value().map(Into::into),
         }
     }
 }

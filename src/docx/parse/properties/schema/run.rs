@@ -5,6 +5,7 @@
 //! via the `split` method — the style id is routed separately because the
 //! property cascade applies it before direct formatting.
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, HalfPoints, Twips, Unit};
@@ -20,52 +21,48 @@ use super::shading::ShdXml;
 
 /// Schema for the `<w:rPr>` element. All fields optional.
 ///
-/// OnOff toggles are typed as `Vec<OnOff>` rather than `Option<OnOff>` because
-/// some third-party DOCX writers (notably LibreOffice/AOO) emit redundant
-/// duplicates like `<w:b/><w:b/>` within a single `<w:rPr>`. Word tolerates
-/// these via the "last wins" property cascade; the derived `Option<T>`
-/// deserializer would reject the second occurrence as a duplicate field and
-/// fail otherwise-valid documents. quick-xml + serde natively accumulate
-/// repeated XML children into `Vec<T>`, so the derive stays clean and `split`
-/// takes the final element per spec semantics.
+/// Every child is typed `Vec<T>`, not `Option<T>`, so a producer that repeats
+/// one cannot fail the parse; `split` collapses each with `last`/`last_toggle`.
+/// The policy and the reasoning behind "last wins" are in
+/// `crate::docx::parse::primitives::duplicates`.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct RPrXml {
     #[serde(rename = "rStyle", default)]
-    r_style: Option<ValString>,
+    r_style: Vec<ValString>,
     #[serde(rename = "rFonts", default)]
-    r_fonts: Option<RFontsXml>,
+    r_fonts: Vec<RFontsXml>,
 
     #[serde(rename = "sz", default)]
-    sz: Option<NonNegativeDimensionVal<HalfPoints>>,
+    sz: Vec<NonNegativeDimensionVal<HalfPoints>>,
     // Complex-script counterparts are intentionally ignored — renderer uses a single size.
     #[serde(rename = "b", default)]
     b: Vec<OnOff>,
     #[serde(rename = "i", default)]
     i: Vec<OnOff>,
     #[serde(rename = "u", default)]
-    u: Option<UnderlineXml>,
+    u: Vec<UnderlineXml>,
     #[serde(rename = "strike", default)]
     strike: Vec<OnOff>,
     #[serde(rename = "dstrike", default)]
     dstrike: Vec<OnOff>,
 
     #[serde(rename = "color", default)]
-    color: Option<ColorXml>,
+    color: Vec<ColorXml>,
     #[serde(rename = "highlight", default)]
-    highlight: Option<ValAttr<StHighlightColor>>,
+    highlight: Vec<ValAttr<StHighlightColor>>,
     #[serde(default)]
-    shd: Option<ShdXml>,
+    shd: Vec<ShdXml>,
 
     #[serde(rename = "vertAlign", default)]
-    vert_align: Option<ValAttr<StVerticalAlignRun>>,
+    vert_align: Vec<ValAttr<StVerticalAlignRun>>,
 
     #[serde(rename = "spacing", default)]
-    spacing: Option<ValAttr<Dimension<Twips>>>,
+    spacing: Vec<ValAttr<Dimension<Twips>>>,
     #[serde(rename = "kern", default)]
-    kern: Option<NonNegativeDimensionVal<HalfPoints>>,
+    kern: Vec<NonNegativeDimensionVal<HalfPoints>>,
     /// §17.3.2.45 — `<w:w w:val="80"/>`: horizontal character scale in percent.
     #[serde(rename = "w", default)]
-    char_scale: Option<ValAttr<u16>>,
+    char_scale: Vec<ValAttr<u16>>,
 
     #[serde(rename = "caps", default)]
     caps: Vec<OnOff>,
@@ -89,12 +86,12 @@ pub(crate) struct RPrXml {
     shadow: Vec<OnOff>,
 
     #[serde(rename = "position", default)]
-    position: Option<ValAttr<Dimension<HalfPoints>>>,
+    position: Vec<ValAttr<Dimension<HalfPoints>>>,
 
     #[serde(rename = "lang", default)]
-    lang: Option<LangXml>,
+    lang: Vec<LangXml>,
     #[serde(rename = "bdr", default)]
-    bdr: Option<BorderXml>,
+    bdr: Vec<BorderXml>,
 }
 
 /// `<w:u w:val="..."/>` — underline. Unlike other ST-enum wrappers we can't
@@ -143,20 +140,27 @@ impl RPrXml {
     /// the cascade (§17.7.2), so it stays separate from the direct-formatting
     /// `RunProperties`.
     pub(crate) fn split(self) -> (RunProperties, Option<StyleId>) {
-        let style_id = self.r_style.map(|v| StyleId::new(v.val));
+        let style_id = Dup::from(self.r_style)
+            .into_value()
+            .map(|v| StyleId::new(v.val));
         let props = RunProperties {
-            fonts: self.r_fonts.map(Into::into).unwrap_or_default(),
-            font_size: self.sz.map(|s| s.val),
+            fonts: Dup::from(self.r_fonts)
+                .into_value()
+                .map(Into::into)
+                .unwrap_or_default(),
+            font_size: Dup::from(self.sz).into_value().map(|s| s.val),
             bold: last_toggle(self.b),
             italic: last_toggle(self.i),
-            underline: self.u.and_then(resolve_underline),
+            underline: Dup::from(self.u).into_value().and_then(resolve_underline),
             strike: resolve_strike(self.strike, self.dstrike),
-            color: self.color.map(|c| c.val.into()),
-            highlight: self.highlight.map(|h| h.val.into()),
-            shading: self.shd.map(Into::into),
-            vertical_align: self.vert_align.map(|v| v.val.into()),
-            spacing: self.spacing.map(|s| s.val),
-            kerning: self.kern.map(|k| k.val),
+            color: Dup::from(self.color).into_value().map(|c| c.val.into()),
+            highlight: Dup::from(self.highlight).into_value().map(|h| h.val.into()),
+            shading: Dup::from(self.shd).into_value().map(Into::into),
+            vertical_align: Dup::from(self.vert_align)
+                .into_value()
+                .map(|v| v.val.into()),
+            spacing: Dup::from(self.spacing).into_value().map(|s| s.val),
+            kerning: Dup::from(self.kern).into_value().map(|k| k.val),
             all_caps: last_toggle(self.caps),
             small_caps: last_toggle(self.small_caps),
             vanish: last_toggle(self.vanish),
@@ -167,10 +171,12 @@ impl RPrXml {
             imprint: last_toggle(self.imprint),
             outline: last_toggle(self.outline),
             shadow: last_toggle(self.shadow),
-            position: self.position.map(|p| p.val),
-            lang: self.lang.map(Into::into),
-            border: self.bdr.map(Into::into),
-            text_scale: self.char_scale.map(|v| TextScale::new(v.val)),
+            position: Dup::from(self.position).into_value().map(|p| p.val),
+            lang: Dup::from(self.lang).into_value().map(Into::into),
+            border: Dup::from(self.bdr).into_value().map(Into::into),
+            text_scale: Dup::from(self.char_scale)
+                .into_value()
+                .map(|v| TextScale::new(v.val)),
         };
         (props, style_id)
     }
@@ -460,5 +466,19 @@ mod tests {
         assert_eq!(rp.font_size.map(|d| d.raw()), Some(28));
         assert_eq!(rp.color, Some(Color::Rgb(0x2E74B5)));
         assert_eq!(rp.underline, Some(UnderlineStyle::Single));
+    }
+
+    /// A duplicated **non-toggle** child is schema-invalid and Word opens it
+    /// anyway; see `primitives::duplicates` for why the last one wins.
+    #[test]
+    fn duplicate_non_toggle_children_are_tolerated_last_wins() {
+        let (rp, _) = parse(
+            r#"<rPr>
+                 <sz val="20"/><sz val="28"/>
+                 <color val="FF0000"/><color val="2E74B5"/>
+               </rPr>"#,
+        );
+        assert_eq!(rp.font_size.map(|d| d.raw()), Some(28), "§17.3.2.38");
+        assert_eq!(rp.color, Some(Color::Rgb(0x2E74B5)), "§17.3.2.6");
     }
 }

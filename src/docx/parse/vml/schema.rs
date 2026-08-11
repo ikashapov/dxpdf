@@ -8,6 +8,7 @@
 
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use crate::model::Dup;
 use serde::Deserialize;
 
 use crate::docx::model::{
@@ -36,7 +37,7 @@ use super::style::{parse_length, parse_style};
 #[derive(Deserialize)]
 pub(crate) struct PictXml {
     #[serde(rename = "shapetype", default)]
-    pub shape_type: Option<ShapeTypeXml>,
+    pub shape_type: Vec<ShapeTypeXml>,
     #[serde(rename = "$value", default)]
     pub primitives: Vec<VmlPrimitiveXml>,
 }
@@ -46,7 +47,7 @@ impl PictXml {
     /// VML text box content (same iterator threading as shape).
     pub(crate) fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> Pict {
         Pict {
-            shape_type: self.shape_type.map(Into::into),
+            shape_type: Dup::from(self.shape_type).into_value().map(Into::into),
             primitives: self
                 .primitives
                 .into_iter()
@@ -119,6 +120,22 @@ impl VmlPrimitiveXml {
 /// `<v:wrap>` / `<v:imagedata>`). Each per-primitive schema struct
 /// embeds this via `#[serde(flatten)]` so we don't repeat the eight
 /// field declarations across nine primitive types.
+///
+/// **The one place duplicate children are not tolerated.** Everywhere else a
+/// duplicable child element is `Vec<T>` collapsed by
+/// [`crate::docx::parse::primitives::duplicates::last`], so a producer that
+/// repeats one cannot fail the parse. That is impossible behind a
+/// `#[serde(flatten)]` boundary: flatten buffers the element into a map and
+/// serde's `FlatMapDeserializer` has no way to collect repeated keys into a
+/// sequence, so a `Vec` field here fails with *"invalid type: map, expected a
+/// sequence"* on documents that parse fine today. These five stay `Option<T>`
+/// and a repeated `<v:stroke>` remains fatal.
+///
+/// Closing the gap means removing the flatten, which is what
+/// [`RectXml`] already did for an unrelated reason — its inlined copies of
+/// these fields *are* `Vec`. Do that per primitive if a real document ever
+/// needs it; nine copies of eight fields is the price, and the note on
+/// `RectXml` explains why that trade was already worth making once.
 #[derive(Deserialize, Default)]
 pub(crate) struct CommonAttrsXml {
     #[serde(rename = "@id", default)]
@@ -226,13 +243,13 @@ pub(crate) struct ShapeTypeXml {
     pub stroked: Option<VmlBool>,
 
     #[serde(rename = "stroke", default)]
-    pub stroke: Option<StrokeXml>,
+    pub stroke: Vec<StrokeXml>,
     #[serde(rename = "path", default)]
-    pub vml_path: Option<PathXml>,
+    pub vml_path: Vec<PathXml>,
     #[serde(rename = "formulas", default)]
-    pub formulas: Option<FormulasXml>,
+    pub formulas: Vec<FormulasXml>,
     #[serde(rename = "lock", default)]
-    pub lock: Option<LockXml>,
+    pub lock: Vec<LockXml>,
 }
 
 impl From<ShapeTypeXml> for VmlShapeType {
@@ -245,10 +262,10 @@ impl From<ShapeTypeXml> for VmlShapeType {
             path: parse_path_commands(x.path),
             filled: x.filled.map(|b| b.0),
             stroked: x.stroked.map(|b| b.0),
-            stroke: x.stroke.map(Into::into),
-            vml_path: x.vml_path.map(Into::into),
-            formulas: x
-                .formulas
+            stroke: Dup::from(x.stroke).into_value().map(Into::into),
+            vml_path: Dup::from(x.vml_path).into_value().map(Into::into),
+            formulas: Dup::from(x.formulas)
+                .into_value()
                 .map(|f| {
                     f.entries
                         .into_iter()
@@ -256,7 +273,7 @@ impl From<ShapeTypeXml> for VmlShapeType {
                         .collect()
                 })
                 .unwrap_or_default(),
-            lock: x.lock.map(Into::into),
+            lock: Dup::from(x.lock).into_value().map(Into::into),
         }
     }
 }
@@ -278,17 +295,17 @@ pub(crate) struct ShapeXml {
     pub stroked: Option<VmlBool>,
 
     #[serde(rename = "stroke", default)]
-    pub stroke: Option<StrokeXml>,
+    pub stroke: Vec<StrokeXml>,
     #[serde(rename = "path", default)]
-    pub vml_path: Option<PathXml>,
+    pub vml_path: Vec<PathXml>,
     #[serde(rename = "textbox", default)]
-    pub textbox: Option<TextBoxXml>,
+    pub textbox: Vec<TextBoxXml>,
     #[serde(rename = "wrap", default)]
-    pub wrap: Option<WrapXml>,
+    pub wrap: Vec<WrapXml>,
     #[serde(rename = "imagedata", default)]
-    pub imagedata: Option<ImageDataXml>,
+    pub imagedata: Vec<ImageDataXml>,
     #[serde(rename = "fill", default)]
-    pub fill: Option<FillXml>,
+    pub fill: Vec<FillXml>,
 }
 
 impl ShapeXml {
@@ -299,16 +316,18 @@ impl ShapeXml {
                 style: parse_style(self.style),
                 fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
-                stroke: self.stroke.map(Into::into),
-                text_box: self.textbox.map(|t| t.into_model(ctx)),
-                wrap: self.wrap.map(Into::into),
-                image_data: self.imagedata.map(Into::into),
-                fill: self.fill.map(Into::into),
+                stroke: Dup::from(self.stroke).into_value().map(Into::into),
+                text_box: Dup::from(self.textbox)
+                    .into_value()
+                    .map(|t| t.into_model(ctx)),
+                wrap: Dup::from(self.wrap).into_value().map(Into::into),
+                image_data: Dup::from(self.imagedata).into_value().map(Into::into),
+                fill: Dup::from(self.fill).into_value().map(Into::into),
             },
             shape_type_ref: self
                 .ty
                 .map(|s| VmlShapeId::new(s.strip_prefix('#').unwrap_or(&s))),
-            vml_path: self.vml_path.map(Into::into),
+            vml_path: Dup::from(self.vml_path).into_value().map(Into::into),
         }
     }
 }
@@ -338,15 +357,15 @@ pub(crate) struct RectXml {
     #[serde(rename = "@stroked", default)]
     pub stroked: Option<VmlBool>,
     #[serde(rename = "stroke", default)]
-    pub stroke: Option<StrokeXml>,
+    pub stroke: Vec<StrokeXml>,
     #[serde(rename = "textbox", default)]
-    pub textbox: Option<TextBoxXml>,
+    pub textbox: Vec<TextBoxXml>,
     #[serde(rename = "wrap", default)]
-    pub wrap: Option<WrapXml>,
+    pub wrap: Vec<WrapXml>,
     #[serde(rename = "imagedata", default)]
-    pub imagedata: Option<ImageDataXml>,
+    pub imagedata: Vec<ImageDataXml>,
     #[serde(rename = "fill", default)]
-    pub fill: Option<FillXml>,
+    pub fill: Vec<FillXml>,
 }
 
 impl RectXml {
@@ -357,11 +376,13 @@ impl RectXml {
                 style: parse_style(self.style),
                 fill_color: self.fillcolor.as_deref().and_then(parse_color),
                 stroked: self.stroked.map(|b| b.0),
-                stroke: self.stroke.map(Into::into),
-                text_box: self.textbox.map(|t| t.into_model(ctx)),
-                wrap: self.wrap.map(Into::into),
-                image_data: self.imagedata.map(Into::into),
-                fill: self.fill.map(Into::into),
+                stroke: Dup::from(self.stroke).into_value().map(Into::into),
+                text_box: Dup::from(self.textbox)
+                    .into_value()
+                    .map(|t| t.into_model(ctx)),
+                wrap: Dup::from(self.wrap).into_value().map(Into::into),
+                image_data: Dup::from(self.imagedata).into_value().map(Into::into),
+                fill: Dup::from(self.fill).into_value().map(Into::into),
             },
         }
     }
@@ -619,7 +640,7 @@ pub(crate) struct TextBoxXml {
     #[serde(rename = "@inset", default)]
     pub inset: Option<String>,
     #[serde(rename = "txbxContent", default)]
-    pub content: Option<TxbxContentXml>,
+    pub content: Vec<TxbxContentXml>,
 }
 
 #[derive(Deserialize, Default)]
@@ -630,8 +651,8 @@ pub(crate) struct TxbxContentXml {
 
 impl TextBoxXml {
     fn into_model(self, ctx: &mut crate::docx::parse::body::ConvertCtx) -> VmlTextBox {
-        let content: Vec<Block> = self
-            .content
+        let content: Vec<Block> = Dup::from(self.content)
+            .into_value()
             .map(|c| {
                 let (blocks, _) = crate::docx::parse::body::convert_container(c.children, ctx);
                 blocks

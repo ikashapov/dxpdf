@@ -414,7 +414,7 @@ pub(super) fn paragraph_style_from_props(
 pub(super) fn resolve_paragraph_borders(
     props: &model::ParagraphProperties,
 ) -> Option<ParagraphBorderStyle> {
-    let pbdr = props.borders.as_ref()?;
+    let pbdr = props.borders.get()?;
 
     let convert = |b: &model::Border| -> Option<BorderLine> {
         if b.style.draws_nothing() {
@@ -905,6 +905,7 @@ pub(super) fn vml_style_length_to_pt(len: model::VmlLength) -> Option<Pt> {
 mod tests {
     use super::*;
     use crate::model::dimension::Dimension;
+    use crate::model::Dup;
     use crate::model::{Border, BorderStyle, Color, ParagraphBorders, ParagraphProperties};
     use crate::render::resolve::color::rgb_from_u32;
 
@@ -976,13 +977,13 @@ mod tests {
     #[test]
     fn paragraph_borders_explicit_none_yields_no_render_borders() {
         let props = ParagraphProperties {
-            borders: Some(ParagraphBorders {
+            borders: Dup::from(Some(ParagraphBorders {
                 top: Some(border_with_style(BorderStyle::None)),
                 bottom: Some(border_with_style(BorderStyle::None)),
                 left: Some(border_with_style(BorderStyle::None)),
                 right: Some(border_with_style(BorderStyle::None)),
                 between: Some(border_with_style(BorderStyle::None)),
-            }),
+            })),
             ..Default::default()
         };
         assert!(
@@ -995,13 +996,13 @@ mod tests {
     #[test]
     fn paragraph_borders_mixed_keeps_only_actual_sides() {
         let props = ParagraphProperties {
-            borders: Some(ParagraphBorders {
+            borders: Dup::from(Some(ParagraphBorders {
                 top: Some(border_with_style(BorderStyle::Single)),
                 bottom: Some(border_with_style(BorderStyle::None)),
                 left: Some(border_with_style(BorderStyle::None)),
                 right: Some(border_with_style(BorderStyle::None)),
                 between: None,
-            }),
+            })),
             ..Default::default()
         };
         let resolved = resolve_paragraph_borders(&props).expect("top side must survive");
@@ -1015,13 +1016,13 @@ mod tests {
     #[test]
     fn paragraph_borders_all_single_round_trips() {
         let props = ParagraphProperties {
-            borders: Some(ParagraphBorders {
+            borders: Dup::from(Some(ParagraphBorders {
                 top: Some(border_with_style(BorderStyle::Single)),
                 bottom: Some(border_with_style(BorderStyle::Single)),
                 left: Some(border_with_style(BorderStyle::Single)),
                 right: Some(border_with_style(BorderStyle::Single)),
                 between: None,
-            }),
+            })),
             ..Default::default()
         };
         let resolved = resolve_paragraph_borders(&props).expect("must produce Some");

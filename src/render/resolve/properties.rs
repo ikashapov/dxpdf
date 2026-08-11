@@ -3,6 +3,7 @@
 //! "Merge" means: for each field, if `self` is `None`, take the value from `base`.
 //! This implements the OOXML style inheritance cascade.
 
+use crate::model::Dup;
 use crate::model::{ParagraphProperties, RunProperties, TabAlignment, TableProperties};
 
 /// Fill any `None` fields in `$target` from the corresponding fields in `$base`.
@@ -195,9 +196,39 @@ fn take<T>(target: &mut Option<T>, overlay: Option<T>) {
     }
 }
 
-/// If `target` is `None`, clone `base` into it.
-fn merge_opt<T: Clone>(target: &mut Option<T>, base: &Option<T>) {
-    if target.is_none() {
+/// §17.7.2 inheritance: "this level did not set the property".
+///
+/// Implemented for both carriers a property can have — `Option` for a value the
+/// seam collapsed, [`Dup`] for one that still holds every occurrence the
+/// document wrote. Absent means the same thing either way, so the cascade does
+/// not have to know which it is looking at.
+trait Unset {
+    fn is_unset(&self) -> bool;
+}
+
+impl<T> Unset for Option<T> {
+    fn is_unset(&self) -> bool {
+        self.is_none()
+    }
+}
+
+impl<T> Unset for Dup<T> {
+    fn is_unset(&self) -> bool {
+        self.is_absent()
+    }
+}
+
+/// If `target` did not set this property, clone `base` into it.
+///
+/// **What this decides for `Dup`:** a child that set the property wins with
+/// *all* of its occurrences — the parent's are not appended, and the child's
+/// losers are not replaced by the parent's winner. That is the faithful
+/// generalisation of the `Option` rule it replaced ("the child wins if it said
+/// anything"), and it keeps the two questions separate: `Dup::get` resolves a
+/// duplicate *within* one bag, this resolves *across* cascade levels. Merging
+/// the two lists would conflate them.
+fn merge_opt<T: Clone + Unset>(target: &mut T, base: &T) {
+    if target.is_unset() {
         *target = base.clone();
     }
 }
@@ -608,13 +639,13 @@ mod tests {
                 alignment: TabAlignment::Left,
                 leader: TabLeader::None,
             }],
-            borders: Some(ParagraphBorders {
+            borders: Dup::from(Some(ParagraphBorders {
                 top: None,
                 bottom: None,
                 left: None,
                 right: None,
                 between: None,
-            }),
+            })),
             shading: Some(Shading {
                 fill: Color::Rgb(0),
                 pattern: ShadingPattern::Clear,
@@ -643,7 +674,7 @@ mod tests {
         assert!(target.spacing.is_some());
         assert!(target.numbering.is_some());
         assert!(!target.tabs.is_empty());
-        assert!(target.borders.is_some());
+        assert!(!target.borders.is_absent());
         assert!(target.shading.is_some());
         assert!(target.keep_next.is_some());
         assert!(target.keep_lines.is_some());
