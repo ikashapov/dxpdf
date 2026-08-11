@@ -38,14 +38,17 @@ pub struct ResolvedStyle {
 /// Deliberately excludes `TOC Heading` (the heading *above* a ToC, not an
 /// entry) and `toc` with no level, neither of which is an entry style.
 fn is_toc_entry_name(name: &str) -> bool {
-    // OOXML style names compare case-insensitively. Safely check prefix without
-    // panicking when a localized style name contains multi-byte UTF-8 characters.
-    if let Some(prefix) = name.get(..4) {
-        if prefix.eq_ignore_ascii_case("toc ") {
-            return matches!(name[4..].parse::<u8>(), Ok(1..=9));
+    // OOXML style names compare case-insensitively. `<w:name>` comes straight
+    // from the document, so *every* index into it goes through `get` and never
+    // `[..]`: a localized name can put a multi-byte codepoint across byte 4
+    // (`Éléments de style` is É-l-é, `引用` is two 3-byte chars) and slicing
+    // there panics — in a library, and as a `PanicException` through PyO3.
+    match (name.get(..4), name.get(4..)) {
+        (Some(prefix), Some(rest)) if prefix.eq_ignore_ascii_case("toc ") => {
+            matches!(rest.parse::<u8>(), Ok(1..=9))
         }
+        _ => false,
     }
-    false
 }
 
 /// Resolve all styles in the stylesheet by walking `basedOn` chains.
@@ -521,6 +524,23 @@ mod tests {
                 !is_toc_entry_name(name),
                 "{name:?} is not a ToC entry style"
             );
+        }
+    }
+
+    /// A style name whose byte 4 splits a codepoint used to panic the whole
+    /// library — `<w:name>` is document-controlled, so this reached any caller
+    /// opening a French or CJK document, and a Python one got a
+    /// `PanicException`. Named for the panic so the regression stays legible:
+    /// the list above asserts *classification*, which passes either way.
+    #[test]
+    fn a_style_name_whose_byte_4_splits_a_codepoint_does_not_panic() {
+        for name in [
+            "Éléments de style", // É=2B, l=1B, é=2B → byte 4 is inside `é`
+            "引用",              // two 3-byte chars → byte 4 is inside the second
+            "日本語スタイル",    // 日(0-2) 本(3-5) → byte 4 is inside 本
+        ] {
+            assert!(!name.is_char_boundary(4), "{name:?} must exercise the bug");
+            assert!(!is_toc_entry_name(name));
         }
     }
 

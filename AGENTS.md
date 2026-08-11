@@ -105,6 +105,7 @@ Open engineering units are tracked as GitHub issues, not here — this file goes
 | `centered-numbered-heading.docx` | Numbered heading with `jc=center` (suffix tab must not suppress alignment) |
 | `issue-126-minimal.docx` | The reporter's document from issue #126 — a paragraph before an explicit page break. Renders 4 pages, matching the LibreOffice reference attached to that issue |
 | `footer-path-wrap.docx` | A token UAX #14 cannot break (a Windows path) in a footer-table cell far narrower than it. Built by `scripts/make_footer_path_fixture.py`; exercised by `tests/footer_path_wrap.rs` |
+| `duplicate-children.docx` | Every property bag (`pPr`, `rPr`, `tblPr`, `trPr`, `tcPr`) repeating a child the schema allows once, each pair disagreeing so the fixture pins *which* wins, plus a style name whose byte 4 splits a codepoint. Built by `scripts/make_duplicate_children_fixture.py`; exercised by `tests/duplicate_children.rs` |
 
 `tests/parse_test_files.rs` parses these and validates the resulting `Document`, so anything added here becomes part of the test suite. Add a new fixture when reproducing a bug — a committed fixture is what makes a fix verifiable by anyone.
 
