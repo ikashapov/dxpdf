@@ -214,7 +214,7 @@ fn extract_level_properties(
     p_pr: Option<PPrXml>,
     r_pr: Option<RPrXml>,
 ) -> (Option<Indentation>, Option<RunProperties>) {
-    let indentation = p_pr.and_then(|p| p.split().properties.indentation);
+    let indentation = p_pr.and_then(|p| p.split().properties.indentation.into_value());
     let run_properties = r_pr.map(|r| r.split().0);
     (indentation, run_properties)
 }

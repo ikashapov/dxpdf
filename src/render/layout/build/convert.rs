@@ -205,7 +205,7 @@ pub(super) fn paragraph_outline(
     props: &model::ParagraphProperties,
     state: &mut BuildState,
 ) -> Option<crate::render::layout::draw_command::OutlineHeading> {
-    let level = props.outline_level?;
+    let level = *props.outline_level.get()?;
     let title = outline_title(&para.content);
     if title.is_empty() {
         return None;
@@ -308,16 +308,19 @@ pub(super) fn paragraph_style_from_props(
 ) -> ParagraphStyle {
     let indent_left = props
         .indentation
+        .get()
         .and_then(|i| i.start)
         .map(Pt::from)
         .unwrap_or(Pt::ZERO);
     let indent_right = props
         .indentation
+        .get()
         .and_then(|i| i.end)
         .map(Pt::from)
         .unwrap_or(Pt::ZERO);
     let indent_first_line = props
         .indentation
+        .get()
         .and_then(|i| i.first_line)
         .map(|fl| match fl {
             FirstLineIndent::FirstLine(v) => Pt::from(v),
@@ -327,20 +330,22 @@ pub(super) fn paragraph_style_from_props(
         .unwrap_or(Pt::ZERO);
 
     // §17.3.1.33: when autoSpacing is true, use 14pt instead of explicit value.
-    let space_before = if props.spacing.and_then(|s| s.before_auto_spacing) == Some(true) {
+    let space_before = if props.spacing.get().and_then(|s| s.before_auto_spacing) == Some(true) {
         Pt::new(14.0)
     } else {
         props
             .spacing
+            .get()
             .and_then(|s| s.before)
             .map(Pt::from)
             .unwrap_or(Pt::ZERO)
     };
-    let space_after = if props.spacing.and_then(|s| s.after_auto_spacing) == Some(true) {
+    let space_after = if props.spacing.get().and_then(|s| s.after_auto_spacing) == Some(true) {
         Pt::new(14.0)
     } else {
         props
             .spacing
+            .get()
             .and_then(|s| s.after)
             .map(Pt::from)
             .unwrap_or(Pt::ZERO)
@@ -349,6 +354,7 @@ pub(super) fn paragraph_style_from_props(
     // §17.3.1.33: line spacing defaults to single (auto, 240 twips = 1.0x).
     let line_spacing = props
         .spacing
+        .get()
         .and_then(|s| s.line)
         .map(|ls| match ls {
             LineSpacing::Auto(v) => LineSpacingRule::Auto(Pt::from(v).raw() / 12.0),
@@ -372,7 +378,7 @@ pub(super) fn paragraph_style_from_props(
 
     ParagraphStyle {
         auto_fit,
-        alignment: props.alignment.unwrap_or(model::Alignment::Start),
+        alignment: props.alignment.cloned().unwrap_or(model::Alignment::Start),
         base_direction: base_direction(props),
         space_before,
         space_after,
@@ -389,7 +395,7 @@ pub(super) fn paragraph_style_from_props(
         borders: resolve_paragraph_borders(props),
         shading: props
             .shading
-            .as_ref()
+            .get()
             .map(|s| resolve_color(s.fill, ColorContext::Background)),
         keep_next: props.keep_next.unwrap_or(false),
         keep_lines: props.keep_lines.unwrap_or(false),

@@ -49,8 +49,8 @@ pub(super) fn inject_list_label(
     ctx: &BuildContext,
     state: &mut BuildState,
 ) {
-    let num_ref = match merged_props.numbering {
-        Some(ref nr) => nr,
+    let num_ref = match merged_props.numbering.get() {
+        Some(nr) => nr,
         None => return,
     };
 
@@ -113,7 +113,7 @@ pub(super) fn inject_list_label(
     // paragraph's *final* indentation wherever it came from, or the suffix tab
     // lands somewhere other than where the body text wraps. Only the §17.9.23
     // overwrite below stays keyed to the level-derived value.
-    let layout_ind = effective_ind.or(merged_props.indentation);
+    let layout_ind = effective_ind.or(merged_props.indentation.cloned());
 
     // §17.9.10: check for picture bullet before text label.
     let pic_bullet_injected = level_def
@@ -199,7 +199,7 @@ pub(super) fn inject_list_label(
     // §17.9.23: numbering level pPr overrides the paragraph style.
     // Only the paragraph's direct ind overrides the numbering level.
     if let Some(ind) = effective_ind {
-        merged_props.indentation = Some(ind);
+        merged_props.indentation = Dup::from(Some(ind));
     }
 }
 
@@ -211,7 +211,7 @@ fn effective_indentation(
     level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
 ) -> Option<model::Indentation> {
     let mut ind = *level_def?.indentation.as_ref()?;
-    if let Some(direct) = para.properties.indentation {
+    if let Some(direct) = para.properties.indentation.get() {
         if let Some(start) = direct.start {
             ind.start = Some(start);
         }
@@ -236,7 +236,7 @@ fn effective_indentation(
 /// label→text distance stays the hanging width, as in the left-aligned case.
 fn alignment_suppresses_tab(merged_props: &ParagraphProperties) -> bool {
     matches!(
-        merged_props.alignment,
+        merged_props.alignment.get(),
         Some(model::Alignment::Center | model::Alignment::End)
     )
 }
@@ -318,7 +318,7 @@ fn inject_text_label(
     auto_fit: crate::render::layout::ShapeAutoFit,
     layout_ind: Option<model::Indentation>,
 ) {
-    let num_id = model::NumId::new(merged_props.numbering.as_ref().unwrap().num_id);
+    let num_id = model::NumId::new(merged_props.numbering.get().unwrap().num_id);
 
     let (default_family, default_size, default_color, _, paragraph_style_run) =
         resolve_paragraph_defaults(para, ctx.resolved, false, None, None);
@@ -680,7 +680,7 @@ mod tests {
 
     fn props_at(level: u8) -> ParagraphProperties {
         ParagraphProperties {
-            numbering: Some(NumberingReference { num_id: 7, level }),
+            numbering: Dup::from(Some(NumberingReference { num_id: 7, level })),
             ..Default::default()
         }
     }
@@ -813,7 +813,7 @@ mod tests {
             ..decimal_level()
         }]);
         let para = para_with(ParagraphProperties {
-            indentation: Some(ind(567, 567)),
+            indentation: Dup::from(Some(ind(567, 567))),
             ..Default::default()
         });
         let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
@@ -823,7 +823,7 @@ mod tests {
             Some(567),
             "implicit tab stop must sit at the direct indent, not the level's"
         );
-        let merged = props.indentation.expect("indentation merged");
+        let merged = props.indentation.get().expect("indentation merged");
         assert_eq!(merged.start.map(|d| d.raw()), Some(567));
         assert_eq!(
             merged.first_line,
@@ -863,7 +863,7 @@ mod tests {
                 ..decimal_level()
             }]);
             let props = ParagraphProperties {
-                alignment: Some(alignment),
+                alignment: Dup::from(Some(alignment)),
                 ..props_at(0)
             };
             let (fragments, props) = inject_full(
@@ -918,7 +918,7 @@ mod tests {
             ..decimal_level()
         }]);
         let props = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             ..props_at(0)
         };
         let (fragments, _) = inject_full(
@@ -953,7 +953,7 @@ mod tests {
             ..decimal_level()
         }]);
         let props = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             ..props_at(0)
         };
         let (fragments, _) = inject_full(
@@ -999,14 +999,14 @@ mod tests {
             ..decimal_level()
         }]);
         let para = para_with(ParagraphProperties {
-            indentation: Some(Indentation {
+            indentation: Dup::from(Some(Indentation {
                 mirror: Some(true),
                 ..ind(567, 567)
-            }),
+            })),
             ..Default::default()
         });
         let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
-        assert_eq!(props.indentation.unwrap().mirror, Some(true));
+        assert_eq!(props.indentation.get().unwrap().mirror, Some(true));
     }
 
     /// When the numbering level defines no `w:ind`, label geometry falls back
@@ -1017,7 +1017,7 @@ mod tests {
     fn level_without_ind_falls_back_to_cascade_indentation() {
         let resolved = resolved_with(vec![decimal_level()]); // no level ind
         let props = ParagraphProperties {
-            indentation: Some(ind(720, 360)),
+            indentation: Dup::from(Some(ind(720, 360))),
             ..props_at(0)
         };
         let (fragments, props) = inject_full(
@@ -1049,7 +1049,10 @@ mod tests {
         }
         // The cascade value stays as-is; the §17.9.23 overwrite is for
         // level-derived indentation only.
-        assert_eq!(props.indentation.unwrap().start.map(|d| d.raw()), Some(720));
+        assert_eq!(
+            props.indentation.get().unwrap().start.map(|d| d.raw()),
+            Some(720)
+        );
     }
 
     /// The picture-bullet branch honors alignment suppression too: a centered
@@ -1100,7 +1103,7 @@ mod tests {
             (None, true),
         ] {
             let props = ParagraphProperties {
-                alignment,
+                alignment: Dup::from(alignment),
                 ..props_at(0)
             };
             let (fragments, _) = inject_full(
@@ -1299,7 +1302,7 @@ mod tests {
         );
 
         assert!(fragments.is_empty(), "no label injected");
-        assert!(props.indentation.is_none(), "indentation untouched");
+        assert!(props.indentation.get().is_none(), "indentation untouched");
         assert!(state.list_counters.is_empty(), "no counter advanced");
     }
 
@@ -1318,10 +1321,10 @@ mod tests {
         let mut state = BuildState::default();
         let mut fragments = Vec::new();
         let mut props = ParagraphProperties {
-            numbering: Some(NumberingReference {
+            numbering: Dup::from(Some(NumberingReference {
                 num_id: 999,
                 level: 0,
-            }),
+            })),
             ..Default::default()
         };
         inject_list_label(
@@ -1355,10 +1358,10 @@ mod tests {
             resolved: &resolved,
         };
         let mut para = numbered_para();
-        para.properties.indentation = Some(Indentation {
+        para.properties.indentation = Dup::from(Some(Indentation {
             start: Some(Dimension::new(1440)),
             ..Default::default()
-        });
+        }));
         let mut fragments = Vec::new();
         let mut props = props_at(0);
         inject_list_label(
@@ -1369,7 +1372,10 @@ mod tests {
             &mut BuildState::default(),
         );
 
-        let ind = props.indentation.expect("the level supplies indentation");
+        let ind = props
+            .indentation
+            .get()
+            .expect("the level supplies indentation");
         assert_eq!(ind.start, Some(Dimension::new(1440)), "direct start wins");
         assert_eq!(ind.end, Some(Dimension::new(100)), "level end survives");
     }

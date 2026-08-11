@@ -168,7 +168,7 @@ fn sample1_numbering() {
     let has_numbering = doc
         .body
         .iter()
-        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.is_some()));
+        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.get().is_some()));
     assert!(has_numbering, "expected at least one numbered paragraph");
 }
 
@@ -261,7 +261,7 @@ fn sample3_numbering() {
     let has_numbering = doc
         .body
         .iter()
-        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.is_some()));
+        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.get().is_some()));
     assert!(has_numbering, "expected numbered paragraphs");
 }
 
@@ -526,7 +526,7 @@ fn the_outline_fixture_declares_heading_levels_on_its_styles() {
             .unwrap_or_else(|| panic!("{style_id} is defined"))
             .paragraph_properties
             .as_ref()
-            .and_then(|p| p.outline_level)
+            .and_then(|p| p.outline_level.cloned())
     };
 
     assert_eq!(level_of("Heading1"), OutlineLevel::from_ooxml(0));

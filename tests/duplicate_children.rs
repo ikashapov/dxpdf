@@ -89,10 +89,13 @@ fn ppr_repeated_jc_takes_the_last() {
         r#"<w:p><w:pPr><w:jc w:val="left"/><w:jc w:val="center"/></w:pPr>
            <w:r><w:t>x</w:t></w:r></w:p>"#,
     );
+    let alignment = &first_paragraph(&doc).properties.alignment;
+    assert_eq!(alignment.get(), Some(&Alignment::Center), "§17.3.1.13");
+    assert_eq!(alignment.all().len(), 2, "neither occurrence was dropped");
     assert_eq!(
-        first_paragraph(&doc).properties.alignment,
-        Some(Alignment::Center),
-        "§17.3.1.13"
+        alignment.all()[0],
+        Alignment::Start,
+        "first-wins is still reachable downstream"
     );
 }
 
@@ -102,11 +105,10 @@ fn ppr_repeated_ind_takes_the_last() {
         r#"<w:p><w:pPr><w:ind w:left="100"/><w:ind w:left="1440"/></w:pPr>
            <w:r><w:t>x</w:t></w:r></w:p>"#,
     );
-    let ind = first_paragraph(&doc)
-        .properties
-        .indentation
-        .expect("indentation present");
+    let indentation = &first_paragraph(&doc).properties.indentation;
+    let ind = indentation.get().expect("indentation present");
     assert_eq!(ind.start.map(|d| d.raw()), Some(1440), "§17.3.1.12");
+    assert_eq!(indentation.all().len(), 2, "neither occurrence was dropped");
 }
 
 /// `<w:pBdr>` is a *child of the bag*, so the whole border set is carried and
@@ -225,8 +227,8 @@ fn the_committed_fixture_parses_and_resolves() {
     .expect("fixture present — rebuild with scripts/make_duplicate_children_fixture.py");
     let doc = dxpdf::docx::parse(&bytes).expect("every duplicated bag must parse");
     assert_eq!(
-        first_paragraph(&doc).properties.alignment,
-        Some(Alignment::Center),
+        first_paragraph(&doc).properties.alignment.get(),
+        Some(&Alignment::Center),
         "the fixture's first paragraph repeats <w:jc>; the last must win"
     );
     // And it must render, not merely parse.

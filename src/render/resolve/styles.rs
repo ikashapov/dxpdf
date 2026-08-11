@@ -236,7 +236,7 @@ mod tests {
             style(
                 None,
                 Some(ParagraphProperties {
-                    alignment: Some(Alignment::Start),
+                    alignment: Dup::from(Some(Alignment::Start)),
                     ..Default::default()
                 }),
                 Some(RunProperties {
@@ -250,7 +250,10 @@ mod tests {
         let resolved = resolve_styles(&sheet, None);
         let normal = resolved.get(&StyleId::new("Normal")).unwrap();
 
-        assert_eq!(normal.paragraph.alignment, Some(Alignment::Start));
+        assert_eq!(
+            normal.paragraph.alignment,
+            Dup::from(Some(Alignment::Start))
+        );
         assert_eq!(normal.run.bold, Some(false));
         assert_eq!(
             normal.run.font_size,
@@ -266,7 +269,7 @@ mod tests {
                 style(
                     None,
                     Some(ParagraphProperties {
-                        alignment: Some(Alignment::Start),
+                        alignment: Dup::from(Some(Alignment::Start)),
                         ..Default::default()
                     }),
                     Some(RunProperties {
@@ -281,7 +284,7 @@ mod tests {
                 style(
                     Some("Normal"),
                     Some(ParagraphProperties {
-                        alignment: Some(Alignment::Center),
+                        alignment: Dup::from(Some(Alignment::Center)),
                         ..Default::default()
                     }),
                     Some(RunProperties {
@@ -297,7 +300,7 @@ mod tests {
 
         assert_eq!(
             h1.paragraph.alignment,
-            Some(Alignment::Center),
+            Dup::from(Some(Alignment::Center)),
             "child overrides parent"
         );
         assert_eq!(h1.run.bold, Some(true), "child overrides parent");
@@ -419,7 +422,7 @@ mod tests {
         // cascade level. Only run defaults are merged into resolved styles.
         let sheet = StyleSheet {
             doc_defaults_paragraph: ParagraphProperties {
-                alignment: Some(Alignment::Both),
+                alignment: Dup::from(Some(Alignment::Both)),
                 ..Default::default()
             },
             doc_defaults_run: RunProperties {
@@ -437,7 +440,8 @@ mod tests {
 
         // Paragraph doc defaults are deferred to the caller.
         assert_eq!(
-            normal.paragraph.alignment, None,
+            normal.paragraph.alignment,
+            Dup::from(None),
             "paragraph doc defaults are not merged into resolved styles"
         );
         // Run doc defaults ARE merged during resolution.

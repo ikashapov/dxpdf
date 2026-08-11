@@ -40,9 +40,11 @@ pub(crate) struct ParsedPPr {
 /// Schema for the `<w:pPr>` element (§17.3.1).
 ///
 /// Every child is typed `Vec<T>`, not `Option<T>`, so a producer that repeats
-/// one cannot fail the parse; `split` collapses each with `last`/`last_toggle`.
-/// The policy and the reasoning behind "last wins" are in
-/// `crate::docx::parse::primitives::duplicates`.
+/// one cannot fail the parse. `split` carries the non-toggle children into the
+/// model as `Dup<T>` — every occurrence survives, and the reader picks — while
+/// the toggles collapse here via `last_toggle`, which is §17.7.2's own rule
+/// rather than this parser's. The policy and the reasoning behind "last wins"
+/// for everything else are in `crate::docx::parse::primitives::duplicates`.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct PPrXml {
     #[serde(rename = "pStyle", default)]
@@ -307,18 +309,18 @@ impl PPrXml {
         let section_properties = Dup::from(self.sect_pr).into_value().map(Into::into);
 
         let properties = ParagraphProperties {
-            alignment: Dup::from(self.jc)
-                .into_value()
-                .map(|j| Alignment::from(j.val)),
-            indentation: Dup::from(self.ind).into_value().map(Into::into),
-            spacing: Dup::from(self.spacing).into_value().map(Into::into),
-            numbering: Dup::from(self.num_pr).into_value().and_then(numbering_ref),
+            alignment: Dup::from(self.jc).map(|j| Alignment::from(j.val)),
+            indentation: Dup::from(self.ind).map(Into::into),
+            spacing: Dup::from(self.spacing).map(Into::into),
+            numbering: Dup::from(self.num_pr).filter_map(numbering_ref),
+            // The one child that resolves here rather than at the read; the
+            // field's doc comment on `ParagraphProperties` says why.
             tabs: Dup::from(self.tabs)
                 .into_value()
                 .map(<Vec<TabStop>>::from)
                 .unwrap_or_default(),
             borders: Dup::from(self.p_bdr).map(ParagraphBorders::from),
-            shading: Dup::from(self.shd).into_value().map(Shading::from),
+            shading: Dup::from(self.shd).map(Shading::from),
             keep_next: last_toggle(self.keep_next),
             keep_lines: last_toggle(self.keep_lines),
             widow_control: last_toggle(self.widow_control),
@@ -328,13 +330,10 @@ impl PPrXml {
             bidi: last_toggle(self.bidi),
             word_wrap: last_toggle(self.word_wrap),
             outline_level: Dup::from(self.outline_lvl)
-                .into_value()
-                .and_then(|v| OutlineLevel::from_ooxml(v.val)),
-            text_alignment: Dup::from(self.text_alignment)
-                .into_value()
-                .map(|v| TextAlignment::from(v.val)),
-            cnf_style: Dup::from(self.cnf_style).into_value().map(CnfStyle::from),
-            frame_properties: Dup::from(self.frame_pr).into_value().map(FrameKind::from),
+                .filter_map(|v| OutlineLevel::from_ooxml(v.val)),
+            text_alignment: Dup::from(self.text_alignment).map(|v| TextAlignment::from(v.val)),
+            cnf_style: Dup::from(self.cnf_style).map(CnfStyle::from),
+            frame_properties: Dup::from(self.frame_pr).map(FrameKind::from),
             auto_space_de: last_toggle(self.auto_space_de),
             auto_space_dn: last_toggle(self.auto_space_dn),
         };
@@ -369,7 +368,7 @@ mod tests {
     #[test]
     fn empty_pprx_produces_defaults() {
         let r = parse(r#"<pPr/>"#);
-        assert_eq!(r.properties.alignment, None);
+        assert_eq!(r.properties.alignment, Dup::from(None));
         assert!(r.style_id.is_none());
         assert!(r.run_properties.is_none());
         assert!(r.section_properties.is_none());
@@ -382,7 +381,7 @@ mod tests {
             r.style_id.map(|s| s.as_str().to_string()),
             Some("Heading1".into())
         );
-        assert_eq!(r.properties.alignment, None);
+        assert_eq!(r.properties.alignment, Dup::from(None));
     }
 
     #[test]
@@ -399,26 +398,26 @@ mod tests {
             </pPr>"#,
         );
         let p = r.properties;
-        assert_eq!(p.alignment, Some(Alignment::Both));
-        assert_eq!(p.indentation.unwrap().start.unwrap().raw(), 720);
-        match p.indentation.unwrap().first_line {
+        assert_eq!(p.alignment, Dup::from(Some(Alignment::Both)));
+        assert_eq!(p.indentation.get().unwrap().start.unwrap().raw(), 720);
+        match p.indentation.get().unwrap().first_line {
             Some(FirstLineIndent::FirstLine(d)) => assert_eq!(d.raw(), 360),
             other => panic!("expected FirstLine, got {other:?}"),
         }
-        match p.spacing.unwrap().line {
+        match p.spacing.get().unwrap().line {
             Some(LineSpacing::Auto(d)) => assert_eq!(d.raw(), 360),
             other => panic!("expected Auto, got {other:?}"),
         }
         assert_eq!(p.keep_next, Some(true));
         assert_eq!(p.keep_lines, Some(false));
-        assert_eq!(p.outline_level.map(|o| o.value()), Some(1));
-        assert_eq!(p.text_alignment, Some(TextAlignment::Center));
+        assert_eq!(p.outline_level.map(|o| o.value()), Dup::from(Some(1)));
+        assert_eq!(p.text_alignment, Dup::from(Some(TextAlignment::Center)));
     }
 
     #[test]
     fn indentation_legacy_left_right_aliases() {
         let r = parse(r#"<pPr><ind left="720" right="360"/></pPr>"#);
-        let ind = r.properties.indentation.unwrap();
+        let ind = r.properties.indentation.get().unwrap();
         assert_eq!(ind.start.unwrap().raw(), 720);
         assert_eq!(ind.end.unwrap().raw(), 360);
     }
@@ -426,13 +425,16 @@ mod tests {
     #[test]
     fn negative_decimal_indentation_remains_valid() {
         let r = parse(r#"<pPr><ind start="-1.5"/></pPr>"#);
-        assert_eq!(r.properties.indentation.unwrap().start.unwrap().raw(), -2);
+        assert_eq!(
+            r.properties.indentation.get().unwrap().start.unwrap().raw(),
+            -2
+        );
     }
 
     #[test]
     fn num_pr_both_ilvl_and_num_id() {
         let r = parse(r#"<pPr><numPr><ilvl val="2"/><numId val="5"/></numPr></pPr>"#);
-        let n = r.properties.numbering.unwrap();
+        let n = r.properties.numbering.get().unwrap();
         assert_eq!(n.level, 2);
         assert_eq!(n.num_id, 5);
     }
@@ -440,7 +442,7 @@ mod tests {
     #[test]
     fn num_pr_without_num_id_is_none() {
         let r = parse(r#"<pPr><numPr><ilvl val="1"/></numPr></pPr>"#);
-        assert!(r.properties.numbering.is_none());
+        assert!(r.properties.numbering.get().is_none());
     }
 
     #[test]
@@ -457,7 +459,7 @@ mod tests {
             p.borders.get().unwrap().top.unwrap().style,
             BorderStyle::Single
         );
-        assert_eq!(p.shading.unwrap().pattern, ShadingPattern::Solid);
+        assert_eq!(p.shading.get().unwrap().pattern, ShadingPattern::Solid);
         assert_eq!(p.tabs.len(), 1);
         assert_eq!(p.tabs[0].position.raw(), 1440);
     }
@@ -479,10 +481,10 @@ mod tests {
     #[test]
     fn frame_pr_drop_cap() {
         let r = parse(r#"<pPr><framePr dropCap="drop" lines="2"/></pPr>"#);
-        match r.properties.frame_properties {
+        match r.properties.frame_properties.get() {
             Some(FrameKind::DropCap { style, lines, .. }) => {
-                assert_eq!(style, DropCap::Drop);
-                assert_eq!(lines, 2);
+                assert_eq!(*style, DropCap::Drop);
+                assert_eq!(*lines, 2);
             }
             other => panic!("expected DropCap, got {other:?}"),
         }
@@ -491,7 +493,7 @@ mod tests {
     #[test]
     fn frame_pr_text_box_default() {
         let r = parse(r#"<pPr><framePr w="5000" h="3000" hAnchor="margin"/></pPr>"#);
-        match r.properties.frame_properties {
+        match r.properties.frame_properties.get() {
             Some(FrameKind::TextBox(tb)) => {
                 assert_eq!(tb.width.unwrap().raw(), 5000);
                 assert_eq!(tb.height.unwrap().raw(), 3000);
@@ -503,7 +505,7 @@ mod tests {
     #[test]
     fn cnf_style_binary_val() {
         let r = parse(r#"<pPr><cnfStyle val="100000000000"/></pPr>"#);
-        assert_eq!(r.properties.cnf_style, Some(CnfStyle::FIRST_ROW));
+        assert_eq!(r.properties.cnf_style, Dup::from(Some(CnfStyle::FIRST_ROW)));
     }
 
     #[test]
@@ -558,17 +560,25 @@ mod tests {
                </pPr>"#,
         );
         assert_eq!(
-            r.properties.alignment,
-            Some(Alignment::Center),
+            r.properties.alignment.get(),
+            Some(&Alignment::Center),
             "§17.3.1.13"
         );
         assert_eq!(
             r.properties
                 .indentation
+                .get()
                 .and_then(|i| i.start)
                 .map(|d| d.raw()),
             Some(720),
             "§17.3.1.12"
         );
+        // Resolving at the read is the point: both occurrences reached the
+        // model, so a consumer that wants the first one still can.
+        assert_eq!(
+            r.properties.alignment.all(),
+            &[Alignment::Start, Alignment::Center]
+        );
+        assert_eq!(r.properties.indentation.all().len(), 2);
     }
 }

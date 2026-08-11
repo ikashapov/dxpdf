@@ -479,7 +479,7 @@ pub fn layout_document(
         .default_paragraph_style_id
         .as_ref()
         .and_then(|id| resolved.styles.get(id))
-        .and_then(|s| s.paragraph.indentation)
+        .and_then(|s| s.paragraph.indentation.get())
         .and_then(|ind| ind.first_line)
         .map(|fl| match fl {
             crate::model::FirstLineIndent::FirstLine(v) => dimension::Pt::from(v),

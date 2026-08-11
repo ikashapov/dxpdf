@@ -62,28 +62,30 @@ pub fn merge_paragraph_properties(target: &mut ParagraphProperties, base: &Parag
     merge_opt(&mut target.alignment, &base.alignment);
     // §17.3.1.12: merge indentation sub-fields individually so partial
     // overrides (e.g., left from child style, firstLine from parent) combine.
-    match (&mut target.indentation, &base.indentation) {
-        (Some(ref mut ti), Some(bi)) => {
+    // Both sides resolve to their effective occurrence first: the cascade
+    // combines the values the document means, not every one it wrote.
+    match (target.indentation.get_mut(), base.indentation.get()) {
+        (Some(ti), Some(bi)) => {
             merge_opt(&mut ti.start, &bi.start);
             merge_opt(&mut ti.end, &bi.end);
             merge_opt(&mut ti.first_line, &bi.first_line);
             merge_opt(&mut ti.mirror, &bi.mirror);
         }
-        (None, Some(_)) => target.indentation = base.indentation,
+        (None, Some(_)) => target.indentation = base.indentation.clone(),
         _ => {}
     }
     // §17.3.1.33: merge spacing sub-fields individually so partial
     // overrides (e.g., line from table style, after from paragraph style)
     // combine correctly.
-    match (&mut target.spacing, &base.spacing) {
-        (Some(ref mut ts), Some(bs)) => {
+    match (target.spacing.get_mut(), base.spacing.get()) {
+        (Some(ts), Some(bs)) => {
             merge_opt(&mut ts.before, &bs.before);
             merge_opt(&mut ts.after, &bs.after);
             merge_opt(&mut ts.line, &bs.line);
             merge_opt(&mut ts.before_auto_spacing, &bs.before_auto_spacing);
             merge_opt(&mut ts.after_auto_spacing, &bs.after_auto_spacing);
         }
-        (None, Some(_)) => target.spacing = base.spacing,
+        (None, Some(_)) => target.spacing = base.spacing.clone(),
         _ => {}
     }
     merge_fields!(
@@ -490,30 +492,34 @@ mod tests {
     fn merge_para_empty_target_takes_from_base() {
         let mut target = ParagraphProperties::default();
         let base = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             keep_next: Some(true),
             ..Default::default()
         };
         merge_paragraph_properties(&mut target, &base);
 
-        assert_eq!(target.alignment, Some(Alignment::Center));
+        assert_eq!(target.alignment, Dup::from(Some(Alignment::Center)));
         assert_eq!(target.keep_next, Some(true));
     }
 
     #[test]
     fn merge_para_target_values_not_overwritten() {
         let mut target = ParagraphProperties {
-            alignment: Some(Alignment::End),
+            alignment: Dup::from(Some(Alignment::End)),
             ..Default::default()
         };
         let base = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             keep_next: Some(true),
             ..Default::default()
         };
         merge_paragraph_properties(&mut target, &base);
 
-        assert_eq!(target.alignment, Some(Alignment::End), "target should win");
+        assert_eq!(
+            target.alignment,
+            Dup::from(Some(Alignment::End)),
+            "target should win"
+        );
         assert_eq!(target.keep_next, Some(true), "keep_next from base");
     }
 
@@ -641,13 +647,13 @@ mod tests {
     #[test]
     fn merge_para_all_fields_covered() {
         let base = ParagraphProperties {
-            alignment: Some(Alignment::Start),
-            indentation: Some(Indentation::default()),
-            spacing: Some(ParagraphSpacing::default()),
-            numbering: Some(NumberingReference {
+            alignment: Dup::from(Some(Alignment::Start)),
+            indentation: Dup::from(Some(Indentation::default())),
+            spacing: Dup::from(Some(ParagraphSpacing::default())),
+            numbering: Dup::from(Some(NumberingReference {
                 num_id: 1,
                 level: 0,
-            }),
+            })),
             tabs: vec![TabStop {
                 position: Dimension::new(720),
                 alignment: TabAlignment::Left,
@@ -660,11 +666,11 @@ mod tests {
                 right: None,
                 between: None,
             })),
-            shading: Some(Shading {
+            shading: Dup::from(Some(Shading {
                 fill: Color::Rgb(0),
                 pattern: ShadingPattern::Clear,
                 color: Color::Rgb(0),
-            }),
+            })),
             keep_next: Some(true),
             keep_lines: Some(true),
             widow_control: Some(true),
@@ -673,23 +679,23 @@ mod tests {
             contextual_spacing: Some(true),
             bidi: Some(true),
             word_wrap: Some(true),
-            outline_level: Some(OutlineLevel::new(1)),
-            text_alignment: Some(TextAlignment::Center),
-            cnf_style: Some(CnfStyle::FIRST_ROW),
-            frame_properties: None,
+            outline_level: Dup::from(Some(OutlineLevel::new(1))),
+            text_alignment: Dup::from(Some(TextAlignment::Center)),
+            cnf_style: Dup::from(Some(CnfStyle::FIRST_ROW)),
+            frame_properties: Dup::from(None),
             auto_space_de: Some(true),
             auto_space_dn: Some(true),
         };
         let mut target = ParagraphProperties::default();
         merge_paragraph_properties(&mut target, &base);
 
-        assert!(target.alignment.is_some());
-        assert!(target.indentation.is_some());
-        assert!(target.spacing.is_some());
-        assert!(target.numbering.is_some());
+        assert!(target.alignment.get().is_some());
+        assert!(target.indentation.get().is_some());
+        assert!(target.spacing.get().is_some());
+        assert!(target.numbering.get().is_some());
         assert!(!target.tabs.is_empty());
         assert!(!target.borders.is_absent());
-        assert!(target.shading.is_some());
+        assert!(target.shading.get().is_some());
         assert!(target.keep_next.is_some());
         assert!(target.keep_lines.is_some());
         assert!(target.widow_control.is_some());
@@ -698,9 +704,9 @@ mod tests {
         assert!(target.contextual_spacing.is_some());
         assert!(target.bidi.is_some());
         assert!(target.word_wrap.is_some());
-        assert!(target.outline_level.is_some());
-        assert!(target.text_alignment.is_some());
-        assert!(target.cnf_style.is_some());
+        assert!(target.outline_level.get().is_some());
+        assert!(target.text_alignment.get().is_some());
+        assert!(target.cnf_style.get().is_some());
         assert!(target.auto_space_de.is_some());
         assert!(target.auto_space_dn.is_some());
     }

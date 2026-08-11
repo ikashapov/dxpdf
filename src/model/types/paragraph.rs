@@ -23,19 +23,36 @@ pub struct Paragraph {
     pub rsids: ParagraphRevisionIds,
 }
 
-/// Paragraph properties — only fields explicitly present in the XML are `Some`.
+/// Paragraph properties — only fields explicitly present in the XML are set.
+///
+/// Every non-toggle child of `<w:pPr>` is a [`Dup`]: the schema allows it once,
+/// producers repeat it anyway, and the model carries every occurrence so the
+/// choice of which one wins belongs to the reader rather than the parser. See
+/// `model::dup`. The `Option<bool>` toggles below are the deliberate exception
+/// — §17.7.2 defines last-wins for them, so `last_toggle` applies the *spec's*
+/// rule at the seam and there is nothing left to carry.
 #[derive(Clone, Debug, Default)]
 pub struct ParagraphProperties {
-    pub alignment: Option<Alignment>,
-    pub indentation: Option<Indentation>,
-    pub spacing: Option<ParagraphSpacing>,
-    pub numbering: Option<NumberingReference>,
+    pub alignment: Dup<Alignment>,
+    pub indentation: Dup<Indentation>,
+    pub spacing: Dup<ParagraphSpacing>,
+    pub numbering: Dup<NumberingReference>,
+    /// §17.3.1.38 `<w:tabs>`. The one pPr child that stays a plain `Vec`: it is
+    /// a *container*, so absence is an empty `Vec` rather than `None`, and
+    /// `Dup<Vec<TabStop>>` would make "the document set no tabs" and "the
+    /// document set an empty `<w:tabs/>`" the same value. A repeated `<w:tabs>`
+    /// therefore collapses at the seam, last-wins like everything else.
+    ///
+    /// Word reference render needed: whether Word takes the last `<w:tabs>` or
+    /// unions the tab stops of both. §17.3.1.38 describes one container and
+    /// does not say. A document with two `<w:tabs>` holding different positions
+    /// would settle it — if Word unions them, this becomes `Dup` and the read
+    /// site concatenates.
     pub tabs: Vec<TabStop>,
-    /// §17.3.1.24 `<w:pBdr>`. `Dup` because a producer may repeat the element
-    /// inside one `<w:pPr>`; the sides *within* one `<w:pBdr>` stay plain so
+    /// §17.3.1.24 `<w:pBdr>`. The sides *within* one `<w:pBdr>` stay plain so
     /// [`ParagraphBorders`] keeps `Copy`. See `model::dup` for where the line is.
     pub borders: Dup<ParagraphBorders>,
-    pub shading: Option<Shading>,
+    pub shading: Dup<Shading>,
     pub keep_next: Option<bool>,
     pub keep_lines: Option<bool>,
     pub widow_control: Option<bool>,
@@ -53,13 +70,13 @@ pub struct ParagraphProperties {
     pub bidi: Option<bool>,
     /// §17.3.1.45: allow line breaking between any characters for East Asian text.
     pub word_wrap: Option<bool>,
-    pub outline_level: Option<OutlineLevel>,
+    pub outline_level: Dup<OutlineLevel>,
     /// §17.3.1.39: vertical alignment of text on each line (ST_TextAlignment).
-    pub text_alignment: Option<TextAlignment>,
+    pub text_alignment: Dup<TextAlignment>,
     /// §17.3.1.8: table conditional formatting applied to this paragraph.
-    pub cnf_style: Option<CnfStyle>,
+    pub cnf_style: Dup<CnfStyle>,
     /// §17.3.1.11: text frame (legacy positioned text region).
-    pub frame_properties: Option<FrameKind>,
+    pub frame_properties: Dup<FrameKind>,
     /// §17.3.1.2: auto-space East Asian text with Latin text.
     pub auto_space_de: Option<bool>,
     /// §17.3.1.3: auto-space East Asian text with numbers.

@@ -66,6 +66,18 @@ impl<T> Dup<T> {
         self.0.last()
     }
 
+    /// The effective value, mutably — the same occurrence [`Dup::get`] returns.
+    ///
+    /// This is what the style cascade merges into. §17.3.1.12 and §17.3.1.33
+    /// combine *sub-fields* of `<w:ind>` and `<w:spacing>` across levels rather
+    /// than replacing the element wholesale, and the level being combined is
+    /// the effective one. The occurrences that lost are left exactly as the
+    /// document wrote them, so [`Dup::all`] stays a record of the XML while the
+    /// last element becomes the resolved value.
+    pub fn get_mut(&mut self) -> Option<&mut T> {
+        self.0.last_mut()
+    }
+
     /// The effective value, by value. Discards the occurrences that lost.
     pub fn into_value(self) -> Option<T> {
         self.0.into_iter().next_back()
