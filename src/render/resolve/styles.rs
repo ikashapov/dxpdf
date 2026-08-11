@@ -510,7 +510,7 @@ mod tests {
             "toc 1x",
             "table of contents",
             "TOCustom", // the false positive the old styleId prefix test hit
-            // Multi-byte non-ASCII UTF-8 style names where byte index 4 falls inside a code point:
+            // Multi-byte non-ASCII UTF-8 style names (including cases where byte index 4 is not a char boundary):
             "Éléments de style",
             "Заголовок 1",
             "引用",
