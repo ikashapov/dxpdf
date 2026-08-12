@@ -315,6 +315,105 @@ def build_cellspacing():
     write("issue-165-cellspacing.docx", document(body))
 
 
+# ── D. tblCellSpacing magnitude, and carve-vs-add ────────────────────────────
+#
+# Probe B settled *where* the spacing goes (edge gap = inter-cell gap) and then
+# turned up something it was not built to ask: Word's gaps came out about twice
+# this engine's. Neither ECMA-376 §17.4.44 nor [MS-OI29500] states a factor —
+# both say only "the minimum amount of space which shall be left between all
+# cells in the table including the width of the table borders in the
+# calculation" — so the factor has to be measured, not read.
+#
+# Four tables, identical but for their spacing, all `tblW=7200` (360pt) with
+# three 2400-twip (120pt) columns and `tblLayout=fixed`. Stacked so their edges
+# line up on the page, which is what makes the second question free to read.
+#
+# **Question 1 — the factor.** Compare the rendered gap against the declared
+# value:
+#
+#   declared value is the gap (dxpdf today) → S200 gap 10pt, S400 gap 20pt
+#   declared value is a half-gap            → S200 gap 20pt, S400 gap 40pt
+#
+# Two values rather than one so the answer is a *ratio* rather than a single
+# reading: whatever the factor is, S400's gap must be exactly twice S200's. A
+# constant offset — a border width folded in, say — would break that and is
+# worth knowing about before anything is multiplied by anything.
+#
+# **Question 2 — carve or add.** All four declare the same `tblW`, so:
+#
+#   carved out of the table (dxpdf today) → all four tables the same width,
+#                                           cells shrink as spacing grows
+#   added to the table                    → each table wider than the one above
+#
+# Just look at whether the right edges line up. This one is not in doubt for
+# any good reason — it is simply untested, and it changes the fix.
+#
+# **Question 3 — precedence, as a bonus.** §17.4.44's own text says the
+# table-level value "shall be superseded by a table-level exception or the row
+# cell spacing value in that order". The last table declares 400 at table level
+# and 800 on its row; if Word renders it like a plain 800 table, supersede is
+# confirmed and this engine's `warned_row_cell_spacing` warning is honest about
+# what it is skipping. Probe B declares the same value in both places, so it
+# cannot tell supersede from add — which is why the tables here declare the
+# spacing at table level only, except this last one.
+def build_cellspacing_scale():
+    # Cell text is one unbroken alphanumeric token per cell — no space, no
+    # hyphen. UAX #14 breaks at both, and the line fitter emits one draw command
+    # per piece, so `S=400 C1` would reach the page as two commands and
+    # `S400-C1` as two more. A test that identifies a table by its cell string
+    # needs that string to survive as one command, and needs no other cell's
+    # string to be a prefix of it.
+    def table(label, tag, tbl_spacing, row_spacing=None):
+        cells = join(
+            *(
+                f'<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/>{TC_BORDERS}</w:tcPr>'
+                f"{para(f'{tag}C{i}')}</w:tc>"
+                for i in (1, 2, 3)
+            )
+        )
+        spacing = (
+            f'<w:tblCellSpacing w:w="{tbl_spacing}" w:type="dxa"/>'
+            if tbl_spacing is not None
+            else ""
+        )
+        tr_pr = (
+            f'<w:trPr><w:tblCellSpacing w:w="{row_spacing}" w:type="dxa"/></w:trPr>'
+            if row_spacing is not None
+            else ""
+        )
+        return join(
+            para(label),
+            "<w:tbl>",
+            f'<w:tblPr><w:tblW w:w="7200" w:type="dxa"/>{spacing}{TBL_BORDERS}'
+            '<w:tblLayout w:type="fixed"/></w:tblPr>',
+            '<w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/>'
+            '<w:gridCol w:w="2400"/></w:tblGrid>',
+            f"<w:tr>{tr_pr}",
+            cells,
+            "</w:tr>",
+            "</w:tbl>",
+            para(),
+        )
+
+    body = join(
+        para("D: tblCellSpacing magnitude — same table, four spacings"),
+        # The zero row is the reference: it fixes the cell width and the table
+        # width that the other three are read against, on the same page and in
+        # the same face, so no external measurement is needed.
+        # Short cell tags on purpose: doubling the spacing narrows the cells,
+        # and a label that no longer fits gets split across draw commands, which
+        # is exactly what a test identifying a table by its cell text cannot
+        # survive. The readable description lives in the heading above each
+        # table, where a human looks anyway.
+        table("Table 1 — no spacing", "T1", None),
+        table("Table 2 — tblCellSpacing 200", "T2", 200),
+        table("Table 3 — tblCellSpacing 400", "T3", 400),
+        table("Table 4 — tblCellSpacing 400, row 800", "T4", 400, row_spacing=800),
+        SECT,
+    )
+    write("issue-165-cellspacing-scale.docx", document(body))
+
+
 # ── C. vertical inside/outside for floats ────────────────────────────────────
 #
 # Mirrored margins with ASYMMETRIC top and bottom (1in / 2in) so a vertical
@@ -385,4 +484,5 @@ def build_floatv():
 if __name__ == "__main__":
     build_vmerge()
     build_cellspacing()
+    build_cellspacing_scale()
     build_floatv()

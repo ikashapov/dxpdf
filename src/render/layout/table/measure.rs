@@ -43,16 +43,17 @@ pub(super) fn measure_table_rows(
     // spacing everywhere, which is what is implemented here and what HTML's
     // `cellspacing` does. The half-gap reading is out.
     //
-    // What that render did *not* confirm is the magnitude. Word's gaps came out
-    // visibly wider than this engine's for the probe's `w:tblCellSpacing
-    // w:w="400"` (= 20pt), which no reading of "one full spacing everywhere"
-    // explains. Tracked separately; the equality above holds either way, since
-    // it is a ratio.
+    // The same render showed the gaps at twice this engine's width, which is a
+    // separate and still-open question — see
+    // `build::table::resolve_cell_spacing`, which explains why the answer is
+    // probably not a factor (ONLYOFFICE's renderer applies none) and probably is
+    // that probe declaring `tblCellSpacing` at both table and row level. The
+    // equality above is unaffected either way, being a ratio.
     //
-    // Note this is *carved out of* the table rather than added to it, which is
-    // a separate claim from either — and the one to suspect first if the
-    // magnitude turns out to be a table-width accounting error rather than a
-    // per-gap one.
+    // Note this is *carved out of* the table rather than added to it, so the
+    // cells shrink as the spacing grows and the table keeps its declared
+    // `w:tblW`. ONLYOFFICE does the same, insetting each cell within its grid
+    // slot. `test-files/issue-165-cellspacing-scale.docx` shows both at once.
     let table_width: Pt = col_widths.iter().copied().sum::<Pt>() + cell_spacing;
     let num_rows = rows.len();
     let mut row_heights = Vec::with_capacity(num_rows);
