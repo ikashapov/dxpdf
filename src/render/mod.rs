@@ -203,7 +203,7 @@ fn shared_page_owner_bounds(
         let section = &input.sections[idx];
         let base = layout::header_footer::next_logical_page_base(
             logical,
-            section.properties.page_number_type.as_ref(),
+            section.properties.page_number_type.get(),
         );
         let config = PageConfig::from_section(&section.properties);
         // §17.11.12: measuring a header is a document-order side effect, and
@@ -225,7 +225,7 @@ fn shared_page_owner_bounds(
         // the page it was handed. The common case, and the one that costs a
         // clearance measurement and no layout.
         let hands_on = input.sections.get(idx + 1).is_some_and(|after| {
-            after.properties.section_type == Some(crate::model::SectionType::Continuous)
+            after.properties.section_type.get() == Some(&crate::model::SectionType::Continuous)
                 && !continuous_break_promotes_to_page_break(&config, &after.properties)
         });
         if !hands_on {
@@ -479,7 +479,7 @@ pub fn layout_document(
         .default_paragraph_style_id
         .as_ref()
         .and_then(|id| resolved.styles.get(id))
-        .and_then(|s| s.paragraph.indentation)
+        .and_then(|s| s.paragraph.indentation.get())
         .and_then(|ind| ind.first_line)
         .map(|fl| match fl {
             crate::model::FirstLineIndent::FirstLine(v) => dimension::Pt::from(v),
@@ -497,7 +497,7 @@ pub fn layout_document(
         state.page_config = config.clone();
         let logical_page_base = layout::header_footer::next_logical_page_base(
             next_logical,
-            section.properties.page_number_type.as_ref(),
+            section.properties.page_number_type.get(),
         );
         let clearance = measure_header_footer_clearance(
             &config,
@@ -524,18 +524,19 @@ pub fn layout_document(
         // `SectionTail::SharedWithNext` only when the *next* section is
         // continuous, so a page can never be left pending for a section that
         // would not take it.
-        let continuation =
-            if section.properties.section_type == Some(crate::model::SectionType::Continuous) {
-                pending_continuation.take()
-            } else {
-                None
-            };
+        let continuation = if section.properties.section_type.get()
+            == Some(&crate::model::SectionType::Continuous)
+        {
+            pending_continuation.take()
+        } else {
+            None
+        };
 
         // §17.6.22: does a `Continuous` section follow, sharing this section's
         // last page? Not if the break is promoted to a page break instead —
         // see `continuous_break_promotes_to_page_break`.
         let next_continuous = resolved.sections.get(section_idx + 1).is_some_and(|next| {
-            next.properties.section_type == Some(crate::model::SectionType::Continuous)
+            next.properties.section_type.get() == Some(&crate::model::SectionType::Continuous)
                 && !continuous_break_promotes_to_page_break(&config, &next.properties)
         });
         let owner = |bounds| {
@@ -920,7 +921,7 @@ mod tests {
         // Mirrors sample-docx-files-sample3.docx: bottom 720 vs 1440 twips,
         // everything else equal.
         let next = SectionProperties {
-            page_margins: Some(PageMargins {
+            page_margins: Dup::from(Some(PageMargins {
                 top: None,
                 right: None,
                 bottom: Some(Dimension::<Twips>::new(720)),
@@ -928,7 +929,7 @@ mod tests {
                 header: None,
                 footer: None,
                 gutter: None,
-            }),
+            })),
             ..Default::default()
         };
         assert!(continuous_break_promotes_to_page_break(
@@ -940,11 +941,11 @@ mod tests {
     #[test]
     fn a_page_size_difference_promotes() {
         let next = SectionProperties {
-            page_size: Some(PageSize {
+            page_size: Dup::from(Some(PageSize {
                 width: Some(Dimension::<Twips>::new(16838)),
                 height: Some(Dimension::<Twips>::new(11906)),
                 orientation: None,
-            }),
+            })),
             ..Default::default()
         };
         assert!(continuous_break_promotes_to_page_break(
@@ -957,13 +958,13 @@ mod tests {
     fn a_column_only_difference_does_not_promote() {
         // §17.6.4: the main legitimate reason a continuous break exists.
         let next = SectionProperties {
-            columns: Some(Columns {
+            columns: Dup::from(Some(Columns {
                 count: Some(2),
                 space: None,
                 equal_width: None,
                 separator: None,
                 columns: vec![],
-            }),
+            })),
             ..Default::default()
         };
         assert!(!continuous_break_promotes_to_page_break(
@@ -1021,12 +1022,12 @@ mod tests {
         );
         doc.body = (0..6).map(|index| para(&format!("body {index}"))).collect();
         doc.final_section = SectionProperties {
-            page_size: Some(PageSize {
+            page_size: Dup::from(Some(PageSize {
                 width: Some(Dimension::<Twips>::new(4000)),
                 height: Some(Dimension::<Twips>::new(2000)),
                 orientation: None,
-            }),
-            page_margins: Some(PageMargins {
+            })),
+            page_margins: Dup::from(Some(PageMargins {
                 top: Some(Dimension::<Twips>::new(200)),
                 right: Some(Dimension::<Twips>::new(200)),
                 bottom: Some(Dimension::<Twips>::new(200)),
@@ -1034,7 +1035,7 @@ mod tests {
                 header: Some(Dimension::<Twips>::new(100)),
                 footer: Some(Dimension::<Twips>::new(100)),
                 gutter: None,
-            }),
+            })),
             header_refs: SectionHeaderFooterRefs {
                 default: Some(default_header),
                 first: Some(first_header),
@@ -1125,11 +1126,11 @@ mod tests {
     fn layout_respects_page_size() {
         let mut doc = empty_doc();
         doc.final_section = SectionProperties {
-            page_size: Some(PageSize {
+            page_size: Dup::from(Some(PageSize {
                 width: Some(crate::model::dimension::Dimension::new(12240)),
                 height: Some(crate::model::dimension::Dimension::new(15840)),
                 orientation: None,
-            }),
+            })),
             ..Default::default()
         };
 

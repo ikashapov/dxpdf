@@ -223,29 +223,18 @@ impl TblPrXml {
             .map(|v| StyleId::new(v.val));
         let props = TableProperties {
             style_id: style_id.clone(),
-            alignment: Dup::from(self.jc)
-                .into_value()
-                .map(|v| Alignment::from(v.val)),
-            width: Dup::from(self.tbl_w).into_value().map(Into::into),
-            layout: Dup::from(self.tbl_layout)
-                .into_value()
-                .map(|v| crate::docx::model::TableLayout::from(v.ty)),
-            indent: Dup::from(self.tbl_ind).into_value().map(Into::into),
-            borders: Dup::from(self.tbl_borders).into_value().map(Into::into),
-            cell_margins: Dup::from(self.tbl_cell_mar).into_value().map(Into::into),
-            cell_spacing: Dup::from(self.tbl_cell_spacing)
-                .into_value()
-                .map(Into::into),
-            look: Dup::from(self.tbl_look).into_value().map(Into::into),
-            style_row_band_size: Dup::from(self.tbl_style_row_band_size)
-                .into_value()
-                .map(|v| v.val),
-            style_col_band_size: Dup::from(self.tbl_style_col_band_size)
-                .into_value()
-                .map(|v| v.val),
-            positioning: Dup::from(self.tblp_pr).into_value().map(Into::into),
+            alignment: Dup::from(self.jc).map(|v| Alignment::from(v.val)),
+            width: Dup::from(self.tbl_w).map(Into::into),
+            layout: Dup::from(self.tbl_layout).map(|v| crate::docx::model::TableLayout::from(v.ty)),
+            indent: Dup::from(self.tbl_ind).map(Into::into),
+            borders: Dup::from(self.tbl_borders).map(Into::into),
+            cell_margins: Dup::from(self.tbl_cell_mar).map(Into::into),
+            cell_spacing: Dup::from(self.tbl_cell_spacing).map(Into::into),
+            look: Dup::from(self.tbl_look).map(Into::into),
+            style_row_band_size: Dup::from(self.tbl_style_row_band_size).map(|v| v.val),
+            style_col_band_size: Dup::from(self.tbl_style_col_band_size).map(|v| v.val),
+            positioning: Dup::from(self.tblp_pr).map(Into::into),
             overlap: Dup::from(self.tbl_overlap)
-                .into_value()
                 .map(|v| crate::docx::model::TableOverlap::from(v.val)),
         };
         (props, style_id)
@@ -377,22 +366,22 @@ impl From<TrHeightXml> for TableRowHeight {
 impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
         Self {
-            height: Dup::from(x.tr_height).into_value().map(Into::into),
+            height: Dup::from(x.tr_height).map(Into::into),
             is_header: last_toggle(x.tbl_header),
             cant_split: last_toggle(x.cant_split),
-            justification: Dup::from(x.jc).into_value().map(|v| Alignment::from(v.val)),
-            cnf_style: Dup::from(x.cnf_style).into_value().map(CnfStyle::from),
+            justification: Dup::from(x.jc).map(|v| Alignment::from(v.val)),
+            cnf_style: Dup::from(x.cnf_style).map(CnfStyle::from),
             grid_before: Dup::from(x.grid_before)
                 .into_value()
                 .map(|v| v.val)
                 .unwrap_or(0),
-            w_before: Dup::from(x.w_before).into_value().map(Into::into),
+            w_before: Dup::from(x.w_before).map(Into::into),
             grid_after: Dup::from(x.grid_after)
                 .into_value()
                 .map(|v| v.val)
                 .unwrap_or(0),
-            w_after: Dup::from(x.w_after).into_value().map(Into::into),
-            cell_spacing: Dup::from(x.tbl_cell_spacing).into_value().map(Into::into),
+            w_after: Dup::from(x.w_after).map(Into::into),
+            cell_spacing: Dup::from(x.tbl_cell_spacing).map(Into::into),
         }
     }
 }
@@ -524,7 +513,7 @@ mod tests {
             sid.map(|s| s.as_str().to_string()),
             Some("TableGrid".into())
         );
-        match tp.width.unwrap() {
+        match tp.width.cloned().unwrap() {
             TableMeasure::Pct(d) => assert_eq!(d.raw(), 5000),
             other => panic!("expected Pct, got {other:?}"),
         }
@@ -540,8 +529,8 @@ mod tests {
     #[test]
     fn tbl_pr_layout_and_alignment() {
         let (tp, _) = parse_tbl_pr(r#"<tblPr><jc val="center"/><tblLayout type="fixed"/></tblPr>"#);
-        assert_eq!(tp.layout, Some(TableLayout::Fixed));
-        assert_eq!(tp.alignment, Some(Alignment::Center));
+        assert_eq!(tp.layout, Dup::from(Some(TableLayout::Fixed)));
+        assert_eq!(tp.alignment, Dup::from(Some(Alignment::Center)));
     }
 
     #[test]
@@ -552,17 +541,17 @@ mod tests {
                 <tblCellMar><top w="100"/><left w="80"/></tblCellMar>
             </tblPr>"#,
         );
-        let b = tp.borders.unwrap();
+        let b = tp.borders.cloned().unwrap();
         assert_eq!(b.top.unwrap().style, BorderStyle::Single);
         assert_eq!(b.left.unwrap().style, BorderStyle::Double);
-        assert_eq!(tp.cell_margins.unwrap().top.raw(), 100);
+        assert_eq!(tp.cell_margins.cloned().unwrap().top.raw(), 100);
     }
 
     #[test]
     fn tbl_pr_tbl_look_attrs() {
         let (tp, _) =
             parse_tbl_pr(r#"<tblPr><tblLook firstRow="1" lastRow="0" noHBand="true"/></tblPr>"#);
-        let l = tp.look.unwrap();
+        let l = tp.look.cloned().unwrap();
         assert_eq!(l.first_row, Some(true));
         assert_eq!(l.last_row, Some(false));
         assert_eq!(l.no_h_band, Some(true));
@@ -576,7 +565,7 @@ mod tests {
     #[test]
     fn tbl_pr_tbl_look_legacy_val_default() {
         let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="04A0"/></tblPr>"#);
-        let l = tp.look.unwrap();
+        let l = tp.look.cloned().unwrap();
         assert_eq!(l.first_row, Some(true));
         assert_eq!(l.last_row, Some(false));
         assert_eq!(l.first_column, Some(true));
@@ -591,7 +580,7 @@ mod tests {
     #[test]
     fn tbl_pr_tbl_look_legacy_val_suppresses_banding() {
         let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="0620"/></tblPr>"#);
-        let l = tp.look.unwrap();
+        let l = tp.look.cloned().unwrap();
         assert_eq!(l.first_row, Some(true));
         assert_eq!(l.no_h_band, Some(true));
         assert_eq!(l.no_v_band, Some(true));
@@ -600,7 +589,7 @@ mod tests {
     #[test]
     fn tbl_pr_tbl_look_legacy_val_zero_clears_all() {
         let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="0000"/></tblPr>"#);
-        let l = tp.look.unwrap();
+        let l = tp.look.cloned().unwrap();
         assert_eq!(l.first_row, Some(false));
         assert_eq!(l.last_row, Some(false));
         assert_eq!(l.first_column, Some(false));
@@ -616,7 +605,7 @@ mod tests {
     fn tbl_pr_tbl_look_explicit_attrs_override_val() {
         let (tp, _) =
             parse_tbl_pr(r#"<tblPr><tblLook val="0000" firstRow="1" noVBand="1"/></tblPr>"#);
-        let l = tp.look.unwrap();
+        let l = tp.look.cloned().unwrap();
         assert_eq!(l.first_row, Some(true), "explicit firstRow=1 wins");
         assert_eq!(l.last_row, Some(false), "from val=0000");
         assert_eq!(l.first_column, Some(false), "from val=0000");
@@ -626,7 +615,7 @@ mod tests {
     #[test]
     fn tbl_pr_tbl_look_legacy_val_lowercase() {
         let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="04a0"/></tblPr>"#);
-        let l = tp.look.unwrap();
+        let l = tp.look.cloned().unwrap();
         assert_eq!(l.first_row, Some(true));
         assert_eq!(l.no_v_band, Some(true));
     }
@@ -640,8 +629,8 @@ mod tests {
                         horzAnchor="margin" tblpXSpec="center"/>
             </tblPr>"#,
         );
-        assert_eq!(tp.overlap, Some(TableOverlap::Never));
-        let pos = tp.positioning.unwrap();
+        assert_eq!(tp.overlap, Dup::from(Some(TableOverlap::Never)));
+        let pos = tp.positioning.cloned().unwrap();
         assert_eq!(pos.x.unwrap().raw(), 100);
         assert_eq!(pos.y.unwrap().raw(), 200);
         assert_eq!(pos.vert_anchor, Some(crate::docx::model::TableAnchor::Page));
@@ -658,7 +647,7 @@ mod tests {
     #[test]
     fn tr_pr_height_with_rule() {
         let tr = parse_tr_pr(r#"<trPr><trHeight val="440" hRule="atLeast"/></trPr>"#);
-        let h = tr.height.unwrap();
+        let h = tr.height.cloned().unwrap();
         assert_eq!(h.value.raw(), 440);
         assert_eq!(h.rule, HeightRule::AtLeast);
     }
@@ -689,7 +678,7 @@ mod tests {
     fn tr_pr_grid_after_and_w_after() {
         let tr = parse_tr_pr(r#"<trPr><gridAfter val="2"/><wAfter w="500" type="dxa"/></trPr>"#);
         assert_eq!(tr.grid_after, 2);
-        match tr.w_after.unwrap() {
+        match tr.w_after.cloned().unwrap() {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 500),
             other => panic!("expected Twips, got {other:?}"),
         }
@@ -699,7 +688,7 @@ mod tests {
     fn tr_pr_grid_before_and_w_before() {
         let tr = parse_tr_pr(r#"<trPr><gridBefore val="1"/><wBefore w="38" type="dxa"/></trPr>"#);
         assert_eq!(tr.grid_before, 1);
-        match tr.w_before.unwrap() {
+        match tr.w_before.cloned().unwrap() {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 38),
             other => panic!("expected Twips, got {other:?}"),
         }
@@ -710,8 +699,8 @@ mod tests {
         let tr = parse_tr_pr(r#"<trPr/>"#);
         assert_eq!(tr.grid_before, 0);
         assert_eq!(tr.grid_after, 0);
-        assert!(tr.w_before.is_none());
-        assert!(tr.w_after.is_none());
+        assert!(tr.w_before.is_absent());
+        assert!(tr.w_after.is_absent());
     }
 
     // ── tcPr ──
@@ -812,7 +801,7 @@ mod tests {
         )
         .unwrap()
         .into();
-        assert!(tr.cell_spacing.is_some(), "row-level §17.4.42");
+        assert!(tr.cell_spacing.cloned().is_some(), "row-level §17.4.42");
 
         let ex: crate::docx::model::TableRowPropertyExceptions =
             quick_xml::de::from_str::<TblPrExXml>(
@@ -833,12 +822,19 @@ mod tests {
                  <tblW w="1000" type="dxa"/><tblW w="5000" type="dxa"/>
                </tblPr>"#,
         );
-        assert_eq!(tbl.alignment, Some(Alignment::Center), "\u{a7}17.4.29");
+        assert_eq!(
+            tbl.alignment.get(),
+            Some(&Alignment::Center),
+            "\u{a7}17.4.29"
+        );
         assert!(
-            matches!(tbl.width, Some(TableMeasure::Twips(d)) if d.raw() == 5000),
+            matches!(tbl.width.get(), Some(TableMeasure::Twips(d)) if d.raw() == 5000),
             "\u{a7}17.4.63, got {:?}",
             tbl.width
         );
+        // Both occurrences reach the model; only the read resolves.
+        assert_eq!(tbl.alignment.all().len(), 2);
+        assert_eq!(tbl.width.all().len(), 2);
     }
 
     #[test]
@@ -848,7 +844,12 @@ mod tests {
                  <trHeight val="200"/><trHeight val="500"/>
                </trPr>"#,
         );
-        assert_eq!(tr.height.map(|h| h.value.raw()), Some(500), "\u{a7}17.4.81");
+        assert_eq!(
+            tr.height.get().map(|h| h.value.raw()),
+            Some(500),
+            "\u{a7}17.4.81"
+        );
+        assert_eq!(tr.height.all().len(), 2, "both occurrences reach the model");
     }
 
     #[test]

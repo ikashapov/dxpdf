@@ -58,7 +58,7 @@ impl PageConfig {
     pub fn from_section(sect: &SectionProperties) -> Self {
         let mut cfg = Self::default();
 
-        if let Some(ref ps) = sect.page_size {
+        if let Some(ps) = sect.page_size.get() {
             if let Some(w) = ps.width {
                 cfg.page_size.width = Pt::from(w);
             }
@@ -67,7 +67,7 @@ impl PageConfig {
             }
         }
 
-        if let Some(ref pm) = sect.page_margins {
+        if let Some(pm) = sect.page_margins.get() {
             if let Some(t) = pm.top {
                 cfg.margins.top = Pt::from(t);
             }
@@ -91,7 +91,7 @@ impl PageConfig {
         // §17.6.4: compute column geometry from the *clamped* text width, so a
         // page whose margins exceed its width yields zero-width columns rather
         // than negative ones.
-        cfg.columns = compute_columns(cfg.content_width(), &sect.columns);
+        cfg.columns = compute_columns(cfg.content_width(), sect.columns.get());
 
         cfg
     }
@@ -180,7 +180,7 @@ fn clamp_column_count(requested: u32, content_width: Pt, space: Pt) -> usize {
 /// **Tier 0:** §17.6.4 `w:sep` — the vertical rule drawn between columns — is
 /// parsed onto `model::Columns::separator` but never drawn. Position and width
 /// of the columns themselves are unaffected; only the divider line is missing.
-fn compute_columns(content_width: Pt, columns: &Option<Columns>) -> Vec<ColumnGeometry> {
+fn compute_columns(content_width: Pt, columns: Option<&Columns>) -> Vec<ColumnGeometry> {
     let single = || {
         vec![ColumnGeometry {
             x_offset: Pt::ZERO,
@@ -249,7 +249,7 @@ fn compute_columns(content_width: Pt, columns: &Option<Columns>) -> Vec<ColumnGe
 mod tests {
     use super::*;
     use crate::model::dimension::{Dimension, Twips};
-    use crate::model::{PageMargins, PageSize};
+    use crate::model::{Dup, PageMargins, PageSize};
 
     #[test]
     fn default_is_us_letter() {
@@ -269,11 +269,11 @@ mod tests {
     #[test]
     fn from_section_with_page_size() {
         let sect = SectionProperties {
-            page_size: Some(PageSize {
+            page_size: Dup::from(Some(PageSize {
                 width: Some(Dimension::<Twips>::new(12240)), // 8.5in = 612pt
                 height: Some(Dimension::<Twips>::new(15840)), // 11in = 792pt
                 orientation: None,
-            }),
+            })),
             ..Default::default()
         };
         let cfg = PageConfig::from_section(&sect);
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn from_section_with_margins() {
         let sect = SectionProperties {
-            page_margins: Some(PageMargins {
+            page_margins: Dup::from(Some(PageMargins {
                 top: Some(Dimension::<Twips>::new(1440)), // 1in = 72pt
                 right: Some(Dimension::<Twips>::new(1440)),
                 bottom: Some(Dimension::<Twips>::new(1440)),
@@ -292,7 +292,7 @@ mod tests {
                 header: Some(Dimension::<Twips>::new(720)), // 0.5in = 36pt
                 footer: Some(Dimension::<Twips>::new(720)),
                 gutter: None,
-            }),
+            })),
             ..Default::default()
         };
         let cfg = PageConfig::from_section(&sect);
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn from_section_partial_uses_defaults() {
         let sect = SectionProperties {
-            page_margins: Some(PageMargins {
+            page_margins: Dup::from(Some(PageMargins {
                 top: Some(Dimension::<Twips>::new(2880)), // 2in = 144pt
                 right: None,
                 bottom: None,
@@ -311,7 +311,7 @@ mod tests {
                 header: None,
                 footer: None,
                 gutter: None,
-            }),
+            })),
             ..Default::default()
         };
         let cfg = PageConfig::from_section(&sect);
@@ -324,7 +324,7 @@ mod tests {
     use crate::model::{ColumnDefinition, Columns};
 
     fn cols_of(c: Columns) -> Vec<ColumnGeometry> {
-        compute_columns(Pt::new(468.0), &Some(c))
+        compute_columns(Pt::new(468.0), Some(&c))
     }
 
     fn base() -> Columns {
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn no_columns_is_one_full_width_column() {
-        let g = compute_columns(Pt::new(468.0), &None);
+        let g = compute_columns(Pt::new(468.0), None);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].x_offset, Pt::ZERO);
         assert_eq!(g[0].width, Pt::new(468.0));
@@ -506,7 +506,7 @@ mod tests {
         // A zero-width text area still yields a usable single column.
         let degenerate = compute_columns(
             Pt::ZERO,
-            &Some(Columns {
+            Some(&Columns {
                 count: Some(u32::MAX),
                 ..base()
             }),
@@ -549,12 +549,12 @@ mod tests {
     #[test]
     fn margins_wider_than_the_page_clamp_to_zero_not_negative() {
         let sect = SectionProperties {
-            page_size: Some(PageSize {
+            page_size: Dup::from(Some(PageSize {
                 width: Some(Dimension::<Twips>::new(2000)), // 100pt
                 height: Some(Dimension::<Twips>::new(2000)),
                 orientation: None,
-            }),
-            page_margins: Some(PageMargins {
+            })),
+            page_margins: Dup::from(Some(PageMargins {
                 left: Some(Dimension::<Twips>::new(1440)),  // 72pt
                 right: Some(Dimension::<Twips>::new(1440)), // 72pt — 144 > 100
                 top: Some(Dimension::<Twips>::new(1440)),
@@ -562,7 +562,7 @@ mod tests {
                 header: None,
                 footer: None,
                 gutter: None,
-            }),
+            })),
             ..Default::default()
         };
         let cfg = PageConfig::from_section(&sect);

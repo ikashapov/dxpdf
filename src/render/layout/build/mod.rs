@@ -301,7 +301,7 @@ fn build_non_story_content(
                     let (family, mut size, ..) =
                         resolve_paragraph_defaults(p, ctx.resolved, false, None, None);
                     if let Some(ref mrp) = p.mark_run_properties {
-                        if let Some(fs) = mrp.font_size {
+                        if let Some(fs) = mrp.font_size.cloned() {
                             size = Pt::from(fs);
                         }
                     }

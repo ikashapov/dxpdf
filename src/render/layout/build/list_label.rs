@@ -27,6 +27,7 @@
 //! `w:bidi` — the stops, the pen, and the alignment-suppression rule together
 //! — and there is no reference corpus here to check that against.
 
+use crate::model::Dup;
 use std::rc::Rc;
 
 use crate::i18n::bidi::BidiLevel;
@@ -48,8 +49,8 @@ pub(super) fn inject_list_label(
     ctx: &BuildContext,
     state: &mut BuildState,
 ) {
-    let num_ref = match merged_props.numbering {
-        Some(ref nr) => nr,
+    let num_ref = match merged_props.numbering.get() {
+        Some(nr) => nr,
         None => return,
     };
 
@@ -112,7 +113,7 @@ pub(super) fn inject_list_label(
     // paragraph's *final* indentation wherever it came from, or the suffix tab
     // lands somewhere other than where the body text wraps. Only the §17.9.23
     // overwrite below stays keyed to the level-derived value.
-    let layout_ind = effective_ind.or(merged_props.indentation);
+    let layout_ind = effective_ind.or(merged_props.indentation.cloned());
 
     // §17.9.10: check for picture bullet before text label.
     let pic_bullet_injected = level_def
@@ -198,7 +199,7 @@ pub(super) fn inject_list_label(
     // §17.9.23: numbering level pPr overrides the paragraph style.
     // Only the paragraph's direct ind overrides the numbering level.
     if let Some(ind) = effective_ind {
-        merged_props.indentation = Some(ind);
+        merged_props.indentation = Dup::from(Some(ind));
     }
 }
 
@@ -210,7 +211,7 @@ fn effective_indentation(
     level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
 ) -> Option<model::Indentation> {
     let mut ind = *level_def?.indentation.as_ref()?;
-    if let Some(direct) = para.properties.indentation {
+    if let Some(direct) = para.properties.indentation.get() {
         if let Some(start) = direct.start {
             ind.start = Some(start);
         }
@@ -235,7 +236,7 @@ fn effective_indentation(
 /// label→text distance stays the hanging width, as in the left-aligned case.
 fn alignment_suppresses_tab(merged_props: &ParagraphProperties) -> bool {
     matches!(
-        merged_props.alignment,
+        merged_props.alignment.get(),
         Some(model::Alignment::Center | model::Alignment::End)
     )
 }
@@ -317,7 +318,7 @@ fn inject_text_label(
     auto_fit: crate::render::layout::ShapeAutoFit,
     layout_ind: Option<model::Indentation>,
 ) {
-    let num_id = model::NumId::new(merged_props.numbering.as_ref().unwrap().num_id);
+    let num_id = model::NumId::new(merged_props.numbering.get().unwrap().num_id);
 
     let (default_family, default_size, default_color, _, paragraph_style_run) =
         resolve_paragraph_defaults(para, ctx.resolved, false, None, None);
@@ -355,7 +356,7 @@ fn inject_text_label(
     // resolved as a separate scalar because it isn't part of
     // `FontProps`.
     let label_color = cascade
-        .pick(|rp| rp.color)
+        .pick(|rp| rp.color.cloned())
         .map(|c| {
             crate::render::resolve::color::resolve_color(
                 c,
@@ -591,13 +592,13 @@ impl<'a> ListLabelRunPropertyCascade<'a> {
 
         model::RunProperties {
             fonts,
-            font_size: self.pick(|rp| rp.font_size),
+            font_size: Dup::from(self.pick(|rp| rp.font_size.cloned())),
             bold: self.pick(|rp| rp.bold),
             italic: self.pick(|rp| rp.italic),
-            underline: self.pick(|rp| rp.underline),
-            color: self.pick(|rp| rp.color),
-            spacing: self.pick(|rp| rp.spacing),
-            text_scale: self.pick(|rp| rp.text_scale),
+            underline: Dup::from(self.pick(|rp| rp.underline.cloned())),
+            color: Dup::from(self.pick(|rp| rp.color.cloned())),
+            spacing: Dup::from(self.pick(|rp| rp.spacing.cloned())),
+            text_scale: Dup::from(self.pick(|rp| rp.text_scale.cloned())),
             ..Default::default()
         }
     }
@@ -679,7 +680,7 @@ mod tests {
 
     fn props_at(level: u8) -> ParagraphProperties {
         ParagraphProperties {
-            numbering: Some(NumberingReference { num_id: 7, level }),
+            numbering: Dup::from(Some(NumberingReference { num_id: 7, level })),
             ..Default::default()
         }
     }
@@ -812,7 +813,7 @@ mod tests {
             ..decimal_level()
         }]);
         let para = para_with(ParagraphProperties {
-            indentation: Some(ind(567, 567)),
+            indentation: Dup::from(Some(ind(567, 567))),
             ..Default::default()
         });
         let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
@@ -822,7 +823,7 @@ mod tests {
             Some(567),
             "implicit tab stop must sit at the direct indent, not the level's"
         );
-        let merged = props.indentation.expect("indentation merged");
+        let merged = props.indentation.get().expect("indentation merged");
         assert_eq!(merged.start.map(|d| d.raw()), Some(567));
         assert_eq!(
             merged.first_line,
@@ -862,7 +863,7 @@ mod tests {
                 ..decimal_level()
             }]);
             let props = ParagraphProperties {
-                alignment: Some(alignment),
+                alignment: Dup::from(Some(alignment)),
                 ..props_at(0)
             };
             let (fragments, props) = inject_full(
@@ -917,7 +918,7 @@ mod tests {
             ..decimal_level()
         }]);
         let props = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             ..props_at(0)
         };
         let (fragments, _) = inject_full(
@@ -943,7 +944,7 @@ mod tests {
     #[test]
     fn centered_spacer_is_never_underlined() {
         let level_rpr = RunProperties {
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         let resolved = resolved_with(vec![ResolvedNumberingLevel {
@@ -952,7 +953,7 @@ mod tests {
             ..decimal_level()
         }]);
         let props = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             ..props_at(0)
         };
         let (fragments, _) = inject_full(
@@ -998,14 +999,14 @@ mod tests {
             ..decimal_level()
         }]);
         let para = para_with(ParagraphProperties {
-            indentation: Some(Indentation {
+            indentation: Dup::from(Some(Indentation {
                 mirror: Some(true),
                 ..ind(567, 567)
-            }),
+            })),
             ..Default::default()
         });
         let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
-        assert_eq!(props.indentation.unwrap().mirror, Some(true));
+        assert_eq!(props.indentation.get().unwrap().mirror, Some(true));
     }
 
     /// When the numbering level defines no `w:ind`, label geometry falls back
@@ -1016,7 +1017,7 @@ mod tests {
     fn level_without_ind_falls_back_to_cascade_indentation() {
         let resolved = resolved_with(vec![decimal_level()]); // no level ind
         let props = ParagraphProperties {
-            indentation: Some(ind(720, 360)),
+            indentation: Dup::from(Some(ind(720, 360))),
             ..props_at(0)
         };
         let (fragments, props) = inject_full(
@@ -1048,7 +1049,10 @@ mod tests {
         }
         // The cascade value stays as-is; the §17.9.23 overwrite is for
         // level-derived indentation only.
-        assert_eq!(props.indentation.unwrap().start.map(|d| d.raw()), Some(720));
+        assert_eq!(
+            props.indentation.get().unwrap().start.map(|d| d.raw()),
+            Some(720)
+        );
     }
 
     /// The picture-bullet branch honors alignment suppression too: a centered
@@ -1099,7 +1103,7 @@ mod tests {
             (None, true),
         ] {
             let props = ParagraphProperties {
-                alignment,
+                alignment: Dup::from(alignment),
                 ..props_at(0)
             };
             let (fragments, _) = inject_full(
@@ -1298,7 +1302,7 @@ mod tests {
         );
 
         assert!(fragments.is_empty(), "no label injected");
-        assert!(props.indentation.is_none(), "indentation untouched");
+        assert!(props.indentation.get().is_none(), "indentation untouched");
         assert!(state.list_counters.is_empty(), "no counter advanced");
     }
 
@@ -1317,10 +1321,10 @@ mod tests {
         let mut state = BuildState::default();
         let mut fragments = Vec::new();
         let mut props = ParagraphProperties {
-            numbering: Some(NumberingReference {
+            numbering: Dup::from(Some(NumberingReference {
                 num_id: 999,
                 level: 0,
-            }),
+            })),
             ..Default::default()
         };
         inject_list_label(
@@ -1354,10 +1358,10 @@ mod tests {
             resolved: &resolved,
         };
         let mut para = numbered_para();
-        para.properties.indentation = Some(Indentation {
+        para.properties.indentation = Dup::from(Some(Indentation {
             start: Some(Dimension::new(1440)),
             ..Default::default()
-        });
+        }));
         let mut fragments = Vec::new();
         let mut props = props_at(0);
         inject_list_label(
@@ -1368,7 +1372,10 @@ mod tests {
             &mut BuildState::default(),
         );
 
-        let ind = props.indentation.expect("the level supplies indentation");
+        let ind = props
+            .indentation
+            .get()
+            .expect("the level supplies indentation");
         assert_eq!(ind.start, Some(Dimension::new(1440)), "direct start wins");
         assert_eq!(ind.end, Some(Dimension::new(100)), "level end survives");
     }
@@ -1382,7 +1389,7 @@ mod tests {
 
     fn rp_with_underline(u: UnderlineStyle) -> RunProperties {
         RunProperties {
-            underline: Some(u),
+            underline: Dup::from(Some(u)),
             ..Default::default()
         }
     }
@@ -1424,7 +1431,7 @@ mod tests {
         };
         assert_eq!(cascade.pick(|rp| rp.bold), Some(true));
         assert_eq!(
-            cascade.pick(|rp| rp.underline),
+            cascade.pick(|rp| rp.underline.cloned()),
             Some(UnderlineStyle::Single)
         );
     }
@@ -1440,7 +1447,7 @@ mod tests {
             paragraph_style: Some(&style),
         };
         assert_eq!(
-            cascade.pick(|rp| rp.underline),
+            cascade.pick(|rp| rp.underline.cloned()),
             Some(UnderlineStyle::Double)
         );
     }
@@ -1483,7 +1490,7 @@ mod tests {
             paragraph_style: None,
         };
         let effective = cascade.resolve();
-        assert_eq!(effective.underline, Some(UnderlineStyle::Single));
+        assert_eq!(effective.underline, Dup::from(Some(UnderlineStyle::Single)));
     }
 
     /// `FontSet` (non-`Copy`) cascade rule: the resolved `fonts` is
@@ -1585,7 +1592,7 @@ mod tests {
     #[test]
     fn label_font_inherits_char_spacing_from_level() {
         let level = RunProperties {
-            spacing: Some(Dimension::<Twips>::new(40)),
+            spacing: Dup::from(Some(Dimension::<Twips>::new(40))),
             ..Default::default()
         };
         let cascade = ListLabelRunPropertyCascade {
@@ -1608,7 +1615,7 @@ mod tests {
     #[test]
     fn label_font_inherits_text_scale_from_level() {
         let level = RunProperties {
-            text_scale: Some(TextScale::new(150)),
+            text_scale: Dup::from(Some(TextScale::new(150))),
             ..Default::default()
         };
         let cascade = ListLabelRunPropertyCascade {
@@ -1632,7 +1639,7 @@ mod tests {
         let level = RunProperties {
             bold: Some(true),
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)), // 12 pt
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))), // 12 pt
             fonts: FontSet {
                 ascii: FontSlot::from_name("Verdana"),
                 ..Default::default()
@@ -1695,18 +1702,18 @@ mod tests {
 
         let level = RunProperties {
             bold: Some(true),
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         let mark = RunProperties {
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
-            spacing: Some(Dimension::<Twips>::new(40)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
+            spacing: Dup::from(Some(Dimension::<Twips>::new(40))),
             ..Default::default()
         };
         let style = RunProperties {
-            color: Some(Color::Rgb(0x112233)),
-            text_scale: Some(TextScale::new(120)),
+            color: Dup::from(Some(Color::Rgb(0x112233))),
+            text_scale: Dup::from(Some(TextScale::new(120))),
             fonts: FontSet {
                 ascii: FontSlot::from_name("Calibri"),
                 ..Default::default()
@@ -1722,24 +1729,28 @@ mod tests {
         assert_eq!(effective.bold, Some(true), "from level");
         assert_eq!(
             effective.underline,
-            Some(UnderlineStyle::Single),
+            Dup::from(Some(UnderlineStyle::Single)),
             "from level"
         );
         assert_eq!(effective.italic, Some(true), "from mark");
         assert_eq!(
             effective.font_size,
-            Some(Dimension::<HalfPoints>::new(24)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             "from mark"
         );
         assert_eq!(
             effective.spacing,
-            Some(Dimension::<Twips>::new(40)),
+            Dup::from(Some(Dimension::<Twips>::new(40))),
             "from mark"
         );
-        assert_eq!(effective.color, Some(Color::Rgb(0x112233)), "from style");
+        assert_eq!(
+            effective.color,
+            Dup::from(Some(Color::Rgb(0x112233))),
+            "from style"
+        );
         assert_eq!(
             effective.text_scale,
-            Some(TextScale::new(120)),
+            Dup::from(Some(TextScale::new(120))),
             "from style"
         );
         assert_eq!(

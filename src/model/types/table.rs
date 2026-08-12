@@ -19,24 +19,26 @@ pub struct Table {
 
 #[derive(Clone, Debug, Default)]
 pub struct TableProperties {
-    /// §17.4.63: table style reference.
+    /// §17.4.63: table style reference. Stays `Option`: `split` returns it
+    /// separately because the cascade applies it *before* direct formatting,
+    /// so it is consumed at the seam rather than carried.
     pub style_id: Option<super::identifiers::StyleId>,
-    pub alignment: Option<Alignment>,
-    pub width: Option<TableMeasure>,
-    pub layout: Option<TableLayout>,
-    pub indent: Option<TableMeasure>,
-    pub borders: Option<TableBorders>,
-    pub cell_margins: Option<EdgeInsets<Twips>>,
-    pub cell_spacing: Option<TableMeasure>,
-    pub look: Option<TableLook>,
+    pub alignment: Dup<Alignment>,
+    pub width: Dup<TableMeasure>,
+    pub layout: Dup<TableLayout>,
+    pub indent: Dup<TableMeasure>,
+    pub borders: Dup<TableBorders>,
+    pub cell_margins: Dup<EdgeInsets<Twips>>,
+    pub cell_spacing: Dup<TableMeasure>,
+    pub look: Dup<TableLook>,
     /// §17.4.68: number of rows in each row band for conditional formatting.
-    pub style_row_band_size: Option<u32>,
+    pub style_row_band_size: Dup<u32>,
     /// §17.4.67: number of columns in each column band for conditional formatting.
-    pub style_col_band_size: Option<u32>,
+    pub style_col_band_size: Dup<u32>,
     /// §17.4.58: floating table positioning properties.
-    pub positioning: Option<TablePositioning>,
+    pub positioning: Dup<TablePositioning>,
     /// §17.4.57: whether this floating table can overlap other floating tables.
-    pub overlap: Option<TableOverlap>,
+    pub overlap: Dup<TableOverlap>,
 }
 
 /// §17.4.58: floating table positioning.
@@ -122,29 +124,29 @@ pub struct TableRowPropertyExceptions {
 
 #[derive(Clone, Debug, Default)]
 pub struct TableRowProperties {
-    pub height: Option<TableRowHeight>,
+    pub height: Dup<TableRowHeight>,
     pub is_header: Option<bool>,
     pub cant_split: Option<bool>,
     /// §17.4.29: alignment of the row with respect to text margins (uses ST_Jc).
-    pub justification: Option<Alignment>,
+    pub justification: Dup<Alignment>,
     /// §17.3.1.8: table conditional formatting applied to this row.
-    pub cnf_style: Option<CnfStyle>,
+    pub cnf_style: Dup<CnfStyle>,
     /// §17.4.17: number of grid columns to skip before the first cell of the row.
     /// Default 0 when omitted from `<w:trPr>`.
     pub grid_before: u32,
     /// §17.4.42: row-level override of the table's `tblCellSpacing`.
-    pub cell_spacing: Option<TableMeasure>,
+    pub cell_spacing: Dup<TableMeasure>,
     /// §17.4.86: preferred width of the leading space before the first cell.
     /// Note: when present and divergent from the corresponding `tblGrid` columns'
     /// summed widths, treated as informational only — column widths are not
     /// overridden per row in this implementation; a `warn!` is logged on mismatch.
-    pub w_before: Option<TableMeasure>,
+    pub w_before: Dup<TableMeasure>,
     /// §17.4.16: number of grid columns to skip after the last cell of the row.
     /// Default 0 when omitted from `<w:trPr>`.
     pub grid_after: u32,
     /// §17.4.85: preferred width of the trailing space after the last cell.
     /// Same width-override caveat as `w_before`.
-    pub w_after: Option<TableMeasure>,
+    pub w_after: Dup<TableMeasure>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

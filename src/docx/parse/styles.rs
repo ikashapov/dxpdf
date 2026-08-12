@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(sheet.doc_defaults_run.bold, Some(true));
         assert_eq!(
             sheet.doc_defaults_paragraph.alignment,
-            Some(Alignment::Center)
+            Dup::from(Some(Alignment::Center))
         );
     }
 

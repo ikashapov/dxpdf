@@ -1,3 +1,4 @@
+use crate::model::Dup;
 use std::rc::Rc;
 
 use crate::i18n::bidi::BidiLevel;
@@ -185,7 +186,7 @@ pub(super) fn build_paragraph_block(
         style,
         lines,
         h_space: dc_h_space,
-    }) = merged_props.frame_properties
+    }) = merged_props.frame_properties.cloned()
     {
         let drop_cap_lines = lines;
         let width: Pt = fragments.iter().map(|f| f.width()).sum();
@@ -203,11 +204,13 @@ pub(super) fn build_paragraph_block(
         // This includes indent_left + indent_first_line from the cascade.
         let dc_indent_left = merged_props
             .indentation
+            .get()
             .and_then(|i| i.start)
             .map(Pt::from)
             .unwrap_or(Pt::ZERO);
         let dc_indent_first = merged_props
             .indentation
+            .get()
             .and_then(|i| i.first_line)
             .map(|fl| match fl {
                 model::FirstLineIndent::FirstLine(v) => Pt::from(v),
@@ -216,13 +219,15 @@ pub(super) fn build_paragraph_block(
             })
             .unwrap_or(Pt::ZERO);
         // §17.3.1.33: frame height from drop cap paragraph's exact line spacing.
-        let frame_height = merged_props
-            .spacing
-            .and_then(|s| s.line)
-            .and_then(|ls| match ls {
-                model::LineSpacing::Exact(v) => Some(Pt::from(v)),
-                _ => None,
-            });
+        let frame_height =
+            merged_props
+                .spacing
+                .get()
+                .and_then(|s| s.line)
+                .and_then(|ls| match ls {
+                    model::LineSpacing::Exact(v) => Some(Pt::from(v)),
+                    _ => None,
+                });
         // §17.3.2.19: position offset from the drop cap run.
         let position_offset = fragments
             .first()
@@ -519,9 +524,9 @@ pub(super) fn build_fragments(
 
     // §17.7.2: table style run properties override Normal.
     if let Some(ts) = table_style {
-        if let Some(fs) = ts.run.font_size {
+        if let Some(fs) = ts.run.font_size.cloned() {
             default_size = Pt::from(fs);
-            run_defaults.font_size = Some(fs);
+            run_defaults.font_size = Dup::from(Some(fs));
         }
     }
 
@@ -534,10 +539,10 @@ pub(super) fn build_fragments(
             let mut overlay = rp.clone();
             merge_run_properties(&mut overlay, &run_defaults);
             run_defaults = overlay;
-            if let Some(fs) = run_defaults.font_size {
+            if let Some(fs) = run_defaults.font_size.cloned() {
                 default_size = Pt::from(fs);
             }
-            if let Some(color) = run_defaults.color {
+            if let Some(color) = run_defaults.color.cloned() {
                 default_color = resolve_color(color, ColorContext::Text);
             }
         }
@@ -851,11 +856,11 @@ mod tests {
         let resolved = empty_resolved();
         with_ctx(&resolved, |ctx, state| {
             let mut cap = para(vec![text_run("D")]);
-            cap.properties.frame_properties = Some(model::FrameKind::DropCap {
+            cap.properties.frame_properties = Dup::from(Some(model::FrameKind::DropCap {
                 style: model::DropCap::Drop,
                 lines: 3,
                 h_space: None,
-            });
+            }));
 
             let mut pending = None;
             assert!(
@@ -894,9 +899,9 @@ mod tests {
     #[test]
     fn conditional_formatting_outranks_table_style() {
         let mut resolved = empty_resolved();
-        resolved.doc_defaults_paragraph.alignment = Some(model::Alignment::Start);
+        resolved.doc_defaults_paragraph.alignment = Dup::from(Some(model::Alignment::Start));
         let table_style = resolved_style(model::ParagraphProperties {
-            alignment: Some(model::Alignment::Center),
+            alignment: Dup::from(Some(model::Alignment::Center)),
             ..Default::default()
         });
 
@@ -911,7 +916,7 @@ mod tests {
             );
             assert_eq!(
                 props.alignment,
-                Some(model::Alignment::Center),
+                Dup::from(Some(model::Alignment::Center)),
                 "table style beats doc defaults"
             );
 
@@ -920,7 +925,7 @@ mod tests {
                 cell_properties: None,
                 run_properties: None,
                 paragraph_properties: Some(model::ParagraphProperties {
-                    alignment: Some(model::Alignment::End),
+                    alignment: Dup::from(Some(model::Alignment::End)),
                     ..Default::default()
                 }),
             };
@@ -933,7 +938,7 @@ mod tests {
             );
             assert_eq!(
                 props.alignment,
-                Some(model::Alignment::End),
+                Dup::from(Some(model::Alignment::End)),
                 "conditional formatting beats the table style"
             );
         });
@@ -944,25 +949,25 @@ mod tests {
     fn direct_paragraph_properties_outrank_conditional_formatting() {
         let resolved = empty_resolved();
         let table_style = resolved_style(model::ParagraphProperties {
-            alignment: Some(model::Alignment::Center),
+            alignment: Dup::from(Some(model::Alignment::Center)),
             ..Default::default()
         });
         let cond = CellConditionalFormatting {
             cell_properties: None,
             run_properties: None,
             paragraph_properties: Some(model::ParagraphProperties {
-                alignment: Some(model::Alignment::End),
+                alignment: Dup::from(Some(model::Alignment::End)),
                 ..Default::default()
             }),
         };
 
         with_ctx(&resolved, |ctx, state| {
             let mut p = para(vec![text_run("x")]);
-            p.properties.alignment = Some(model::Alignment::Both);
+            p.properties.alignment = Dup::from(Some(model::Alignment::Both));
             let (_, props) = build_fragments(&p, ctx, state, Some(&table_style), Some(&cond));
             assert_eq!(
                 props.alignment,
-                Some(model::Alignment::Both),
+                Dup::from(Some(model::Alignment::Both)),
                 "direct pPr wins over every table layer"
             );
         });

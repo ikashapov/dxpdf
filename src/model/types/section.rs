@@ -1,23 +1,36 @@
 //! Section properties — page size, margins, columns, headers/footers.
 
 use crate::model::dimension::{Dimension, FractionPoints, Twips};
+use crate::model::Dup;
 
 use super::formatting::NumberFormat;
 use super::identifiers::{RelId, SectionRevisionIds};
 
+/// §17.6.18 `<w:sectPr>`.
+///
+/// Unlike the `w:` property bags, this one was never fatal on a repeated
+/// child: it deserializes through a `$value` catch-all, which simply
+/// overwrote a local. Carrying [`Dup`] here buys losslessness, not tolerance —
+/// the earlier occurrences now reach the model instead of being dropped in the
+/// fold. See `model::dup`.
 #[derive(Clone, Debug, Default)]
 pub struct SectionProperties {
-    pub page_size: Option<PageSize>,
-    pub page_margins: Option<PageMargins>,
-    pub columns: Option<Columns>,
+    pub page_size: Dup<PageSize>,
+    pub page_margins: Dup<PageMargins>,
+    pub columns: Dup<Columns>,
     /// §17.6.5: document grid for East Asian typography and line pitch.
-    pub doc_grid: Option<DocGrid>,
+    pub doc_grid: Dup<DocGrid>,
+    /// §17.6.10: `<w:headerReference>`, one per `@w:type`. Genuinely
+    /// repeatable — the spec expects up to three (default, first, even) — so
+    /// this is a keyed set, not a [`Dup`]: repetition here is the schema
+    /// working, not a producer violating it.
     pub header_refs: SectionHeaderFooterRefs,
+    /// §17.6.5: `<w:footerReference>`. See [`SectionProperties::header_refs`].
     pub footer_refs: SectionHeaderFooterRefs,
     pub title_page: Option<bool>,
-    pub section_type: Option<SectionType>,
+    pub section_type: Dup<SectionType>,
     /// §17.6.12: page numbering settings for this section.
-    pub page_number_type: Option<PageNumberType>,
+    pub page_number_type: Dup<PageNumberType>,
     pub rsids: SectionRevisionIds,
 }
 

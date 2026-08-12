@@ -160,11 +160,12 @@ where
                 crate::render::resolve::color::ColorContext::Text,
             )
         })
+        .cloned()
         .unwrap_or(default_color);
     // §17.3.2.32 / §17.3.2.15: shading or highlight as background.
     let shading = effective_props
         .shading
-        .as_ref()
+        .get()
         .map(|s| {
             crate::render::resolve::color::resolve_color(
                 s.fill,
@@ -174,10 +175,15 @@ where
         // §17.18.40: HighlightColor::None is the explicit "no highlight"
         // override and yields no fill, so use `and_then` to thread the
         // Option through.
-        .or_else(|| effective_props.highlight.and_then(resolve_highlight_color));
+        .or_else(|| {
+            effective_props
+                .highlight
+                .cloned()
+                .and_then(resolve_highlight_color)
+        });
 
     // §17.3.2.42: vertical alignment (super/sub).
-    let mut baseline_offset = match effective_props.vertical_align {
+    let mut baseline_offset = match effective_props.vertical_align.cloned() {
         Some(VerticalAlign::Superscript) => {
             let (_, base_m) = measure_text("X", &font);
             font.size = font.size * SUPERSCRIPT_FONT_SIZE_RATIO;
@@ -191,12 +197,12 @@ where
         _ => Pt::ZERO,
     };
     // §17.3.2.19: w:position — vertical baseline offset in half-points.
-    if let Some(pos) = effective_props.position {
+    if let Some(pos) = effective_props.position.cloned() {
         baseline_offset += Pt::from(pos);
     }
 
     // §17.3.2.4: run-level border (filtered to drop the no-border styles).
-    let border = run_border_to_fragment(effective_props.border.as_ref());
+    let border = run_border_to_fragment(effective_props.border.get());
 
     let text_style = TextRunStyle {
         color,
@@ -1212,7 +1218,7 @@ mod tests {
                     ascii: FontSlot::from_name(font),
                     ..Default::default()
                 },
-                font_size: Some(Dimension::<HalfPoints>::new(size)),
+                font_size: Dup::from(Some(Dimension::<HalfPoints>::new(size))),
                 ..Default::default()
             },
             content: vec![RunElement::Text(text.into())],

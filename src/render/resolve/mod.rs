@@ -229,7 +229,7 @@ mod tests {
     fn resolve_resolves_styles() {
         let mut doc = empty_doc();
         doc.styles.doc_defaults_run = RunProperties {
-            font_size: Some(Dimension::<HalfPoints>::new(22)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(22))),
             ..Default::default()
         };
         doc.styles.styles.insert(
@@ -240,7 +240,7 @@ mod tests {
                 based_on: None,
                 is_default: true,
                 paragraph_properties: Some(ParagraphProperties {
-                    alignment: Some(Alignment::Start),
+                    alignment: Dup::from(Some(Alignment::Start)),
                     ..Default::default()
                 }),
                 run_properties: None,
@@ -251,10 +251,13 @@ mod tests {
 
         let resolved = resolve(doc);
         let normal = resolved.styles.get(&StyleId::new("Normal")).unwrap();
-        assert_eq!(normal.paragraph.alignment, Some(Alignment::Start));
+        assert_eq!(
+            normal.paragraph.alignment,
+            Dup::from(Some(Alignment::Start))
+        );
         assert_eq!(
             normal.run.font_size,
-            Some(Dimension::<HalfPoints>::new(22)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(22))),
             "should inherit doc default"
         );
     }

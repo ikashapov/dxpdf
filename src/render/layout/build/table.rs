@@ -114,11 +114,11 @@ pub(super) fn build_table(
     // §17.4.42: default cell margins from table style cascade.
     let style_cell_margins = raw_table_style
         .and_then(|s| s.table.as_ref())
-        .and_then(|tp| tp.cell_margins);
+        .and_then(|tp| tp.cell_margins.cloned());
     // Per-edge merge: direct tblCellMar overrides style per-edge, with
     // unspecified edges (value 0) falling back to the style's value.
     // Word merges per-edge rather than replacing the entire set.
-    let default_cell_margins = match (t.properties.cell_margins, style_cell_margins) {
+    let default_cell_margins = match (t.properties.cell_margins.cloned(), style_cell_margins) {
         (Some(direct), Some(style)) => {
             use crate::model::geometry::EdgeInsets;
             Some(EdgeInsets {
@@ -151,7 +151,7 @@ pub(super) fn build_table(
 
     // §17.4.63: resolve table width from tblW.
     let is_auto_width = matches!(
-        t.properties.width,
+        t.properties.width.get(),
         None | Some(model::TableMeasure::Auto) | Some(model::TableMeasure::Nil)
     );
     let cell_margins_h = default_cell_margins
@@ -165,10 +165,10 @@ pub(super) fn build_table(
     // centered tables have different cell margins (cf. the stacked
     // "Anhang: Sauberkeit" tables in the Volvo Annahme-Protokoll).
     let extends_for_alignment = !matches!(
-        t.properties.alignment,
+        t.properties.alignment.get(),
         Some(model::Alignment::Center) | Some(model::Alignment::End)
     );
-    let target_width = match t.properties.width {
+    let target_width = match t.properties.width.get() {
         Some(model::TableMeasure::Pct(pct)) => {
             // §17.4.63: percentage in fiftieths of a percent. 5000 = 100%.
             let ratio = pct.raw() as f32 / 5000.0;
@@ -179,7 +179,7 @@ pub(super) fn build_table(
             };
             base * ratio
         }
-        Some(model::TableMeasure::Twips(tw)) => Pt::from(tw),
+        Some(model::TableMeasure::Twips(tw)) => Pt::from(*tw),
         _ => available_width, // auto/nil: use grid cols or available width
     };
     // §17.4.53: tblLayout controls whether columns may auto-resize to fit
@@ -197,14 +197,14 @@ pub(super) fn build_table(
     // be left between all cells", not extra width. Reserving one spacing here
     // and offsetting each cell by one in `measure_table_rows` yields exactly
     // `cell_spacing` between adjacent cells *and* at both table edges.
-    let cell_spacing = resolve_cell_spacing(t.properties.cell_spacing);
+    let cell_spacing = resolve_cell_spacing(t.properties.cell_spacing.cloned());
     let col_widths = reserve_cell_spacing(col_widths, cell_spacing);
     let style_overrides = raw_table_style
         .map(|s| s.table_style_overrides.as_slice())
         .unwrap_or(&[]);
-    let tbl_look = t.properties.look.as_ref();
-    let row_band_size = t.properties.style_row_band_size.unwrap_or(1);
-    let col_band_size = t.properties.style_col_band_size.unwrap_or(1);
+    let tbl_look = t.properties.look.get();
+    let row_band_size = t.properties.style_row_band_size.cloned().unwrap_or(1);
+    let col_band_size = t.properties.style_col_band_size.cloned().unwrap_or(1);
     let num_rows = t.rows.len();
 
     // §17.4.38: resolve table borders — merge direct properties over table style.
@@ -213,8 +213,8 @@ pub(super) fn build_table(
     // per-row tblPrEx merges (§17.4.61) below have a stable basis.
     let style_borders = raw_table_style
         .and_then(|s| s.table.as_ref())
-        .and_then(|tp| tp.borders.as_ref());
-    let tbl_borders = match (t.properties.borders.as_ref(), style_borders) {
+        .and_then(|tp| tp.borders.get());
+    let tbl_borders = match (t.properties.borders.get(), style_borders) {
         (Some(direct), Some(style)) => Some(merge_table_borders(direct, style)),
         (Some(direct), None) => Some(*direct),
         (None, Some(style)) => Some(*style),
@@ -301,7 +301,7 @@ pub(super) fn build_table(
             // the grid slots are shrunk once, up front — so a per-row value
             // cannot be honoured without a per-row grid. Report it rather than
             // dropping it silently; the parsed value stays on the model.
-            let row_spacing = row.properties.cell_spacing.or_else(|| {
+            let row_spacing = row.properties.cell_spacing.cloned().or_else(|| {
                 row.property_exceptions
                     .as_ref()
                     .and_then(|e| e.cell_spacing)
@@ -327,7 +327,7 @@ pub(super) fn build_table(
                 // [MS-OE376] §2.4.77(c) notes Word requires `val = 0` whenever
                 // `hRule="auto"`, making `AtLeast(0)` a no-op on Word output.
                 // Other producers are not bound by that.
-                height_rule: row.properties.height.and_then(row_height_rule),
+                height_rule: row.properties.height.cloned().and_then(row_height_rule),
                 is_header: row.properties.is_header,
                 cant_split: row.properties.cant_split,
                 grid_before: row.properties.grid_before,
@@ -361,7 +361,7 @@ pub(super) fn build_table(
     // not carried into `TableFloatInfo` — a horizontally-offset or
     // margin/page-anchored-horizontally table places as if none of those were
     // set.
-    let float_info = t.properties.positioning.as_ref().map(|pos| {
+    let float_info = t.properties.positioning.get().map(|pos| {
         super::super::section::TableFloatInfo {
             right_gap: pos.right_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             bottom_gap: pos.bottom_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
@@ -372,7 +372,7 @@ pub(super) fn build_table(
             vert_anchor: pos.vert_anchor.unwrap_or(crate::model::TableAnchor::Text),
             // §17.4.57: tblOverlap controls collision behavior with
             // other floats on the same page.
-            overlap: t.properties.overlap,
+            overlap: t.properties.overlap.cloned(),
         }
     });
 
@@ -380,15 +380,15 @@ pub(super) fn build_table(
     // For full-width left-aligned tables, MS Word shifts the table left
     // by the default cell margin so cell content aligns with paragraph text.
     let is_full_width = matches!(
-        t.properties.width,
+        t.properties.width.get(),
         Some(model::TableMeasure::Pct(pct)) if pct.raw() >= 5000
     );
     let is_left_aligned = !matches!(
-        t.properties.alignment,
+        t.properties.alignment.get(),
         Some(model::Alignment::Center) | Some(model::Alignment::End)
     );
-    let indent = match t.properties.indent {
-        Some(model::TableMeasure::Twips(tw)) => Pt::from(tw),
+    let indent = match t.properties.indent.get() {
+        Some(model::TableMeasure::Twips(tw)) => Pt::from(*tw),
         _ if is_full_width && is_left_aligned => -default_cell_margins
             .map(|m| Pt::from(m.left))
             .unwrap_or(Pt::ZERO),
@@ -401,7 +401,7 @@ pub(super) fn build_table(
         cell_spacing,
         border_config,
         indent,
-        alignment: t.properties.alignment,
+        alignment: t.properties.alignment.cloned(),
         float_info,
     }
 }

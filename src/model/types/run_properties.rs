@@ -1,6 +1,7 @@
 //! Run (character) properties.
 
 use crate::model::dimension::{Dimension, HalfPoints, Twips};
+use crate::model::Dup;
 
 use super::color::Color;
 use super::formatting::{Border, Shading};
@@ -9,17 +10,17 @@ use super::formatting::{Border, Shading};
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct RunProperties {
     pub fonts: FontSet,
-    pub font_size: Option<Dimension<HalfPoints>>,
+    pub font_size: Dup<Dimension<HalfPoints>>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
-    pub underline: Option<UnderlineStyle>,
+    pub underline: Dup<UnderlineStyle>,
     pub strike: Option<StrikeStyle>,
-    pub color: Option<Color>,
-    pub highlight: Option<HighlightColor>,
-    pub shading: Option<Shading>,
-    pub vertical_align: Option<VerticalAlign>,
-    pub spacing: Option<Dimension<Twips>>,
-    pub kerning: Option<Dimension<HalfPoints>>,
+    pub color: Dup<Color>,
+    pub highlight: Dup<HighlightColor>,
+    pub shading: Dup<Shading>,
+    pub vertical_align: Dup<VerticalAlign>,
+    pub spacing: Dup<Dimension<Twips>>,
+    pub kerning: Dup<Dimension<HalfPoints>>,
     pub all_caps: Option<bool>,
     pub small_caps: Option<bool>,
     pub vanish: Option<bool>,
@@ -41,15 +42,15 @@ pub struct RunProperties {
     pub shadow: Option<bool>,
     /// §17.3.2.19: vertical position offset of text baseline, in half-points.
     /// Positive raises, negative lowers.
-    pub position: Option<Dimension<HalfPoints>>,
+    pub position: Dup<Dimension<HalfPoints>>,
     /// §17.3.2.20: proofing languages per script category (BCP 47 tags).
-    pub lang: Option<Lang>,
+    pub lang: Dup<Lang>,
     /// §17.3.2.4: border around run content.
-    pub border: Option<Border>,
+    pub border: Dup<Border>,
     /// §17.3.2.45 (`<w:w>`): horizontal character scaling, as a percentage.
     /// Scales glyph advances horizontally without affecting font size or
     /// inter-character spacing (`w:spacing`). Default 100% (no scaling).
-    pub text_scale: Option<TextScale>,
+    pub text_scale: Dup<TextScale>,
 }
 
 /// §17.18.81 ST_TextScale — integer percent in `1..=600`. Default 100.

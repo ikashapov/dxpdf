@@ -168,7 +168,7 @@ fn sample1_numbering() {
     let has_numbering = doc
         .body
         .iter()
-        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.is_some()));
+        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.get().is_some()));
     assert!(has_numbering, "expected at least one numbered paragraph");
 }
 
@@ -190,7 +190,7 @@ fn sample1_has_direct_formatting() {
         if let Block::Paragraph(p) = block {
             for inline in &p.content {
                 if let Inline::TextRun(run) = inline {
-                    if let Some(sz) = run.properties.font_size {
+                    if let Some(sz) = run.properties.font_size.cloned() {
                         sizes.insert(sz.raw());
                     }
                 }
@@ -261,7 +261,7 @@ fn sample3_numbering() {
     let has_numbering = doc
         .body
         .iter()
-        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.is_some()));
+        .any(|b| matches!(b, Block::Paragraph(p) if p.properties.numbering.get().is_some()));
     assert!(has_numbering, "expected numbered paragraphs");
 }
 
@@ -430,7 +430,7 @@ fn all_files_have_page_size() {
     for name in ALL_FILES {
         let doc = load(name);
         assert!(
-            doc.final_section.page_size.is_some(),
+            doc.final_section.page_size.get().is_some(),
             "{name}: final section should have page size"
         );
     }
@@ -441,7 +441,7 @@ fn all_files_have_margins() {
     for name in ALL_FILES {
         let doc = load(name);
         assert!(
-            doc.final_section.page_margins.is_some(),
+            doc.final_section.page_margins.get().is_some(),
             "{name}: final section should have page margins"
         );
     }
@@ -526,7 +526,7 @@ fn the_outline_fixture_declares_heading_levels_on_its_styles() {
             .unwrap_or_else(|| panic!("{style_id} is defined"))
             .paragraph_properties
             .as_ref()
-            .and_then(|p| p.outline_level)
+            .and_then(|p| p.outline_level.cloned())
     };
 
     assert_eq!(level_of("Heading1"), OutlineLevel::from_ooxml(0));

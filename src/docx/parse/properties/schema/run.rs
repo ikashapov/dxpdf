@@ -148,19 +148,17 @@ impl RPrXml {
                 .into_value()
                 .map(Into::into)
                 .unwrap_or_default(),
-            font_size: Dup::from(self.sz).into_value().map(|s| s.val),
+            font_size: Dup::from(self.sz).map(|s| s.val),
             bold: last_toggle(self.b),
             italic: last_toggle(self.i),
-            underline: Dup::from(self.u).into_value().and_then(resolve_underline),
+            underline: Dup::from(self.u).filter_map(resolve_underline),
             strike: resolve_strike(self.strike, self.dstrike),
-            color: Dup::from(self.color).into_value().map(|c| c.val.into()),
-            highlight: Dup::from(self.highlight).into_value().map(|h| h.val.into()),
-            shading: Dup::from(self.shd).into_value().map(Into::into),
-            vertical_align: Dup::from(self.vert_align)
-                .into_value()
-                .map(|v| v.val.into()),
-            spacing: Dup::from(self.spacing).into_value().map(|s| s.val),
-            kerning: Dup::from(self.kern).into_value().map(|k| k.val),
+            color: Dup::from(self.color).map(|c| c.val.into()),
+            highlight: Dup::from(self.highlight).map(|h| h.val.into()),
+            shading: Dup::from(self.shd).map(Into::into),
+            vertical_align: Dup::from(self.vert_align).map(|v| v.val.into()),
+            spacing: Dup::from(self.spacing).map(|s| s.val),
+            kerning: Dup::from(self.kern).map(|k| k.val),
             all_caps: last_toggle(self.caps),
             small_caps: last_toggle(self.small_caps),
             vanish: last_toggle(self.vanish),
@@ -171,12 +169,10 @@ impl RPrXml {
             imprint: last_toggle(self.imprint),
             outline: last_toggle(self.outline),
             shadow: last_toggle(self.shadow),
-            position: Dup::from(self.position).into_value().map(|p| p.val),
-            lang: Dup::from(self.lang).into_value().map(Into::into),
-            border: Dup::from(self.bdr).into_value().map(Into::into),
-            text_scale: Dup::from(self.char_scale)
-                .into_value()
-                .map(|v| TextScale::new(v.val)),
+            position: Dup::from(self.position).map(|p| p.val),
+            lang: Dup::from(self.lang).map(Into::into),
+            border: Dup::from(self.bdr).map(Into::into),
+            text_scale: Dup::from(self.char_scale).map(|v| TextScale::new(v.val)),
         };
         (props, style_id)
     }
@@ -266,13 +262,13 @@ mod tests {
     #[test]
     fn font_size_is_half_points() {
         let (rp, _) = parse(r#"<rPr><sz val="22"/></rPr>"#);
-        assert_eq!(rp.font_size.map(|d| d.raw()), Some(22));
+        assert_eq!(rp.font_size.map(|d| d.raw()), Dup::from(Some(22)));
     }
 
     #[test]
     fn underline_with_val() {
         let (rp, _) = parse(r#"<rPr><u val="double"/></rPr>"#);
-        assert_eq!(rp.underline, Some(UnderlineStyle::Double));
+        assert_eq!(rp.underline, Dup::from(Some(UnderlineStyle::Double)));
     }
 
     #[test]
@@ -284,14 +280,14 @@ mod tests {
         // contributes nothing to the cascade (parser returns None), letting
         // any inherited underline win.
         let (rp, _) = parse(r#"<rPr><u/></rPr>"#);
-        assert_eq!(rp.underline, None);
+        assert_eq!(rp.underline, Dup::from(None));
     }
 
     #[test]
     fn underline_with_color_but_no_val_is_silent() {
         // Same shape Word actually emits — color attribute alone, no `@val`.
         let (rp, _) = parse(r#"<rPr><u color="000000"/></rPr>"#);
-        assert_eq!(rp.underline, None);
+        assert_eq!(rp.underline, Dup::from(None));
     }
 
     #[test]
@@ -300,7 +296,7 @@ mod tests {
         // it must round-trip as `Some(UnderlineStyle::None)`, distinct from
         // both an absent <w:u/> element (None) and an inherited underline.
         let (rp, _) = parse(r#"<rPr><u val="none"/></rPr>"#);
-        assert_eq!(rp.underline, Some(UnderlineStyle::None));
+        assert_eq!(rp.underline, Dup::from(Some(UnderlineStyle::None)));
     }
 
     #[test]
@@ -324,16 +320,16 @@ mod tests {
     #[test]
     fn color_rgb_and_auto() {
         let (rp, _) = parse(r#"<rPr><color val="FF0000"/></rPr>"#);
-        assert_eq!(rp.color, Some(Color::Rgb(0xFF0000)));
+        assert_eq!(rp.color, Dup::from(Some(Color::Rgb(0xFF0000))));
 
         let (rp, _) = parse(r#"<rPr><color val="auto"/></rPr>"#);
-        assert_eq!(rp.color, Some(Color::Auto));
+        assert_eq!(rp.color, Dup::from(Some(Color::Auto)));
     }
 
     #[test]
     fn highlight_via_st_enum() {
         let (rp, _) = parse(r#"<rPr><highlight val="yellow"/></rPr>"#);
-        assert_eq!(rp.highlight, Some(HighlightColor::Yellow));
+        assert_eq!(rp.highlight, Dup::from(Some(HighlightColor::Yellow)));
     }
 
     #[test]
@@ -342,42 +338,45 @@ mod tests {
         // explicit "no highlight" override — must round-trip to
         // `Some(HighlightColor::None)`, not a parse error.
         let (rp, _) = parse(r#"<rPr><highlight val="none"/></rPr>"#);
-        assert_eq!(rp.highlight, Some(HighlightColor::None));
+        assert_eq!(rp.highlight, Dup::from(Some(HighlightColor::None)));
     }
 
     #[test]
     fn vertical_align_superscript() {
         let (rp, _) = parse(r#"<rPr><vertAlign val="superscript"/></rPr>"#);
-        assert_eq!(rp.vertical_align, Some(VerticalAlign::Superscript));
+        assert_eq!(
+            rp.vertical_align,
+            Dup::from(Some(VerticalAlign::Superscript))
+        );
     }
 
     #[test]
     fn text_scale_parsed() {
         // §17.3.2.45: <w:w w:val="80"/> compresses character width to 80%.
         let (rp, _) = parse(r#"<rPr><w val="80"/></rPr>"#);
-        assert_eq!(rp.text_scale, Some(TextScale::new(80)));
-        assert_eq!(rp.text_scale.unwrap().percent(), 80);
+        assert_eq!(rp.text_scale, Dup::from(Some(TextScale::new(80))));
+        assert_eq!(rp.text_scale.cloned().unwrap().percent(), 80);
     }
 
     #[test]
     fn text_scale_absent_is_none() {
         // No <w:w> element → inherit from style cascade.
         let (rp, _) = parse(r#"<rPr><b/></rPr>"#);
-        assert_eq!(rp.text_scale, None);
+        assert_eq!(rp.text_scale, Dup::from(None));
     }
 
     #[test]
     fn text_scale_clamps_above_600() {
         // §17.18.81: ST_TextScale max is 600.
         let (rp, _) = parse(r#"<rPr><w val="999"/></rPr>"#);
-        assert_eq!(rp.text_scale, Some(TextScale::new(600)));
+        assert_eq!(rp.text_scale, Dup::from(Some(TextScale::new(600))));
     }
 
     #[test]
     fn text_scale_zero_normalizes_to_100() {
         // Word treats <w:w w:val="0"/> as the default 100%.
         let (rp, _) = parse(r#"<rPr><w val="0"/></rPr>"#);
-        assert_eq!(rp.text_scale, Some(TextScale::NORMAL));
+        assert_eq!(rp.text_scale, Dup::from(Some(TextScale::NORMAL)));
     }
 
     #[test]
@@ -395,15 +394,15 @@ mod tests {
                 <position val="-4"/>
             </rPr>"#,
         );
-        assert_eq!(rp.spacing.map(|d| d.raw()), Some(40));
-        assert_eq!(rp.kerning.map(|d| d.raw()), Some(20));
-        assert_eq!(rp.position.map(|d| d.raw()), Some(-4));
+        assert_eq!(rp.spacing.map(|d| d.raw()), Dup::from(Some(40)));
+        assert_eq!(rp.kerning.map(|d| d.raw()), Dup::from(Some(20)));
+        assert_eq!(rp.position.map(|d| d.raw()), Dup::from(Some(-4)));
     }
 
     #[test]
     fn lang_tri_mode() {
         let (rp, _) = parse(r#"<rPr><lang val="en-US" eastAsia="ja-JP"/></rPr>"#);
-        let l = rp.lang.unwrap();
+        let l = rp.lang.cloned().unwrap();
         assert_eq!(l.val.as_deref(), Some("en-US"));
         assert_eq!(l.east_asia.as_deref(), Some("ja-JP"));
     }
@@ -411,7 +410,7 @@ mod tests {
     #[test]
     fn border_via_bdr() {
         let (rp, _) = parse(r#"<rPr><bdr val="single" sz="4" color="000000"/></rPr>"#);
-        let b = rp.border.unwrap();
+        let b = rp.border.cloned().unwrap();
         assert_eq!(b.style, BorderStyle::Single);
         assert_eq!(b.width.raw(), 4);
     }
@@ -463,9 +462,9 @@ mod tests {
         assert_eq!(rp.fonts.ascii.explicit.as_deref(), Some("Arial"));
         assert_eq!(rp.bold, Some(true));
         assert_eq!(rp.italic, Some(true));
-        assert_eq!(rp.font_size.map(|d| d.raw()), Some(28));
-        assert_eq!(rp.color, Some(Color::Rgb(0x2E74B5)));
-        assert_eq!(rp.underline, Some(UnderlineStyle::Single));
+        assert_eq!(rp.font_size.map(|d| d.raw()), Dup::from(Some(28)));
+        assert_eq!(rp.color, Dup::from(Some(Color::Rgb(0x2E74B5))));
+        assert_eq!(rp.underline, Dup::from(Some(UnderlineStyle::Single)));
     }
 
     /// A duplicated **non-toggle** child is schema-invalid and Word opens it
@@ -478,7 +477,10 @@ mod tests {
                  <color val="FF0000"/><color val="2E74B5"/>
                </rPr>"#,
         );
-        assert_eq!(rp.font_size.map(|d| d.raw()), Some(28), "§17.3.2.38");
-        assert_eq!(rp.color, Some(Color::Rgb(0x2E74B5)), "§17.3.2.6");
+        assert_eq!(rp.font_size.get().map(|d| d.raw()), Some(28), "§17.3.2.38");
+        assert_eq!(rp.color.get(), Some(&Color::Rgb(0x2E74B5)), "§17.3.2.6");
+        // Both occurrences reach the model; only the read resolves.
+        assert_eq!(rp.font_size.all().len(), 2);
+        assert_eq!(rp.color.all().len(), 2);
     }
 }

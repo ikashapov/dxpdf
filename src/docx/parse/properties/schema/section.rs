@@ -14,6 +14,7 @@ use crate::docx::model::{
 use crate::docx::parse::primitives::st_enums::{StNumberFormat, StPageOrientation, StSectionMark};
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
 use crate::docx::parse::primitives::OnOff;
+use crate::model::Dup;
 
 /// `<w:sectPr>` root.
 ///
@@ -305,41 +306,49 @@ impl From<PgNumTypeXml> for PageNumberType {
 
 impl From<SectPrXml> for SectionProperties {
     fn from(x: SectPrXml) -> Self {
-        let mut page_size: Option<PgSzXml> = None;
-        let mut page_margins: Option<PgMarXml> = None;
-        let mut cols: Option<ColsXml> = None;
-        let mut doc_grid: Option<DocGridXml> = None;
+        // Each accumulator collects *every* occurrence rather than overwriting.
+        // `<w:sectPr>` deserializes through a `$value` catch-all, so a repeated
+        // child was never fatal here; what it was, until now, was lossy — the
+        // assignment this `push` replaces dropped the earlier one on the floor.
+        let mut page_size: Vec<PgSzXml> = Vec::new();
+        let mut page_margins: Vec<PgMarXml> = Vec::new();
+        let mut cols: Vec<ColsXml> = Vec::new();
+        let mut doc_grid: Vec<DocGridXml> = Vec::new();
         let mut header_refs = SectionHeaderFooterRefs::default();
         let mut footer_refs = SectionHeaderFooterRefs::default();
         let mut title_page: Option<bool> = None;
-        let mut section_type: Option<SectionType> = None;
-        let mut page_number_type: Option<PgNumTypeXml> = None;
+        let mut section_type: Vec<SectionType> = Vec::new();
+        let mut page_number_type: Vec<PgNumTypeXml> = Vec::new();
 
         for child in x.children {
             match child {
-                SectChildXml::PgSz(v) => page_size = Some(v),
-                SectChildXml::PgMar(v) => page_margins = Some(v),
-                SectChildXml::Cols(v) => cols = Some(v),
-                SectChildXml::DocGrid(v) => doc_grid = Some(v),
+                SectChildXml::PgSz(v) => page_size.push(v),
+                SectChildXml::PgMar(v) => page_margins.push(v),
+                SectChildXml::Cols(v) => cols.push(v),
+                SectChildXml::DocGrid(v) => doc_grid.push(v),
+                // §17.6.10 admits one reference per `@w:type`, so these keep
+                // overwriting: a second `first` header is a redefinition, not a
+                // duplicate of the element.
                 SectChildXml::HeaderRef(r) => assign_hf_ref(&mut header_refs, r),
                 SectChildXml::FooterRef(r) => assign_hf_ref(&mut footer_refs, r),
+                // §17.7.2 governs the toggle; last wins by the spec's own rule.
                 SectChildXml::TitlePg(OnOff(b)) => title_page = Some(b),
-                SectChildXml::Type(v) => section_type = Some(SectionType::from(v.val)),
-                SectChildXml::PgNumType(v) => page_number_type = Some(v),
+                SectChildXml::Type(v) => section_type.push(SectionType::from(v.val)),
+                SectChildXml::PgNumType(v) => page_number_type.push(v),
                 SectChildXml::Other => {}
             }
         }
 
         Self {
-            page_size: page_size.map(Into::into),
-            page_margins: page_margins.map(Into::into),
-            columns: cols.map(Into::into),
-            doc_grid: doc_grid.map(Into::into),
+            page_size: Dup::from(page_size).map(Into::into),
+            page_margins: Dup::from(page_margins).map(Into::into),
+            columns: Dup::from(cols).map(Into::into),
+            doc_grid: Dup::from(doc_grid).map(Into::into),
             header_refs,
             footer_refs,
             title_page,
-            section_type,
-            page_number_type: page_number_type.map(Into::into),
+            section_type: Dup::from(section_type),
+            page_number_type: Dup::from(page_number_type).map(Into::into),
             rsids: SectionRevisionIds {
                 r: x.rsid_r.as_deref().and_then(RevisionSaveId::from_hex),
                 r_pr: x.rsid_r_pr.as_deref().and_then(RevisionSaveId::from_hex),
@@ -371,7 +380,7 @@ mod tests {
     #[test]
     fn page_size_with_orientation() {
         let s = parse(r#"<sectPr><pgSz w="12240" h="15840" orient="landscape"/></sectPr>"#);
-        let ps = s.page_size.unwrap();
+        let ps = s.page_size.get().unwrap();
         assert_eq!(ps.width.unwrap().raw(), 12240);
         assert_eq!(ps.height.unwrap().raw(), 15840);
         assert_eq!(ps.orientation, Some(PageOrientation::Landscape));
@@ -383,7 +392,7 @@ mod tests {
             r#"<sectPr><pgMar top="1440" right="1800" bottom="1440" left="1800"
                  header="720" footer="720" gutter="0"/></sectPr>"#,
         );
-        let pm = s.page_margins.unwrap();
+        let pm = s.page_margins.get().unwrap();
         assert_eq!(pm.top.unwrap().raw(), 1440);
         assert_eq!(pm.header.unwrap().raw(), 720);
         assert_eq!(pm.gutter.unwrap().raw(), 0);
@@ -395,7 +404,7 @@ mod tests {
             r#"<sectPr><pgMar top="-720.0" right="1800" bottom="-360"
                  left="1800" header="720" footer="720" gutter="0"/></sectPr>"#,
         );
-        let pm = s.page_margins.unwrap();
+        let pm = s.page_margins.get().unwrap();
         assert_eq!(pm.top.unwrap().raw(), -720);
         assert_eq!(pm.bottom.unwrap().raw(), -360);
     }
@@ -408,7 +417,7 @@ mod tests {
                 <col w="4000"/>
             </cols></sectPr>"#,
         );
-        let c = s.columns.unwrap();
+        let c = s.columns.get().unwrap();
         assert_eq!(c.count, Some(2));
         assert_eq!(c.equal_width, Some(false));
         assert_eq!(c.columns.len(), 2);
@@ -418,7 +427,7 @@ mod tests {
     #[test]
     fn doc_grid_basic() {
         let s = parse(r#"<sectPr><docGrid type="lines" linePitch="360"/></sectPr>"#);
-        let g = s.doc_grid.unwrap();
+        let g = s.doc_grid.get().unwrap();
         assert_eq!(g.grid_type, Some(DocGridType::Lines));
         assert_eq!(g.line_pitch.unwrap().raw(), 360);
     }
@@ -428,7 +437,7 @@ mod tests {
         let s = parse(
             r#"<sectPr><docGrid type="linesAndChars" linePitch="-360.0" charSpace="-12"/></sectPr>"#,
         );
-        let g = s.doc_grid.unwrap();
+        let g = s.doc_grid.get().unwrap();
         assert_eq!(g.line_pitch.unwrap().raw(), -360);
         assert_eq!(g.char_space.unwrap().raw(), -12);
     }
@@ -499,7 +508,7 @@ mod tests {
     #[test]
     fn section_type_roundtrip() {
         let s = parse(r#"<sectPr><type val="evenPage"/></sectPr>"#);
-        assert_eq!(s.section_type, Some(SectionType::EvenPage));
+        assert_eq!(s.section_type, Dup::from(Some(SectionType::EvenPage)));
     }
 
     #[test]
@@ -513,7 +522,7 @@ mod tests {
         let s = parse(
             r#"<sectPr><pgNumType fmt="decimal" start="1" chapStyle="1" chapSep="emDash"/></sectPr>"#,
         );
-        let p = s.page_number_type.unwrap();
+        let p = s.page_number_type.get().unwrap();
         assert_eq!(p.format, Some(NumberFormat::Decimal));
         assert_eq!(p.start, Some(1));
         assert_eq!(p.chap_sep, Some(ChapterSeparator::EmDash));
@@ -530,7 +539,7 @@ mod tests {
     #[test]
     fn empty_sect_pr_is_default() {
         let s = parse(r#"<sectPr/>"#);
-        assert!(s.page_size.is_none());
-        assert!(s.columns.is_none());
+        assert!(s.page_size.get().is_none());
+        assert!(s.columns.get().is_none());
     }
 }

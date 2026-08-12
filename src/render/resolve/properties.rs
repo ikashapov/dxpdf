@@ -62,28 +62,30 @@ pub fn merge_paragraph_properties(target: &mut ParagraphProperties, base: &Parag
     merge_opt(&mut target.alignment, &base.alignment);
     // §17.3.1.12: merge indentation sub-fields individually so partial
     // overrides (e.g., left from child style, firstLine from parent) combine.
-    match (&mut target.indentation, &base.indentation) {
-        (Some(ref mut ti), Some(bi)) => {
+    // Both sides resolve to their effective occurrence first: the cascade
+    // combines the values the document means, not every one it wrote.
+    match (target.indentation.get_mut(), base.indentation.get()) {
+        (Some(ti), Some(bi)) => {
             merge_opt(&mut ti.start, &bi.start);
             merge_opt(&mut ti.end, &bi.end);
             merge_opt(&mut ti.first_line, &bi.first_line);
             merge_opt(&mut ti.mirror, &bi.mirror);
         }
-        (None, Some(_)) => target.indentation = base.indentation,
+        (None, Some(_)) => target.indentation = base.indentation.clone(),
         _ => {}
     }
     // §17.3.1.33: merge spacing sub-fields individually so partial
     // overrides (e.g., line from table style, after from paragraph style)
     // combine correctly.
-    match (&mut target.spacing, &base.spacing) {
-        (Some(ref mut ts), Some(bs)) => {
+    match (target.spacing.get_mut(), base.spacing.get()) {
+        (Some(ts), Some(bs)) => {
             merge_opt(&mut ts.before, &bs.before);
             merge_opt(&mut ts.after, &bs.after);
             merge_opt(&mut ts.line, &bs.line);
             merge_opt(&mut ts.before_auto_spacing, &bs.before_auto_spacing);
             merge_opt(&mut ts.after_auto_spacing, &bs.after_auto_spacing);
         }
-        (None, Some(_)) => target.spacing = base.spacing,
+        (None, Some(_)) => target.spacing = base.spacing.clone(),
         _ => {}
     }
     merge_fields!(
@@ -174,24 +176,35 @@ pub fn overlay_table_properties(
     // field to `TableProperties` without deciding how it layers is a visible
     // omission here, not a silent one. `table_properties_overlay_covers_every_field`
     // pins it.
-    take(&mut out.alignment, overlay.alignment);
-    take(&mut out.width, overlay.width);
-    take(&mut out.layout, overlay.layout);
-    take(&mut out.indent, overlay.indent);
-    take(&mut out.borders, overlay.borders);
-    take(&mut out.cell_margins, overlay.cell_margins);
-    take(&mut out.cell_spacing, overlay.cell_spacing);
-    take(&mut out.look, overlay.look);
-    take(&mut out.style_row_band_size, overlay.style_row_band_size);
-    take(&mut out.style_col_band_size, overlay.style_col_band_size);
-    take(&mut out.positioning, overlay.positioning);
-    take(&mut out.overlap, overlay.overlap);
+    take(&mut out.alignment, overlay.alignment.clone());
+    take(&mut out.width, overlay.width.clone());
+    take(&mut out.layout, overlay.layout.clone());
+    take(&mut out.indent, overlay.indent.clone());
+    take(&mut out.borders, overlay.borders.clone());
+    take(&mut out.cell_margins, overlay.cell_margins.clone());
+    take(&mut out.cell_spacing, overlay.cell_spacing.clone());
+    take(&mut out.look, overlay.look.clone());
+    take(
+        &mut out.style_row_band_size,
+        overlay.style_row_band_size.clone(),
+    );
+    take(
+        &mut out.style_col_band_size,
+        overlay.style_col_band_size.clone(),
+    );
+    take(&mut out.positioning, overlay.positioning.clone());
+    take(&mut out.overlap, overlay.overlap.clone());
     out
 }
 
-/// If `overlay` specifies a value, it replaces `target`.
-fn take<T>(target: &mut Option<T>, overlay: Option<T>) {
-    if overlay.is_some() {
+/// §17.7.6: if `overlay` specifies a value, it replaces `target`.
+///
+/// The overlay twin of [`merge_opt`], and generic over the same [`Unset`] trait
+/// so it reads both carriers. For a [`Dup`] the replacement is wholesale: an
+/// overlay that set the property brings *all* of its occurrences and drops the
+/// target's, which is what "replaces" has always meant here.
+fn take<T: Unset>(target: &mut T, overlay: T) {
+    if !overlay.is_unset() {
         *target = overlay;
     }
 }
@@ -247,29 +260,32 @@ mod tests {
         let base = RunProperties {
             bold: Some(true),
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
-            color: Some(Color::Rgb(0xFF0000)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
+            color: Dup::from(Some(Color::Rgb(0xFF0000))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
 
         assert_eq!(target.bold, Some(true));
         assert_eq!(target.italic, Some(true));
-        assert_eq!(target.font_size, Some(Dimension::<HalfPoints>::new(24)));
-        assert_eq!(target.color, Some(Color::Rgb(0xFF0000)));
+        assert_eq!(
+            target.font_size,
+            Dup::from(Some(Dimension::<HalfPoints>::new(24)))
+        );
+        assert_eq!(target.color, Dup::from(Some(Color::Rgb(0xFF0000))));
     }
 
     #[test]
     fn merge_run_target_values_not_overwritten() {
         let mut target = RunProperties {
             bold: Some(false),
-            font_size: Some(Dimension::<HalfPoints>::new(20)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(20))),
             ..Default::default()
         };
         let base = RunProperties {
             bold: Some(true),
             italic: Some(true),
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
@@ -277,7 +293,7 @@ mod tests {
         assert_eq!(target.bold, Some(false), "target's bold should win");
         assert_eq!(
             target.font_size,
-            Some(Dimension::<HalfPoints>::new(20)),
+            Dup::from(Some(Dimension::<HalfPoints>::new(20))),
             "target's size should win"
         );
         assert_eq!(target.italic, Some(true), "italic should come from base");
@@ -291,7 +307,7 @@ mod tests {
 
         assert_eq!(target.bold, None);
         assert_eq!(target.italic, None);
-        assert_eq!(target.font_size, None);
+        assert_eq!(target.font_size, Dup::from(None));
     }
 
     #[test]
@@ -301,17 +317,17 @@ mod tests {
         // inherit. The merge must preserve `Some(UnderlineStyle::None)`
         // rather than overwriting it with the parent's `Single`.
         let mut target = RunProperties {
-            underline: Some(UnderlineStyle::None),
+            underline: Dup::from(Some(UnderlineStyle::None)),
             ..Default::default()
         };
         let base = RunProperties {
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
         assert_eq!(
             target.underline,
-            Some(UnderlineStyle::None),
+            Dup::from(Some(UnderlineStyle::None)),
             "explicit <w:u w:val=\"none\"/> must override the parent's Single"
         );
     }
@@ -321,11 +337,11 @@ mod tests {
         // Mirror invariant: when the child is silent, parent's underline wins.
         let mut target = RunProperties::default();
         let base = RunProperties {
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
-        assert_eq!(target.underline, Some(UnderlineStyle::Single));
+        assert_eq!(target.underline, Dup::from(Some(UnderlineStyle::Single)));
     }
 
     #[test]
@@ -369,21 +385,21 @@ mod tests {
                 east_asian: FontSlot::from_name("F"),
                 complex_script: FontSlot::from_name("F"),
             },
-            font_size: Some(Dimension::<HalfPoints>::new(24)),
+            font_size: Dup::from(Some(Dimension::<HalfPoints>::new(24))),
             bold: Some(true),
             italic: Some(true),
-            underline: Some(UnderlineStyle::Single),
+            underline: Dup::from(Some(UnderlineStyle::Single)),
             strike: Some(StrikeStyle::Single),
-            color: Some(Color::Rgb(0)),
-            highlight: Some(HighlightColor::Yellow),
-            shading: Some(Shading {
+            color: Dup::from(Some(Color::Rgb(0))),
+            highlight: Dup::from(Some(HighlightColor::Yellow)),
+            shading: Dup::from(Some(Shading {
                 fill: Color::Rgb(0),
                 pattern: ShadingPattern::Clear,
                 color: Color::Rgb(0),
-            }),
-            vertical_align: Some(VerticalAlign::Superscript),
-            spacing: Some(Dimension::<Twips>::new(10)),
-            kerning: Some(Dimension::<HalfPoints>::new(2)),
+            })),
+            vertical_align: Dup::from(Some(VerticalAlign::Superscript)),
+            spacing: Dup::from(Some(Dimension::<Twips>::new(10))),
+            kerning: Dup::from(Some(Dimension::<HalfPoints>::new(2))),
             all_caps: Some(true),
             small_caps: Some(true),
             vanish: Some(true),
@@ -394,33 +410,33 @@ mod tests {
             imprint: Some(true),
             outline: Some(true),
             shadow: Some(true),
-            position: Some(Dimension::<HalfPoints>::new(5)),
-            lang: Some(Lang {
+            position: Dup::from(Some(Dimension::<HalfPoints>::new(5))),
+            lang: Dup::from(Some(Lang {
                 val: Some("en".into()),
                 east_asia: None,
                 bidi: None,
-            }),
-            border: Some(Border {
+            })),
+            border: Dup::from(Some(Border {
                 style: BorderStyle::Single,
                 width: Dimension::new(0),
                 space: Dimension::new(0),
                 color: Color::BLACK,
-            }),
-            text_scale: Some(TextScale::new(80)),
+            })),
+            text_scale: Dup::from(Some(TextScale::new(80))),
         };
         let mut target = RunProperties::default();
         merge_run_properties(&mut target, &base);
 
         assert!(target.bold.is_some());
         assert!(target.italic.is_some());
-        assert!(target.underline.is_some());
+        assert!(target.underline.cloned().is_some());
         assert!(target.strike.is_some());
-        assert!(target.color.is_some());
-        assert!(target.highlight.is_some());
-        assert!(target.shading.is_some());
-        assert!(target.vertical_align.is_some());
-        assert!(target.spacing.is_some());
-        assert!(target.kerning.is_some());
+        assert!(target.color.cloned().is_some());
+        assert!(target.highlight.cloned().is_some());
+        assert!(target.shading.cloned().is_some());
+        assert!(target.vertical_align.cloned().is_some());
+        assert!(target.spacing.cloned().is_some());
+        assert!(target.kerning.cloned().is_some());
         assert!(target.all_caps.is_some());
         assert!(target.small_caps.is_some());
         assert!(target.vanish.is_some());
@@ -431,15 +447,15 @@ mod tests {
         assert!(target.imprint.is_some());
         assert!(target.outline.is_some());
         assert!(target.shadow.is_some());
-        assert!(target.position.is_some());
-        assert!(target.lang.is_some());
-        assert!(target.border.is_some());
+        assert!(target.position.cloned().is_some());
+        assert!(target.lang.cloned().is_some());
+        assert!(target.border.cloned().is_some());
         assert!(target.fonts.ascii.explicit.is_some());
         assert!(target.fonts.high_ansi.explicit.is_some());
         assert!(target.fonts.east_asian.explicit.is_some());
         assert!(target.fonts.complex_script.explicit.is_some());
-        assert!(target.font_size.is_some());
-        assert_eq!(target.text_scale, Some(TextScale::new(80)));
+        assert!(target.font_size.cloned().is_some());
+        assert_eq!(target.text_scale, Dup::from(Some(TextScale::new(80))));
     }
 
     #[test]
@@ -447,15 +463,15 @@ mod tests {
         // §17.7.2: when both parent and child specify text_scale, the child's
         // value wins. Mirrors the standard merge semantics for run properties.
         let mut target = RunProperties {
-            text_scale: Some(TextScale::new(120)),
+            text_scale: Dup::from(Some(TextScale::new(120))),
             ..Default::default()
         };
         let base = RunProperties {
-            text_scale: Some(TextScale::new(80)),
+            text_scale: Dup::from(Some(TextScale::new(80))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
-        assert_eq!(target.text_scale, Some(TextScale::new(120)));
+        assert_eq!(target.text_scale, Dup::from(Some(TextScale::new(120))));
     }
 
     #[test]
@@ -463,11 +479,11 @@ mod tests {
         // No child override → parent's text_scale propagates.
         let mut target = RunProperties::default();
         let base = RunProperties {
-            text_scale: Some(TextScale::new(80)),
+            text_scale: Dup::from(Some(TextScale::new(80))),
             ..Default::default()
         };
         merge_run_properties(&mut target, &base);
-        assert_eq!(target.text_scale, Some(TextScale::new(80)));
+        assert_eq!(target.text_scale, Dup::from(Some(TextScale::new(80))));
     }
 
     // ── ParagraphProperties merging ──────────────────────────────────────
@@ -476,30 +492,34 @@ mod tests {
     fn merge_para_empty_target_takes_from_base() {
         let mut target = ParagraphProperties::default();
         let base = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             keep_next: Some(true),
             ..Default::default()
         };
         merge_paragraph_properties(&mut target, &base);
 
-        assert_eq!(target.alignment, Some(Alignment::Center));
+        assert_eq!(target.alignment, Dup::from(Some(Alignment::Center)));
         assert_eq!(target.keep_next, Some(true));
     }
 
     #[test]
     fn merge_para_target_values_not_overwritten() {
         let mut target = ParagraphProperties {
-            alignment: Some(Alignment::End),
+            alignment: Dup::from(Some(Alignment::End)),
             ..Default::default()
         };
         let base = ParagraphProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             keep_next: Some(true),
             ..Default::default()
         };
         merge_paragraph_properties(&mut target, &base);
 
-        assert_eq!(target.alignment, Some(Alignment::End), "target should win");
+        assert_eq!(
+            target.alignment,
+            Dup::from(Some(Alignment::End)),
+            "target should win"
+        );
         assert_eq!(target.keep_next, Some(true), "keep_next from base");
     }
 
@@ -627,13 +647,13 @@ mod tests {
     #[test]
     fn merge_para_all_fields_covered() {
         let base = ParagraphProperties {
-            alignment: Some(Alignment::Start),
-            indentation: Some(Indentation::default()),
-            spacing: Some(ParagraphSpacing::default()),
-            numbering: Some(NumberingReference {
+            alignment: Dup::from(Some(Alignment::Start)),
+            indentation: Dup::from(Some(Indentation::default())),
+            spacing: Dup::from(Some(ParagraphSpacing::default())),
+            numbering: Dup::from(Some(NumberingReference {
                 num_id: 1,
                 level: 0,
-            }),
+            })),
             tabs: vec![TabStop {
                 position: Dimension::new(720),
                 alignment: TabAlignment::Left,
@@ -646,11 +666,11 @@ mod tests {
                 right: None,
                 between: None,
             })),
-            shading: Some(Shading {
+            shading: Dup::from(Some(Shading {
                 fill: Color::Rgb(0),
                 pattern: ShadingPattern::Clear,
                 color: Color::Rgb(0),
-            }),
+            })),
             keep_next: Some(true),
             keep_lines: Some(true),
             widow_control: Some(true),
@@ -659,23 +679,23 @@ mod tests {
             contextual_spacing: Some(true),
             bidi: Some(true),
             word_wrap: Some(true),
-            outline_level: Some(OutlineLevel::new(1)),
-            text_alignment: Some(TextAlignment::Center),
-            cnf_style: Some(CnfStyle::FIRST_ROW),
-            frame_properties: None,
+            outline_level: Dup::from(Some(OutlineLevel::new(1))),
+            text_alignment: Dup::from(Some(TextAlignment::Center)),
+            cnf_style: Dup::from(Some(CnfStyle::FIRST_ROW)),
+            frame_properties: Dup::from(None),
             auto_space_de: Some(true),
             auto_space_dn: Some(true),
         };
         let mut target = ParagraphProperties::default();
         merge_paragraph_properties(&mut target, &base);
 
-        assert!(target.alignment.is_some());
-        assert!(target.indentation.is_some());
-        assert!(target.spacing.is_some());
-        assert!(target.numbering.is_some());
+        assert!(target.alignment.get().is_some());
+        assert!(target.indentation.get().is_some());
+        assert!(target.spacing.get().is_some());
+        assert!(target.numbering.get().is_some());
         assert!(!target.tabs.is_empty());
         assert!(!target.borders.is_absent());
-        assert!(target.shading.is_some());
+        assert!(target.shading.get().is_some());
         assert!(target.keep_next.is_some());
         assert!(target.keep_lines.is_some());
         assert!(target.widow_control.is_some());
@@ -684,9 +704,9 @@ mod tests {
         assert!(target.contextual_spacing.is_some());
         assert!(target.bidi.is_some());
         assert!(target.word_wrap.is_some());
-        assert!(target.outline_level.is_some());
-        assert!(target.text_alignment.is_some());
-        assert!(target.cnf_style.is_some());
+        assert!(target.outline_level.get().is_some());
+        assert!(target.text_alignment.get().is_some());
+        assert!(target.cnf_style.get().is_some());
         assert!(target.auto_space_de.is_some());
         assert!(target.auto_space_dn.is_some());
     }
@@ -701,36 +721,36 @@ mod tests {
         use crate::model::geometry::EdgeInsets;
         let overlay = TableProperties {
             style_id: Some(StyleId::new("Ignored")),
-            alignment: Some(Alignment::Center),
-            width: Some(TableMeasure::Auto),
-            layout: Some(TableLayout::Fixed),
-            indent: Some(TableMeasure::Twips(Dimension::new(120))),
-            borders: Some(TableBorders {
+            alignment: Dup::from(Some(Alignment::Center)),
+            width: Dup::from(Some(TableMeasure::Auto)),
+            layout: Dup::from(Some(TableLayout::Fixed)),
+            indent: Dup::from(Some(TableMeasure::Twips(Dimension::new(120)))),
+            borders: Dup::from(Some(TableBorders {
                 top: None,
                 bottom: None,
                 left: None,
                 right: None,
                 inside_h: None,
                 inside_v: None,
-            }),
-            cell_margins: Some(EdgeInsets {
+            })),
+            cell_margins: Dup::from(Some(EdgeInsets {
                 top: Dimension::new(1),
                 right: Dimension::new(2),
                 bottom: Dimension::new(3),
                 left: Dimension::new(4),
-            }),
-            cell_spacing: Some(TableMeasure::Twips(Dimension::new(30))),
-            look: Some(TableLook {
+            })),
+            cell_spacing: Dup::from(Some(TableMeasure::Twips(Dimension::new(30)))),
+            look: Dup::from(Some(TableLook {
                 first_row: Some(true),
                 last_row: None,
                 first_column: None,
                 last_column: None,
                 no_h_band: None,
                 no_v_band: None,
-            }),
-            style_row_band_size: Some(2),
-            style_col_band_size: Some(3),
-            positioning: Some(TablePositioning {
+            })),
+            style_row_band_size: Dup::from(Some(2)),
+            style_col_band_size: Dup::from(Some(3)),
+            positioning: Dup::from(Some(TablePositioning {
                 left_from_text: None,
                 right_from_text: None,
                 top_from_text: None,
@@ -741,8 +761,8 @@ mod tests {
                 y_align: None,
                 x: Some(Dimension::new(5)),
                 y: None,
-            }),
-            overlap: Some(TableOverlap::Never),
+            })),
+            overlap: Dup::from(Some(TableOverlap::Never)),
         };
         let out = overlay_table_properties(None, &overlay);
 
@@ -750,10 +770,10 @@ mod tests {
         assert_eq!(out.width, overlay.width);
         assert_eq!(out.layout, overlay.layout);
         assert_eq!(out.indent, overlay.indent);
-        assert!(out.borders.is_some(), "borders overlaid"); // no PartialEq on TableBorders
+        assert!(out.borders.cloned().is_some(), "borders overlaid"); // no PartialEq on TableBorders
         assert_eq!(out.cell_margins, overlay.cell_margins);
         assert_eq!(out.cell_spacing, overlay.cell_spacing);
-        assert!(out.look.is_some(), "look overlaid"); // no PartialEq on TableLook
+        assert!(out.look.cloned().is_some(), "look overlaid"); // no PartialEq on TableLook
         assert_eq!(out.style_row_band_size, overlay.style_row_band_size);
         assert_eq!(out.style_col_band_size, overlay.style_col_band_size);
         assert_eq!(out.positioning, overlay.positioning);
@@ -772,21 +792,25 @@ mod tests {
     fn table_properties_overlay_wins_but_only_where_specified() {
         use crate::model::geometry::EdgeInsets;
         let base = TableProperties {
-            alignment: Some(Alignment::Start),
-            cell_margins: Some(EdgeInsets {
+            alignment: Dup::from(Some(Alignment::Start)),
+            cell_margins: Dup::from(Some(EdgeInsets {
                 top: Dimension::new(9),
                 right: Dimension::new(9),
                 bottom: Dimension::new(9),
                 left: Dimension::new(9),
-            }),
+            })),
             ..Default::default()
         };
         let overlay = TableProperties {
-            alignment: Some(Alignment::Center),
+            alignment: Dup::from(Some(Alignment::Center)),
             ..Default::default()
         };
         let out = overlay_table_properties(Some(base.clone()), &overlay);
-        assert_eq!(out.alignment, Some(Alignment::Center), "overlay wins");
+        assert_eq!(
+            out.alignment,
+            Dup::from(Some(Alignment::Center)),
+            "overlay wins"
+        );
         assert_eq!(
             out.cell_margins, base.cell_margins,
             "what the overlay omits falls through to the base"
