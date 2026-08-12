@@ -404,6 +404,7 @@ const ALL_FILES: &[&str] = &[
     "russian-numbering.docx",
     "numbering-direct-indent.docx",
     "centered-numbered-heading.docx",
+    "issue-159-minimal.docx",
 ];
 
 #[test]

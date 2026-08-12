@@ -104,6 +104,7 @@ Open engineering units are tracked as GitHub issues, not here — this file goes
 | `numbering-direct-indent.docx` | Direct paragraph `w:ind` overriding the numbering level's indentation (suffix-tab position) |
 | `centered-numbered-heading.docx` | Numbered heading with `jc=center` (suffix tab must not suppress alignment) |
 | `issue-126-minimal.docx` | The reporter's document from issue #126 — a paragraph before an explicit page break. Renders 4 pages, matching the LibreOffice reference attached to that issue |
+| `issue-159-minimal.docx` | The reporter's document from issue #159 — four `w:fldSimple` DATE fields whose `\@` pictures cover an escaped space, no escape, an escaped letter, and no picture. Each carries a deliberately wrong cached result (`CACHED`) so a renderer that fails to evaluate is obvious. Exercised by `tests/date_field_picture.rs` |
 | `footer-path-wrap.docx` | A token UAX #14 cannot break (a Windows path) in a footer-table cell far narrower than it. Built by `scripts/make_footer_path_fixture.py`; exercised by `tests/footer_path_wrap.rs` |
 | `duplicate-children.docx` | Every property bag (`pPr`, `rPr`, `tblPr`, `trPr`, `tcPr`) plus a VML `<v:roundrect>` repeating a child the schema allows once, each pair disagreeing so the fixture pins *which* wins, plus a style name whose byte 4 splits a codepoint. Built by `scripts/make_duplicate_children_fixture.py`; exercised by `tests/duplicate_children.rs` |
 

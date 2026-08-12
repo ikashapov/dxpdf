@@ -68,6 +68,38 @@ LOCALES="und ca-ES de-AT de-CH de-DE en-CA en-GB en-US en-ZA es-MX fr-FR it-IT p
 # and a filter left stale behind such a change removes the data silently,
 # degrading every locale to the English fallback.
 #
+# icu_datetime (#159): the remaining §17.16.4.2 name, and the picture-*less*
+# default a DATE/TIME field falls back to. Measured one at a time against the
+# 529,383-byte blob that preceded them:
+#
+#   DatetimeNamesDayperiodV1         +32,514  the AM/PM token's name. The last
+#                                             picture name still hardcoded
+#                                             English; es-MX writes "p.m.",
+#                                             ca-ES "p. m."
+#   DatetimePatternsTimeV1           +15,010  the locale's short *time*, for a
+#                                             TIME field with no \@ picture
+#   DatetimePatternsDateGregorianV1 +142,398  the locale's short *date*, same
+#                                             for DATE. By far the dearest
+#                                             thing in this file per feature
+#   DatetimeNamesYearGregorianV1     +29,869  not optional alongside the line
+#                                             above: YMD::short() resolves an
+#                                             Era field and fails with
+#                                             MarkerNotFound without it, even
+#                                             though no short pattern in these
+#                                             locales prints an era
+#
+# Together 529,383 -> 754,275 (+224,892, +42.5%). On the wheel that is only
+# 11,846,388 -> 11,902,721 (+56,333, +0.48%), measured by building both with
+# `maturin build --release --features python` off the same source and swapping
+# only the blob: these are CLDR text tables, which deflate to about a quarter,
+# unlike the LSTM float weights below that land at close to full size.
+#
+# The date half is 172,267 of the raw figure — if this blob ever has to
+# shrink, dropping the picture-less date default (and letting it keep the
+# engine's M/d/yyyy) is the single biggest lever here, and costs the least
+# behaviour: it applies only to a field that named no picture in a document
+# that named a language.
+#
 # icu_segmenter (#130): UAX #14 line breaking. All three markers are
 # locale-independent — LOCALES above does not apply to them, and dropping a
 # locale from that list does not shrink them.
@@ -91,7 +123,7 @@ LOCALES="und ca-ES de-AT de-CH de-DE en-CA en-GB en-US en-ZA es-MX fr-FR it-IT p
 # the CLDR name tables above this lands on the wheel at close to full size:
 # 11,845,784 -> 12,177,618 bytes, +331,834 (+2.80%), measured before and after
 # with `maturin build --release --features python`.
-MARKERS="DecimalSymbolsV1 DecimalDigitsV1 DatetimeNamesMonthGregorianV1 DatetimeNamesWeekdayV1 SegmenterBreakLineV1 SegmenterBreakGraphemeClusterV1 SegmenterLstmAutoV1"
+MARKERS="DecimalSymbolsV1 DecimalDigitsV1 DatetimeNamesMonthGregorianV1 DatetimeNamesWeekdayV1 DatetimeNamesDayperiodV1 DatetimePatternsDateGregorianV1 DatetimePatternsTimeV1 DatetimeNamesYearGregorianV1 SegmenterBreakLineV1 SegmenterBreakGraphemeClusterV1 SegmenterLstmAutoV1"
 
 icu4x-datagen \
   --locales $LOCALES \

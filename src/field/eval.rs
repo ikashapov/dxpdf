@@ -48,10 +48,13 @@ pub fn evaluate(instr: &FieldInstruction, ctx: &FieldContext) -> FieldValue {
                     // layout *does* call (`render::layout::fragment::collect`)
                     // passes the paragraph's tag through.
                     let formatted = if let Some(pattern) = &switches.date_format {
-                        format::format_date(date, pattern, None)
+                        format::format_datetime(Some(date), ctx.time.as_ref(), pattern, None)
                     } else {
-                        // Default: M/d/yyyy
-                        format::format_date(date, "M/d/yyyy", None)
+                        // §17.16.5.13: no picture — the locale's short date.
+                        // This evaluator carries no `w:lang`, so it always
+                        // takes the engine default; the layout evaluator in
+                        // `render::layout::fragment::collect` passes the tag.
+                        format::default_date(date, None)
                     };
                     format_result(formatted, switches)
                 }
@@ -65,9 +68,9 @@ pub fn evaluate(instr: &FieldInstruction, ctx: &FieldContext) -> FieldValue {
         } => match &ctx.time {
             Some(time) => {
                 let formatted = if let Some(pattern) = &switches.date_format {
-                    format::format_time(time, pattern)
+                    format::format_datetime(ctx.date.as_ref(), Some(time), pattern, None)
                 } else {
-                    format::format_time(time, "h:mm AM/PM")
+                    format::default_time(time, None)
                 };
                 format_result(formatted, switches)
             }
