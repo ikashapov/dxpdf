@@ -373,10 +373,7 @@ fn render_header(
     // so it needs this header's offset added, same as the text/table commands
     // shifted below.
     for fi in hf.floating_images.iter().filter(|fi| fi.behind_doc) {
-        let img_y = match fi.y {
-            super::section::FloatingImageY::Absolute(y) => y,
-            super::section::FloatingImageY::RelativeToParagraph(off) => offset_y + off,
-        };
+        let img_y = fi.y.at(parity, offset_y);
         header_cmds.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
                 fi.x.resolve(parity),
@@ -397,10 +394,7 @@ fn render_header(
 
     // §20.4.2.3 @behindDoc=false: paint in front of text — emit after text commands.
     for fi in hf.floating_images.iter().filter(|fi| !fi.behind_doc) {
-        let img_y = match fi.y {
-            super::section::FloatingImageY::Absolute(y) => y,
-            super::section::FloatingImageY::RelativeToParagraph(off) => offset_y + off,
-        };
+        let img_y = fi.y.at(parity, offset_y);
         header_cmds.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
                 fi.x.resolve(parity),
@@ -450,10 +444,7 @@ fn render_footer(
     // Same `Absolute`/`RelativeToParagraph` split as the header (see
     // `render_header`), against `footer_y` instead of the header's offset.
     for fi in hf.floating_images.iter().filter(|fi| fi.behind_doc) {
-        let img_y = match fi.y {
-            super::section::FloatingImageY::Absolute(y) => y,
-            super::section::FloatingImageY::RelativeToParagraph(off) => footer_y + off,
-        };
+        let img_y = fi.y.at(parity, footer_y);
         page.commands.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
                 fi.x.resolve(parity),
@@ -473,10 +464,7 @@ fn render_footer(
 
     // §20.4.2.3 @behindDoc=false: paint in front of text.
     for fi in hf.floating_images.iter().filter(|fi| !fi.behind_doc) {
-        let img_y = match fi.y {
-            super::section::FloatingImageY::Absolute(y) => y,
-            super::section::FloatingImageY::RelativeToParagraph(off) => footer_y + off,
-        };
+        let img_y = fi.y.at(parity, footer_y);
         page.commands.push(DrawCommand::Image {
             rect: crate::render::geometry::PtRect::from_xywh(
                 fi.x.resolve(parity),
@@ -505,14 +493,12 @@ fn emit_page_anchored_shapes(
     parity: PageParity,
     out: &mut Vec<DrawCommand>,
 ) {
-    use super::section::FloatingImageY;
     for fs in shapes {
-        let shape_y = match fs.y {
-            FloatingImageY::Absolute(y) => y,
-            // The extractor only routes Absolute-y shapes here; treat
-            // any RelativeToParagraph as an unreachable misroute and
-            // skip it rather than stacking on a non-existent paragraph.
-            FloatingImageY::RelativeToParagraph(_) => continue,
+        // The extractor only routes page-absolute shapes here; treat any
+        // paragraph-relative one as an unreachable misroute and skip it rather
+        // than stacking on a non-existent paragraph.
+        let Some(shape_y) = fs.y.absolute(parity) else {
+            continue;
         };
         out.push(DrawCommand::Path {
             origin: crate::render::geometry::PtOffset::new(fs.x.resolve(parity), shape_y),

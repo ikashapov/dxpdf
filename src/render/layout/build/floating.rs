@@ -644,31 +644,37 @@ fn resolve_anchor_position(
     (x, y)
 }
 
-/// §20.4.3.4 `ST_RelFromH`: a horizontal strip of the sheet, expressed in the
-/// coordinates of the [`AnchorFrame`] that produced it.
+/// §20.4.3.4 `ST_RelFromH` / §20.4.3.5 `ST_RelFromV`: a strip of the sheet
+/// along one axis, expressed in the coordinates of the [`AnchorFrame`] that
+/// produced it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct AnchorSpan {
-    /// x of the strip's left edge.
+    /// The strip's near edge — x of its left edge horizontally, y of its top
+    /// edge vertically.
     start: Pt,
-    /// Its width. Zero is legal and meaningful: a page with no left margin has
-    /// an empty `leftMargin` strip, and in [`AnchorFrame::Stack`] the
-    /// container's extent is simply not known here.
+    /// Its extent along that axis. Zero is legal and meaningful: a page with no
+    /// left margin has an empty `leftMargin` strip, and in
+    /// [`AnchorFrame::Stack`] the container's extent is simply not known here.
     extent: Pt,
 }
 
 /// The region an anchor measures against — or, for the two references whose
 /// region depends on which page the object lands on, the pair it chooses from.
+///
+/// Shared by both axes: §20.4.3.4 and §20.4.3.5 mirror the same way, one about
+/// left and right and the other about top and bottom.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum HorizontalRegion {
+enum AnchorRegion {
     /// The same strip on every page.
     Fixed(AnchorSpan),
-    /// §20.4.3.4 `insideMargin` / `outsideMargin`: "inside" is the left margin
-    /// on an odd (recto) page and the right margin on an even one, so which
-    /// strip this names is a function of the page number.
+    /// §20.4.3.4 / §20.4.3.5 `insideMargin` / `outsideMargin`: "inside" is the
+    /// left margin on an odd (recto) page and the right margin on an even one —
+    /// and, vertically, the top margin on an odd page and the bottom on an even
+    /// one. Which strip this names is a function of the page number.
     Mirrored { odd: AnchorSpan, even: AnchorSpan },
 }
 
-impl HorizontalRegion {
+impl AnchorRegion {
     /// The strip this reference names on a page of the given parity.
     fn on(self, parity: PageParity) -> AnchorSpan {
         match self {
@@ -772,12 +778,9 @@ impl FrameGeometry {
 /// catch-all, so a new spec variant becomes a build error rather than another
 /// silent landing in the text area, which is how four distinct margin strips
 /// came to share one arm in the first place.
-fn horizontal_region(
-    from: crate::model::AnchorRelativeFrom,
-    geom: &FrameGeometry,
-) -> HorizontalRegion {
+fn horizontal_region(from: crate::model::AnchorRelativeFrom, geom: &FrameGeometry) -> AnchorRegion {
     use crate::model::AnchorRelativeFrom as From;
-    use HorizontalRegion::{Fixed, Mirrored};
+    use AnchorRegion::{Fixed, Mirrored};
 
     match from {
         From::Page => Fixed(geom.page()),
@@ -817,6 +820,79 @@ fn horizontal_region(
                  (§20.4.3.4) — positioning against the text area instead"
             );
             Fixed(geom.container)
+        }
+    }
+}
+
+/// §20.4.3.5 `ST_RelFromV`: the vertical strip `from` names.
+///
+/// Only ever asked in [`AnchorFrame::Page`] — a `Stack`-framed anchor has no
+/// resolved container to measure against and returns before reaching here — so
+/// this takes the page directly rather than a [`FrameGeometry`].
+///
+/// Total over `AnchorRelativeFrom` for the same reason `horizontal_region` is:
+/// a new spec variant must be a build error, not another silent landing in the
+/// margin box.
+fn vertical_region(
+    from: crate::model::AnchorRelativeFrom,
+    pc: &crate::render::layout::page::PageConfig,
+) -> AnchorRegion {
+    use crate::model::AnchorRelativeFrom as From;
+    use AnchorRegion::{Fixed, Mirrored};
+
+    let (margin_top, margin_bottom) = (pc.margins.top, pc.margins.bottom);
+    let page_height = pc.page_size.height;
+    let margin_box = AnchorSpan {
+        start: margin_top,
+        extent: (page_height - margin_top - margin_bottom).max(Pt::ZERO),
+    };
+    // §20.4.2.11: the strip from the sheet's top edge to the top margin edge —
+    // the margin itself, not the text area below it. `bottomMargin` mirrors it.
+    let top_margin = AnchorSpan {
+        start: Pt::ZERO,
+        extent: margin_top,
+    };
+    let bottom_margin = AnchorSpan {
+        start: page_height - margin_bottom,
+        extent: margin_bottom,
+    };
+
+    match from {
+        From::Page => Fixed(AnchorSpan {
+            start: Pt::ZERO,
+            extent: page_height,
+        }),
+        From::Margin => Fixed(margin_box),
+        From::TopMargin => Fixed(top_margin),
+        From::BottomMargin => Fixed(bottom_margin),
+        // §20.4.3.5 `insideMargin`/`outsideMargin`. Settled against a Word
+        // render of `test-files/issue-165-floatv.docx` (issue #165): vertically
+        // "inside" is the *top* margin strip on an odd (recto) page and the
+        // *bottom* one on an even page — the top/bottom analogue of the
+        // left/right mirror `horizontal_region` applies. See the test module's
+        // §20.4.3.2 section for the six-page table this comes from.
+        From::InsideMargin => Mirrored {
+            odd: top_margin,
+            even: bottom_margin,
+        },
+        From::OutsideMargin => Mirrored {
+            odd: bottom_margin,
+            even: top_margin,
+        },
+        // §20.4.3.5 `paragraph`/`line` name an area the stacker has not placed
+        // yet. An *offset* against them is carried as `RelativeToParagraph` and
+        // never reaches here; an *alignment* has nothing to align within, so it
+        // collapses onto the margin box.
+        From::Paragraph | From::Line => Fixed(margin_box),
+        // §20.4.3.4-only values on `wp:positionV` — one `AnchorRelativeFrom`
+        // serves both axes, so these are reachable only from a document that
+        // put a horizontal reference on the vertical position.
+        From::Column | From::Character | From::LeftMargin | From::RightMargin => {
+            log::warn!(
+                "anchor: relativeFrom={from:?} is not a vertical reference \
+                 (§20.4.3.5) — positioning against the margin box"
+            );
+            Fixed(margin_box)
         }
     }
 }
@@ -892,6 +968,14 @@ fn resolve_anchor_x(
 /// Vertical axis of `resolve_anchor_position`. In `Stack` every offset is
 /// paragraph-relative because the stacker — not the anchor — decides the
 /// absolute page-y of the owning paragraph.
+///
+/// Parity reaches the result through the same two channels as on the
+/// horizontal axis — the region (`insideMargin`/`outsideMargin`) and the
+/// alignment (`inside`/`outside`) — so the position is evaluated once per
+/// parity and the two readings handed to
+/// [`FloatingImageY::absolute_from_pages`], which collapses them back to
+/// `Absolute` when they agree. They agree for every anchor that is not
+/// `inside`/`outside`.
 fn resolve_anchor_y(
     anchor: &crate::model::AnchorProperties,
     content_h: Pt,
@@ -909,41 +993,28 @@ fn resolve_anchor_y(
         } => match frame {
             AnchorFrame::Stack => FloatingImageY::RelativeToParagraph(Pt::from(*offset)),
             AnchorFrame::Page => match relative_from {
-                AnchorRelativeFrom::Page => FloatingImageY::Absolute(Pt::from(*offset)),
-                AnchorRelativeFrom::Margin => {
-                    FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
-                }
-                // §20.4.2.11: topMargin — offset from page top.
-                AnchorRelativeFrom::TopMargin => FloatingImageY::Absolute(Pt::from(*offset)),
-                // §20.4.2.11: bottomMargin — offset from bottom margin edge.
-                AnchorRelativeFrom::BottomMargin => FloatingImageY::Absolute(
-                    pc.page_size.height - pc.margins.bottom + Pt::from(*offset),
-                ),
+                // §20.4.3.5 `paragraph`/`line`: the stacker, not the anchor,
+                // knows where the owning paragraph lands.
                 AnchorRelativeFrom::Paragraph | AnchorRelativeFrom::Line => {
                     FloatingImageY::RelativeToParagraph(Pt::from(*offset))
                 }
-                // §20.4.3.5 `insideMargin`/`outsideMargin`. The spec names them
-                // on the vertical axis without saying which strips they are —
-                // Word mirrors *left/right* for two-sided documents, not
-                // top/bottom — so no reading is derivable from source alone.
-                // Treated as `margin`, the long-standing fallback. Settling it
-                // needs a two-sided document with a float anchored
-                // inside/outside vertically, rendered by Word on both an odd
-                // and an even page; `FloatingImageX::PageParity` is already in
-                // place should the answer turn out to be "it mirrors".
-                AnchorRelativeFrom::InsideMargin | AnchorRelativeFrom::OutsideMargin => {
-                    FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
-                }
-                // §20.4.3.4-only values on `wp:positionV` — malformed.
-                AnchorRelativeFrom::Column
+                // §20.4.2.11: every other reference is a strip of the sheet,
+                // and the offset is measured from that strip's own top edge.
+                // Listed rather than caught so a new spec variant is a build
+                // error here as well as in `vertical_region`.
+                AnchorRelativeFrom::Page
+                | AnchorRelativeFrom::Margin
+                | AnchorRelativeFrom::TopMargin
+                | AnchorRelativeFrom::BottomMargin
+                | AnchorRelativeFrom::InsideMargin
+                | AnchorRelativeFrom::OutsideMargin
+                | AnchorRelativeFrom::Column
                 | AnchorRelativeFrom::Character
                 | AnchorRelativeFrom::LeftMargin
                 | AnchorRelativeFrom::RightMargin => {
-                    log::warn!(
-                        "anchor: relativeFrom={relative_from:?} is not a vertical \
-                         reference (§20.4.3.5) — positioning against the margin box"
-                    );
-                    FloatingImageY::Absolute(pc.margins.top + Pt::from(*offset))
+                    let region = vertical_region(*relative_from, pc);
+                    let at = |parity: PageParity| region.on(parity).start + Pt::from(*offset);
+                    FloatingImageY::absolute_from_pages(at(PageParity::Odd), at(PageParity::Even))
                 }
             },
         },
@@ -962,67 +1033,40 @@ fn resolve_anchor_y(
             if frame == AnchorFrame::Stack {
                 return FloatingImageY::RelativeToParagraph(Pt::ZERO);
             }
-            let (margin_top, page_height, margin_bottom) =
-                (pc.margins.top, pc.page_size.height, pc.margins.bottom);
-            let (area_top, area_height) = match relative_from {
-                AnchorRelativeFrom::Page => (Pt::ZERO, page_height),
-                AnchorRelativeFrom::Margin => (
-                    margin_top,
-                    (page_height - margin_top - margin_bottom).max(Pt::ZERO),
-                ),
-                // §20.4.2.11: topMargin = area from page top to top margin edge.
-                AnchorRelativeFrom::TopMargin => (Pt::ZERO, margin_top),
-                // §20.4.2.11: bottomMargin = area from bottom margin edge to page bottom.
-                AnchorRelativeFrom::BottomMargin => (page_height - margin_bottom, margin_bottom),
-                // §20.4.3.5 `insideMargin`/`outsideMargin` — see the `Offset`
-                // arm above; treated as `margin` pending a Word reference.
-                // `paragraph`/`line` cannot align within an area the stacker
-                // has not placed yet, so they collapse onto it too.
-                AnchorRelativeFrom::InsideMargin
-                | AnchorRelativeFrom::OutsideMargin
-                | AnchorRelativeFrom::Paragraph
-                | AnchorRelativeFrom::Line => (
-                    margin_top,
-                    (page_height - margin_top - margin_bottom).max(Pt::ZERO),
-                ),
-                // §20.4.3.4-only values on `wp:positionV` — malformed.
-                AnchorRelativeFrom::Column
-                | AnchorRelativeFrom::Character
-                | AnchorRelativeFrom::LeftMargin
-                | AnchorRelativeFrom::RightMargin => {
-                    log::warn!(
-                        "anchor: relativeFrom={relative_from:?} is not a vertical \
-                         reference (§20.4.3.5) — aligning within the margin box"
-                    );
-                    (
-                        margin_top,
-                        (page_height - margin_top - margin_bottom).max(Pt::ZERO),
-                    )
+            let region = vertical_region(*relative_from, pc);
+            let at = |parity: PageParity| -> Pt {
+                let span = region.on(parity);
+                let near = span.start;
+                let far = span.start + span.extent - content_h;
+                match alignment {
+                    AnchorAlignment::Top => near,
+                    AnchorAlignment::Bottom => far,
+                    AnchorAlignment::Center => span.start + (span.extent - content_h) * 0.5,
+                    // §20.4.3.2 `inside`/`outside`: vertically, "inside" is the
+                    // region's top edge on an odd (recto) page and its bottom
+                    // edge on an even one, "outside" the opposite. Measured
+                    // from a Word render — see the test module's §20.4.3.2
+                    // section for the six-page table.
+                    AnchorAlignment::Inside => match parity {
+                        PageParity::Odd => near,
+                        PageParity::Even => far,
+                    },
+                    AnchorAlignment::Outside => match parity {
+                        PageParity::Odd => far,
+                        PageParity::Even => near,
+                    },
+                    // §20.4.3.1 horizontal alignments on `wp:positionV` —
+                    // malformed, the same way round as the horizontal axis.
+                    AnchorAlignment::Left | AnchorAlignment::Right => {
+                        log::warn!(
+                            "anchor: align={alignment:?} is not a vertical alignment \
+                             (§20.4.3.2) — aligning to the region's top instead"
+                        );
+                        near
+                    }
                 }
             };
-            let y_pos = match alignment {
-                AnchorAlignment::Top => area_top,
-                AnchorAlignment::Bottom => area_top + area_height - content_h,
-                AnchorAlignment::Center => area_top + (area_height - content_h) * 0.5,
-                // §20.4.3.2 `inside`/`outside`. Deliberately *not* given the
-                // page-parity treatment the horizontal axis gets: a two-sided
-                // document mirrors left and right, not top and bottom, so
-                // there is no reading of a vertical "inside" that source can
-                // derive. Aligned to the region's top, the long-standing
-                // fallback. **Word reference render**: open on the same
-                // question as vertical `insideMargin`/`outsideMargin` above.
-                AnchorAlignment::Inside | AnchorAlignment::Outside => area_top,
-                // §20.4.3.1 horizontal alignments on `wp:positionV` —
-                // malformed, the same way round as the horizontal axis.
-                AnchorAlignment::Left | AnchorAlignment::Right => {
-                    log::warn!(
-                        "anchor: align={alignment:?} is not a vertical alignment \
-                         (§20.4.3.2) — aligning to the region's top instead"
-                    );
-                    area_top
-                }
-            };
-            FloatingImageY::Absolute(y_pos)
+            FloatingImageY::absolute_from_pages(at(PageParity::Odd), at(PageParity::Even))
         }
     }
 }
@@ -1723,6 +1767,202 @@ mod tests {
         }
     }
 
+    // ── §20.4.3.2 / §20.4.3.5 vertical inside/outside ────────────────────
+    //
+    // Settled by a Word render of `test-files/issue-165-floatv.docx` (issue
+    // #165), a two-sided (`w:mirrorMargins`) document whose six pages each
+    // carry one anchored 36pt image, on a 612×792pt sheet with a deliberately
+    // asymmetric 72pt top / 144pt bottom margin so a top/bottom mirror is
+    // visible at all. Word placed them:
+    //
+    // | page | anchor                       | Word            |
+    // |------|------------------------------|-----------------|
+    // | 1 odd  | `margin` + `align=inside`  | top             |
+    // | 2 even | `margin` + `align=inside`  | bottom          |
+    // | 3 odd  | `insideMargin` + offset 0  | glued to page top |
+    // | 4 even | `insideMargin` + offset 0  | below the bottom margin |
+    // | 5 odd  | `margin` + `align=outside` | bottom (like 2) |
+    // | 6 even | `margin` + `align=outside` | top (like 1)    |
+    //
+    // So vertically `inside` is the **top** on an odd page and the **bottom**
+    // on an even one, and `outside` is the complement — the same page-parity
+    // mirror the horizontal axis applies to left and right. That falsifies the
+    // reading these arms carried until now ("a two-sided document mirrors left
+    // and right, not top and bottom"), which was a guess made in the absence of
+    // a render.
+    //
+    // One qualification on page 4, the only observation that is not exact: it
+    // fixes the *strip* (below the bottom margin) but not the position within
+    // it. Page 3 is what settles that — "glued to the page top", i.e. offset 0
+    // measured from the strip's own start, not centred in it — and the two
+    // strips are read the same way, as `topMargin`/`bottomMargin` already are.
+    // A render that put page 4's object anywhere but flush against the bottom
+    // margin edge would contradict page 3, so this is derived rather than
+    // assumed; a measurement of that one page would confirm it outright.
+    //
+    // The tests below use the default page (612×792, 72pt margins all round)
+    // rather than the fixture's geometry; the fixture itself is checked
+    // end-to-end in `tests/floating_anchor_parity.rs`.
+
+    fn v_align_from(
+        relative_from: AnchorRelativeFrom,
+        alignment: AnchorAlignment,
+    ) -> AnchorProperties {
+        anchor_with_v(AnchorPosition::Align {
+            relative_from,
+            alignment,
+        })
+    }
+
+    fn v_offset(relative_from: AnchorRelativeFrom, offset: i64) -> AnchorProperties {
+        anchor_with_v(AnchorPosition::Offset {
+            relative_from,
+            offset: Dimension::new(offset),
+        })
+    }
+
+    /// `resolve_anchor_y` for a 50pt-tall object on a `Page`-framed page of
+    /// `parity`.
+    fn y_on(anchor: &AnchorProperties, parity: PageParity) -> f32 {
+        resolve_anchor_y(anchor, Pt::new(50.0), &default_state(), AnchorFrame::Page)
+            .at(parity, Pt::ZERO)
+            .raw()
+    }
+
+    fn assert_y(got: f32, expected: f32, what: &str) {
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "{what}: expected {expected}, got {got}"
+        );
+    }
+
+    /// §20.4.3.2: `inside` is the top of the region on an odd page and its
+    /// bottom on an even one; `outside` is the opposite edge. Pages 1/2 and
+    /// 5/6 of the Word render above.
+    #[test]
+    fn inside_and_outside_alignments_mirror_top_and_bottom() {
+        // Margin box 72..720; a 50pt object is flush top at 72, flush bottom
+        // at 670.
+        for (alignment, odd, even) in [
+            (AnchorAlignment::Inside, 72.0, 670.0),
+            (AnchorAlignment::Outside, 670.0, 72.0),
+        ] {
+            let anchor = v_align_from(AnchorRelativeFrom::Margin, alignment);
+            assert_y(
+                y_on(&anchor, PageParity::Odd),
+                odd,
+                &format!("{alignment:?} on an odd page"),
+            );
+            assert_y(
+                y_on(&anchor, PageParity::Even),
+                even,
+                &format!("{alignment:?} on an even page"),
+            );
+        }
+    }
+
+    /// §20.4.3.5: vertically, `insideMargin` names the **top** margin strip on
+    /// an odd page and the **bottom** one on an even page, `outsideMargin` the
+    /// complement — and an offset is measured from the named strip's own start,
+    /// the way `topMargin`/`bottomMargin` already are. Pages 3/4 of the render:
+    /// odd puts the object at the very top of the sheet, even puts it just
+    /// below the bottom margin edge.
+    #[test]
+    fn inside_and_outside_margin_references_mirror_top_and_bottom() {
+        for (from, odd, even) in [
+            (AnchorRelativeFrom::InsideMargin, 0.0, 720.0),
+            (AnchorRelativeFrom::OutsideMargin, 720.0, 0.0),
+        ] {
+            let anchor = v_offset(from, 0);
+            assert_y(
+                y_on(&anchor, PageParity::Odd),
+                odd,
+                &format!("{from:?} odd"),
+            );
+            assert_y(
+                y_on(&anchor, PageParity::Even),
+                even,
+                &format!("{from:?} even"),
+            );
+        }
+    }
+
+    /// Both parity channels compose on this axis too: an `inside` alignment
+    /// *within* an `insideMargin` region mirrors through region and alignment
+    /// at once, and must not double-mirror back to the odd-page answer. The
+    /// horizontal twin is `a_mirrored_alignment_inside_a_mirrored_region_mirrors_once`.
+    #[test]
+    fn a_mirrored_vertical_alignment_inside_a_mirrored_region_mirrors_once() {
+        let anchor = v_align_from(AnchorRelativeFrom::InsideMargin, AnchorAlignment::Inside);
+        // Odd: insideMargin = the 0..72 strip, inside-aligned = its top edge.
+        assert_y(y_on(&anchor, PageParity::Odd), 0.0, "odd");
+        // Even: insideMargin = the 720..792 strip, inside-aligned = its
+        // *bottom* edge, less the object's height.
+        assert_y(y_on(&anchor, PageParity::Even), 720.0 + 72.0 - 50.0, "even");
+    }
+
+    /// An anchor that uses neither parity channel collapses to `Absolute`, so
+    /// an ordinary document carries no vertical deferral at all — the property
+    /// that keeps this ADT free on the documents that are nearly all of them.
+    #[test]
+    fn an_unmirrored_vertical_anchor_carries_no_deferral() {
+        let cases: [(&str, AnchorProperties); 5] = [
+            ("align=top", v_align(AnchorAlignment::Top)),
+            ("align=center", v_align(AnchorAlignment::Center)),
+            ("align=bottom", v_align(AnchorAlignment::Bottom)),
+            (
+                "offset from margin",
+                v_offset(AnchorRelativeFrom::Margin, 914400),
+            ),
+            (
+                "offset from topMargin",
+                v_offset(AnchorRelativeFrom::TopMargin, 0),
+            ),
+        ];
+        for (what, anchor) in cases {
+            let y = resolve_anchor_y(&anchor, Pt::new(50.0), &default_state(), AnchorFrame::Page);
+            assert!(
+                matches!(y, FloatingImageY::Absolute(_)),
+                "{what} is parity-independent, got {y:?}"
+            );
+        }
+        for (what, anchor) in [
+            (
+                "align=inside",
+                v_align_from(AnchorRelativeFrom::Margin, AnchorAlignment::Inside),
+            ),
+            (
+                "offset from insideMargin",
+                v_offset(AnchorRelativeFrom::InsideMargin, 0),
+            ),
+        ] {
+            let y = resolve_anchor_y(&anchor, Pt::new(50.0), &default_state(), AnchorFrame::Page);
+            assert!(
+                matches!(y, FloatingImageY::PageParity { .. }),
+                "{what} is parity-dependent, got {y:?}"
+            );
+        }
+    }
+
+    /// The `Stack` frame has no page to mirror against — a header, footer or
+    /// table cell float stays paragraph-relative whichever way it is anchored.
+    /// Pinned because the mirror is applied in the same two arms that
+    /// `stack_frame_align_is_paragraph_relative` guards.
+    #[test]
+    fn stack_frame_never_mirrors() {
+        for anchor in [
+            v_align_from(AnchorRelativeFrom::Margin, AnchorAlignment::Inside),
+            v_align_from(AnchorRelativeFrom::InsideMargin, AnchorAlignment::Outside),
+            v_offset(AnchorRelativeFrom::OutsideMargin, 0),
+        ] {
+            let y = resolve_anchor_y(&anchor, Pt::new(50.0), &default_state(), AnchorFrame::Stack);
+            assert!(
+                matches!(y, FloatingImageY::RelativeToParagraph(_)),
+                "Stack frame must not mirror, got {y:?}"
+            );
+        }
+    }
+
     // ── §20.1.10.60 shape text-body anchoring ────────────────────────────
 
     use super::build_shape_text_commands;
@@ -2279,13 +2519,12 @@ mod tests {
     }
 
     /// The deferred pair is a genuine mirror — whichever page the object lands
-    /// on, `inside` and `outside` name opposite strips. Worth pinning because
-    /// `assume_odd_page` reads only one half of it; the other half exists for
-    /// the parity resolution that replaces it, and nothing else would catch it
-    /// being built wrong.
+    /// on, `inside` and `outside` name opposite strips. Asserted as a relation
+    /// between the two readings rather than through their coordinates, so it
+    /// still holds for a page whose margins are not the ones this fixture uses.
     #[test]
     fn inside_and_outside_margins_mirror_each_other() {
-        use super::{horizontal_region, FrameGeometry, HorizontalRegion::Mirrored};
+        use super::{horizontal_region, AnchorRegion::Mirrored, FrameGeometry};
 
         let geom = FrameGeometry::new(&default_state().page_config, AnchorFrame::Page);
         let (
