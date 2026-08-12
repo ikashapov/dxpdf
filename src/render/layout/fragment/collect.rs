@@ -268,18 +268,33 @@ fn evaluate_field_instruction(
         // §17.16.4.2 is one picture grammar, so both field types render
         // through the same function and each may use the other's tokens; the
         // `?` still gates on the source the field is *named* for.
-        FieldInstruction::Date { switches, .. } => Some(crate::field::format::format_datetime(
-            Some(ctx.date.as_ref()?),
-            ctx.time.as_ref(),
-            switches.date_format.as_deref().unwrap_or("M/d/yyyy"),
-            locale_tag,
-        )),
-        FieldInstruction::Time { switches, .. } => Some(crate::field::format::format_datetime(
-            ctx.date.as_ref(),
-            Some(ctx.time.as_ref()?),
-            switches.date_format.as_deref().unwrap_or("h:mm AM/PM"),
-            locale_tag,
-        )),
+        FieldInstruction::Date { switches, .. } => {
+            let date = ctx.date.as_ref()?;
+            Some(match switches.date_format.as_deref() {
+                Some(picture) => crate::field::format::format_datetime(
+                    Some(date),
+                    ctx.time.as_ref(),
+                    picture,
+                    locale_tag,
+                ),
+                // §17.16.5.13: no picture is a different question from an
+                // empty one — the locale's own short date, not a hardcoded
+                // American one. See `format::default_date`.
+                None => crate::field::format::default_date(date, locale_tag),
+            })
+        }
+        FieldInstruction::Time { switches, .. } => {
+            let time = ctx.time.as_ref()?;
+            Some(match switches.date_format.as_deref() {
+                Some(picture) => crate::field::format::format_datetime(
+                    ctx.date.as_ref(),
+                    Some(time),
+                    picture,
+                    locale_tag,
+                ),
+                None => crate::field::format::default_time(time, locale_tag),
+            })
+        }
         _ => None,
     }
 }

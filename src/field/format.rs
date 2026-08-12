@@ -107,11 +107,7 @@ pub fn format_datetime(
             }
             PictureToken::AmPm(case) => {
                 if let Some(t) = time {
-                    let period = to_12hour(t.hour).1;
-                    match case {
-                        AmPmCase::Upper => result.push_str(period),
-                        AmPmCase::Lower => result.push_str(&period.to_ascii_lowercase()),
-                    }
+                    result.push_str(&day_period(t, *case, locale_tag));
                 }
             }
         }
@@ -126,6 +122,89 @@ fn pad_num(value: u32, pad: Pad) -> String {
         Pad::None => value.to_string(),
         Pad::Zero => format!("{value:02}"),
     }
+}
+
+/// The `AM/PM` token, in the document's language where there is one.
+///
+/// **The picture chooses the case, CLDR chooses the word.** §17.16.4.2 gives
+/// two spellings of this token, `AM/PM` and `am/pm`, and the difference
+/// between them is case — an English distinction the token inherits from
+/// Word. Applying it to CLDR's string keeps every English document rendering
+/// exactly as before (`en-US` is already `AM`, so upper-casing is a no-op)
+/// and gives a Spanish one `a. m.`/`A. M.` rather than a bare `AM`.
+///
+/// Word reference render needed: whether Word case-folds a localized day
+/// period at all, or prints CLDR's own casing for both spellings. A Spanish
+/// document with `\@ "h:mm AM/PM"` would settle it — `A. M.` confirms this
+/// reading, `a. m.` overturns it.
+fn day_period(time: &Time, case: AmPmCase, locale_tag: Option<&str>) -> String {
+    let english = to_12hour(time.hour).1;
+    let localized = locale_tag.and_then(|tag| {
+        let icu_time = to_icu_time(time)?;
+        crate::i18n::day_period_for_tag(&icu_time, tag)
+    });
+    let name = localized.unwrap_or_else(|| english.to_string());
+    match case {
+        AmPmCase::Upper => name.to_uppercase(),
+        AmPmCase::Lower => name.to_lowercase(),
+    }
+}
+
+/// §17.16.5.13: the locale's short date, for a `DATE` field with no `\@`
+/// picture.
+///
+/// Word resolves this against the *system* locale; this engine reads the
+/// document's `w:lang`, and falls back to `M/d/yyyy` when the document states
+/// no language or states one the baked data cannot serve. The argument for
+/// reading the document rather than the host is `crate::field::now`'s: a
+/// converter that reads the host's regional settings renders the same document
+/// differently on two machines.
+///
+/// That fallback is the pre-existing behaviour, kept deliberately. A
+/// document that never said which language it is in has not asked for a
+/// localized date, and picking one from the host would be exactly the
+/// machine-dependence the paragraph above rejects.
+pub fn default_date(date: &Date, locale_tag: Option<&str>) -> String {
+    locale_tag
+        .and_then(|tag| {
+            let icu_date = to_icu_date(date)?;
+            crate::i18n::short_date_for_tag(&icu_date, tag)
+        })
+        .unwrap_or_else(|| format_datetime(Some(date), None, "M/d/yyyy", None))
+}
+
+/// §17.16.5.76: the locale's short time, for a `TIME` field with no `\@`
+/// picture. The twin of [`default_date`]; the same locale argument applies,
+/// and the fallback is Word's `h:mm AM/PM`.
+pub fn default_time(time: &Time, locale_tag: Option<&str>) -> String {
+    locale_tag
+        .and_then(|tag| {
+            let icu_time = to_icu_time(time)?;
+            crate::i18n::short_time_for_tag(&icu_time, tag)
+        })
+        .unwrap_or_else(|| format_datetime(None, Some(time), "h:mm AM/PM", None))
+}
+
+/// This engine's `Date` as ICU4X's. `None` for a date outside the Gregorian
+/// range ICU accepts, which the caller answers by falling back — the same
+/// shape `month_name`/`weekday_name` already use.
+fn to_icu_date(date: &Date) -> Option<icu_calendar::Date<icu_calendar::Gregorian>> {
+    let month = u8::try_from(date.month).ok()?;
+    let day = u8::try_from(date.day).ok()?;
+    icu_calendar::Date::try_new_gregorian(date.year, month, day).ok()
+}
+
+/// This engine's `Time` as ICU4X's.
+fn to_icu_time(time: &Time) -> Option<icu_datetime::input::Time> {
+    let hour = u8::try_from(time.hour).ok()?.try_into().ok()?;
+    let minute = u8::try_from(time.minute).ok()?.try_into().ok()?;
+    let second = u8::try_from(time.second).ok()?.try_into().ok()?;
+    Some(icu_datetime::input::Time {
+        hour,
+        minute,
+        second,
+        subsecond: icu_datetime::input::Time::start_of_day().subsecond,
+    })
 }
 
 /// Format a number using an OOXML numeric format string (§17.16.4.1).
@@ -521,6 +600,69 @@ mod tests {
         assert_eq!(time_picture(&half_past_nine(), "h 'AM/PM'"), "21 AM/PM");
         // An actual AM/PM token *does* switch it.
         assert_eq!(time_picture(&half_past_nine(), "h AM/PM"), "9 PM");
+    }
+
+    // ── localized day period ────────────────────────────────────────────────
+
+    /// The day period is a name like the month and the weekday, and has to
+    /// come from CLDR for the same reason: `AM`/`PM` are English, and a
+    /// document that states `w:lang` has said which language it wants.
+    #[test]
+    fn the_day_period_follows_the_locale() {
+        let t = half_past_nine();
+        assert_eq!(
+            format_datetime(None, Some(&t), "am/pm", Some("es-MX")),
+            "p.m."
+        );
+        assert_eq!(
+            format_datetime(None, Some(&t), "AM/PM", Some("es-MX")),
+            "P.M."
+        );
+    }
+
+    /// English is unchanged, and an unusable tag falls back to it — the same
+    /// discipline `month_name`/`weekday_name` already follow.
+    #[test]
+    fn the_day_period_falls_back_to_english() {
+        let t = half_past_nine();
+        assert_eq!(
+            format_datetime(None, Some(&t), "AM/PM", Some("en-US")),
+            "PM"
+        );
+        assert_eq!(format_datetime(None, Some(&t), "AM/PM", None), "PM");
+        assert_eq!(
+            format_datetime(None, Some(&t), "am/pm", Some("zz-ZZ")),
+            "pm"
+        );
+    }
+
+    // ── the picture-less default (issue #159 case D) ────────────────────────
+
+    /// §17.16.5.13: a `DATE` with no `\@` picture renders the locale's short
+    /// date. Word reads the *system* locale for this; dxpdf reads the
+    /// document's `w:lang`, for the reason `field::now` gives about the host's
+    /// regional settings — see `default_date`'s own doc.
+    #[test]
+    fn a_picture_less_date_follows_the_document_locale() {
+        let d = reported_date();
+        assert_eq!(default_date(&d, Some("de-DE")), "11.08.26");
+        assert_eq!(default_date(&d, Some("en-GB")), "11/08/2026");
+    }
+
+    /// No `w:lang`, or one with no data, keeps the pre-existing default rather
+    /// than rendering nothing.
+    #[test]
+    fn a_picture_less_date_without_a_locale_keeps_the_engine_default() {
+        let d = reported_date();
+        assert_eq!(default_date(&d, None), "8/11/2026");
+        assert_eq!(default_date(&d, Some("zz-ZZ")), "8/11/2026");
+    }
+
+    #[test]
+    fn a_picture_less_time_follows_the_document_locale() {
+        let t = half_past_nine();
+        assert_eq!(default_time(&t, Some("de-DE")), "21:30");
+        assert_eq!(default_time(&t, None), "9:30 PM");
     }
 
     // ── §17.16.4.2 name tokens (issue #129) ─────────────────────────────────

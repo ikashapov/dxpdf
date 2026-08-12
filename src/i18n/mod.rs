@@ -236,6 +236,100 @@ pub fn weekday_name_for_tag(
     })
 }
 
+/// §17.16.4.2 (issue #159): the `AM/PM` token's name in `tag`'s language.
+///
+/// The third name in a picture, and the last one that was still hardcoded
+/// English while [`month_name_for_tag`] and [`weekday_name_for_tag`] read
+/// CLDR. `es-MX` writes it `p.m.`, `ca-ES` `p. m.`; a document that states
+/// `w:lang` has said which it wants.
+///
+/// The **abbreviated** length, matching the abbreviated month and weekday
+/// sets: a picture's `AM/PM` is the short form, and CLDR's wide day period is
+/// the same string in most locales anyway.
+///
+/// The picture's own case is applied by the caller, not here — see
+/// `field::format`'s `AmPm` arm for why that choice, and what would settle it.
+///
+/// `None` under the same two conditions [`decimal_separator_for_tag`]
+/// documents.
+pub fn day_period_for_tag(time: &icu_datetime::input::Time, tag: &str) -> Option<String> {
+    use icu_datetime::fieldsets::T;
+    use icu_datetime::pattern::{DayPeriodNameLength, FixedCalendarDateTimeNames};
+
+    let locale: icu_locale_core::Locale = tag.parse().ok()?;
+    with_data_provider(|provider| {
+        let mut names =
+            FixedCalendarDateTimeNames::<icu_calendar::Gregorian, T>::new_without_number_formatting(
+                locale.into(),
+            );
+        names
+            .load_day_period_names(
+                &as_data_provider(provider),
+                DayPeriodNameLength::Abbreviated,
+            )
+            .ok()?;
+        let pattern: icu_datetime::pattern::DateTimePattern = "a".parse().ok()?;
+        let formatter = names.with_pattern_unchecked(&pattern);
+        write_field(formatter.format(time))
+    })
+}
+
+/// §17.16.5.13 (issue #159 case D): `tag`'s short date, for a `DATE` field
+/// that carries no `\@` picture.
+///
+/// Word resolves a picture-less `DATE` against the *system* locale. This
+/// engine reads the *document's* `w:lang` instead, for the reason
+/// [`crate::field::now`] gives about the host's regional settings: a
+/// converter that reads them renders the same document differently on two
+/// machines. A document that states no language gets the engine default,
+/// which is `field::format`'s business rather than this function's.
+///
+/// **Short**, not medium: §17.16.5.13 says only "the current date", and Word's
+/// picture-less default is the system *short* date — the form that is all
+/// digits in every locale CLDR knows, which is what makes it the one a
+/// document can carry without asserting a language it did not state.
+pub fn short_date_for_tag(
+    date: &icu_calendar::Date<icu_calendar::Gregorian>,
+    tag: &str,
+) -> Option<String> {
+    use icu_datetime::fieldsets::YMD;
+    use icu_datetime::FixedCalendarDateTimeFormatter;
+
+    let locale: icu_locale_core::Locale = tag.parse().ok()?;
+    with_data_provider(|provider| {
+        let formatter = FixedCalendarDateTimeFormatter::try_new_with_buffer_provider(
+            provider,
+            locale.into(),
+            YMD::short(),
+        )
+        .ok()?;
+        Some(write_pattern(formatter.format(date)))
+    })
+}
+
+/// §17.16.5.76: `tag`'s short time, for a `TIME` field with no `\@` picture.
+/// The twin of [`short_date_for_tag`]; the same locale argument applies.
+pub fn short_time_for_tag(time: &icu_datetime::input::Time, tag: &str) -> Option<String> {
+    use icu_datetime::fieldsets::T;
+    use icu_datetime::FixedCalendarDateTimeFormatter;
+
+    let locale: icu_locale_core::Locale = tag.parse().ok()?;
+    with_data_provider(|provider| {
+        // The calendar parameter is spelled out because a time-only field set
+        // never mentions one, so inference has nothing to go on. Gregorian
+        // matches the only month-name marker this engine bakes.
+        let formatter = FixedCalendarDateTimeFormatter::<icu_calendar::Gregorian, T>::try_new_with_buffer_provider(
+            provider,
+            locale.into(),
+            // §17.16.5.76: minutes, not seconds. `T::short()` alone resolves
+            // to second precision, which no `TIME` field default shows.
+            T::short().with_time_precision(icu_datetime::options::TimePrecision::Minute),
+        )
+        .ok()?;
+        Some(write_pattern(formatter.format(time)))
+    })
+}
+
 /// Deserialize a buffer provider into the `DataProvider` the `load_*_names`
 /// calls above want — the same conversion ICU4X's own
 /// `try_new_with_buffer_provider` constructors perform internally.
@@ -258,6 +352,16 @@ fn write_field(formatted: impl writeable::TryWriteable) -> Option<String> {
         .try_write_to_string()
         .ok()
         .map(|written| written.into_owned())
+}
+
+/// The infallible twin of [`write_field`], for the whole-pattern formatters.
+///
+/// A `FixedCalendarDateTimeFormatter` picks its own pattern out of CLDR and
+/// loads exactly the names that pattern needs, so unlike `write_field`'s
+/// hand-written patterns there is no "field without names" case to answer —
+/// which is why its output is `Writeable` rather than `TryWriteable`.
+fn write_pattern(formatted: impl writeable::Writeable) -> String {
+    formatted.write_to_string().into_owned()
 }
 
 #[cfg(test)]
@@ -443,5 +547,67 @@ mod tests {
         assert_eq!(month_name_for_tag(&d, true, "not a bcp47 tag!"), None);
         assert_eq!(weekday_name_for_tag(monday, true, "zz-ZZ"), None);
         assert_eq!(weekday_name_for_tag(monday, true, ""), None);
+    }
+
+    // ── day period and picture-less defaults (issue #159) ───────────────────
+
+    /// 21:30:05 — afternoon, so every expectation below is the PM half.
+    fn reference_time() -> icu_datetime::input::Time {
+        icu_datetime::input::Time::try_new(21, 30, 5, 0).expect("a valid time of day")
+    }
+
+    /// The third picture name, and the last one that was hardcoded English.
+    /// `es-MX` and `ca-ES` are the two baked locales where CLDR's abbreviated
+    /// day period is not the bare `PM` — if this starts failing, check CLDR
+    /// before changing the expectations.
+    /// CLDR joins a day period to the time — and the halves of `ca-ES`'s
+    /// abbreviation — with U+202F NARROW NO-BREAK SPACE, not an ordinary
+    /// space. Written as an escape so the distinction is legible in the source
+    /// instead of an invisible byte a later edit could "tidy" away.
+    const NNBSP: &str = "\u{202f}";
+
+    #[test]
+    fn day_period_for_tag_localizes() {
+        let t = reference_time();
+        assert_eq!(day_period_for_tag(&t, "en-US").as_deref(), Some("PM"));
+        assert_eq!(day_period_for_tag(&t, "es-MX").as_deref(), Some("p.m."));
+        assert_eq!(
+            day_period_for_tag(&t, "ca-ES"),
+            Some(format!("p.{NNBSP}m.")),
+            "ca-ES separates the halves with U+202F"
+        );
+    }
+
+    /// The locale's short date and short time, for a picture-less DATE/TIME.
+    /// `de-DE` and `en-GB` disagree with `en-US` on both order and separator,
+    /// which is the whole point of asking CLDR rather than hardcoding one.
+    #[test]
+    fn short_date_and_time_for_tag_localize() {
+        let d = reference_date();
+        let t = reference_time();
+        assert_eq!(short_date_for_tag(&d, "en-US").as_deref(), Some("8/10/26"));
+        assert_eq!(short_date_for_tag(&d, "de-DE").as_deref(), Some("10.08.26"));
+        assert_eq!(
+            short_date_for_tag(&d, "en-GB").as_deref(),
+            Some("10/08/2026")
+        );
+        assert_eq!(short_time_for_tag(&t, "de-DE").as_deref(), Some("21:30"));
+        assert_eq!(
+            short_time_for_tag(&t, "en-US"),
+            Some(format!("9:30{NNBSP}PM")),
+            "CLDR joins the time to its day period with U+202F"
+        );
+    }
+
+    /// Same two failure modes as every other function here, so
+    /// `field::format`'s fallbacks are reachable identically.
+    #[test]
+    fn day_period_and_short_forms_are_none_for_unusable_tags() {
+        let d = reference_date();
+        let t = reference_time();
+        assert_eq!(day_period_for_tag(&t, "zz-ZZ"), None);
+        assert_eq!(day_period_for_tag(&t, "not a bcp47 tag!"), None);
+        assert_eq!(short_date_for_tag(&d, "zz-ZZ"), None);
+        assert_eq!(short_time_for_tag(&t, ""), None);
     }
 }
