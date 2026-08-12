@@ -11,7 +11,7 @@
 //! breaks the cycle instead of resolving it.
 
 use crate::render::dimension::Pt;
-use crate::render::geometry::PtSize;
+use crate::render::geometry::{PtRect, PtSize};
 
 mod borders;
 mod emit;
@@ -23,6 +23,7 @@ mod types;
 pub use grid::compute_column_widths;
 pub use types::*;
 
+use borders::emit_table_outline;
 use emit::{emit_split_row, emit_table_rows, TableCommandBuffers};
 use grid::{build_row_groups, row_group_end};
 use measure::measure_table_rows;
@@ -128,14 +129,31 @@ pub fn layout_table(
         None,
     );
 
+    // §17.4.44: each row reserves its own leading gap, so the only one left to
+    // add is the trailing gap at the table's bottom edge.
+    let table_height = cursor_y + cell_spacing;
+
+    // Issue #168: a spaced table's outer border is its own rectangle, because
+    // the cells no longer touch the table's edges. `suppress_first_row_top`
+    // (§17.4.38 adjacent-table collapse) is deliberately not consulted: with a
+    // gap between two tables there is no shared edge to collapse, so there is
+    // nothing for it to suppress here.
+    if cell_spacing > Pt::ZERO {
+        emit_table_outline(
+            &mut border_commands,
+            borders,
+            PtRect::from_xywh(Pt::ZERO, Pt::ZERO, measured.table_width, table_height),
+            true,
+            true,
+        );
+    }
+
     commands.append(&mut content_commands);
     commands.append(&mut border_commands);
 
     TableLayout {
         commands,
-        // §17.4.44: each row reserves its own leading gap, so the only one left
-        // to add is the trailing gap at the table's bottom edge.
-        size: PtSize::new(measured.table_width, cursor_y + cell_spacing),
+        size: PtSize::new(measured.table_width, table_height),
     }
 }
 
@@ -458,8 +476,6 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                     }
                 }
             }
-            commands.append(&mut content_commands);
-            commands.append(&mut border_commands);
             // §17.4.44: the trailing gap belongs to the table's bottom *edge*,
             // so only the final slice gets it — an intermediate slice ends at a
             // page cut, not at the table's edge. Without this a table that
@@ -470,9 +486,27 @@ pub(crate) fn layout_table_paginated_with_page_heights(
             } else {
                 Pt::ZERO
             };
+            let slice_height = cursor_y + trailing_gap;
+
+            // Issue #168: the outline follows the same two conditions the gap
+            // above does, for the same reason. A slice gets the table's top
+            // edge only if the table starts on it and its bottom edge only if
+            // the table ends on it; left and right bound every slice.
+            if cell_spacing > Pt::ZERO {
+                emit_table_outline(
+                    &mut border_commands,
+                    borders,
+                    PtRect::from_xywh(Pt::ZERO, Pt::ZERO, measured.table_width, slice_height),
+                    slice_idx == 0,
+                    slice_idx == last_slice_idx,
+                );
+            }
+
+            commands.append(&mut content_commands);
+            commands.append(&mut border_commands);
             TableSlice {
                 commands,
-                size: PtSize::new(measured.table_width, cursor_y + trailing_gap),
+                size: PtSize::new(measured.table_width, slice_height),
             }
         })
         .collect()
