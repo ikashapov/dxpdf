@@ -48,10 +48,10 @@ pub fn evaluate(instr: &FieldInstruction, ctx: &FieldContext) -> FieldValue {
                     // layout *does* call (`render::layout::fragment::collect`)
                     // passes the paragraph's tag through.
                     let formatted = if let Some(pattern) = &switches.date_format {
-                        format::format_date(date, pattern, None)
+                        format::format_datetime(Some(date), ctx.time.as_ref(), pattern, None)
                     } else {
                         // Default: M/d/yyyy
-                        format::format_date(date, "M/d/yyyy", None)
+                        format::format_datetime(Some(date), ctx.time.as_ref(), "M/d/yyyy", None)
                     };
                     format_result(formatted, switches)
                 }
@@ -65,9 +65,9 @@ pub fn evaluate(instr: &FieldInstruction, ctx: &FieldContext) -> FieldValue {
         } => match &ctx.time {
             Some(time) => {
                 let formatted = if let Some(pattern) = &switches.date_format {
-                    format::format_time(time, pattern)
+                    format::format_datetime(ctx.date.as_ref(), Some(time), pattern, None)
                 } else {
-                    format::format_time(time, "h:mm AM/PM")
+                    format::format_datetime(ctx.date.as_ref(), Some(time), "h:mm AM/PM", None)
                 };
                 format_result(formatted, switches)
             }

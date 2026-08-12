@@ -24,6 +24,7 @@ pub mod eval;
 pub mod format;
 pub mod now;
 pub(crate) mod parse;
+pub(crate) mod picture;
 pub(crate) mod switches;
 
 pub use ast::{CommonSwitches, ComparisonOp, FieldInstruction};

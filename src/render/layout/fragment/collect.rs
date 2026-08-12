@@ -265,14 +265,20 @@ fn evaluate_field_instruction(
         // §17.16.4.2: `switches.date_format` is the `\@ "picture"` argument,
         // already extracted during parse. The defaults are Word's for a
         // picture-less field.
-        FieldInstruction::Date { switches, .. } => Some(crate::field::format::format_date(
-            ctx.date.as_ref()?,
+        // §17.16.4.2 is one picture grammar, so both field types render
+        // through the same function and each may use the other's tokens; the
+        // `?` still gates on the source the field is *named* for.
+        FieldInstruction::Date { switches, .. } => Some(crate::field::format::format_datetime(
+            Some(ctx.date.as_ref()?),
+            ctx.time.as_ref(),
             switches.date_format.as_deref().unwrap_or("M/d/yyyy"),
             locale_tag,
         )),
-        FieldInstruction::Time { switches, .. } => Some(crate::field::format::format_time(
-            ctx.time.as_ref()?,
+        FieldInstruction::Time { switches, .. } => Some(crate::field::format::format_datetime(
+            ctx.date.as_ref(),
+            Some(ctx.time.as_ref()?),
             switches.date_format.as_deref().unwrap_or("h:mm AM/PM"),
+            locale_tag,
         )),
         _ => None,
     }

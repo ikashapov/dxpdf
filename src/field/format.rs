@@ -1,186 +1,131 @@
 use crate::field::context::{Date, Time};
+use crate::field::picture::{self, AmPmCase, NameWidth, Pad, PictureToken, YearWidth};
 
-/// Format a date using an OOXML date-time picture (§17.16.4.2).
+/// Render a §17.16.4.2 date-time picture.
 ///
-/// Supports:
-/// - `d`, `dd` — day of month (9 vs 09)
-/// - `ddd`, `dddd` — day of *week* (Mon, Monday)
+/// One function for both `DATE` and `TIME`, because §17.16.4.2 is one picture
+/// grammar: a `DATE` field may ask for `MMM d, yyyy h:mm am/pm`, and splitting
+/// this in two made each half treat the other's tokens as literal letters.
+/// `crate::field::picture` does the parsing and says more about why.
+///
+/// Tokens:
+/// - `d`, `dd` — day of month (9 vs 09); `ddd`, `dddd` — day of *week*
 /// - `M`, `MM`, `MMM`, `MMMM` — month (3, 03, Mar, March)
 /// - `yy`, `yyyy` — year (26, 2026)
+/// - `H`, `HH` — hour, 24-clock; `h`, `hh` — hour, 12-clock when the picture
+///   also carries `AM/PM`
+/// - `m`, `mm` — minute; `s`, `ss` — second; `AM/PM`, `am/pm`
 ///
-/// Literal text can be included in single quotes: `'on' d MMMM`.
+/// Literal text goes in single quotes (`'on' d MMMM`), and a backslash escapes
+/// the single character after it (`MMM\ d`).
+///
+/// **A token whose source is absent renders as nothing**: `format_datetime`
+/// takes the date and the time separately because the evaluator has them
+/// separately, and a `TIME` field with no date in context still has to render
+/// the rest of its picture rather than fail.
 ///
 /// `locale_tag` is the §17.3.2.20 `w:lang` in effect where the field sits;
 /// the two name-bearing tokens (`MMM`/`MMMM` and `ddd`/`dddd`) render in that
 /// language. `None`, or a tag this engine has no CLDR data for, falls back to
 /// the English tables below — the same discipline `Locale::decimal_separator`
 /// backstops [`crate::i18n::decimal_separator_for_tag`] with.
-pub fn format_date(date: &Date, pattern: &str, locale_tag: Option<&str>) -> String {
+pub fn format_datetime(
+    date: Option<&Date>,
+    time: Option<&Time>,
+    pattern: &str,
+    locale_tag: Option<&str>,
+) -> String {
+    let tokens = picture::parse(pattern);
+
+    // §17.16.4.2: `h` is the 12-hour clock only when the picture says which
+    // half of the day it means. A property of the token list, so a quoted
+    // `'AM/PM'` — text, not a token — no longer flips it.
+    let twelve_hour = tokens.iter().any(|t| matches!(t, PictureToken::AmPm(_)));
+
     let mut result = String::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+    for token in &tokens {
+        match token {
+            PictureToken::Literal(text) => result.push_str(text),
 
-    while i < len {
-        // Literal text in single quotes
-        if chars[i] == '\'' {
-            i += 1;
-            while i < len && chars[i] != '\'' {
-                result.push(chars[i]);
-                i += 1;
+            PictureToken::Year(width) => {
+                if let Some(d) = date {
+                    match width {
+                        YearWidth::FourDigit => result.push_str(&format!("{:04}", d.year)),
+                        YearWidth::TwoDigit => {
+                            result.push_str(&format!("{:02}", d.year.rem_euclid(100)))
+                        }
+                    }
+                }
             }
-            if i < len {
-                i += 1; // skip closing quote
+            PictureToken::Month(width) => {
+                if let Some(d) = date {
+                    match width {
+                        NameWidth::Numeric(pad) => result.push_str(&pad_num(d.month, *pad)),
+                        NameWidth::Abbreviated => {
+                            result.push_str(&month_name(d, false, locale_tag))
+                        }
+                        NameWidth::Full => result.push_str(&month_name(d, true, locale_tag)),
+                    }
+                }
             }
-            continue;
+            PictureToken::Day(width) => {
+                if let Some(d) = date {
+                    match width {
+                        NameWidth::Numeric(pad) => result.push_str(&pad_num(d.day, *pad)),
+                        NameWidth::Abbreviated => {
+                            result.push_str(&weekday_name(d, false, locale_tag))
+                        }
+                        NameWidth::Full => result.push_str(&weekday_name(d, true, locale_tag)),
+                    }
+                }
+            }
+
+            PictureToken::Hour24(pad) => {
+                if let Some(t) = time {
+                    result.push_str(&pad_num(t.hour, *pad));
+                }
+            }
+            PictureToken::Hour12(pad) => {
+                if let Some(t) = time {
+                    let hour = if twelve_hour {
+                        to_12hour(t.hour).0
+                    } else {
+                        t.hour
+                    };
+                    result.push_str(&pad_num(hour, *pad));
+                }
+            }
+            PictureToken::Minute(pad) => {
+                if let Some(t) = time {
+                    result.push_str(&pad_num(t.minute, *pad));
+                }
+            }
+            PictureToken::Second(pad) => {
+                if let Some(t) = time {
+                    result.push_str(&pad_num(t.second, *pad));
+                }
+            }
+            PictureToken::AmPm(case) => {
+                if let Some(t) = time {
+                    let period = to_12hour(t.hour).1;
+                    match case {
+                        AmPmCase::Upper => result.push_str(period),
+                        AmPmCase::Lower => result.push_str(&period.to_ascii_lowercase()),
+                    }
+                }
+            }
         }
-
-        // Year
-        if chars[i] == 'y' {
-            let count = count_run(&chars, i, 'y');
-            if count >= 4 {
-                result.push_str(&format!("{:04}", date.year));
-            } else {
-                result.push_str(&format!("{:02}", date.year % 100));
-            }
-            i += count;
-            continue;
-        }
-
-        // Month (uppercase M to distinguish from minute)
-        if chars[i] == 'M' {
-            let count = count_run(&chars, i, 'M');
-            match count {
-                1 => result.push_str(&date.month.to_string()),
-                2 => result.push_str(&format!("{:02}", date.month)),
-                3 => result.push_str(&month_name(date, false, locale_tag)),
-                _ => result.push_str(&month_name(date, true, locale_tag)),
-            }
-            i += count;
-            continue;
-        }
-
-        // Day. §17.16.4.2 splits this token by *count*, not just by presence:
-        // one or two `d` is the day of the month, three or four is the day of
-        // the week. Three and four used to fall into the zero-padded branch
-        // below and print the day number, so `dddd` silently rendered "09"
-        // where a weekday name belonged.
-        if chars[i] == 'd' {
-            let count = count_run(&chars, i, 'd');
-            match count {
-                1 => result.push_str(&date.day.to_string()),
-                2 => result.push_str(&format!("{:02}", date.day)),
-                3 => result.push_str(&weekday_name(date, false, locale_tag)),
-                _ => result.push_str(&weekday_name(date, true, locale_tag)),
-            }
-            i += count;
-            continue;
-        }
-
-        // Passthrough for other characters (separators like /, -, space)
-        result.push(chars[i]);
-        i += 1;
     }
 
     result
 }
 
-/// Format a time using an OOXML date/time format string.
-pub fn format_time(time: &Time, pattern: &str) -> String {
-    let has_ampm = pattern.contains("AM/PM") || pattern.contains("am/pm");
-
-    let (display_hour, ampm) = if has_ampm {
-        let (h, period) = to_12hour(time.hour);
-        (h, Some(period))
-    } else {
-        (time.hour, None)
-    };
-
-    let mut result = String::new();
-    let chars: Vec<char> = pattern.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        if chars[i] == '\'' {
-            i += 1;
-            while i < len && chars[i] != '\'' {
-                result.push(chars[i]);
-                i += 1;
-            }
-            if i < len {
-                i += 1;
-            }
-            continue;
-        }
-
-        // AM/PM — compare on the char slice, not byte offsets: `i` is a char
-        // index, so `pattern[i..i+5]` would misalign (and can panic) after any
-        // multi-byte character earlier in the pattern.
-        if chars[i..].starts_with(&['A', 'M', '/', 'P', 'M']) {
-            result.push_str(ampm.unwrap_or("AM"));
-            i += 5;
-            continue;
-        }
-        if chars[i..].starts_with(&['a', 'm', '/', 'p', 'm']) {
-            result.push_str(&ampm.unwrap_or("am").to_ascii_lowercase());
-            i += 5;
-            continue;
-        }
-
-        // 24-hour (H)
-        if chars[i] == 'H' {
-            let count = count_run(&chars, i, 'H');
-            if count >= 2 {
-                result.push_str(&format!("{:02}", time.hour));
-            } else {
-                result.push_str(&time.hour.to_string());
-            }
-            i += count;
-            continue;
-        }
-
-        // 12-hour (h)
-        if chars[i] == 'h' {
-            let count = count_run(&chars, i, 'h');
-            if count >= 2 {
-                result.push_str(&format!("{:02}", display_hour));
-            } else {
-                result.push_str(&display_hour.to_string());
-            }
-            i += count;
-            continue;
-        }
-
-        // Minute
-        if chars[i] == 'm' {
-            let count = count_run(&chars, i, 'm');
-            if count >= 2 {
-                result.push_str(&format!("{:02}", time.minute));
-            } else {
-                result.push_str(&time.minute.to_string());
-            }
-            i += count;
-            continue;
-        }
-
-        // Second
-        if chars[i] == 's' {
-            let count = count_run(&chars, i, 's');
-            if count >= 2 {
-                result.push_str(&format!("{:02}", time.second));
-            } else {
-                result.push_str(&time.second.to_string());
-            }
-            i += count;
-            continue;
-        }
-
-        result.push(chars[i]);
-        i += 1;
+/// Render a numeric token at the width its run length asked for.
+fn pad_num(value: u32, pad: Pad) -> String {
+    match pad {
+        Pad::None => value.to_string(),
+        Pad::Zero => format!("{value:02}"),
     }
-
-    result
 }
 
 /// Format a number using an OOXML numeric format string (§17.16.4.1).
@@ -265,10 +210,6 @@ fn title_case(value: &str) -> String {
         }
     }
     out
-}
-
-fn count_run(chars: &[char], start: usize, ch: char) -> usize {
-    chars[start..].iter().take_while(|&&c| c == ch).count()
 }
 
 fn to_12hour(hour: u32) -> (u32, &'static str) {
@@ -453,6 +394,18 @@ fn to_alphabetic(n: u32, lowercase: bool) -> String {
 mod tests {
     use super::*;
 
+    /// A date-only picture. Deliberately *not* named `format_date`: the two
+    /// separate renderers are what this module stopped having, and a helper
+    /// wearing the old name would invite them back.
+    fn date_picture(date: &Date, pattern: &str, locale_tag: Option<&str>) -> String {
+        format_datetime(Some(date), None, pattern, locale_tag)
+    }
+
+    /// A time-only picture. See [`date_picture`].
+    fn time_picture(time: &Time, pattern: &str) -> String {
+        format_datetime(None, Some(time), pattern, None)
+    }
+
     #[test]
     fn format_date_basic() {
         let date = Date {
@@ -460,9 +413,114 @@ mod tests {
             month: 3,
             day: 5,
         };
-        assert_eq!(format_date(&date, "dd/MM/yyyy", None), "05/03/2026");
-        assert_eq!(format_date(&date, "d/M/yy", None), "5/3/26");
-        assert_eq!(format_date(&date, "MMMM d, yyyy", None), "March 5, 2026");
+        assert_eq!(date_picture(&date, "dd/MM/yyyy", None), "05/03/2026");
+        assert_eq!(date_picture(&date, "d/M/yy", None), "5/3/26");
+        assert_eq!(date_picture(&date, "MMMM d, yyyy", None), "March 5, 2026");
+    }
+
+    // ── §17.16.4.2 escapes (issue #159) ─────────────────────────────────────
+
+    /// 2026-08-11, the day the reporter ran their comparison, so the expected
+    /// strings below are literally the ones in the issue's table.
+    fn reported_date() -> Date {
+        Date {
+            year: 2026,
+            month: 8,
+            day: 11,
+        }
+    }
+
+    /// §17.16.4.2: a backslash escapes the character that follows it, so that
+    /// the character is taken literally rather than as a formatting code. The
+    /// escape is consumed and is *not* part of the output.
+    ///
+    /// Cases A and C from issue #159, where 0.5.0 emitted the backslash.
+    #[test]
+    fn an_escape_is_consumed_and_its_character_is_literal() {
+        let d = reported_date();
+        assert_eq!(
+            date_picture(&d, r"MMM\ d, yyyy", None),
+            "Aug 11, 2026",
+            "issue #159 case A: an escaped space"
+        );
+        assert_eq!(
+            date_picture(&d, r"MMM d \a yyyy", None),
+            "Aug 11 a 2026",
+            "issue #159 case C: an escaped letter"
+        );
+    }
+
+    /// Case B — the same picture without an escape. Correct before the fix, and
+    /// what proves the fault is the escape rather than the picture parser.
+    #[test]
+    fn an_unescaped_picture_is_unaffected() {
+        assert_eq!(
+            date_picture(&reported_date(), "MMM d, yyyy", None),
+            "Aug 11, 2026"
+        );
+    }
+
+    /// The escape has to happen *before* token recognition, not after: an
+    /// escaped `d` is the letter `d`, never a day. Three of them in a row would
+    /// otherwise be a weekday name.
+    #[test]
+    fn an_escaped_format_character_is_not_a_format_character() {
+        assert_eq!(date_picture(&reported_date(), r"\d\d\d", None), "ddd");
+        assert_eq!(date_picture(&reported_date(), r"\y\M\d", None), "yMd");
+    }
+
+    // ── one picture grammar, not two ────────────────────────────────────────
+
+    fn half_past_nine() -> Time {
+        Time {
+            hour: 21,
+            minute: 30,
+            second: 5,
+        }
+    }
+
+    /// §17.16.4.2 is a single date-*and*-time picture. A `DATE` field may ask
+    /// for the time, and did not get it while date and time had separate
+    /// renderers: `h:mm` came out as the literal letters `h:mm`.
+    #[test]
+    fn one_picture_renders_both_date_and_time_tokens() {
+        assert_eq!(
+            format_datetime(
+                Some(&reported_date()),
+                Some(&half_past_nine()),
+                "MMM d, yyyy h:mm am/pm",
+                None,
+            ),
+            "Aug 11, 2026 9:30 pm",
+        );
+        // …and the mirror: `M` is the month even in a picture reached from TIME.
+        assert_eq!(
+            format_datetime(
+                Some(&reported_date()),
+                Some(&half_past_nine()),
+                "HH:mm:ss 'on' yyyy-MM-dd",
+                None,
+            ),
+            "21:30:05 on 2026-08-11",
+        );
+    }
+
+    /// A token whose source the caller does not have contributes nothing,
+    /// rather than rendering a placeholder or dropping the whole picture.
+    #[test]
+    fn a_token_without_its_source_renders_as_nothing() {
+        assert_eq!(date_picture(&reported_date(), "yyyy h:mm", None), "2026 :");
+        assert_eq!(time_picture(&half_past_nine(), "yyyy HH:mm"), " 21:30");
+    }
+
+    /// 12-hour is now a property of the token list, not of the raw string.
+    /// `contains("AM/PM")` — what this replaced — read the quoted literal and
+    /// switched the clock on the strength of text it was about to print.
+    #[test]
+    fn am_pm_inside_a_quoted_literal_does_not_switch_to_12_hour() {
+        assert_eq!(time_picture(&half_past_nine(), "h 'AM/PM'"), "21 AM/PM");
+        // An actual AM/PM token *does* switch it.
+        assert_eq!(time_picture(&half_past_nine(), "h AM/PM"), "9 PM");
     }
 
     // ── §17.16.4.2 name tokens (issue #129) ─────────────────────────────────
@@ -482,21 +540,21 @@ mod tests {
     /// *number*, where §17.16.4.2 asks for a day *name*.
     #[test]
     fn ddd_is_a_weekday_name_not_a_zero_padded_day() {
-        assert_eq!(format_date(&monday(), "ddd", None), "Mon");
-        assert_eq!(format_date(&monday(), "dddd", None), "Monday");
+        assert_eq!(date_picture(&monday(), "ddd", None), "Mon");
+        assert_eq!(date_picture(&monday(), "dddd", None), "Monday");
         // …while one and two `d` still mean the day of the month.
-        assert_eq!(format_date(&monday(), "d", None), "10");
-        assert_eq!(format_date(&monday(), "dd", None), "10");
+        assert_eq!(date_picture(&monday(), "d", None), "10");
+        assert_eq!(date_picture(&monday(), "dd", None), "10");
     }
 
     #[test]
     fn month_and_weekday_names_follow_the_locale() {
         let d = monday();
-        assert_eq!(format_date(&d, "MMMM", Some("fr-FR")), "août");
-        assert_eq!(format_date(&d, "MMMM", Some("ru-RU")), "август");
-        assert_eq!(format_date(&d, "dddd", Some("de-DE")), "Montag");
-        assert_eq!(format_date(&d, "ddd", Some("de-DE")), "Mo");
-        assert_eq!(format_date(&d, "dddd", Some("fr-FR")), "lundi");
+        assert_eq!(date_picture(&d, "MMMM", Some("fr-FR")), "août");
+        assert_eq!(date_picture(&d, "MMMM", Some("ru-RU")), "август");
+        assert_eq!(date_picture(&d, "dddd", Some("de-DE")), "Montag");
+        assert_eq!(date_picture(&d, "ddd", Some("de-DE")), "Mo");
+        assert_eq!(date_picture(&d, "dddd", Some("fr-FR")), "lundi");
     }
 
     /// A whole picture, not one token: the literal text around the names is
@@ -505,11 +563,11 @@ mod tests {
     #[test]
     fn a_full_picture_localizes_only_its_name_tokens() {
         assert_eq!(
-            format_date(&monday(), "dddd, d MMMM yyyy", Some("de-DE")),
+            date_picture(&monday(), "dddd, d MMMM yyyy", Some("de-DE")),
             "Montag, 10 August 2026",
         );
         assert_eq!(
-            format_date(&monday(), "dddd, d MMMM yyyy", None),
+            date_picture(&monday(), "dddd, d MMMM yyyy", None),
             "Monday, 10 August 2026",
         );
     }
@@ -518,9 +576,9 @@ mod tests {
     /// the English tables rather than erroring or emitting nothing.
     #[test]
     fn an_unusable_locale_falls_back_to_english_names() {
-        assert_eq!(format_date(&monday(), "MMMM", Some("zz-ZZ")), "August");
-        assert_eq!(format_date(&monday(), "dddd", Some("zz-ZZ")), "Monday");
-        assert_eq!(format_date(&monday(), "MMM", None), "Aug");
+        assert_eq!(date_picture(&monday(), "MMMM", Some("zz-ZZ")), "August");
+        assert_eq!(date_picture(&monday(), "dddd", Some("zz-ZZ")), "Monday");
+        assert_eq!(date_picture(&monday(), "MMM", None), "Aug");
     }
 
     /// A date that isn't a real calendar date has no weekday to name. It must
@@ -533,10 +591,10 @@ mod tests {
             month: 13,
             day: 40,
         };
-        assert_eq!(format_date(&nonsense, "dddd", Some("de-DE")), "");
+        assert_eq!(date_picture(&nonsense, "dddd", Some("de-DE")), "");
         // The month table still answers for an out-of-range month, exactly as
         // it did before this change.
-        assert_eq!(format_date(&nonsense, "MMMM", Some("de-DE")), "???");
+        assert_eq!(date_picture(&nonsense, "MMMM", Some("de-DE")), "???");
     }
 
     #[test]
@@ -546,8 +604,8 @@ mod tests {
             minute: 5,
             second: 9,
         };
-        assert_eq!(format_time(&time, "HH:mm:ss"), "14:05:09");
-        assert_eq!(format_time(&time, "H:m"), "14:5");
+        assert_eq!(time_picture(&time, "HH:mm:ss"), "14:05:09");
+        assert_eq!(time_picture(&time, "H:m"), "14:5");
     }
 
     #[test]
@@ -557,7 +615,7 @@ mod tests {
             minute: 30,
             second: 0,
         };
-        assert_eq!(format_time(&time, "h:mm AM/PM"), "2:30 PM");
+        assert_eq!(time_picture(&time, "h:mm AM/PM"), "2:30 PM");
     }
 
     #[test]
@@ -641,6 +699,6 @@ mod tests {
         };
         // A multi-byte char in a literal shifts byte vs char offsets; the AM/PM
         // match must still align (previously this byte-sliced and could panic).
-        assert_eq!(format_time(&time, "'é' h AM/PM"), "é 2 PM");
+        assert_eq!(time_picture(&time, "'é' h AM/PM"), "é 2 PM");
     }
 }
