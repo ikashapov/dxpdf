@@ -113,11 +113,13 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
 }
 
 /// §17.4.85: grow the rows of each vertical merge group so the `Restart`
-/// cell's content fits within their combined height. The shortfall is spread
-/// **evenly** over the spanned rows.
+/// cell's content fits within their combined height. The shortfall goes
+/// **entirely to the last row of the span**.
 ///
-/// Even distribution is a choice, not a spec rule, and ECMA-376 cannot settle
-/// it. All three places a rule would have to live were checked: §17.4.85
+/// # Settled by a Word render, not by the spec
+///
+/// ECMA-376 cannot settle this, and all three places a rule would have to live
+/// were checked before concluding so: §17.4.85
 /// `vMerge` defines which cells merge and carries no height language at all;
 /// §17.4.81 `trHeight`/`auto` defers to "the height required by its contents"
 /// without ever defining "contents" for a cell that spans rows; and §17.4.21
@@ -137,10 +139,17 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
 /// that the sentence was written without merged cells in mind. The spec is
 /// silent by omission, not by implication.
 ///
-/// So even distribution is disfavoured and last-row and first-row both remain
-/// open; last-row has the better structural argument (a single-pass
-/// top-to-bottom sizer can only enforce a span's total once the span closes)
-/// but no spec text.
+/// That left last-row and first-row open, with last-row holding the better
+/// structural argument — a single-pass top-to-bottom sizer can only enforce a
+/// span's total once the span closes — but no spec text either way.
+///
+/// **Word settles it for last-row** (issue #165). Rendering
+/// `test-files/issue-165-vmerge.docx` in Word 16.112 — a two-row merge whose
+/// restart cell holds ten lines, against a neighbouring column of one line per
+/// row — puts the divider between the two rows near the *top*. The restart row
+/// keeps its natural height and the final row of the span absorbs the whole
+/// excess. This code distributed it evenly until then, which put the divider at
+/// the midpoint.
 ///
 /// The choice is *observable*, not academic: it changes rendered output on 1
 /// of the 24 real documents in the local `test-cases/` corpus —
@@ -149,11 +158,6 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
 /// parsing artefact: Word wrote exactly **one** `w:trHeight` in the entire
 /// document, so the merge rows carry no authored heights for a renderer to
 /// defer to instead of computing one.
-///
-/// Settling it needs a Word-exported PDF of a two-row vertical merge whose
-/// restart cell overflows both rows. Until then the behaviour is pinned by
-/// `expand_spreads_overflow_across_the_merge_span`, so it cannot change
-/// silently. Tracked as E5a#6.
 ///
 /// A lone `Restart` with no `Continue` below it is not a span, and is sized by
 /// the normal row-height path in `measure_table_rows` instead.
@@ -184,15 +188,12 @@ pub(super) fn expand_rows_for_vmerge(
                 continue;
             }
 
-            // Distribute overflow evenly across all rows in the merge group.
+            // The whole shortfall lands on the span's last row — see this
+            // function's doc for the render that settled it. Every other row in
+            // the span keeps the height its own contents earned.
             let spanned: Pt = row_heights[row_idx..=last_merged_row].iter().copied().sum();
             if content_h > spanned {
-                let overflow = content_h - spanned;
-                let num_rows = (last_merged_row - row_idx + 1) as f32;
-                let per_row = overflow / num_rows;
-                for h in &mut row_heights[row_idx..=last_merged_row] {
-                    *h += per_row;
-                }
+                row_heights[last_merged_row] += content_h - spanned;
             }
         }
     }
@@ -537,16 +538,15 @@ mod tests {
     }
 
     /// The core §17.4.85 behaviour: when a `Restart` cell's content exceeds the
-    /// rows it spans, the shortfall is spread across them.
+    /// rows it spans, the shortfall goes to the span's **last** row.
     ///
-    /// Note this pins **even distribution**, which is what the code does and
-    /// not obviously what Word does — see `expand_rows_for_vmerge` for why
-    /// ECMA-376 cannot settle it and why even distribution is in fact the
-    /// candidate §17.4.21 structurally disfavours. This test will need updating
-    /// if a Word reference render settles it the other way; it exists to make
-    /// that a deliberate change rather than a silent one.
+    /// This test used to pin *even* distribution, and said in its own doc that
+    /// it "will need updating if a Word reference render settles it the other
+    /// way". That render happened (issue #165): Word puts the divider between
+    /// the two rows near the top, so the restart row keeps its natural height
+    /// and the last row takes the excess. See `expand_rows_for_vmerge`.
     #[test]
-    fn expand_spreads_overflow_across_the_merge_span() {
+    fn expand_puts_overflow_on_the_last_row_of_the_span() {
         let rows = vec![
             plain_row(vec![merged_cell(Some(VerticalMergeState::Restart))]),
             plain_row(vec![merged_cell(Some(VerticalMergeState::Continue))]),
@@ -556,9 +556,14 @@ mod tests {
 
         expand_rows_for_vmerge(&rows, &layouts, &mut heights);
 
-        // 84pt of content over a 28pt span → 56pt spread over 2 rows.
-        assert_eq!(heights[0].raw(), 42.0);
-        assert_eq!(heights[1].raw(), 42.0);
+        // 84pt of content over a 28pt span → 56pt of overflow, all of it onto
+        // the second row. The first keeps the 14pt its own contents earned.
+        assert_eq!(heights[0].raw(), 14.0, "the restart row is not grown");
+        assert_eq!(
+            heights[1].raw(),
+            70.0,
+            "the last row absorbs the whole excess"
+        );
         assert_eq!(
             heights[0].raw() + heights[1].raw(),
             84.0,
