@@ -79,6 +79,7 @@ pub(super) fn measure_table_rows(
                     span,
                     num_rows,
                     col_widths.len(),
+                    cell_spacing > Pt::ZERO,
                 );
                 if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
                     b_top = CellEdge::Absent;
@@ -871,15 +872,32 @@ mod tests {
         assert!(collapsed.rows[0].borders[1].left.line().is_none());
         assert!(collapsed.rows[1].borders[0].top.line().is_none());
 
-        // Spaced: every cell keeps all four of its own borders.
+        // Spaced: no edge is resolved away. This is what the test is about —
+        // where collapsing kept one side of a shared edge and cleared the
+        // other, both sides now survive.
         let spaced = measure(Pt::new(8.0));
-        for r in &spaced.rows {
-            for b in &r.borders {
-                assert!(b.left.line().is_some(), "left kept");
-                assert!(b.right.line().is_some(), "right kept");
-                assert!(b.top.line().is_some(), "top kept");
-                assert!(b.bottom.line().is_some(), "bottom kept");
-            }
-        }
+        assert!(spaced.rows[0].borders[1].left.line().is_some(), "left kept");
+        assert!(
+            spaced.rows[0].borders[0].right.line().is_some(),
+            "right kept"
+        );
+        assert!(spaced.rows[1].borders[0].top.line().is_some(), "top kept");
+        assert!(
+            spaced.rows[0].borders[0].bottom.line().is_some(),
+            "bottom kept"
+        );
+
+        // Issue #168: the *outer* edges of a spaced table are no longer drawn
+        // on the cells. They are the table's own border, and a cell inset by
+        // the spacing is the wrong place for it — `emit_table_outline` paints
+        // it at the table's bounds instead. This assertion used to read "every
+        // cell keeps all four of its own borders", which was true of the
+        // implementation but said more than the §17.4.66 sentence above does:
+        // the sentence distinguishes *cell* borders from *outer table* borders
+        // precisely so both can display, each in its own place.
+        assert!(spaced.rows[0].borders[0].top.line().is_none());
+        assert!(spaced.rows[0].borders[0].left.line().is_none());
+        assert!(spaced.rows[1].borders[1].bottom.line().is_none());
+        assert!(spaced.rows[1].borders[1].right.line().is_none());
     }
 }

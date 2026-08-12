@@ -82,6 +82,7 @@ pub(super) struct CellBorders {
 /// determine whether the cell is at the table's left or right edge — which
 /// matters because §17.4.17/§17.4.16 (`gridBefore`/`gridAfter`) can leave
 /// the row's first/last cell *not* at the table edge.
+#[allow(clippy::too_many_arguments)] // one cell's grid position; cohesive
 pub(super) fn resolve_cell_effective_borders(
     cell: &TableCellInput,
     table_borders: Option<&TableBorderConfig>,
@@ -90,6 +91,9 @@ pub(super) fn resolve_cell_effective_borders(
     cell_grid_span: usize,
     num_rows: usize,
     num_grid_cols: usize,
+    // §17.4.44: whether this table has a non-zero `w:tblCellSpacing`. See the
+    // `outer` closure below — it is the whole reason this parameter exists.
+    spaced: bool,
 ) -> (CellEdge, CellEdge, CellEdge, CellEdge) {
     // Start with table-level borders mapped to cell edges.
     let tb = table_borders;
@@ -101,30 +105,49 @@ pub(super) fn resolve_cell_effective_borders(
     let is_first_col = cell_grid_col == 0;
     let is_last_col = cell_grid_col + cell_grid_span >= num_grid_cols;
 
+    // §17.4.44 / issue #168: with a non-zero cell spacing the outer edges are
+    // **not** seeded from the table's own borders. A spaced cell is inset from
+    // the table's boundary, so a table border painted on it lands in the wrong
+    // place — and once `emit_table_outline` draws that border where it belongs,
+    // seeding it here as well would paint it twice.
+    //
+    // The interior seeding is deliberately left alone. With a gap there is no
+    // shared edge for `insideH`/`insideV` to sit on either, so what they mean
+    // for a spaced table is a real question — but [MS-OI29500] §17.4.66 names
+    // only "cell borders and outer table borders", and answering a second
+    // unsettled question inside this one is how a fix stops being reviewable.
+    //
+    // **Word reference render needed** (issue #165 has the batch): a spaced
+    // table with `insideV` set whose cells carry no `w:tcBorders`. If Word
+    // draws one line per cell edge, today's behaviour is right; if it draws one
+    // line in the gap, or none, this seeding has to change too.
+    let outer = |line: Option<TableBorderLine>| -> CellEdge {
+        if spaced {
+            CellEdge::Absent
+        } else {
+            line.into()
+        }
+    };
     let mut top: CellEdge = if is_first_row {
-        tb.and_then(|b| b.top)
+        outer(tb.and_then(|b| b.top))
     } else {
-        tb.and_then(|b| b.inside_h)
-    }
-    .into();
+        tb.and_then(|b| b.inside_h).into()
+    };
     let mut bottom: CellEdge = if is_last_row {
-        tb.and_then(|b| b.bottom)
+        outer(tb.and_then(|b| b.bottom))
     } else {
-        tb.and_then(|b| b.inside_h)
-    }
-    .into();
+        tb.and_then(|b| b.inside_h).into()
+    };
     let mut left: CellEdge = if is_first_col {
-        tb.and_then(|b| b.left)
+        outer(tb.and_then(|b| b.left))
     } else {
-        tb.and_then(|b| b.inside_v)
-    }
-    .into();
+        tb.and_then(|b| b.inside_v).into()
+    };
     let mut right: CellEdge = if is_last_col {
-        tb.and_then(|b| b.right)
+        outer(tb.and_then(|b| b.right))
     } else {
-        tb.and_then(|b| b.inside_v)
-    }
-    .into();
+        tb.and_then(|b| b.inside_v).into()
+    };
 
     // Per-cell overrides. Only `nil` and a real border reach here — an explicit
     // `none` was mapped to "no override" upstream (§17.4.66: it inherits
@@ -346,6 +369,76 @@ pub(super) fn emit_cell_borders(
                     right_w,
                     v_height,
                 ),
+                false,
+            );
+        }
+    }
+}
+
+/// §17.4.44 / issue #168: draw the table's own outer border, for a table whose
+/// `w:tblCellSpacing` is non-zero.
+///
+/// [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ... then all cell
+/// borders and outer table borders display."* Everywhere else in this engine a
+/// table border exists only as a **cell** edge, which is exactly right while the
+/// spacing is zero — the outer cells' edges are then the table's edges. Once
+/// there is a gap they are not, and nothing else in the pipeline draws the
+/// table's own rectangle.
+///
+/// `rect` is the slice's box in table-local coordinates. `draw_top` and
+/// `draw_bottom` are false on the sides where a paginated table continues:
+/// an intermediate slice ends at a page cut, not at the table's edge, so it
+/// gets left and right only.
+///
+/// Geometry mirrors [`emit_cell_borders`] exactly — horizontals span the full
+/// width and own the corners, verticals are inset between them — so an outline
+/// and a cell edge of the same width meet the same way a cell edge meets its
+/// neighbour.
+pub(super) fn emit_table_outline(
+    commands: &mut Vec<DrawCommand>,
+    borders: Option<&TableBorderConfig>,
+    rect: PtRect,
+    draw_top: bool,
+    draw_bottom: bool,
+) {
+    let Some(cfg) = borders else {
+        return;
+    };
+    let top = if draw_top { cfg.top } else { None };
+    let bottom = if draw_bottom { cfg.bottom } else { None };
+    let (x, y) = (rect.origin.x, rect.origin.y);
+    let (w, h) = (rect.size.width, rect.size.height);
+
+    let top_w = top.map(|b| b.width).unwrap_or(Pt::ZERO);
+    let bot_w = bottom.map(|b| b.width).unwrap_or(Pt::ZERO);
+
+    if let Some(ref border) = top {
+        emit_border_rect(commands, border, PtRect::from_xywh(x, y, w, top_w), true);
+    }
+    if let Some(ref border) = bottom {
+        emit_border_rect(
+            commands,
+            border,
+            PtRect::from_xywh(x, y + h - bot_w, w, bot_w),
+            true,
+        );
+    }
+
+    let v_height = h - top_w - bot_w;
+    if v_height > Pt::ZERO {
+        if let Some(ref border) = cfg.left {
+            emit_border_rect(
+                commands,
+                border,
+                PtRect::from_xywh(x, y + top_w, border.width, v_height),
+                false,
+            );
+        }
+        if let Some(ref border) = cfg.right {
+            emit_border_rect(
+                commands,
+                border,
+                PtRect::from_xywh(x + w - border.width, y + top_w, border.width, v_height),
                 false,
             );
         }
@@ -667,6 +760,231 @@ mod tests {
                 interior_bottom.raw(),
             );
         }
+    }
+
+    // ── issue #168: the outer table border of a spaced table ────────────────
+
+    fn all_borders(width: f32) -> TableBorderConfig {
+        let line = TableBorderLine {
+            width: Pt::new(width),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
+        TableBorderConfig {
+            top: Some(line),
+            bottom: Some(line),
+            left: Some(line),
+            right: Some(line),
+            inside_h: Some(line),
+            inside_v: Some(line),
+        }
+    }
+
+    /// One `Rect` command as `(x, y, w, h)`.
+    type R = (f32, f32, f32, f32);
+
+    /// Every `Rect` command, flattened to plain numbers so a failing assertion
+    /// prints geometry rather than a wall of `Pt` wrappers.
+    fn rects(cmds: &[DrawCommand]) -> Vec<R> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, .. } => Some((
+                    rect.origin.x.raw(),
+                    rect.origin.y.raw(),
+                    rect.size.width.raw(),
+                    rect.size.height.raw(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn two_rows() -> Vec<TableRowInput> {
+        (0..2)
+            .map(|_| TableRowInput {
+                cells: vec![simple_cell("a"), simple_cell("b")],
+                height_rule: None,
+                is_header: None,
+                cant_split: None,
+                grid_before: 0,
+                border_overrides: None,
+            })
+            .collect()
+    }
+
+    const NEAR: f32 = 0.01;
+
+    /// The defect. [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ...
+    /// then all cell borders and outer table borders display."* Before this
+    /// fix nothing was ever drawn at the table's own bounds — table borders
+    /// existed only as cell edges, which are inset by the spacing.
+    #[test]
+    fn a_spaced_table_draws_its_outer_border_at_the_table_bounds() {
+        let cfg = all_borders(1.0);
+        let result = layout_table(
+            &two_rows(),
+            &[Pt::new(100.0), Pt::new(100.0)],
+            Pt::new(20.0),
+            Pt::new(14.0),
+            Some(&cfg),
+            None,
+            false,
+        );
+        let (w, h) = (result.size.width.raw(), result.size.height.raw());
+        let r = rects(&result.commands);
+
+        assert!(
+            r.iter().any(|t| t.1.abs() < NEAR && (t.2 - w).abs() < NEAR),
+            "no top outline spanning the table width at y=0; rects={r:?} (w={w}, h={h})"
+        );
+        assert!(
+            r.iter()
+                .any(|t| (t.1 + t.3 - h).abs() < NEAR && (t.2 - w).abs() < NEAR),
+            "no bottom outline at the table's bottom edge; rects={r:?} (w={w}, h={h})"
+        );
+        assert!(
+            r.iter().any(|t| t.0.abs() < NEAR && t.3 > h * 0.5),
+            "no left outline down the table's left edge; rects={r:?} (w={w}, h={h})"
+        );
+        assert!(
+            r.iter()
+                .any(|t| (t.0 + t.2 - w).abs() < NEAR && t.3 > h * 0.5),
+            "no right outline down the table's right edge; rects={r:?} (w={w}, h={h})"
+        );
+    }
+
+    /// The guarantee the whole corpus rests on. With no spacing the outer
+    /// cells' edges *are* the table's edges, the existing mapping is correct,
+    /// and this fix must not add a single rect.
+    ///
+    /// Two rows deliberately: in a one-row table the row's own height equals
+    /// the table's, so a full-height vertical rect would be ambiguous. With two
+    /// rows only an outline can span the whole table.
+    #[test]
+    fn a_zero_spacing_table_draws_no_outline() {
+        let cfg = all_borders(1.0);
+        let result = layout_table(
+            &two_rows(),
+            &[Pt::new(100.0), Pt::new(100.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&cfg),
+            None,
+            false,
+        );
+        let h = result.size.height.raw();
+        let spanning: Vec<_> = rects(&result.commands)
+            .into_iter()
+            .filter(|t| t.3 > h * 0.9 && t.2 < 5.0)
+            .collect();
+        assert!(
+            spanning.is_empty(),
+            "a zero-spacing table must draw no table-height outline, got {spanning:?}"
+        );
+    }
+
+    /// A spaced table split across pages: left and right bound every slice,
+    /// but the table's top edge exists only where the table starts and its
+    /// bottom edge only where it ends. An intermediate slice stops at a page
+    /// cut, not at the table's boundary, and drawing a horizontal rule there
+    /// would draw a table edge that does not exist.
+    #[test]
+    fn a_paginated_spaced_table_splits_its_outline_across_slices() {
+        use crate::render::layout::table::{layout_table_paginated, TablePaginationConfig};
+
+        let cfg = all_borders(1.0);
+        // Six rows against a short page, so the table needs at least three
+        // slices and therefore has a middle one with neither horizontal edge.
+        let rows: Vec<TableRowInput> = (0..6)
+            .map(|_| TableRowInput {
+                cells: vec![simple_cell("a")],
+                height_rule: None,
+                is_header: None,
+                cant_split: None,
+                grid_before: 0,
+                border_overrides: None,
+            })
+            .collect();
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(100.0)],
+            Pt::new(20.0),
+            Pt::new(14.0),
+            Some(&cfg),
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(80.0),
+                page_height: Pt::new(80.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert!(
+            slices.len() >= 3,
+            "need a middle slice to test; got {}",
+            slices.len()
+        );
+
+        let last = slices.len() - 1;
+        for (i, slice) in slices.iter().enumerate() {
+            let (w, h) = (slice.size.width.raw(), slice.size.height.raw());
+            let r = rects(&slice.commands);
+            let spans_width = |y: f32| {
+                r.iter()
+                    .any(|t| (t.1 - y).abs() < NEAR && (t.2 - w).abs() < NEAR)
+            };
+
+            assert_eq!(
+                spans_width(0.0),
+                i == 0,
+                "slice {i}: top edge should be present only on the first slice"
+            );
+            let bottom_present = r
+                .iter()
+                .any(|t| (t.1 + t.3 - h).abs() < NEAR && (t.2 - w).abs() < NEAR);
+            assert_eq!(
+                bottom_present,
+                i == last,
+                "slice {i}: bottom edge should be present only on the last slice"
+            );
+            assert!(
+                r.iter().any(|t| t.0.abs() < NEAR && t.3 > h * 0.4),
+                "slice {i}: left edge must bound every slice; rects={r:?}"
+            );
+            assert!(
+                r.iter()
+                    .any(|t| (t.0 + t.2 - w).abs() < NEAR && t.3 > h * 0.4),
+                "slice {i}: right edge must bound every slice; rects={r:?}"
+            );
+        }
+    }
+
+    /// The other half of §17.4.66's sentence: the cells' own borders keep
+    /// drawing, at the cells' rectangles, alongside the outline. A fix that
+    /// moved the border out to the table bounds and dropped the cell edges
+    /// would satisfy the first test and still be wrong.
+    #[test]
+    fn a_spaced_table_draws_cell_borders_as_well_as_the_outline() {
+        let cfg = all_borders(1.0);
+        let result = layout_table(
+            &two_rows(),
+            &[Pt::new(100.0), Pt::new(100.0)],
+            Pt::new(20.0),
+            Pt::new(14.0),
+            Some(&cfg),
+            None,
+            false,
+        );
+        let w = result.size.width.raw();
+        // A rect that touches neither the left nor the right table edge can
+        // only belong to a cell.
+        let interior = rects(&result.commands)
+            .into_iter()
+            .filter(|t| t.0 > NEAR && (t.0 + t.2) < w - NEAR)
+            .count();
+        assert!(
+            interior > 0,
+            "the cells' own borders vanished; only the outline is left"
+        );
     }
 }
 
@@ -1029,9 +1347,66 @@ mod edge_mapping_tests {
             1,
             num_rows,
             num_grid_cols,
+            false,
         );
         let w = |e: CellEdge| e.line().map(|e| e.width.raw());
         (w(t), w(b), w(l), w(r))
+    }
+
+    /// The same corner cell, in a table whose `w:tblCellSpacing` is non-zero.
+    fn spaced_edges(
+        row_idx: usize,
+        grid_col: usize,
+        num_rows: usize,
+        num_grid_cols: usize,
+    ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+        let (t, b, l, r) = resolve_cell_effective_borders(
+            &plain_cell(),
+            Some(&config()),
+            row_idx,
+            grid_col,
+            1,
+            num_rows,
+            num_grid_cols,
+            true,
+        );
+        let w = |e: CellEdge| e.line().map(|e| e.width.raw());
+        (w(t), w(b), w(l), w(r))
+    }
+
+    /// Issue #168. A spaced cell is inset from the table's boundary, so the
+    /// table's own borders must not be painted on it — `emit_table_outline`
+    /// draws them at the table's bounds instead, and seeding them here too
+    /// would paint each one twice.
+    #[test]
+    fn a_spaced_cell_takes_no_outer_border_from_the_table() {
+        // Top-left corner of a 2x2 table: outer on top and left, interior on
+        // bottom and right.
+        let (t, b, l, r) = spaced_edges(0, 0, 2, 2);
+        assert_eq!(
+            t, None,
+            "top is the table's own edge and belongs to the outline"
+        );
+        assert_eq!(
+            l, None,
+            "left is the table's own edge and belongs to the outline"
+        );
+        assert_eq!(
+            (b, r),
+            (Some(INSIDE_H), Some(INSIDE_V)),
+            "interior edges are untouched by spacing — see the comment in \
+             resolve_cell_effective_borders for why that question is left open"
+        );
+    }
+
+    /// And the unspaced mapping is exactly as it was, which is what every
+    /// document in the corpus depends on.
+    #[test]
+    fn an_unspaced_cell_still_takes_the_tables_outer_borders() {
+        assert_eq!(
+            widths(0, 0, 2, 2),
+            (Some(TOP), Some(INSIDE_H), Some(LEFT), Some(INSIDE_V))
+        );
     }
 
     /// A 3×3 grid: the corners take the outer borders, the middle takes
