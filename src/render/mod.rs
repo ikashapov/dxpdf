@@ -783,13 +783,13 @@ fn measure_header_bottom(
         .iter()
         .filter(|fi| fi.is_wrap_top_and_bottom())
         .map(|fi| {
-            let y = match fi.y {
-                layout::section::FloatingImageY::Absolute(y) => y,
-                layout::section::FloatingImageY::RelativeToParagraph(off) => {
-                    config.header_margin + off
-                }
-            };
-            y + fi.size.height
+            // The reserved band is one number for the whole section, so a
+            // §20.4.3.2 float that mirrors with the page's parity gets the
+            // deeper of its two readings — enough room on either page. Both
+            // readings are equal for every float that does not mirror, which
+            // is all of them outside a two-sided document.
+            let bottom = |parity| fi.y.at(parity, config.header_margin) + fi.size.height;
+            bottom(layout::section::PageParity::Odd).max(bottom(layout::section::PageParity::Even))
         })
         .fold(dimension::Pt::ZERO, |a, b| a.max(b));
     blocks_bottom.max(floats_bottom)
@@ -816,11 +816,15 @@ fn measure_footer_extent(
         .floating_images
         .iter()
         .filter(|fi| fi.is_wrap_top_and_bottom())
-        .map(|fi| match fi.y {
-            layout::section::FloatingImageY::Absolute(y) => config.page_size.height - y,
-            layout::section::FloatingImageY::RelativeToParagraph(off) => {
-                config.footer_margin + off + fi.size.height
-            }
+        .map(|fi| {
+            // Deeper of the two parity readings — see `measure_header_bottom`.
+            let extent = |parity| match fi.y.absolute(parity) {
+                Some(y) => config.page_size.height - y,
+                None => {
+                    config.footer_margin + fi.y.at(parity, dimension::Pt::ZERO) + fi.size.height
+                }
+            };
+            extent(layout::section::PageParity::Odd).max(extent(layout::section::PageParity::Even))
         })
         .fold(dimension::Pt::ZERO, |a, b| a.max(b));
     blocks_extent.max(floats_extent)

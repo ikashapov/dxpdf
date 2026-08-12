@@ -120,12 +120,75 @@ impl FloatingImage {
 }
 
 /// Vertical position for a floating image.
-#[derive(Clone, Copy)]
+///
+/// Three cases, and the third is the one that carries the page: §20.4.3.2
+/// `inside`/`outside` — both as an alignment and as the §20.4.3.5
+/// `insideMargin` / `outsideMargin` references — mirror **top and bottom** with
+/// the page's parity, the way the horizontal axis mirrors left and right (see
+/// [`FloatingImageX`]). Floats are extracted before pagination, so the reading
+/// cannot be chosen at build time: both are carried, and [`FloatingImageY::at`]
+/// picks one once a page is assigned.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FloatingImageY {
-    /// Absolute page position.
+    /// Absolute page position, the same on every page.
     Absolute(Pt),
+    /// Absolute page position, mirrored — which reading applies depends on the
+    /// page's [`PageParity`].
+    PageParity { odd: Pt, even: Pt },
     /// Relative to the paragraph's y position (offset added to cursor_y).
     RelativeToParagraph(Pt),
+}
+
+impl FloatingImageY {
+    /// Build an absolute position from its two per-parity readings, collapsing
+    /// to `Absolute` when they agree.
+    ///
+    /// They agree for every anchor that is not `inside`/`outside`, so a
+    /// document with no mirrored anchor carries no deferral at all — the same
+    /// property [`FloatingImageX::from_pages`] has on the other axis.
+    pub fn absolute_from_pages(odd: Pt, even: Pt) -> Self {
+        if odd == even {
+            Self::Absolute(odd)
+        } else {
+            Self::PageParity { odd, even }
+        }
+    }
+
+    /// The page-space y this object takes on a page of the given parity.
+    ///
+    /// `paragraph_top` is where the owning paragraph's content starts; only
+    /// [`Self::RelativeToParagraph`] reads it, and the two absolute cases
+    /// ignore it entirely.
+    pub fn at(self, parity: PageParity, paragraph_top: Pt) -> Pt {
+        match self {
+            Self::Absolute(y) => y,
+            Self::PageParity { odd, even } => match parity {
+                PageParity::Odd => odd,
+                PageParity::Even => even,
+            },
+            Self::RelativeToParagraph(offset) => paragraph_top + offset,
+        }
+    }
+
+    /// The page-space y when the position is page-absolute, `None` when it is
+    /// anchored to its paragraph.
+    ///
+    /// The distinction is behavioural, not merely arithmetic: a page-absolute
+    /// float is placed by its anchor, so it ignores the §20.4.2.18
+    /// `wrapTopAndBottom` band and the paragraph cursor that [`Self::at`]
+    /// would otherwise fold in.
+    pub fn absolute(self, parity: PageParity) -> Option<Pt> {
+        match self {
+            Self::Absolute(_) | Self::PageParity { .. } => Some(self.at(parity, Pt::ZERO)),
+            Self::RelativeToParagraph(_) => None,
+        }
+    }
+
+    /// Whether the position is page-absolute — the same question as
+    /// [`Self::absolute`], for callers that have no page to ask about.
+    pub fn is_page_absolute(self) -> bool {
+        !matches!(self, Self::RelativeToParagraph(_))
+    }
 }
 
 /// §20.4.3.1: which side of a two-sided document a page falls on.

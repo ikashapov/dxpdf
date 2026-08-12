@@ -21,8 +21,7 @@ use super::helpers::{
     render_page_footnotes, split_at_column_breaks, split_at_page_breaks, table_x_offset,
 };
 use super::types::{
-    ContinuationState, FloatingImage, FloatingImageY, FloatingShape, LayoutBlock, PageParity,
-    WrapMode,
+    ContinuationState, FloatingImage, FloatingShape, LayoutBlock, PageParity, WrapMode,
 };
 use super::FLOAT_DEDUP_EPSILON_PT;
 use super::FOOTNOTE_SEPARATOR_GAP;
@@ -411,7 +410,7 @@ impl<'doc> PageLayoutState<'doc> {
                             if !fi.wrap_mode.registers_as_wrap_float() {
                                 continue;
                             }
-                            if let FloatingImageY::Absolute(img_y) = fi.y {
+                            if let Some(img_y) = fi.y.absolute(parity) {
                                 self.current_page_abs_floats.push(float::ActiveFloat {
                                     page_x: fi.x.resolve(parity) - fi.dist_left,
                                     page_y_start: img_y,
@@ -601,19 +600,16 @@ fn register_paragraph_floats(
 ) {
     let parity = state.parity();
     for fi in floating_images {
-        let (y_start, y_end) = match fi.y {
-            FloatingImageY::RelativeToParagraph(offset) => {
-                (content_top + offset, content_top + offset + fi.size.height)
-            }
-            FloatingImageY::Absolute(img_y) => (img_y, img_y + fi.size.height),
-        };
+        let y_start = fi.y.at(parity, content_top);
+        let y_end = y_start + fi.size.height;
         if fi.is_wrap_top_and_bottom() {
-            let img_y = match fi.y {
-                FloatingImageY::Absolute(y) => y,
-                FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
-            };
             state.current_page.commands.push(DrawCommand::Image {
-                rect: PtRect::from_xywh(fi.x.resolve(parity), img_y, fi.size.width, fi.size.height),
+                rect: PtRect::from_xywh(
+                    fi.x.resolve(parity),
+                    y_start,
+                    fi.size.width,
+                    fi.size.height,
+                ),
                 image_data: fi.image_data.clone(),
                 src_rect: fi.src_rect,
             });
@@ -644,17 +640,10 @@ fn register_paragraph_floats(
         if matches!(fs.wrap_mode, WrapMode::None) {
             continue;
         }
-        let (y_start, y_end) = match fs.y {
-            FloatingImageY::RelativeToParagraph(offset) => {
-                (content_top + offset, content_top + offset + fs.size.height)
-            }
-            FloatingImageY::Absolute(y) => (y, y + fs.size.height),
-        };
+        let y_start = fs.y.at(parity, content_top);
+        let y_end = y_start + fs.size.height;
         if fs.is_wrap_top_and_bottom() {
-            let shape_y = match fs.y {
-                FloatingImageY::Absolute(y) => y,
-                FloatingImageY::RelativeToParagraph(offset) => content_top + offset,
-            };
+            let shape_y = y_start;
             state.current_page.commands.push(DrawCommand::Path {
                 origin: crate::render::geometry::PtOffset::new(fs.x.resolve(parity), shape_y),
                 rotation: fs.rotation,
@@ -710,9 +699,9 @@ fn register_destination_paragraph_floats(
 }
 
 fn has_absolute_wrap_float(floating_images: &[FloatingImage]) -> bool {
-    floating_images.iter().any(|image| {
-        matches!(image.y, FloatingImageY::Absolute(_)) && image.wrap_mode.registers_as_wrap_float()
-    })
+    floating_images
+        .iter()
+        .any(|image| image.y.is_page_absolute() && image.wrap_mode.registers_as_wrap_float())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2158,12 +2147,7 @@ pub(crate) fn layout_section_with_clearance(
                     if fi.is_wrap_top_and_bottom() {
                         continue;
                     }
-                    let img_y = match fi.y {
-                        FloatingImageY::Absolute(y) => y,
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            para_start_y + effective_style.space_before + offset
-                        }
-                    };
+                    let img_y = fi.y.at(parity, para_start_y + effective_style.space_before);
                     state.current_page.commands.push(DrawCommand::Image {
                         rect: PtRect::from_xywh(
                             fi.x.resolve(parity),
@@ -2184,12 +2168,7 @@ pub(crate) fn layout_section_with_clearance(
                     if fs.is_wrap_top_and_bottom() {
                         continue;
                     }
-                    let shape_y = match fs.y {
-                        FloatingImageY::Absolute(y) => y,
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            para_start_y + effective_style.space_before + offset
-                        }
-                    };
+                    let shape_y = fs.y.at(parity, para_start_y + effective_style.space_before);
                     state.current_page.commands.push(DrawCommand::Path {
                         origin: crate::render::geometry::PtOffset::new(
                             fs.x.resolve(parity),

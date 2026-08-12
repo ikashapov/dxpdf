@@ -5,7 +5,7 @@ use super::super::float;
 use super::super::paragraph::place_paragraph;
 use super::super::table::layout_table;
 use super::helpers::table_x_offset;
-use super::types::{FloatingImageY, LayoutBlock, PageParity};
+use super::types::{LayoutBlock, PageParity};
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtRect;
 
@@ -133,24 +133,17 @@ pub fn stack_blocks(
                 // before.
                 let mut band_bottom: Option<Pt> = None;
                 for fi in floating_images.iter() {
-                    let (y_start, y_end) = match fi.y {
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            (content_top + offset, content_top + offset + fi.size.height)
-                        }
-                        FloatingImageY::Absolute(img_y) => (img_y, img_y + fi.size.height),
-                    };
+                    let y_start = fi.y.at(parity, content_top);
+                    let y_end = y_start + fi.size.height;
                     if fi.is_wrap_top_and_bottom() {
-                        let img_y = match fi.y {
+                        let img_y = match fi.y.absolute(parity) {
                             // Page-absolute floats are positioned by the anchor,
                             // not by the band.
-                            FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => {
-                                let natural = content_top + offset;
-                                match band_bottom {
-                                    Some(bottom) => natural.max(bottom),
-                                    None => natural,
-                                }
-                            }
+                            Some(y) => y,
+                            None => match band_bottom {
+                                Some(bottom) => y_start.max(bottom),
+                                None => y_start,
+                            },
                         };
                         commands.push(DrawCommand::Image {
                             rect: PtRect::from_xywh(
@@ -192,23 +185,16 @@ pub fn stack_blocks(
                     if matches!(fs.wrap_mode, WrapMode::None) {
                         continue;
                     }
-                    let (y_start, y_end) = match fs.y {
-                        FloatingImageY::RelativeToParagraph(offset) => {
-                            (content_top + offset, content_top + offset + fs.size.height)
-                        }
-                        FloatingImageY::Absolute(y) => (y, y + fs.size.height),
-                    };
+                    let y_start = fs.y.at(parity, content_top);
+                    let y_end = y_start + fs.size.height;
                     if fs.is_wrap_top_and_bottom() {
                         // Same band as the images above — see `band_bottom`.
-                        let shape_y = match fs.y {
-                            FloatingImageY::Absolute(y) => y,
-                            FloatingImageY::RelativeToParagraph(offset) => {
-                                let natural = content_top + offset;
-                                match band_bottom {
-                                    Some(bottom) => natural.max(bottom),
-                                    None => natural,
-                                }
-                            }
+                        let shape_y = match fs.y.absolute(parity) {
+                            Some(y) => y,
+                            None => match band_bottom {
+                                Some(bottom) => y_start.max(bottom),
+                                None => y_start,
+                            },
                         };
                         commands.push(DrawCommand::Path {
                             origin: crate::render::geometry::PtOffset::new(
@@ -314,10 +300,7 @@ pub fn stack_blocks(
                     if fi.is_wrap_top_and_bottom() {
                         continue;
                     }
-                    let img_y = match fi.y {
-                        FloatingImageY::Absolute(y) => y,
-                        FloatingImageY::RelativeToParagraph(offset) => para_content_top + offset,
-                    };
+                    let img_y = fi.y.at(parity, para_content_top);
                     commands.push(DrawCommand::Image {
                         rect: PtRect::from_xywh(
                             fi.x.resolve(parity),
@@ -345,10 +328,7 @@ pub fn stack_blocks(
                     if fs.is_wrap_top_and_bottom() {
                         continue;
                     }
-                    let shape_y = match fs.y {
-                        FloatingImageY::Absolute(y) => y,
-                        FloatingImageY::RelativeToParagraph(offset) => para_content_top + offset,
-                    };
+                    let shape_y = fs.y.at(parity, para_content_top);
                     commands.push(DrawCommand::Path {
                         origin: crate::render::geometry::PtOffset::new(
                             fs.x.resolve(parity),
@@ -431,6 +411,7 @@ pub fn stack_blocks(
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::FloatingImageY;
     use super::*;
     use crate::model::ImageFormat;
     use crate::model::WrapText;
