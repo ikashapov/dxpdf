@@ -60,7 +60,21 @@ pub(super) fn parse_path_commands(s: Option<String>) -> Vec<VmlPathCommand> {
                 tokens.push(&rest[..end]);
                 rest = &rest[end..];
             } else {
-                rest = &rest[1..]; // skip unrecognized char
+                // `rest[1..]` is a byte index, and it is on a character
+                // boundary only by a chain of reasoning rather than a guard:
+                // `end == 0` is reachable only when `rest` starts with one of
+                // the delimiters `find` matches, and every one of those (`,`,
+                // `@`, ASCII whitespace, ASCII alphabetic) is a single byte.
+                //
+                // **Add a non-ASCII delimiter above and this panics** on any
+                // path string containing it. Guard it with `is_char_boundary`
+                // or advance by the character's own length before extending
+                // the set. The same fixed-index hazard took down a *library*
+                // once — `is_toc_entry_name` panicked on style names like
+                // `Заголовок 1` whose byte 4 split a codepoint (fixed in #146);
+                // every other fixed-index slice in non-test code was swept
+                // then, and this is the one that survived on reasoning alone.
+                rest = &rest[1..];
             }
         }
     }
@@ -164,6 +178,12 @@ pub(super) fn parse_path_commands(s: Option<String>) -> Vec<VmlPathCommand> {
                         cmds.push(VmlPathCommand::LineTo { x, y });
                     }
                 } else {
+                    // `qb` (quadratic bezier) reaches this arm and is dropped
+                    // with a warning rather than modelled. Deliberate, and
+                    // inert: `VmlPathCommand` is not consumed by the renderer
+                    // at all — no VML custom path is drawn today — so a `QuadTo`
+                    // variant would be plumbing with no observable effect.
+                    // Model it when VML custom-path rendering lands, not before.
                     log::warn!("vml-path: unsupported command {:?}", tok);
                 }
             }

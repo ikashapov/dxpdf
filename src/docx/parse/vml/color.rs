@@ -8,6 +8,14 @@ use crate::docx::model::*;
 /// optional (an unparseable `fillcolor` simply means "no color"), so this
 /// mirrors the sibling `parse_style`/`parse_formula`/`parse_length` helpers
 /// rather than raising a document-fatal error.
+///
+/// **Two §14.1.2.1 forms are deliberately not modelled**, and both degrade to
+/// "no color" here: three-digit hex (`#f00`), and the two-token commands that
+/// modify a colour (`red lighten(128)`, `fill darken(64)`). Adding them was
+/// weighed and declined — not because they are hard, but because a VML shape's
+/// colour is one input to a fill this engine already renders, so the work is
+/// small and the payoff is real; it simply has not been asked for by any
+/// document in the corpus. Revisit when one turns up.
 pub(super) fn parse_color(s: &str) -> Option<VmlColor> {
     let hex = s.strip_prefix('#').unwrap_or(s);
     if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {

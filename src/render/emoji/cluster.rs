@@ -86,6 +86,16 @@ pub enum FlagKind {
 ///
 /// Adjacent text clusters are merged into one [`InlineCluster::Text`] span.
 /// Empty input yields an empty vector.
+///
+/// # Keep single-codepoint clusters out of the emoji pipeline
+///
+/// A correctness rule, not an optimisation, and worth stating because it looks
+/// like one. A lone codepoint needs no GSUB — there is no sequence to shape —
+/// so routing it through the colour pipeline buys nothing. It also actively
+/// breaks: per UTS #51 a character like `U+2612` BALLOT BOX WITH X defaults to
+/// **text** presentation unless followed by VS-16, and Apple Color Emoji maps
+/// it to glyph 0. Sent to the colour pipeline it draws nothing; left as text it
+/// draws from the document's own face, which is what the spec asks for.
 pub fn classify(text: &str) -> Vec<InlineCluster<'_>> {
     let mut out = Vec::new();
     let mut text_start: Option<usize> = None;
