@@ -357,11 +357,17 @@ def build_cellspacing():
 # cannot tell supersede from add — which is why the tables here declare the
 # spacing at table level only, except this last one.
 def build_cellspacing_scale():
-    def table(label, tbl_spacing, row_spacing=None):
+    # Cell text is one unbroken alphanumeric token per cell — no space, no
+    # hyphen. UAX #14 breaks at both, and the line fitter emits one draw command
+    # per piece, so `S=400 C1` would reach the page as two commands and
+    # `S400-C1` as two more. A test that identifies a table by its cell string
+    # needs that string to survive as one command, and needs no other cell's
+    # string to be a prefix of it.
+    def table(label, tag, tbl_spacing, row_spacing=None):
         cells = join(
             *(
                 f'<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/>{TC_BORDERS}</w:tcPr>'
-                f"{para(f'{label} C{i}')}</w:tc>"
+                f"{para(f'{tag}C{i}')}</w:tc>"
                 for i in (1, 2, 3)
             )
         )
@@ -394,10 +400,15 @@ def build_cellspacing_scale():
         # The zero row is the reference: it fixes the cell width and the table
         # width that the other three are read against, on the same page and in
         # the same face, so no external measurement is needed.
-        table("S=0", None),
-        table("S=200", 200),
-        table("S=400", 400),
-        table("S=400 row=800", 400, row_spacing=800),
+        # Short cell tags on purpose: doubling the spacing narrows the cells,
+        # and a label that no longer fits gets split across draw commands, which
+        # is exactly what a test identifying a table by its cell text cannot
+        # survive. The readable description lives in the heading above each
+        # table, where a human looks anyway.
+        table("Table 1 — no spacing", "T1", None),
+        table("Table 2 — tblCellSpacing 200", "T2", 200),
+        table("Table 3 — tblCellSpacing 400", "T3", 400),
+        table("Table 4 — tblCellSpacing 400, row 800", "T4", 400, row_spacing=800),
         SECT,
     )
     write("issue-165-cellspacing-scale.docx", document(body))

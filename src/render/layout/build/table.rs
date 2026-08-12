@@ -57,11 +57,46 @@ fn row_height_rule(
     }
 }
 
-/// §17.4.44: resolve `tblCellSpacing` to points.
+/// §17.4.44: resolve `tblCellSpacing` to the gap it actually renders, in points.
 ///
 /// `CT_TblWidth` allows `pct` and `auto`, and the spec says both **are ignored**
 /// for this element — only `dxa` carries a usable value. `nil` and an omitted
 /// element are zero, which is every table in the test corpora.
+///
+/// # No factor: the declared value *is* the gap, everywhere
+///
+/// Word renders `test-files/issue-165-cellspacing.docx` with gaps about twice
+/// this width (issue #165), which twice prompted the obvious conclusion —
+/// double the value — and it is wrong. The spec states no factor: §17.4.44 and
+/// [MS-OI29500] describe the value only as "the minimum amount of space which
+/// shall be left between all cells in the table including the width of the table
+/// borders in the calculation".
+///
+/// **ONLYOFFICE settles it**, being an independent implementation that both
+/// renders and targets Word compatibility. `sdkjs`, in
+/// `word/Editor/Table/TableRecalculate.js`, insets each cell within its grid
+/// slot: `+= CellSpacing` on the first cell's outer side and on the last cell's,
+/// `+= CellSpacing / 2` on every interior side. So an interior gap is two halves
+/// and an edge gap is one whole — **every gap is exactly the declared value**,
+/// which is what this function returns and always did. It also carves them out
+/// of the grid rather than growing the table, confirming `reserve_cell_spacing`
+/// below.
+///
+/// So where does Word's doubling come from? The probe is the suspect, not the
+/// factor: `issue-165-cellspacing.docx` declares `tblCellSpacing` **twice**, 400
+/// in `tblPr` and 400 again in `trPr`. If Word sums them the effective spacing is
+/// 800 twips — exactly the doubling observed, with no factor anywhere. §17.4.44
+/// says the row value *supersedes* the table one and ONLYOFFICE implements
+/// override (`RowPr.TableCellSpacing = TablePr.TablePr.TableCellSpacing`, then a
+/// merge), but the spec saying "supersede" is not evidence about what Word does
+/// — [MS-OI29500] exists because Word deviates. That probe cannot tell the two
+/// apart, which is why it must not be used to justify a factor.
+///
+/// **Word reference render needed** (issue #165):
+/// `test-files/issue-165-cellspacing-scale.docx` declares the spacing at table
+/// level *only* in two of its four tables, so it separates "Word applies a
+/// factor" from "Word sums the two declarations" — and its fourth table, with
+/// 400 at table level and 800 on the row, measures the sum directly.
 fn resolve_cell_spacing(m: Option<model::TableMeasure>) -> Pt {
     match m {
         Some(model::TableMeasure::Twips(tw)) => Pt::from(tw).max(Pt::ZERO),
@@ -790,10 +825,9 @@ mod tests {
     #[test]
     fn cell_spacing_only_honours_dxa() {
         use crate::model::dimension::Dimension;
-        assert_eq!(
-            resolve_cell_spacing(Some(model::TableMeasure::Twips(Dimension::new(240)))),
-            Pt::new(12.0),
-            "240 twips = 12pt"
+        assert!(
+            resolve_cell_spacing(Some(model::TableMeasure::Twips(Dimension::new(240)))) > Pt::ZERO,
+            "a dxa measurement carries a usable spacing"
         );
         for ignored in [
             Some(model::TableMeasure::Pct(Dimension::new(2500))),
@@ -803,6 +837,22 @@ mod tests {
         ] {
             assert_eq!(resolve_cell_spacing(ignored), Pt::ZERO, "{ignored:?}");
         }
+    }
+
+    /// §17.4.44: the declared value passes through unscaled — it *is* the gap.
+    ///
+    /// Pinned because it was briefly changed to `2x` on the strength of a Word
+    /// render, and reverted when ONLYOFFICE's renderer turned out to apply no
+    /// factor at all. See `resolve_cell_spacing`'s doc comment for that evidence
+    /// and for what the doubling in that render is more likely to have been.
+    #[test]
+    fn a_declared_spacing_is_the_whole_gap() {
+        use crate::model::dimension::Dimension;
+        assert_eq!(
+            resolve_cell_spacing(Some(model::TableMeasure::Twips(Dimension::new(240)))),
+            Pt::new(12.0),
+            "240 twips = 12pt declared and 12pt rendered"
+        );
     }
 
     /// The spacing is carved *out of* the table, so the slots shrink by exactly
