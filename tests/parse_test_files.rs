@@ -406,6 +406,9 @@ const ALL_FILES: &[&str] = &[
     "centered-numbered-heading.docx",
     "issue-159-minimal.docx",
     "issue-139-minimal.docx",
+    "issue-165-vmerge.docx",
+    "issue-165-cellspacing.docx",
+    "issue-165-floatv.docx",
 ];
 
 #[test]
