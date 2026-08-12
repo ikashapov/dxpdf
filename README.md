@@ -281,7 +281,7 @@ Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 1
 | Highlighting | ✅ full ST_HighlightColor palette |
 | Caps, smallCaps | ⚠️ parsed, not applied at layout |
 | Shadow, outline, emboss, imprint | ❌ |
-| Hidden text (`w:vanish`) | ⚠️ parsed, not applied — hidden runs still paint |
+| Hidden text (`w:vanish`) | ⚠️ a hidden run is removed before layout — its text, tabs and breaks take no space and the text either side closes up — resolved through the §17.7.2 cascade, so a character style can hide and `w:val="0"` can un-hide. Two gaps: a `w:sym`, `w:drawing` or `w:pict` in a hidden run still draws, and a hidden paragraph **mark** does not merge its paragraph into the next |
 | Run borders (`w:bdr`) | ✅ |
 
 ### Paragraph Properties (w:pPr)

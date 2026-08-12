@@ -516,6 +516,34 @@ pub struct FragmentCtx<'a> {
     pub locale_tag: Option<&'a str>,
 }
 
+/// §17.3.2 `w:vanish`: whether this run is hidden text, and so contributes
+/// nothing to the page.
+///
+/// Walks the §17.7.2 cascade in the order [`resolve_run_styling`] merges it —
+/// direct `w:rPr`, then the character style named by `w:rStyle`, then the
+/// paragraph style's run properties — but reads the one field rather than
+/// merging the whole bag, because this is asked of every run in every document
+/// and that merge clones a `RunProperties`. The two orders have to agree;
+/// `a_run_can_override_a_hidden_style_back_to_visible` is what notices if they
+/// drift apart.
+///
+/// Reads the *value*, not the presence: `<w:vanish w:val="0"/>` is how a run
+/// un-hides itself inside a hidden style, and is the reason this cannot be an
+/// `is_some()` test.
+fn run_is_hidden(tr: &TextRun, ctx: &FragmentCtx<'_>) -> bool {
+    if let Some(vanish) = tr.properties.vanish {
+        return vanish;
+    }
+    if let (Some(style_id), Some(styles)) = (&tr.style_id, ctx.resolved_styles) {
+        if let Some(vanish) = styles.get(style_id).and_then(|s| s.run.vanish) {
+            return vanish;
+        }
+    }
+    ctx.paragraph_run_defaults
+        .and_then(|defaults| defaults.vanish)
+        .unwrap_or(false)
+}
+
 /// Walk inline content and collect fragments.
 /// `measure_text` is a callback that measures text width/height/ascent for a given font.
 /// `resolved_styles` is used to look up character styles (w:rStyle) on text runs.
@@ -540,6 +568,26 @@ where
     let paragraph_run_defaults = ctx.paragraph_run_defaults;
     let theme = ctx.theme;
     let auto_fit = ctx.auto_fit;
+
+    // §17.3.2 `w:vanish`: hidden runs are removed here, before anything
+    // measures or joins them, so the visible text either side closes up rather
+    // than leaving a gap where the run was. Everything downstream — the field
+    // pre-pass below, `build_inline_units`, the line fitter — then sees a
+    // stream that simply does not contain them.
+    //
+    // The scan runs first so the allocation happens only for a document that
+    // actually hides something, which is a small minority; for every other one
+    // this costs two `Option` checks per run and no clone. A `Vec<&Inline>`
+    // would avoid the clone in that minority too, at the price of threading a
+    // borrow through `build_inline_units` and the field pre-pass — not worth it
+    // for a path taken this rarely.
+    let hidden = |inline: &Inline| matches!(inline, Inline::TextRun(tr) if run_is_hidden(tr, ctx));
+    let visible: Option<Vec<Inline>> = inlines
+        .iter()
+        .any(hidden)
+        .then(|| inlines.iter().filter(|i| !hidden(i)).cloned().collect());
+    let inlines: &[Inline] = visible.as_deref().unwrap_or(inlines);
+
     let mut fragments = Vec::new();
     let mut field_depth: i32 = 0; // tracks nested complex field state
     let mut field_instr = String::new(); // accumulated instruction text for current complex field
@@ -1177,6 +1225,225 @@ mod tests {
             auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             locale_tag: None,
         }
+    }
+
+    // ── §17.3.2 `w:vanish` hidden text ───────────────────────────────────
+    //
+    // A run marked hidden contributes nothing to the page: no glyphs, no
+    // width, and no line height of its own. The surrounding text closes up
+    // around it, so hiding is a *removal* from the inline stream rather than a
+    // draw-time skip — that is the difference between "Visible tail" and
+    // "Visible  tail".
+    //
+    // The cascade is §17.7.2's, the same one `resolve_run_styling` walks:
+    // direct `w:rPr` beats the character style (`w:rStyle`), which beats the
+    // paragraph style's run properties and `docDefaults`. `w:val="0"` on a
+    // run is therefore how a document un-hides one run of a hidden style, and
+    // it has to keep working — a `.is_some()` test in place of a value test
+    // would silently invert it.
+    //
+    // Not covered, deliberately, and stated where it bites rather than only
+    // here: the paragraph **mark**'s own `w:pPr/w:rPr/w:vanish`. That hides the
+    // mark, which merges the paragraph into the next one — a pagination change,
+    // not a run filter — and the mark's properties never reach this cascade
+    // anyway (`resolve_paragraph_defaults` builds `paragraph_run_defaults` from
+    // the paragraph *style*, not from `w:pPr/w:rPr`).
+
+    fn hidden_run(text: &str, vanish: Option<bool>, style_id: Option<&str>) -> Inline {
+        Inline::TextRun(Box::new(TextRun {
+            style_id: style_id.map(crate::model::StyleId::new),
+            properties: RunProperties {
+                vanish,
+                ..Default::default()
+            },
+            content: vec![RunElement::Text(text.into())],
+            rsids: RevisionIds::default(),
+        }))
+    }
+
+    /// A character style that hides whatever it is applied to.
+    fn styles_with_hidden(
+        id: &str,
+    ) -> std::collections::HashMap<
+        crate::model::StyleId,
+        crate::render::resolve::styles::ResolvedStyle,
+    > {
+        let style = crate::render::resolve::styles::ResolvedStyle {
+            paragraph: Default::default(),
+            run: RunProperties {
+                vanish: Some(true),
+                ..Default::default()
+            },
+            table: None,
+            table_style_overrides: Vec::new(),
+            is_toc_entry: false,
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert(crate::model::StyleId::new(id), style);
+        map
+    }
+
+    fn collect(inlines: &[Inline], ctx: &FragmentCtx<'_>) -> Vec<Fragment> {
+        collect_fragments(
+            inlines,
+            ctx,
+            None,
+            &dummy_measure,
+            &mut FootnoteTracker::default(),
+            &mut 0,
+            FieldContext::default(),
+        )
+    }
+
+    /// The defect: a hidden run drew its text like any other.
+    #[test]
+    fn a_hidden_run_contributes_no_fragments() {
+        let inlines = vec![hidden_run("SECRET", Some(true), None)];
+        assert!(
+            collect(&inlines, &default_ctx(12.0)).is_empty(),
+            "a hidden run must not reach layout at all"
+        );
+    }
+
+    /// Removal, not a zero-width draw: the visible text either side has to end
+    /// up adjacent, which is only true if the hidden run never becomes a
+    /// fragment.
+    #[test]
+    fn text_closes_up_around_a_hidden_run() {
+        let inlines = vec![
+            text_run("ab"),
+            hidden_run("SECRET", Some(true), None),
+            text_run("cd"),
+        ];
+        let frags = collect(&inlines, &default_ctx(12.0));
+        let width: f32 = frags.iter().map(|f| f.width().raw()).sum();
+        assert_eq!(
+            width, 24.0,
+            "only the four visible characters may take width, got {frags:?}"
+        );
+    }
+
+    /// §17.7.2: a character style can hide the runs that reference it.
+    #[test]
+    fn a_character_style_hides_the_runs_that_use_it() {
+        let styles = styles_with_hidden("Secret");
+        let ctx = FragmentCtx {
+            resolved_styles: Some(&styles),
+            ..default_ctx(12.0)
+        };
+        let inlines = vec![hidden_run("SECRET", None, Some("Secret"))];
+        assert!(
+            collect(&inlines, &ctx).is_empty(),
+            "the style's w:vanish must reach the run"
+        );
+    }
+
+    /// §17.7.2: and the run can turn it back off. `w:vanish w:val="0"` is the
+    /// documented way to un-hide one run of a hidden style, so the filter has
+    /// to read the *value*, not merely the presence of the element.
+    #[test]
+    fn a_run_can_override_a_hidden_style_back_to_visible() {
+        let styles = styles_with_hidden("Secret");
+        let ctx = FragmentCtx {
+            resolved_styles: Some(&styles),
+            ..default_ctx(12.0)
+        };
+        let inlines = vec![hidden_run("ab", Some(false), Some("Secret"))];
+        assert_eq!(
+            collect(&inlines, &ctx).len(),
+            1,
+            "explicit w:val=\"0\" outranks the style"
+        );
+    }
+
+    /// §17.7.2: the paragraph style's run properties are the bottom of the
+    /// cascade, and reach a run that states nothing itself.
+    #[test]
+    fn paragraph_run_defaults_can_hide_a_run() {
+        let defaults = RunProperties {
+            vanish: Some(true),
+            ..Default::default()
+        };
+        let ctx = FragmentCtx {
+            paragraph_run_defaults: Some(&defaults),
+            ..default_ctx(12.0)
+        };
+        assert!(
+            collect(&[text_run("SECRET")], &ctx).is_empty(),
+            "an inherited w:vanish hides a run that states nothing"
+        );
+        let inlines = vec![hidden_run("ab", Some(false), None)];
+        assert_eq!(
+            collect(&inlines, &ctx).len(),
+            1,
+            "and the run still outranks it"
+        );
+    }
+
+    /// A hidden run's tabs and breaks go with it — they are its content, and
+    /// Word does not leave a tab stop or a line break behind when it hides the
+    /// run that carried them.
+    #[test]
+    fn a_hidden_run_takes_its_tabs_and_breaks_with_it() {
+        let inlines = vec![Inline::TextRun(Box::new(TextRun {
+            style_id: None,
+            properties: RunProperties {
+                vanish: Some(true),
+                ..Default::default()
+            },
+            content: vec![
+                RunElement::Tab,
+                RunElement::Text("SECRET".into()),
+                RunElement::LineBreak(crate::model::BreakKind::TextWrapping),
+            ],
+            rsids: RevisionIds::default(),
+        }))];
+        assert!(
+            collect(&inlines, &default_ctx(12.0)).is_empty(),
+            "the whole run goes, not just its text"
+        );
+    }
+
+    /// Hidden runs inside a `w:hyperlink` are hidden too — the recursion has to
+    /// carry the filter, not just the top level.
+    #[test]
+    fn a_hidden_run_inside_a_hyperlink_is_hidden() {
+        let inlines = vec![Inline::Hyperlink(crate::model::Hyperlink {
+            target: crate::model::HyperlinkTarget::ExternalUrl("https://example.com".into()),
+            content: vec![hidden_run("SECRET", Some(true), None), text_run("ab")],
+        })];
+        let frags = collect(&inlines, &default_ctx(12.0));
+        let width: f32 = frags.iter().map(|f| f.width().raw()).sum();
+        assert_eq!(
+            width, 12.0,
+            "only the visible half of the link, got {frags:?}"
+        );
+    }
+
+    /// **Known limit, characterized rather than fixed.** Word hides a `w:sym`,
+    /// `w:drawing` or `w:pict` in a hidden run along with its text. This engine
+    /// cannot: `docx::parse::body::extend_from_run` flushes those children into
+    /// sibling `Inline`s of their own, and `Inline::Symbol` / `Inline::Image` /
+    /// `Inline::Pict` carry no run properties — so by the time the filter runs,
+    /// the `w:vanish` that governed them is gone.
+    ///
+    /// Closing it is a model change (carry the run's `w:rPr` onto those
+    /// inlines), not a change here. This test exists so that change announces
+    /// itself instead of silently contradicting a passing suite.
+    #[test]
+    fn a_hidden_symbol_still_draws_because_the_model_drops_its_run_properties() {
+        let inlines = vec![
+            hidden_run("SECRET", Some(true), None),
+            Inline::Symbol(crate::model::Symbol {
+                font: "Wingdings".into(),
+                char_code: 0xF0FC,
+            }),
+        ];
+        assert_eq!(
+            collect(&inlines, &default_ctx(12.0)).len(),
+            1,
+            "the symbol survives its hidden run — see this test's doc comment"
+        );
     }
 
     // ── §17.3.2.4 / §17.18.2 run-level border tri-state ─────────────────
