@@ -409,6 +409,7 @@ const ALL_FILES: &[&str] = &[
     "issue-165-vmerge.docx",
     "issue-165-cellspacing.docx",
     "issue-165-floatv.docx",
+    "hidden-text.docx",
 ];
 
 #[test]
