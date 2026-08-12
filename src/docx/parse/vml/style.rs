@@ -176,7 +176,11 @@ pub(super) fn parse_length(s: &str) -> Option<VmlLength> {
         return None;
     }
 
-    // Try known unit suffixes.
+    // Try known unit suffixes. `pc` (picas) is the one CSS2 unit VML allows
+    // that is deliberately absent: it falls through to the warn-and-reject arm
+    // below rather than being converted at 1pc = 12pt. Nothing in the corpus
+    // uses it, and a silently-wrong length is worse than a warned-away one —
+    // add it with a test the day a document needs it.
     let (num_str, unit) = if let Some(n) = s.strip_suffix("pt") {
         (n, VmlLengthUnit::Pt)
     } else if let Some(n) = s.strip_suffix("in") {

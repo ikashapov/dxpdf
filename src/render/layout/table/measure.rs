@@ -35,6 +35,17 @@ pub(super) fn measure_table_rows(
     // §17.4.44: the slots were shrunk by one `cell_spacing` before they got
     // here, so adding it back recovers the table's own outer width — the
     // spacing is carved out of the table, not added to it.
+    //
+    // **Word reference render needed** (issue #165): whether the gap at the table's *own
+    // edges* is one full spacing or a half. §17.4.44 says the spacing sits
+    // "between adjacent cells and the edges of the table" without saying
+    // whether an edge gets the same amount as the gap between two cells — one
+    // full spacing everywhere is what is implemented, matching HTML's
+    // `cellspacing`, and the spec licenses but does not require it. What would
+    // settle it: a table with a large `w:tblCellSpacing` and a visible outer
+    // border, so the edge gap can be measured against the inter-cell gap.
+    // Nothing in the corpus sets a non-zero value, so no test distinguishes
+    // the two readings either.
     let table_width: Pt = col_widths.iter().copied().sum::<Pt>() + cell_spacing;
     let num_rows = rows.len();
     let mut row_heights = Vec::with_capacity(num_rows);

@@ -43,6 +43,48 @@
 //! Because the occurrences survive, a consumer that wants a different rule can
 //! have one without touching the parser: [`Dup::all`] hands back every
 //! occurrence in document order.
+//!
+//! # Where a `Dup` goes, and why that is not a matter of taste
+//!
+//! On a **property-bag field** — a direct child of `w:pPr`, `w:rPr`, `w:tblPr`,
+//! `w:trPr`, `w:tcPr`, `w:sectPr`. **Never inside a composite value type**
+//! ([`crate::model::ParagraphBorders`], `Border`, `EdgeInsets`, `Transform2D`),
+//! which stay plain and `Copy`.
+//!
+//! This was settled by two whole-tree attempts that collapsed before it was
+//! clear, and re-deriving it is expensive enough to be worth stating. Widening
+//! the *sides* inside `ParagraphBorders` strips `Copy` from a type layout reads
+//! in 59 places, turns one bordered paragraph into five heap allocations, and
+//! cascades through every reader: compile errors went 82 → 216 on one attempt
+//! and 143 → 180 on the other, and neither converged. Widening the *owner* cost
+//! 12 errors and was fixed in a single pass.
+//!
+//! The property-bag child is also the level §17.7.2 operates at, so `Dup` and
+//! the style cascade line up instead of crossing. The price is that a repeated
+//! `<w:top>` inside one `<w:pBdr>` still collapses at the seam — not maximally
+//! lossless, and deliberate.
+//!
+//! The `Option<bool>` toggles are excluded for the opposite reason and should
+//! stay that way: they come from `last_toggle`, where last-wins is §17.7.2's
+//! own rule rather than this parser's choice, and converting them would erase
+//! the distinction `crate::docx::parse::primitives::duplicates` exists to
+//! record.
+//!
+//! # What the corpus proves about this, and what it does not
+//!
+//! Measured — do not re-measure. **0 of 20** committed documents repeat a
+//! property-bag child, so "corpus renders byte-identical" proves no regression
+//! and *nothing at all* about the tolerance itself. Against eight synthetic
+//! documents built for it: **7 of 8** were fatal before this type existed
+//! (`tcMar` alone had been fixed separately), **8 of 8** convert now, and each
+//! renders identically to the same document carrying only the winning
+//! occurrence. That validates internal consistency — not that Word picks last,
+//! which still needs the reference render named in
+//! `crate::docx::parse::primitives::duplicates`.
+//!
+//! Cost is within noise on all four benchmark documents by whole-process
+//! timing. Treat that as **no measurable cost**, not as the speedup the
+//! criterion reports showed, which has no mechanism anyone could name.
 
 /// Every occurrence of a child element the schema allows at most once.
 ///

@@ -66,13 +66,27 @@ The converter follows a **parse → resolve → layout → (subset) → paint** 
 
 ## OOXML Reference
 
-**`docs/` — behavior.** How the engine works today, and WHY it makes those choices, which is generally not re-derivable from the source. Consult the relevant page before changing layout behavior, and update it in the same change when you change behavior it describes. A page here stays valid as long as the behavior does.
+**There is no reference directory.** `docs/` was removed deliberately, page by page: a prose page describing behaviour drifts from the behaviour, and the second copy is the one that goes stale. WHY the engine makes a choice — which is generally not re-derivable from the source — belongs in the **module doc or the comment at the site that makes the choice**, where it is next to the thing it explains and moves when that moves. The "No doc yet" list below is now simply the entry-point list.
 
-`docs/` is the only reference directory in the repo. Working notes — designs, profiling analyses, branch reviews — are kept **local and uncommitted** (`/plans/`, gitignored), because they describe a point in time rather than current behaviour. Nothing tracked may link to them, and no code comment may cite them: a fresh clone does not have them. Anything that must outlive the work belongs in `docs/`, or in the code it describes.
+Working notes — designs, profiling analyses, branch reviews — are kept **local and uncommitted** (`/plans/`, gitignored), because they describe a point in time rather than current behaviour. Nothing tracked may link to them, and no code comment may cite them: a fresh clone does not have them. That cuts both ways, and it is the rule most easily broken by accident: **anything in `/plans/` that must outlive the work has to be moved out before the file is deleted** — into the code it describes, into this file, or into a GitHub issue. A note that exists only there is one `rm -rf` from gone, and nothing will warn you.
 
 ### Known-unimplemented work
 
 Open engineering units are tracked as GitHub issues, not here — this file goes stale the moment one closes. Everything that is *not* a tracked unit is recorded where it applies: each ambiguity ECMA-376 cannot settle is stated in a comment at the site that makes the choice, saying what the choice is, why the spec does not decide it, and what evidence would. Grep for "Word reference render" to find them. Where a capability boundary is deliberate, the code says so at the boundary rather than deferring to the tracker — `SubsetOutcome::VariableInstanceNotBaked` states why a variable instance cannot be baked into embedded PDF bytes and names its two candidate routes; `register_embedded` states which faces of an embedded collection a given platform will open; `src/render/fonts/request.rs` states why `Toggle::Off` and `Toggle::Absent` select the same face today. One larger question is a decision rather than a gap: whether to take on a CLDR/ICU dependency for the i18n gaps tracked in issue #124.
+
+### Decided — do not redo
+
+Work deliberately *not* done. It is here rather than at a site because there is no site: no code was written, so a comment has nowhere to live. Reopen any of it with evidence, not with reasoning — each was closed against a measurement.
+
+**Rejected optimisations.** Layout is 1–3.5 ms on 25 of 33 corpus documents, and that is the budget every one of these competed for: font-family interning · `Vec::with_capacity` seeding in the hot builders · `format!` per footnote number (which would also have cost an `itoa` dependency) · the per-run `RunProperties` clone. Reopen only with a profile showing layout is the bottleneck for the workload in question. `PTabLeader`'s pass-through enum is a separate "no": a distinct per-spec-type enum is what the spec-faithful ADT convention prescribes, so the extra layer is intentional — unlike `PTabAlignment`, which earns its enum by driving distinct layout math.
+
+**Investigated and rejected.** Sharing `PackageContents` parts to remove the last package→media image copy: a parse-only probe peaks at 135 MB on the largest corpus document against 217 MB for the full render, so that duplicate never sets the peak. The keepNext double-layout and the floating-table double-measure: both measured in microseconds, and not worth the pagination risk.
+
+**Inherited § citations are suspect until checked.** The retired findings cited `a:bodyPr/@vertOverflow` as §20.1.10.85, but [`drawing.rs`](src/model/types/drawing.rs) already annotates §20.1.10.85 as `ST_TextWrappingType` — the `wrap` attribute. Both cannot be right, and the conflict was resolved by *not* citing the disputed number: the code names the attribute (`a:bodyPr/@vertOverflow`, `ST_TextVertOverflowType`), which is unambiguous. Confirm any § against the spec before adding it, and never inherit one from a document.
+
+**Worth knowing.** The `textlayout` feature costs binary size — the release binary is 15.9 → 28.2 MB (+77%) for ICU plus SkShaper/HarfBuzz. The same Skia build independently improved PDF font embedding: corpus output fell 28.98 → 27.22 MB (−6.1%), one document by −88%. That is Skia's PDF backend, not this engine's subset pass; don't attribute it here.
+
+**When a fix is written from the symptom rather than the spec, it tends to be wrong.** The last attempt to do so prescribed *clipping text Word draws* (`@vertOverflow`). Three times a written plan was itself wrong — the MCE ADT, the `bar` tab's semantics, and a locale unit's premise that its ambiguity blocked implementation — and writing the tests from the spec first is what exposed it each time. Treat any plan, including one in this file, as a starting point to verify rather than a specification to implement.
 
 **No doc yet** — start from the module docs at these entry points: character spacing and distributed alignment (`src/render/spacing.rs` — §17.3.2.35 and §17.3.1.13 share one unit, the UAX #29 grapheme cluster; the module doc says why it is that and not a shaped cluster), color-emoji pipeline (`src/render/emoji/mod.rs`), parse/serde schemas (`src/docx/parse/`, the `XxxXml` → domain seam), text shaping & fragments (`src/render/layout/fragment/`), per-glyph font fallback (`src/render/layout/fragment/fallback.rs` — why the fallback is carried as a name and not a resolved face, and why the early-out is load-bearing), paint & PDF emission (`src/render/painter.rs`), EMF images (`src/render/emf.rs`), numbering & list labels (`src/docx/parse/numbering.rs`, `src/render/layout/build/list_label.rs`), VML fallback (`src/docx/parse/vml/`).
 
@@ -145,6 +159,12 @@ docker run --rm -v "$PWD:/w" -w /w debian:12-slim bash -c '
 ```
 
 Two things that are not obvious from the files. The `assets` list is explicit because cargo-deb's default set also picks up C-ABI dynamic libraries, and `crate-type = ["rlib", "cdylib"]` means a release build emits `libdxpdf.so` — the PyO3 extension body, which has no business in `/usr/lib`. And when testing an install in a Debian *container*, delete `/etc/dpkg/dpkg.cfg.d/docker` first: it sets `path-exclude /usr/share/man/*`, so dpkg drops the man page and the test appears to prove the package has none.
+
+**How a change is built here.** Three conventions that the CI commands below do not enforce and that reviewers assume have happened:
+
+- **Tests written from the spec, first, and watched fail.** Not written against current output, which only pins the bug. Where a change touches uncovered code, the characterization tests land first as their own commit.
+- **A mutation check on every new test.** A test written alongside its implementation passes on the first run, which proves nothing. Break the implementation deliberately and confirm the right tests fail — if none does, the test is decoration.
+- **Pixel-diff any change that moves geometry**, across `test-files/` + `test-cases/`, and *explain* every diff rather than merely observing it. A document that changes is either the fix working or a regression, and only reading the pixels says which.
 
 **Before handing work back**, run what CI runs (`.github/workflows/ci.yml`):
 
