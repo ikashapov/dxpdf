@@ -24,6 +24,7 @@ Built by [nerdy.pro](https://nerdy.pro).
 - **Unicode-aware** — grapheme-correct segmentation, plus full-color emoji including ZWJ, skin-tone, keycap and flag sequences shaped through Skia's HarfBuzz
 - **Internationalised** — UAX #14 line breaking (including Thai, Lao, Khmer and Burmese), UAX #9 bidirectional text, and CLDR-driven numbers and dates that follow the document's own `w:lang`
 - **Packaged** — `cargo install`, `pip install`, or a `.deb` for Debian and Ubuntu
+- **Tolerant** — documents written by tools other than Word still parse: a schema-invalid repeated element resolves the way Word resolves it rather than failing the file
 - **ISO 29500 compliant** — validated against the Office Open XML specification
 
 ## Installation
@@ -40,8 +41,8 @@ Every [release](https://github.com/nerdy-pro/dxpdf/releases) ships a `.deb` for
 `amd64` and `arm64`:
 
 ```bash
-curl -LO https://github.com/nerdy-pro/dxpdf/releases/download/v0.5.0/dxpdf_0.5.0-1_amd64.deb
-sudo apt install ./dxpdf_0.5.0-1_amd64.deb
+curl -LO https://github.com/nerdy-pro/dxpdf/releases/download/v0.5.1/dxpdf_0.5.1-1_amd64.deb
+sudo apt install ./dxpdf_0.5.1-1_amd64.deb
 ```
 
 Installs `dxpdf` to `/usr/bin` with a `dxpdf(1)` man page, and recommends
@@ -59,7 +60,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dxpdf = "0.5.0"
+dxpdf = "0.5.1"
 ```
 
 ### Python Package
@@ -158,17 +159,17 @@ dxpdf handles the most common DOCX features found in real-world business documen
 
 ## Performance Benchmarks
 
-Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.5.0**,
+Measured on Apple M3 Max with `hyperfine` (30 runs, 5 warmup) at **v0.5.1**,
 against fixtures committed in `test-files/` so the numbers are reproducible.
 Times are rounded to 5 ms — run-to-run spread on a normally loaded machine is
 around ±10 ms, so smaller differences are not meaningful:
 
 | Fixture | Pages | Input | Conversion time | Peak RSS |
 |---|---|---|---|---|
-| `sample-docx-files-sample3` | 3 | 34 KB | **170 ms** | 55 MB |
-| `sample-docx-files-sample-4` | 7 | 10 KB | **170 ms** | 52 MB |
-| `sample-docx-files-sample1` | 9 | 1.3 MB | **55 ms** | 42 MB |
-| `sample-docx-files-sample4` | 171 | 14 MB | **420 ms** | 159 MB |
+| `sample-docx-files-sample3` | 3 | 34 KB | **170 ms** | 54 MB |
+| `sample-docx-files-sample-4` | 7 | 10 KB | **170 ms** | 51 MB |
+| `sample-docx-files-sample1` | 9 | 1.3 MB | **55 ms** | 40 MB |
+| `sample-docx-files-sample4` | 171 | 14 MB | **420 ms** | 145 MB |
 
 **Font resolution, not document size, decides what a conversion costs.** Notice
 that the 9-page fixture converts in a third of the time the 3-page one does,
@@ -260,7 +261,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **74 entries fully implemented, 11 partial, 12 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 11 partial, 12 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -383,9 +384,10 @@ Validated against ISO 29500 (Office Open XML). **74 entries fully implemented, 1
 | Feature | Status |
 |---|---|
 | PAGE, NUMPAGES | ✅ evaluated per page |
+| DATE, TIME | ✅ §17.16.4.2 evaluated against the `\@` picture at the moment of the render, with month, weekday and AM/PM names taken from the paragraph's own `w:lang`; a field naming no picture gets that locale's short date or time |
 | Hyperlinks | ✅ clickable PDF annotations |
-| All other fields | ✅ Word's cached result text is rendered, so a TOC, DATE or MERGEFIELD written by Word displays correctly but is not recomputed |
-| Field instruction parser (`dxpdf::field`) | ✅ ~20 instructions parsed and evaluable as a library — DATE, TIME, REF, PAGEREF, SEQ, IF, MERGEFIELD, DOCPROPERTY, SYMBOL and more — but only PAGE/NUMPAGES are wired into rendering |
+| All other fields | ✅ Word's cached result text is rendered, so a TOC or MERGEFIELD written by Word displays correctly but is not recomputed |
+| Field instruction parser (`dxpdf::field`) | ✅ ~20 instructions parsed and evaluable as a library — REF, PAGEREF, SEQ, IF, MERGEFIELD, DOCPROPERTY, SYMBOL and more — but only PAGE, NUMPAGES, DATE and TIME are wired into rendering |
 
 ### Other
 
@@ -396,7 +398,7 @@ Validated against ISO 29500 (Office Open XML). **74 entries fully implemented, 1
 | Color emoji (ZWJ, modifier, keycap, flag sequences) | ✅ host-resolved color typeface, cross-run cluster reassembly, GSUB-shaped via Skia's HarfBuzz |
 | Complex-script shaping — cursive joining | ✅ §17.3.2.30 a run whose script has positional forms (Unicode `Joining_Type` — Arabic, Syriac, N'Ko, Mongolian, Adlam …) is shaped through Skia's HarfBuzz; everything else keeps the cmap path unchanged |
 | Complex-script shaping — Indic reordering | ❌ needs the spacing unit to become the shaped cluster, not just a new call site |
-| Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator (from CLDR, region-aware — `de-CH` and `de-DE` disagree correctly) and number-word spelling (English, German, French, Spanish; every other language gets digits) |
+| Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator, the DATE/TIME picture names and the picture-less date and time defaults (all from CLDR, region-aware — `de-CH` and `de-DE` disagree correctly) and number-word spelling (English, German, French, Spanish; every other language gets digits) |
 | Font subsetting | ✅ codepoint-driven, with shapeability validation |
 | Per-glyph font fallback | ❌ a codepoint the resolved face does not cover is dropped rather than drawn from another face — `ASCII ① ア` in a Latin-only font loses both non-ASCII characters. Emoji are the exception (their own host-resolved pipeline). Documents that name a covering font, as Word writes, are unaffected |
 | Comments, tracked changes | ❌ |

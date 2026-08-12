@@ -1,3 +1,22 @@
+dxpdf (0.5.1-1) unstable; urgency=medium
+
+  * A repeated XML child no longer fails the document. A writer that emits two
+    <w:jc> in one <w:pPr>, or repeats any other child of pPr, rPr, tblPr, trPr
+    or tcPr, previously aborted the parse with "duplicate field"; every
+    occurrence is now carried through the model and the last one wins, as Word
+    resolves it. The same applies to VML shape children.
+  * Fixed a crash on localized style names: a name whose fourth byte fell
+    inside a multi-byte character (Заголовок 1, Título 1) panicked the table of
+    contents style detection.
+  * §17.16.4.2 date pictures: a backslash now escapes the character after it
+    instead of being printed. DATE \@ "MMM\ d, yyyy" rendered Aug\ 11, 2026 and
+    now renders Aug 11, 2026 (closes #159).
+  * A DATE or TIME field naming no picture takes the short date or time of the
+    document's own w:lang rather than a hardcoded American one, and AM/PM is
+    written the way the locale writes it.
+
+ -- Ilya Nixan <nixan@nerdy.pro>  Wed, 12 Aug 2026 09:00:00 +0000
+
 dxpdf (0.5.0-1) unstable; urgency=medium
 
   * Internationalisation: UAX #14 line breaking, UAX #9 bidirectional text with
