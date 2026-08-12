@@ -261,7 +261,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 11 partial, 12 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 12 partial, 11 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -374,7 +374,7 @@ Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 1
 |---|---|
 | Bullet, decimal, letter, roman | ✅ |
 | Ordinal, cardinalText, ordinalText | ✅ §17.9.27 spelled out in English, German, French and Spanish (`Eins`, `Vingt et un`, `Veintiuno`, `Erste`, `1er`, `1.º`); other languages fall back to digits |
-| Non-Latin sequences | ✅ §17.18.59 — Cyrillic, full-width/Devanagari/Thai/ideographic digits, circled and parenthesised decimals, kana (`aiueo`, `iroha`, both widths), hangul (`ganada`, `chosung`), Hebrew/Arabic/Devanagari/Thai alphabets, Chicago footnote symbols, heavenly stems, earthly branches and the sexagenary cycle, Hebrew and abjad numerals. Needs the level's §17.9.3 `w:rPr` to name a font covering the sequence, as Word writes — there is no per-glyph font fallback (see below) |
+| Non-Latin sequences | ✅ §17.18.59 — Cyrillic, full-width/Devanagari/Thai/ideographic digits, circled and parenthesised decimals, kana (`aiueo`, `iroha`, both widths), hangul (`ganada`, `chosung`), Hebrew/Arabic/Devanagari/Thai alphabets, Chicago footnote symbols, heavenly stems, earthly branches and the sexagenary cycle, Hebrew and abjad numerals. A level whose §17.9.3 `w:rPr` names a covering font, as Word writes, uses it; one that does not now falls back per glyph to a host face that covers the sequence (see below) |
 | Counting-system formats | ❌ §17.18.59 `chineseCounting`, `japaneseCounting`, `koreanCounting`, `thaiCounting`, `bahtText`, … render as decimal — each spells the number out in its own language rather than substituting digits |
 | Picture bullets | ✅ §17.9.21 |
 | Multi-level lists | ✅ `%1`–`%9` templates, per-level counters and resets, §17.9.8 `isLgl` |
@@ -400,7 +400,7 @@ Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 1
 | Complex-script shaping — Indic reordering | ❌ needs the spacing unit to become the shaped cluster, not just a new call site |
 | Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator, the DATE/TIME picture names and the picture-less date and time defaults (all from CLDR, region-aware — `de-CH` and `de-DE` disagree correctly) and number-word spelling (English, German, French, Spanish; every other language gets digits) |
 | Font subsetting | ✅ codepoint-driven, with shapeability validation |
-| Per-glyph font fallback | ❌ a codepoint the resolved face does not cover is dropped rather than drawn from another face — `ASCII ① ア` in a Latin-only font loses both non-ASCII characters. Emoji are the exception (their own host-resolved pipeline). Documents that name a covering font, as Word writes, are unaffected |
+| Per-glyph font fallback | ⚠️ a codepoint the resolved face cannot draw is drawn from a host face that can, chosen per UAX #29 grapheme cluster and carried through subsetting, so `ASCII ① ア` renders in full. Which face the host offers is its choice, so output is host-dependent (as color emoji already is), and no `w:lang` hint is passed yet — Han text may be given a face for the wrong language's glyph shapes. A codepoint no host face covers still draws nothing |
 | Comments, tracked changes | ❌ |
 | DrawingML fills, strokes, outer shadow | ⚠️ solid fills, strokes incl. dash patterns, and outer shadow; gradient and blip fills, blur, glow, reflection and soft edge are not rendered |
 | DrawingML preset geometry | ⚠️ `line` and `rect`; `custGeom` fully evaluated incl. guide formulas |

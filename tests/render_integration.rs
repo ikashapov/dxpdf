@@ -153,14 +153,28 @@ fn subsetted_pdf_is_well_formed() {
                 .is_some_and(|n| n == b"Font")
             {
                 font_dict_count += 1;
-                assert!(
-                    dict.get(b"Subtype").is_ok(),
-                    "/Font object must have a /Subtype"
-                );
-                assert!(
-                    dict.get(b"BaseFont").is_ok(),
-                    "/Font object must have a /BaseFont"
-                );
+                let subtype = dict
+                    .get(b"Subtype")
+                    .and_then(|s| s.as_name())
+                    .expect("/Font object must have a /Subtype")
+                    .to_vec();
+                // ISO 32000-1 §9.6.5: a Type 3 font is defined by its
+                // `/CharProcs` glyph procedures, and `/BaseFont` is not among
+                // the entries Table 112 lists for it — unlike Type 1, TrueType
+                // and Type 0, where it is required. Skia's PDF backend chooses
+                // Type 3 for some host faces on its own: issue #139's per-glyph
+                // fallback made `sample-docx-files-sample1` reach macOS's
+                // Lucida Grande for `U+25AA`, and it emits Type 3 for that face
+                // whether or not `subset-fonts` is on — verified both ways, so
+                // this is Skia's embedding choice and not something subsetting
+                // does to the font.
+                if subtype != b"Type3" {
+                    assert!(
+                        dict.get(b"BaseFont").is_ok(),
+                        "/Font object of /Subtype {} must have a /BaseFont",
+                        String::from_utf8_lossy(&subtype),
+                    );
+                }
             }
         }
     }

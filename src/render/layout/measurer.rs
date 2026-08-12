@@ -12,7 +12,7 @@ use crate::render::fonts::{self, FontRegistry, TypefaceEntry, TypefaceId};
 use crate::render::shape::Shaper;
 use crate::render::spacing;
 
-use super::fragment::{FontProps, TextMetrics};
+use super::fragment::{FontProps, RegistryFallback, TextMetrics};
 use crate::render::fonts::Toggle;
 
 /// Per-font measurement memo: the font's metrics (constant for the font) plus
@@ -59,6 +59,11 @@ pub struct TextMeasurer<'r> {
     /// words dominate. Uses FxHash: an earlier std-hasher width cache was
     /// net-negative on small docs due to per-word hashing overhead.
     measure_cache: RefCell<FxHashMap<usize, FontMeasureCache>>,
+    /// Issue #139: per-glyph fallback's view of this render's font system.
+    ///
+    /// Here for the same reason `emoji_resolver` is — it memoizes host lookups
+    /// and must not outlive the registry those answers came from.
+    fallback: RegistryFallback<'r>,
 }
 
 impl<'r> TextMeasurer<'r> {
@@ -71,7 +76,14 @@ impl<'r> TextMeasurer<'r> {
             cluster_shaper: Shaper::new().ok(),
             emoji_advance_cache: RefCell::new(HashMap::new()),
             measure_cache: RefCell::new(FxHashMap::default()),
+            fallback: RegistryFallback::new(registry),
         }
+    }
+
+    /// This render's coverage oracle — see
+    /// [`crate::render::layout::fragment::apply_font_fallback`].
+    pub fn fallback(&self) -> &RegistryFallback<'r> {
+        &self.fallback
     }
 
     pub fn registry(&self) -> &'r FontRegistry {

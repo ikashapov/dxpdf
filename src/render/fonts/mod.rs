@@ -757,6 +757,41 @@ impl FontRegistry {
         self.open(&best)
     }
 
+    /// Make `name` resolve to `typeface`, so a face chosen by codepoint
+    /// coverage can be carried as a **name** — issue #139.
+    ///
+    /// Per-glyph fallback (`layout::fragment::fallback`) picks a face by asking
+    /// the host which one covers a character, but everything downstream of
+    /// layout re-resolves from a family name: `DrawCommand::Text` carries one,
+    /// and both the painter and `subset::collect` ask this registry again. A
+    /// name is therefore the only handle that reaches both — and this is what
+    /// makes it a handle rather than a hope.
+    ///
+    /// Needed because not every face the host will *return* is a face it will
+    /// *find* by name. macOS answers an uncovered codepoint with `.LastResort`,
+    /// whose dot-prefixed family plain resolution cannot reach: without a pin
+    /// it resolves to some other face, and the codepoint silently goes back to
+    /// drawing nothing.
+    ///
+    /// Pins nothing when the name already resolves to this same typeface, which
+    /// is every ordinary family — so a document's own fonts stay authoritative
+    /// and this is a no-op in the common case.
+    pub fn pin_system_face(&self, name: &str, bold: Toggle, italic: Toggle, typeface: Typeface) {
+        let request = FaceRequest::new(name, bold, italic);
+        let key = FaceRequestKey::new(&request);
+        let wanted = TypefaceId::from(&typeface);
+
+        // `resolve` populates the cache as a side effect, so this both answers
+        // "does the name find it anyway?" and leaves the natural entry in place
+        // when it does.
+        if TypefaceId::from(&self.resolve(&request).typeface) == wanted {
+            return;
+        }
+        self.typefaces
+            .borrow_mut()
+            .insert(key, TypefaceEntry::system(typeface));
+    }
+
     /// Pre-resolve the four toggle combinations for each family.
     ///
     /// Warms the cache so layout's measurement loop never takes the slow path.

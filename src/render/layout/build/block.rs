@@ -482,6 +482,16 @@ pub(super) fn resolve_paragraph_bidi(
         super::convert::base_direction(props),
         &measure,
     );
+    // Issue #139: then give every cluster a face that can actually draw it.
+    // After bidi because a coverage boundary cannot change an embedding level,
+    // so each piece inherits the one its fragment already carries; before
+    // shaping because shaping re-measures against the resolved typeface and
+    // has to see the family this pass may have changed.
+    crate::render::layout::fragment::apply_font_fallback(
+        fragments,
+        ctx.measurer.fallback(),
+        &measure,
+    );
     // Then shaping, which needs the levels the line above resolved: a run's
     // direction is its embedding level, and nothing about the run's own
     // characters says whether it is a Latin phrase quoted inside Arabic.

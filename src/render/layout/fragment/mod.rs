@@ -18,6 +18,7 @@ use crate::render::shape::RunDirection;
 
 mod bidi;
 mod collect;
+mod fallback;
 mod segment;
 mod shape;
 mod split;
@@ -27,6 +28,7 @@ pub use bidi::assign_bidi_levels;
 pub use collect::{
     collect_fragments, FieldContext, FootnoteTracker, FragmentCtx, RecordedFootnote,
 };
+pub use fallback::{apply_font_fallback, FallbackLookup, RegistryFallback};
 pub use shape::shape_complex_scripts;
 pub use split::split_oversized_fragments;
 
