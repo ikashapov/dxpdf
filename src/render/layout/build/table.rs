@@ -414,11 +414,10 @@ pub(super) fn build_table(
                 .map(|(col_idx, cell)| {
                     // §17.4.17: gridBefore offsets the row's first cell to the
                     // right by that many grid columns; subsequent spans accumulate.
-                    let span = cell.properties.grid_span.cloned().unwrap_or(1) as usize;
+                    let span = grid_span(cell) as usize;
                     let mut grid_start = row.properties.grid_before as usize;
                     for ci in 0..col_idx {
-                        grid_start +=
-                            row.cells[ci].properties.grid_span.cloned().unwrap_or(1) as usize;
+                        grid_start += grid_span(&row.cells[ci]) as usize;
                     }
 
                     // §17.7.6: the cell's *grid* position, which is what decides
@@ -617,6 +616,28 @@ pub(super) fn build_table(
         alignment,
         float_info,
     }
+}
+
+/// §17.4.18: how many grid columns a `<w:tc>` covers — at least one.
+///
+/// `gridSpan` is a `ST_DecimalNumber`, so `w:val="0"` is well-formed and the
+/// spec gives it no meaning: §17.4.18 defines the element as "the number of
+/// grid columns spanned by the current cell", and a cell that exists occupies
+/// a column. Every pass that walks the grid already says exactly that with
+/// `span.max(1)` — `measure_table_rows`, `emit_table_rows`,
+/// `find_cell_at_grid_col`, `cell_index_at_grid_col`,
+/// `promote_orphan_vmerge_continues`.
+///
+/// This is the seam those passes are fed from, and it spelled the same rule
+/// `unwrap_or(1)`: identical on an *absent* `gridSpan`, and off by one column
+/// for every later cell in the row on `w:val="0"`. No corpus table writes one,
+/// and while the walk produced nothing but widths the divergence changed no
+/// pixel — but the walk now also addresses §17.7.6 conditional formatting, and
+/// there the shortfall costs the row's last cell its `lastCol` layer. One
+/// spelling, in one place, is what keeps the build layer and the layout passes
+/// looking at the same grid.
+fn grid_span(cell: &TableCell) -> u32 {
+    cell.properties.grid_span.cloned().unwrap_or(1).max(1)
 }
 
 /// §17.4.85: turn every **orphaned** `w:vMerge w:val="continue"` cell — one
@@ -924,7 +945,7 @@ fn build_table_cell(
     TableCellInput {
         blocks: cell_blocks,
         margins: cell_margins,
-        grid_span: cell.properties.grid_span.cloned().unwrap_or(1),
+        grid_span: grid_span(cell),
         shading,
         cell_borders,
         vertical_merge: cell.properties.vertical_merge.cloned().map(|vm| match vm {

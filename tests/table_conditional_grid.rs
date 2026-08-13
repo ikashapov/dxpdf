@@ -238,3 +238,57 @@ fn one_cell_per_grid_column_marks_the_outer_two() {
         vec![(BLUE.to_string(), 372, 100), (RED.to_string(), 72, 100)],
     );
 }
+
+/// One `<w:tc>` whose `gridSpan` is written verbatim, so a value the `u32`
+/// range allows but the layout does not can be stated at all.
+fn cell_with_raw_span(span: &str) -> String {
+    format!(
+        r#"<w:tc><w:tcPr><w:gridSpan w:val="{span}"/></w:tcPr>
+             <w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>"#
+    )
+}
+
+/// §17.4.18: `gridSpan` counts the grid columns a cell covers, and a `<w:tc>`
+/// that exists covers at least one. Every pass that walks the grid says so with
+/// `span.max(1)` — `measure_table_rows`, `emit_table_rows`,
+/// `find_cell_at_grid_col`, the orphan-`vMerge` repair — but the build layer's
+/// own walk spelled it `unwrap_or(1)`, which agrees on an *absent* `gridSpan`
+/// and disagrees on `w:val="0"`.
+///
+/// The disagreement is not cosmetic now that the walk addresses §17.7.6
+/// conditional formatting: a zero span gives the cell no columns, so every
+/// later cell in the row is addressed one grid column short, the row's last
+/// cell stops reaching the last grid column and loses its `lastCol` layer.
+///
+/// Asserted as parity against `gridSpan="1"` rather than against literal
+/// coordinates, because what is being pinned is that the two spellings are one
+/// walk — not any particular geometry, which the fixture's other tests own.
+#[test]
+fn a_zero_grid_span_covers_one_grid_column_like_an_absent_one() {
+    let with_zero = layout(&document(&format!(
+        "<w:tr>{}{}{}{}</w:tr>",
+        cell_with_raw_span("0"),
+        cell(1),
+        cell(1),
+        cell(1)
+    )));
+    let with_one = layout(&document(&format!(
+        "<w:tr>{}{}{}{}</w:tr>",
+        cell_with_raw_span("1"),
+        cell(1),
+        cell(1),
+        cell(1)
+    )));
+
+    assert_eq!(
+        shaded(&with_zero),
+        shaded(&with_one),
+        "a zero gridSpan must address the grid exactly as a span of one"
+    );
+    assert_eq!(
+        shaded(&with_zero),
+        vec![(BLUE.to_string(), 372, 100), (RED.to_string(), 72, 100)],
+        "and that grid is the plain one-cell-per-column grid: firstCol at the \
+         left margin, lastCol over the fourth column"
+    );
+}
