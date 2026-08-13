@@ -58,6 +58,11 @@ pub struct ResolvedDocument {
     /// §17.7.4.17: the default paragraph style (w:default="1", type="paragraph").
     /// Applied to paragraphs that don't specify a style explicitly.
     pub default_paragraph_style_id: Option<StyleId>,
+    /// §17.7.4.17: the default table style (`w:default="1"`, `type="table"`) —
+    /// Word's `TableNormal`. Applied to tables that name no style; a table that
+    /// names one reaches this through that style's `basedOn` chain instead,
+    /// which is how Word's built-in table styles are written.
+    pub default_table_style_id: Option<StyleId>,
     /// Footnote content keyed by note ID.
     pub footnotes: HashMap<NoteId, Vec<Block>>,
     /// Endnote content keyed by note ID.
@@ -90,13 +95,17 @@ pub fn resolve(doc: Document) -> ResolvedDocument {
 
     let font_families = fonts::collect_font_families(&doc);
 
-    // §17.7.4.17: find the default paragraph style.
-    let default_paragraph_style_id = doc
-        .styles
-        .styles
-        .iter()
-        .find(|(_, s)| s.is_default && s.style_type == StyleType::Paragraph)
-        .map(|(id, _)| id.clone());
+    // §17.7.4.17: the default style of each type that has a consumer — the one
+    // applied to an object of that type which references no style by name.
+    let default_style_of = |ty: StyleType| {
+        doc.styles
+            .styles
+            .iter()
+            .find(|(_, s)| s.is_default && s.style_type == ty)
+            .map(|(id, _)| id.clone())
+    };
+    let default_paragraph_style_id = default_style_of(StyleType::Paragraph);
+    let default_table_style_id = default_style_of(StyleType::Table);
 
     // Destructured rather than field-by-field so that adding a field to
     // `Document` breaks this build: an unhandled part is a silently dropped
@@ -133,6 +142,7 @@ pub fn resolve(doc: Document) -> ResolvedDocument {
         doc_defaults_paragraph: styles.doc_defaults_paragraph,
         doc_defaults_run: styles.doc_defaults_run,
         default_paragraph_style_id,
+        default_table_style_id,
         theme,
         footnotes,
         endnotes,

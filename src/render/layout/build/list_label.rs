@@ -661,6 +661,7 @@ mod tests {
             doc_defaults_paragraph: ParagraphProperties::default(),
             doc_defaults_run: RunProperties::default(),
             default_paragraph_style_id: None,
+            default_table_style_id: None,
             footnotes: HashMap::new(),
             endnotes: HashMap::new(),
             even_and_odd_headers: false,

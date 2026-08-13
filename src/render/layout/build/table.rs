@@ -140,10 +140,22 @@ pub(super) fn build_table(
     let grid_cols: Vec<Pt> = t.grid.iter().map(|g| Pt::from(g.width)).collect();
 
     // §17.7.6: table style for conditional formatting, borders, cell margins.
+    //
+    // §17.7.4.17: a table that names no style takes the stylesheet's
+    // `w:default="1"` table style. That is Word's `TableNormal`, whose
+    // 108-twip left/right `tblCellMar` is why cell text in a Word table sits
+    // in from the cell edge rather than against it — without this, such a
+    // table drew its text 5.4 pt to the left of where Word puts it.
+    //
+    // Only when none is named. §17.7.4.17 scopes the default to objects that
+    // do not reference a style, and a table style that wants `TableNormal`
+    // underneath it says `basedOn` — which is exactly how Word's own built-in
+    // table styles are written, so the two readings agree on Word's output.
     let raw_table_style = t
         .properties
         .style_id
         .as_ref()
+        .or(ctx.resolved.default_table_style_id.as_ref())
         .and_then(|sid| ctx.resolved.styles.get(sid));
 
     // §17.7.2: the table style's own `<w:tblPr>`, already folded through

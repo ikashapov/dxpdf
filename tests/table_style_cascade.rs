@@ -764,3 +764,106 @@ fn a_child_layers_cell_properties_merge_with_the_parents() {
         "a child tcPr that states only vAlign must not drop the parent's shading"
     );
 }
+
+// ── §17.7.4.17: the document default table style ───────────────────────────
+
+/// [`table_document`] with no `<w:tblStyle>` at all — the case the default
+/// table style exists for.
+fn styleless_table_document(direct_tbl_pr: &str) -> String {
+    let with_style = table_document(direct_tbl_pr);
+    let out = with_style.replace(r#"<w:tblStyle w:val="TestTbl"/>"#, "");
+    assert_ne!(
+        out, with_style,
+        "the fixture must have had a tblStyle to drop"
+    );
+    out
+}
+
+/// A stylesheet whose `TableNormal` carries `body`, marked default or not.
+fn styles_with_table_normal(body: &str, is_default: bool) -> String {
+    let default_attr = if is_default { r#" w:default="1""# } else { "" };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="TableNormal"{default_attr}>
+    <w:name w:val="Normal Table"/>
+    {body}
+  </w:style>
+  <w:style w:type="table" w:styleId="TestTbl">
+    <w:name w:val="Test Table"/>
+    <w:tblPr/>
+  </w:style>
+</w:styles>"#
+    )
+}
+
+/// Word's own `TableNormal`, as Word writes it.
+const TABLE_NORMAL: &str = r#"<w:tblPr>
+    <w:tblInd w:w="0" w:type="dxa"/>
+    <w:tblCellMar>
+      <w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>
+      <w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>
+    </w:tblCellMar>
+  </w:tblPr>"#;
+
+/// §17.7.4.17: `w:default="1"` means the style applies to objects of that type
+/// which reference no style. For tables that is `TableNormal`, and its 108-twip
+/// left/right `tblCellMar` is why cell text in a Word table sits 5.4 pt in from
+/// the cell edge rather than against it.
+#[test]
+fn a_table_naming_no_style_takes_the_document_default_table_style() {
+    let applied = layout(
+        &styleless_table_document(""),
+        &styles_with_table_normal(TABLE_NORMAL, true),
+    );
+    assert_eq!(
+        text_xs(&applied).first().copied(),
+        Some(77.40),
+        "the default style's 108-twip left cell inset applies: 72 + 5.4"
+    );
+
+    // Control: the very same style, not marked default, reaches nothing.
+    let unmarked = layout(
+        &styleless_table_document(""),
+        &styles_with_table_normal(TABLE_NORMAL, false),
+    );
+    assert_eq!(
+        text_xs(&unmarked).first().copied(),
+        Some(72.00),
+        "without w:default the style is just another unreferenced style"
+    );
+}
+
+/// …and only when the table names none. A table that names a style resolves
+/// through that style's `basedOn` chain instead, which is how Word's own
+/// built-in table styles reach `TableNormal`.
+#[test]
+fn a_table_naming_a_style_does_not_also_take_the_default() {
+    let named = layout(
+        // `TestTbl` declares nothing and is not `basedOn` TableNormal.
+        &table_document(""),
+        &styles_with_table_normal(TABLE_NORMAL, true),
+    );
+    assert_eq!(
+        text_xs(&named).first().copied(),
+        Some(72.00),
+        "naming a style opts out of the default, per §17.7.4.17"
+    );
+}
+
+/// The default is the *base* of the cascade, not the top of it: a direct
+/// `<w:tblCellMar>` on the table still wins, per edge.
+#[test]
+fn a_direct_property_still_beats_the_default_table_style() {
+    let overridden = layout(
+        &styleless_table_document(
+            r#"<w:tblCellMar><w:left w:w="720" w:type="dxa"/></w:tblCellMar>"#,
+        ),
+        &styles_with_table_normal(TABLE_NORMAL, true),
+    );
+    assert_eq!(
+        text_xs(&overridden).first().copied(),
+        Some(108.00),
+        "the table's own 720-twip left inset wins over the default's 108"
+    );
+}
