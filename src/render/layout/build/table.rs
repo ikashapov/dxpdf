@@ -220,14 +220,52 @@ pub(super) fn build_table(
         .and_then(|sid| ctx.resolved.styles.get(sid));
 
     // §17.7.2: the table style's own `<w:tblPr>`, already folded through
-    // `basedOn` and `wholeTable` by style resolution. Every table property
-    // below cascades direct-then-style through it, because a style's `tblPr`
-    // and a table's are the same content model (`CT_TblPrBase`) — there is no
-    // property the one may state and the other may not.
+    // `basedOn` and `wholeTable` by style resolution. The properties below
+    // cascade direct-then-style through it — but not all of `CT_TblPrBase`
+    // does, and which do is not a property of the content model.
+    //
+    // # Six of the twelve do not cascade
+    //
+    // [MS-OI29500] §2.1.250(a), annotating §17.7.6.4 (a style's own `tblPr`):
+    // the standard allows `bidiVisual`, `tblLayout`, `tblLook`, `tblOverlap`,
+    // `tblpPr`, `tblStyle` and `tblW` as its children, and "Word does not allow
+    // these elements to be child elements of the tblPr element". §2.1.249(a)
+    // says the same of §17.7.6.3, the conditional `tblPr` that `wholeTable`
+    // folds in here, so both sources feeding `style_table` are covered. A
+    // document declaring one of them in a style either fails to open in Word or
+    // renders without it; reading it would render a third-party document
+    // differently from the Word its author checked it against.
+    //
+    // Four of those seven are modelled and read here — `tblW`, `tblLook`,
+    // `tblpPr`, `tblOverlap` — so each is taken from the `<w:tbl>` alone below.
+    // `tblLayout` has no read site at all. The remaining two need no code:
+    // `TableProperties` has no `bidiVisual` field, and `tblStyle` is already
+    // excluded from `merge_table_properties` for an independent reason (it
+    // would be a second inheritance edge competing with `basedOn`).
+    //
+    // The five that do cascade — `jc`, `tblInd`, `tblBorders`, `tblCellMar`,
+    // `tblCellSpacing` — appear on neither list. So do the two band sizes,
+    // and their case runs the *other* way: §2.1.164(a) says Word does not
+    // accept `tblStyleColBandSize`/`tblStyleRowBandSize` on a `<w:tbl>`'s own
+    // `tblPr` (§17.4.59), which makes the style the only level it reads them
+    // at. ECMA documents them under Table Styles to match (§17.7.6.5 and
+    // §17.7.6.7, not §17.4), and the corpus agrees without exception: 693
+    // band-size declarations across 8 documents, every one in a style's
+    // `tblPr`, none on a table. The direct read below is kept anyway — it costs
+    // nothing and honours a producer Word would not.
     //
     // `cell_margins` and `borders` merge *per edge*, since §17.4.42 and
     // §17.4.38 define those as edge-wise exceptions; every other property is a
     // single value, so the direct occurrence simply wins outright.
+    //
+    // Note the narrowing is of the **application** only. `merge_table_
+    // properties` still folds all twelve fields through `basedOn`, because
+    // style-to-style inheritance is a different question: §17.7.4.3 gives a
+    // child "all of the properties of the base style" unconditionally, and
+    // nothing in either erratum speaks about what one style inherits from
+    // another. A field that both levels carry and no one applies is inert, and
+    // making the merge selective would put a rule about Word's *reader* inside
+    // a function that models the *stylesheet*.
     let style_table = raw_table_style.and_then(|s| s.table.as_ref());
 
     // §17.4.42: default cell margins from table style cascade.
@@ -266,20 +304,12 @@ pub(super) fn build_table(
         (None, None) => None,
     };
 
-    // §17.4.63 `tblW`, §17.4.28 `jc`, §17.4.51 `tblInd`, §17.4.44
-    // `tblCellSpacing`, §17.4.55 `tblLook`, §17.4.67/§17.4.68 the band sizes,
-    // §17.4.58 `tblpPr` and §17.4.57 `tblOverlap` — each read once here so the
-    // several sites below cannot disagree about which level won.
+    // Each property read once here, so the several sites below cannot disagree
+    // about which level won. Which of them consult `style_table` is decided by
+    // the errata cited above it, not by the content model.
     //
-    // `tblpPr`/`tblOverlap` are included because `CT_TblPrBase` carries them
-    // and §17.7.2 states no exception, not because Word's UI can write them
-    // into a style: it cannot, so a document that exercises this path came
-    // from another producer.
-    let width = t
-        .properties
-        .width
-        .get()
-        .or_else(|| style_table.and_then(|tp| tp.width.get()));
+    // §17.4.28 `jc`, §17.4.51 `tblInd`, §17.7.6.5/§17.7.6.7 the band sizes:
+    // direct, then style.
     let alignment = t
         .properties
         .alignment
@@ -291,11 +321,6 @@ pub(super) fn build_table(
         .indent
         .get()
         .or_else(|| style_table.and_then(|tp| tp.indent.get()));
-    let tbl_look = t
-        .properties
-        .look
-        .get()
-        .or_else(|| style_table.and_then(|tp| tp.look.get()));
     let row_band_size = t
         .properties
         .style_row_band_size
@@ -310,17 +335,15 @@ pub(super) fn build_table(
         .or_else(|| style_table.and_then(|tp| tp.style_col_band_size.get()))
         .copied()
         .unwrap_or(1);
-    let positioning = t
-        .properties
-        .positioning
-        .get()
-        .or_else(|| style_table.and_then(|tp| tp.positioning.get()));
-    let overlap = t
-        .properties
-        .overlap
-        .get()
-        .or_else(|| style_table.and_then(|tp| tp.overlap.get()))
-        .copied();
+
+    // §17.4.63 `tblW`, §17.4.55 `tblLook`, §17.4.57 `tblpPr`, §17.4.56
+    // `tblOverlap`: the `<w:tbl>`'s own `<w:tblPr>` and nothing else, per
+    // §2.1.250(a)/§2.1.249(a). Written as plain reads rather than as a cascade
+    // with the style arm deleted, so no later edit can restore one by reflex.
+    let width = t.properties.width.get();
+    let tbl_look = t.properties.look.get();
+    let positioning = t.properties.positioning.get();
+    let overlap = t.properties.overlap.cloned();
 
     // §17.4.63: resolve table width from tblW.
     let is_auto_width = matches!(
@@ -356,15 +379,26 @@ pub(super) fn build_table(
         Some(model::TableMeasure::Twips(tw)) => Pt::from(*tw),
         _ => available_width, // auto/nil: use grid cols or available width
     };
-    // §17.4.53: tblLayout controls whether columns may auto-resize to fit
+    // §17.4.52: tblLayout controls whether columns may auto-resize to fit
     // content; it does not override the preferred table width from tblW.
     // Word scales grid column widths proportionally to match tblW in both
     // fixed and auto layouts. Only when tblW is auto/nil do we keep the raw
     // grid widths (no preferred width was specified).
     //
-    // `tblLayout` is therefore the one `CT_TblPrBase` property with no cascade
-    // above: it has no read site to cascade *to*. Giving it one would be dead
-    // code, so when auto-fit lands it must take its style level with it.
+    // `tblLayout` has no read site here, and when auto-fit lands it must **not**
+    // acquire a style level — §2.1.250(a) lists it, so a style's `tblLayout` is
+    // one of the elements Word does not read.
+    //
+    // Producers do write it there, so this is a decision and not a shortage of
+    // documents: `sample-docx-files-sample-5.docx` and `-6.docx` each ship a
+    // `TableNormal` whose own `tblPr` declares `<w:tblLayout w:type="fixed"/>`,
+    // and each marks it `w:default="1"` — the style §17.7.4.17 hands to a table
+    // naming none, which is the path `raw_table_style` above already resolves.
+    // Neither document happens to contain a table, so nothing in this corpus
+    // reaches the value; the point is that Word, reading the same two files,
+    // would ignore the element either way. The 226 `<w:tblLayout>` elements the
+    // corpus does put on a `<w:tbl>` are the direct level, which §2.1.250(a)
+    // says nothing about.
     let col_widths = if is_auto_width && !grid_cols.is_empty() {
         clamp_auto_grid_to_page(&grid_cols, num_cols, available_width, &state.page_config)
     } else {

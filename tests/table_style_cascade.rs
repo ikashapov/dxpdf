@@ -1,8 +1,9 @@
-//! §17.7.2 / §17.7.6: what a **table style** declares must reach the table.
+//! §17.7.2 / §17.7.6: what a **table style** declares, and what of it reaches
+//! the table.
 //!
 //! The cascade a table sees has three levels — direct `<w:tblPr>` on the
 //! `<w:tbl>`, the style it names, and that style's `basedOn` ancestors — and
-//! every one of them speaks the same vocabulary (`CT_TblPrBase`). The tests
+//! every one of them speaks the same vocabulary (`CT_TblPrBase`). Most tests
 //! here are written as *parity*: a property declared in the style must produce
 //! the same page as the same property declared directly on the table, and both
 //! must differ from a control that declares it nowhere. That formulation is the
@@ -10,9 +11,26 @@
 //! the base style", §17.7.4.3) rather than a transcription of current output,
 //! and it stays true if the geometry these properties drive is ever refined.
 //!
+//! # The vocabulary is not shared in full
+//!
+//! `CT_TblPrBase` is one content model, but Word does not read all of it from a
+//! style. [MS-OI29500] §2.1.250(a) (on §17.7.6.4, a style's own `tblPr`) and
+//! §2.1.249(a) (on §17.7.6.3, a conditional one) each list the elements the
+//! standard allows there and Word does not, so those cases are written as the
+//! *inverse* parity — declaring it in the style must change nothing, while the
+//! same element on the `<w:tbl>` still applies. `build_table` states which
+//! elements and why; the split is:
+//!
+//! | reaches the table from a style | does not (§2.1.250(a))         |
+//! |--------------------------------|--------------------------------|
+//! | `jc`, `tblInd`, `tblBorders`   | `tblW`, `tblLook`, `tblpPr`    |
+//! | `tblCellMar`, `tblCellSpacing` | `tblOverlap`, `tblLayout`      |
+//! | the two band sizes             | `bidiVisual`, `tblStyle`       |
+//!
 //! No document in `test-files/` exercises a table style that declares anything
-//! other than borders and cell margins, so the fixtures are built here: the XML
-//! *is* the point of each test, and a `.docx` would hide it.
+//! other than borders, cell margins, indent, the band sizes and `tblLayout`, so
+//! the fixtures are built here: the XML *is* the point of each test, and a
+//! `.docx` would hide it.
 
 use std::io::Write;
 
@@ -204,23 +222,52 @@ fn text_xs(pages: &[LayoutedPage]) -> Vec<f32> {
         .collect()
 }
 
+/// The three renders every case below is decided by: the property written
+/// nowhere, written directly on the `<w:tbl>`, and written in the table style.
+struct ThreeWays {
+    control: Vec<String>,
+    direct: Vec<String>,
+    from_style: Vec<String>,
+}
+
+/// `style_extra` is appended to the style body after its `<w:tblPr>`, which is
+/// where a `tblLook`/band-size case puts the `tblStylePr` layers it needs to be
+/// observable at all. `constant_tbl_pr` is written directly on the table in
+/// *all three* variants — the background a property needs in order to be
+/// observable at all (`tblOverlap` says nothing about a table that does not
+/// float).
+fn three_ways(
+    document: &dyn Fn(&str) -> String,
+    constant_tbl_pr: &str,
+    tbl_pr: &str,
+    style_extra: &str,
+) -> ThreeWays {
+    ThreeWays {
+        control: page_geometry(&layout(
+            &document(constant_tbl_pr),
+            &styles_with(&format!("<w:tblPr/>{style_extra}")),
+        )),
+        direct: page_geometry(&layout(
+            &document(&format!("{constant_tbl_pr}{tbl_pr}")),
+            &styles_with(&format!("<w:tblPr/>{style_extra}")),
+        )),
+        from_style: page_geometry(&layout(
+            &document(constant_tbl_pr),
+            &styles_with(&format!("<w:tblPr>{tbl_pr}</w:tblPr>{style_extra}")),
+        )),
+    }
+}
+
 /// §17.7.2: the whole point of a style. A property in the style must render
 /// exactly as the same property written directly on the `<w:tbl>` — and the
 /// control, which writes it in neither place, must differ, or the assertion
 /// above it proves nothing.
-///
-/// `style_extra` is appended to the style body after its `<w:tblPr>`, which is
-/// where a `tblLook`/band-size case puts the `tblStylePr` layers it needs to be
-/// observable at all.
 #[track_caller]
 fn assert_style_matches_direct(tbl_pr: &str, style_extra: &str, what: &str) {
     assert_style_matches_direct_with(&table_document, "", tbl_pr, style_extra, what);
 }
 
-/// [`assert_style_matches_direct`] over a different fixture, and with a
-/// `constant_tbl_pr` written directly on the table in *all three* variants —
-/// the background a property needs in order to be observable at all
-/// (`tblOverlap` says nothing about a table that does not float).
+/// [`assert_style_matches_direct`] over a different fixture.
 #[track_caller]
 fn assert_style_matches_direct_with(
     document: &dyn Fn(&str) -> String,
@@ -229,30 +276,52 @@ fn assert_style_matches_direct_with(
     style_extra: &str,
     what: &str,
 ) {
-    let control = layout(
-        &document(constant_tbl_pr),
-        &styles_with(&format!("<w:tblPr/>{style_extra}")),
-    );
-    let direct = layout(
-        &document(&format!("{constant_tbl_pr}{tbl_pr}")),
-        &styles_with(&format!("<w:tblPr/>{style_extra}")),
-    );
-    let from_style = layout(
-        &document(constant_tbl_pr),
-        &styles_with(&format!("<w:tblPr>{tbl_pr}</w:tblPr>{style_extra}")),
-    );
-
+    let w = three_ways(document, constant_tbl_pr, tbl_pr, style_extra);
     assert_ne!(
-        page_geometry(&control),
-        page_geometry(&direct),
+        w.control, w.direct,
         "{what}: the fixture does not discriminate — writing it directly on the \
          table changes nothing, so the style assertion below is vacuous"
     );
     assert_eq!(
-        page_geometry(&from_style),
-        page_geometry(&direct),
+        w.from_style, w.direct,
         "{what}: declared in the table style, it must render as if declared \
          directly on the table"
+    );
+}
+
+/// The inverse, for the properties [MS-OI29500] §2.1.250(a) says Word does not
+/// accept in a table style's `<w:tblPr>`: declaring one there must change
+/// **nothing**, so the style render matches the control rather than the direct
+/// one.
+///
+/// The same `control != direct` guard runs first, and does the same job in
+/// the opposite direction: without it, "declaring it in the style changed
+/// nothing" would also be satisfied by a fixture in which the property changes
+/// nothing anywhere.
+#[track_caller]
+fn assert_style_does_not_reach_the_table(tbl_pr: &str, style_extra: &str, what: &str) {
+    assert_style_does_not_reach_the_table_with(&table_document, "", tbl_pr, style_extra, what);
+}
+
+/// [`assert_style_does_not_reach_the_table`] over a different fixture.
+#[track_caller]
+fn assert_style_does_not_reach_the_table_with(
+    document: &dyn Fn(&str) -> String,
+    constant_tbl_pr: &str,
+    tbl_pr: &str,
+    style_extra: &str,
+    what: &str,
+) {
+    let w = three_ways(document, constant_tbl_pr, tbl_pr, style_extra);
+    assert_ne!(
+        w.control, w.direct,
+        "{what}: the fixture does not discriminate — writing it directly on the \
+         table changes nothing, so the style assertion below is vacuous"
+    );
+    assert_eq!(
+        w.from_style, w.control,
+        "{what}: [MS-OI29500] §2.1.250(a) — Word does not accept this element \
+         in a table style's tblPr, so declaring it there must change nothing"
     );
 }
 
@@ -276,24 +345,44 @@ fn a_table_style_can_align_the_table() {
     );
 }
 
-/// §17.4.63 `tblW` — the table's preferred width, which the grid is scaled to.
+/// §17.4.63 `tblW` — and the first of the six the erratum removes.
+///
+/// [MS-OI29500] §2.1.250(a), on §17.7.6.4's `tblPr` — a table style's own —
+/// says the standard permits `bidiVisual`, `tblLayout`, `tblLook`,
+/// `tblOverlap`, `tblpPr`, `tblStyle` and `tblW` as its children and "Word
+/// does not allow these elements to be child elements of the tblPr element".
+/// §2.1.249(a) says the same of §17.7.6.3's conditional `tblPr`, adding the
+/// two band sizes. A document that declares `tblW` in a style therefore either
+/// fails to open in Word or renders without it, and matching Word is what this
+/// engine is for.
 #[test]
-fn a_table_style_can_set_the_table_width() {
-    assert_style_matches_direct(r#"<w:tblW w:w="7200" w:type="dxa"/>"#, "", "tblW");
+fn a_table_style_cannot_set_the_table_width() {
+    assert_style_does_not_reach_the_table(r#"<w:tblW w:w="7200" w:type="dxa"/>"#, "", "tblW");
 
-    let widened = layout(
+    // The absolute placement, so a regression that moves *both* sides of the
+    // parity together still fails: the grid's own 2×2000 twips, unscaled.
+    let from_style = layout(
         &table_document(""),
         &styles_with(r#"<w:tblPr><w:tblW w:w="7200" w:type="dxa"/></w:tblPr>"#),
     );
     assert_eq!(
-        text_xs(&widened).first().copied(),
-        Some(72.0),
-        "a left-aligned table still starts at the left margin"
+        text_xs(&from_style).get(1).copied(),
+        Some(172.0),
+        "the style's 7200 twips is ignored, leaving the second column at its \
+         declared 2000 twips = 100 pt past the 72 pt margin"
+    );
+
+    // …and the direct level is untouched: 7200 twips = 360 pt still scales the
+    // two equal grid columns to 180 pt each.
+    let direct = layout(
+        &table_document(r#"<w:tblW w:w="7200" w:type="dxa"/>"#),
+        &styles_with("<w:tblPr/>"),
     );
     assert_eq!(
-        text_xs(&widened).get(1).copied(),
+        text_xs(&direct).get(1).copied(),
         Some(252.0),
-        "7200 twips = 360 pt scales the two equal grid columns to 180 pt each"
+        "written on the <w:tbl> it still applies — the removal is of the style \
+         level only"
     );
 }
 
@@ -323,40 +412,52 @@ fn a_table_style_can_set_cell_spacing() {
     );
 }
 
-/// §17.4.55 `tblLook` — which conditional regions of the style are switched on.
+/// §17.4.55 `tblLook` — also on §2.1.250(a)'s list, and the one whose exclusion
+/// the element's own title argues for independently: "Table Style Conditional
+/// Formatting **Settings**" is the table's statement about which of the
+/// referenced style's regions it wants, so it belongs to the reference and not
+/// to the style. A style switching off its own regions could simply not define
+/// them.
+///
 /// Only observable through a `tblStylePr` layer, so the style carries one.
 #[test]
-fn a_table_style_can_set_its_own_tbl_look() {
+fn a_table_style_cannot_set_the_tbl_look() {
     let first_row_red = r#"<w:tblStylePr w:type="firstRow">
              <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
            </w:tblStylePr>"#;
-    assert_style_matches_direct(
-        r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
-                      w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>"#,
-        first_row_red,
-        "tblLook",
-    );
+    let all_regions_off = r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
+                                        w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>"#;
+    assert_style_does_not_reach_the_table(all_regions_off, first_row_red, "tblLook");
 
-    let suppressed = layout(
+    let from_style = layout(
         &table_document(""),
         &styles_with(&format!(
-            r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
-                                   w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
-               {first_row_red}"#
+            "<w:tblPr>{all_regions_off}</w:tblPr>{first_row_red}"
         )),
     );
     assert_eq!(
-        page_geometry(&suppressed)
-            .iter()
-            .filter(|g| g.ends_with("#FF0000"))
-            .count(),
+        red_cells(&from_style),
+        2,
+        "firstRow=0 in the style's own tblLook is ignored, so §17.4.55's \
+         absent-element default (0x04A0, firstRow on) still shades the row"
+    );
+
+    let direct = layout(
+        &table_document(all_regions_off),
+        &styles_with(first_row_red),
+    );
+    assert_eq!(
+        red_cells(&direct),
         0,
-        "firstRow=0 in the style's own tblLook switches the firstRow layer off"
+        "…while the same element on the <w:tbl> still switches the layer off"
     );
 }
 
-/// A `lastRow` layer painted red, and how many cells it painted — the probe
-/// every `tblLook` case below reads, since `tblLook` has no geometry of its own.
+/// A `firstRow` layer painted red, and how many cells it painted — the probe
+/// every `tblLook` case reads, since `tblLook` has no geometry of its own.
+/// `firstRow` because §17.4.55 note (a)'s absent-element default is Word's
+/// 0x04A0, which switches that region **on** and `lastRow` off, so the layer
+/// paints unless something says otherwise.
 fn red_cells(pages: &[LayoutedPage]) -> usize {
     page_geometry(pages)
         .iter()
@@ -364,89 +465,58 @@ fn red_cells(pages: &[LayoutedPage]) -> usize {
         .count()
 }
 
-const LAST_ROW_RED: &str = r#"<w:tblStylePr w:type="lastRow">
+const FIRST_ROW_RED: &str = r#"<w:tblStylePr w:type="firstRow">
              <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
            </w:tblStylePr>"#;
 
-/// §17.4.55 × §17.7.2: an **empty** `<w:tblLook/>` states nothing, so it cannot
-/// shadow the style's.
+/// §17.4.55: an **empty** `<w:tblLook/>` states nothing, so it resolves to the
+/// absent element's default — not to "every region off".
 ///
 /// `CT_TblLook`'s six attributes are optional `ST_OnOff` with no schema
-/// default, and `@val` is optional too — `<w:tblLook/>` therefore carries no
-/// information at all, which is the same amount the *absent* element carries.
-/// §17.4.55 note (a)'s absent-element default (Word's 0x04A0, `lastRow` off)
-/// is what the consumer applies when nothing in the cascade said otherwise;
-/// applying it because the direct level wrote an empty element discards a
-/// `lastRow="1"` the style did state, and the last row loses its shading.
+/// default, and `@val` is optional too, so `<w:tblLook/>` carries exactly what
+/// the omitted element carries: nothing. The parse seam is where that is
+/// decided — `Dup::filter_map(tbl_look)` drops the occurrence rather than
+/// producing an all-`None` value — and `tbl_pr_tbl_look_empty_element_states_
+/// nothing` pins it there. This is the render end of the same rule, and the
+/// arm that discriminates is the third: an element that *does* state
+/// something is still a value, so the drop is narrowed to silence and is not
+/// "a direct `tblLook` never counts".
 #[test]
-fn an_empty_tbl_look_does_not_shadow_the_styles() {
-    let styles = styles_with(&format!(
-        r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0"
-                               w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
-           {LAST_ROW_RED}"#
-    ));
+fn an_empty_tbl_look_is_the_absent_elements_default_not_every_region_off() {
+    let styles = styles_with(FIRST_ROW_RED);
 
     let absent = layout(&table_document(""), &styles);
     assert_eq!(
         red_cells(&absent),
         2,
-        "with no direct tblLook the style's lastRow=1 shades both cells of the \
-         last row — without which the assertion below is vacuous"
+        "0x04A0 leaves firstRow active, so the layer shades both cells of the \
+         first row — without which the assertions below are vacuous"
     );
 
     let empty = layout(&table_document("<w:tblLook/>"), &styles);
     assert_eq!(
         red_cells(&empty),
         2,
-        "an empty <w:tblLook/> states nothing, so the style's tblLook still \
-         governs and the last row stays shaded"
+        "an empty <w:tblLook/> states nothing, so the same default applies"
     );
-}
 
-/// The control on the other side: an element that *does* state something still
-/// replaces the style's, so the fix above cannot be "the direct level never
-/// wins". `lastRow="0"` switches the layer back off.
-#[test]
-fn a_stated_tbl_look_still_shadows_the_styles() {
-    let styles = styles_with(&format!(
-        r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0"
-                               w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
-           {LAST_ROW_RED}"#
-    ));
-    let overridden = layout(&table_document(r#"<w:tblLook w:lastRow="0"/>"#), &styles);
+    let stated_off = layout(&table_document(r#"<w:tblLook w:val="0000"/>"#), &styles);
     assert_eq!(
-        red_cells(&overridden),
+        red_cells(&stated_off),
         0,
-        "a direct tblLook that states lastRow=0 replaces the style's wholesale"
+        "…while a tblLook that states every region off is a value, and is read"
     );
 }
 
-/// The same question one level up, which is why the repair belongs at the parse
-/// seam rather than in one `.or_else`: a child style's empty `<w:tblLook/>` must
-/// not discard the `tblLook` its `basedOn` parent declared either. §17.7.4.3
-/// gives the child every property it does not restate, and an element stating
-/// nothing has restated nothing.
-#[test]
-fn an_empty_tbl_look_in_a_child_style_does_not_shadow_the_parents() {
-    let derived = layout(
-        &table_document(""),
-        &styles_derived_from(
-            &format!(
-                r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0"
-                                       w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
-                   {LAST_ROW_RED}"#
-            ),
-            r#"<w:tblPr><w:tblLook/></w:tblPr>"#,
-        ),
-    );
-    assert_eq!(
-        red_cells(&derived),
-        2,
-        "the child restated nothing, so the parent's lastRow=1 still governs"
-    );
-}
-
-/// §17.4.68 `tblStyleRowBandSize` — how many rows one horizontal band spans.
+/// §17.7.6.7 `tblStyleRowBandSize` — how many rows one horizontal band spans.
+///
+/// One of the two properties that **stay** on the style level, and the evidence
+/// runs the opposite way from `tblW`'s: §2.1.250(a)'s list omits the band
+/// sizes, while [MS-OI29500] §2.1.164(a) — on §17.4.59, the `<w:tbl>`'s own
+/// `tblPr` — says Word does *not* allow them there. So the style is the level
+/// Word reads them at, which is also where ECMA documents them (§17.7.6.5 and
+/// §17.7.6.7, under Table Styles, not §17.4) and where every one of the 693
+/// band-size declarations in this repo's corpus sits. None is on a `<w:tbl>`.
 #[test]
 fn a_table_style_can_set_the_row_band_size() {
     let bands = r#"<w:tblStylePr w:type="band1Horz">
@@ -456,18 +526,24 @@ fn a_table_style_can_set_the_row_band_size() {
              <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr>
            </w:tblStylePr>"#;
     // firstRow/lastRow off so all four rows band, noVBand so only rows band.
+    // Written directly on the `<w:tbl>` in every variant, as the constant
+    // background: `tblLook` is the switch that makes banding observable at all,
+    // and it is one of the elements a style may not carry, so putting it in the
+    // style would test its exclusion rather than the band size.
     let look = r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
                              w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>"#;
-    assert_style_matches_direct(
-        &format!(r#"{look}<w:tblStyleRowBandSize w:val="2"/>"#),
+    assert_style_matches_direct_with(
+        &table_document,
+        look,
+        r#"<w:tblStyleRowBandSize w:val="2"/>"#,
         bands,
         "tblStyleRowBandSize",
     );
 
     let banded = layout(
-        &table_document(""),
+        &table_document(look),
         &styles_with(&format!(
-            r#"<w:tblPr><w:tblStyleRowBandSize w:val="2"/>{look}</w:tblPr>{bands}"#
+            r#"<w:tblPr><w:tblStyleRowBandSize w:val="2"/></w:tblPr>{bands}"#
         )),
     );
     let reds = page_geometry(&banded)
@@ -480,7 +556,8 @@ fn a_table_style_can_set_the_row_band_size() {
     );
 }
 
-/// §17.4.67 `tblStyleColBandSize` — how many columns one vertical band spans.
+/// §17.7.6.5 `tblStyleColBandSize` — how many columns one vertical band spans.
+/// The same evidence as the row band size above.
 #[test]
 fn a_table_style_can_set_the_column_band_size() {
     let bands = r#"<w:tblStylePr w:type="band1Vert">
@@ -489,19 +566,22 @@ fn a_table_style_can_set_the_column_band_size() {
            <w:tblStylePr w:type="band2Vert">
              <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr>
            </w:tblStylePr>"#;
-    // noHBand so row banding cannot override column banding (§17.7.6 order).
+    // noHBand so row banding cannot override column banding (§17.7.6 order);
+    // direct, for the reason the row-band case states.
     let look = r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
                              w:lastColumn="0" w:noHBand="1" w:noVBand="0"/>"#;
-    assert_style_matches_direct(
-        &format!(r#"{look}<w:tblStyleColBandSize w:val="2"/>"#),
+    assert_style_matches_direct_with(
+        &table_document,
+        look,
+        r#"<w:tblStyleColBandSize w:val="2"/>"#,
         bands,
         "tblStyleColBandSize",
     );
 
     let banded = layout(
-        &table_document(""),
+        &table_document(look),
         &styles_with(&format!(
-            r#"<w:tblPr><w:tblStyleColBandSize w:val="2"/>{look}</w:tblPr>{bands}"#
+            r#"<w:tblPr><w:tblStyleColBandSize w:val="2"/></w:tblPr>{bands}"#
         )),
     );
     let geometry = page_geometry(&banded);
@@ -517,22 +597,25 @@ fn a_table_style_can_set_the_column_band_size() {
     );
 }
 
-/// §17.4.58 `tblpPr` — floating-table positioning. `CT_TblPrBase` carries it,
-/// so a style may declare it even though Word's UI cannot write one there.
+/// `tblpPr` — floating-table positioning, and on §2.1.250(a)'s list. A style
+/// that could float the tables it is applied to would move them off the flow
+/// wherever it was used, which is why Word's UI cannot write one there and why
+/// the erratum says Word does not read one.
 #[test]
-fn a_table_style_can_float_the_table() {
-    assert_style_matches_direct(
+fn a_table_style_cannot_float_the_table() {
+    assert_style_does_not_reach_the_table(
         r#"<w:tblpPr w:vertAnchor="text" w:tblpY="360" w:tblpXSpec="center"/>"#,
         "",
         "tblpPr",
     );
 }
 
-/// §17.4.57 `tblOverlap` — only meaningful once the table floats, so `tblpPr`
-/// is the constant background here and `tblOverlap` is the variable.
+/// `tblOverlap` — also on the list, and only meaningful once the table floats,
+/// so `tblpPr` is the constant background here (written directly, where it is
+/// read) and `tblOverlap` is the variable.
 #[test]
-fn a_table_style_can_forbid_float_overlap() {
-    assert_style_matches_direct_with(
+fn a_table_style_cannot_forbid_float_overlap() {
+    assert_style_does_not_reach_the_table_with(
         &two_tables_document,
         r#"<w:tblpPr w:vertAnchor="text" w:tblpY="0"/>"#,
         r#"<w:tblOverlap w:val="never"/>"#,
@@ -543,11 +626,15 @@ fn a_table_style_can_forbid_float_overlap() {
 
 // ── §17.7.4.3: `basedOn` inheritance of the style's own `<w:tblPr>` ─────────
 
-/// A `<w:tblPr>` carrying one of every table property that reaches layout.
+/// A `<w:tblPr>` carrying one of every table property that reaches layout
+/// **from a style** — so no `tblW`, `tblLook`, `tblpPr` or `tblOverlap`, which
+/// §2.1.250(a) excludes and which would therefore be inert here whether the
+/// `basedOn` merge carried them or not. That is the point of leaving them out:
+/// an inert element cannot fail this test, so including it would weaken the
+/// claim rather than widen it.
 const EVERY_TABLE_PROPERTY: &str = r#"<w:tblPr>
     <w:tblStyleRowBandSize w:val="2"/>
     <w:tblStyleColBandSize w:val="2"/>
-    <w:tblW w:w="7200" w:type="dxa"/>
     <w:jc w:val="center"/>
     <w:tblCellSpacing w:w="144" w:type="dxa"/>
     <w:tblInd w:w="720" w:type="dxa"/>
@@ -563,8 +650,6 @@ const EVERY_TABLE_PROPERTY: &str = r#"<w:tblPr>
       <w:top w:w="60" w:type="dxa"/><w:left w:w="120" w:type="dxa"/>
       <w:bottom w:w="60" w:type="dxa"/><w:right w:w="120" w:type="dxa"/>
     </w:tblCellMar>
-    <w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
-               w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
   </w:tblPr>"#;
 
 /// §17.7.4.3: a style "inherits all of the properties of the base style". The
@@ -574,8 +659,8 @@ const EVERY_TABLE_PROPERTY: &str = r#"<w:tblPr>
 ///
 /// The child here declares `<w:tblLayout>`, which is as unrelated as a
 /// `tblPr` child gets and moves nothing on its own. Before the fix that lone
-/// element was enough to erase the parent's borders, width, alignment,
-/// indentation, cell spacing, `tblLook` and band sizes in one go.
+/// element was enough to erase the parent's borders, alignment, indentation,
+/// cell margins, cell spacing and band sizes in one go.
 #[test]
 fn a_child_table_style_inherits_every_property_it_does_not_restate() {
     let bands = r#"<w:tblStylePr w:type="band1Horz">
@@ -619,8 +704,8 @@ fn a_child_table_style_overrides_only_the_properties_it_restates() {
             r#"<w:tblPr><w:jc w:val="start"/></w:tblPr>"#,
         ),
     );
-    // The parent centers a 360 pt table in a 468 pt content area, which would
-    // put its left edge at 126 pt; the child pulls it back to the left margin,
+    // The parent centers the 200 pt table in a 468 pt content area, which would
+    // put its left edge at 206 pt; the child pulls it back to the left margin,
     // where the parent's `tblInd` then applies. First text: 72 (margin) + 36
     // (tblInd) + 7.2 (one cell spacing) + 6 (left cell margin).
     assert_eq!(
