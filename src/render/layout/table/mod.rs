@@ -1465,11 +1465,16 @@ mod tests {
             })
             .expect("header text present");
 
-        // "header" is top-aligned in row 0; "Total" should be bottom-
-        // aligned across the 2-row span, so roughly one row-height below.
-        assert!(
-            total_y > header_y + 10.0,
-            "Total (bottom-valigned merged) should sit well below header (top-valigned row 0): \
+        // "header" is top-aligned in row 0, so it marks the span's top. The
+        // span is 28pt (two 14pt rows) holding 14pt of content, so §17.4.83
+        // `bottom` puts "Total" exactly 14pt lower — one whole row down, which
+        // is only expressible because the alignment sees the *span* and not
+        // the restart row. A loose inequality here would also pass for a
+        // renderer that aligned against row 0 alone and merely overshot.
+        assert_eq!(
+            total_y - header_y,
+            14.0,
+            "Total sits `span − content` = 28 − 14 below the span's top; \
              total_y={total_y}, header_y={header_y}"
         );
     }
@@ -2359,5 +2364,425 @@ mod tests {
         for (i, slice) in split.iter().enumerate() {
             assert_eq!(slice.size.width, outer, "slice {i} spans the same width");
         }
+    }
+
+    // ── The paginator's lookahead must agree with the paginator ─────────────
+
+    /// The lookahead and the group builder, over the same table.
+    fn lookahead_and_first_group(
+        rows: &[TableRowInput],
+        borders: Option<&TableBorderConfig>,
+    ) -> (Pt, Pt) {
+        let cols = [Pt::new(40.0)];
+        let measured =
+            measure_table_rows(rows, &cols, Pt::ZERO, Pt::new(14.0), borders, None, false);
+        let groups = build_row_groups(rows, &measured);
+        let lookahead = measure_leading_table_group_height(
+            rows,
+            &cols,
+            Pt::ZERO,
+            Pt::new(14.0),
+            borders,
+            None,
+            false,
+        )
+        .expect("a non-empty table has a leading group");
+        (lookahead, groups[0].height)
+    }
+
+    /// `measure_leading_table_group_height` derives the height of the table's
+    /// first atomic row group **independently** of `build_row_groups` — over a
+    /// truncated table, of the group plus the one row that follows it, which is
+    /// the least that can resolve the group's shared bottom border. Nothing
+    /// asserted the two agreed.
+    ///
+    /// A divergence is silent and expensive: `section/layout.rs` asks the
+    /// lookahead whether the group fits before a break, and then the paginator
+    /// lays out a group of a different height. Every test in the suite would
+    /// stay green while keepNext chains and page fits were decided against a
+    /// number the table never has.
+    ///
+    /// Asserted for the three shapes `build_row_groups` distinguishes: a plain
+    /// row (a group of one), a §17.4.84 vMerge span (a group of many), and a
+    /// §17.4.6 `cantSplit` row. Each carries `insideH` borders, because it is
+    /// `border_gap_below` — reserved from the *next* row's share of the shared
+    /// edge — that the truncation is most able to get wrong. Without the
+    /// following row the group's last row looks like the table's last row, its
+    /// bottom falls back to `tblBorders/bottom` (unset here), and the reserved
+    /// gap silently disappears.
+    #[test]
+    fn the_leading_group_lookahead_matches_the_paginators_own_first_group() {
+        let inside_h = TableBorderConfig {
+            top: None,
+            bottom: None,
+            left: None,
+            right: None,
+            inside_h: Some(TableBorderLine {
+                width: Pt::new(2.0),
+                color: RgbColor::BLACK,
+                style: TableBorderStyle::Single,
+            }),
+            inside_v: None,
+        };
+
+        // A plain row: the group is one row, 14pt of content plus the 2pt gap
+        // reserved below it for the `insideH` edge it owns.
+        let plain: Vec<TableRowInput> = (0..3).map(|_| tall_row(1)).collect();
+        let (lookahead, group) = lookahead_and_first_group(&plain, Some(&inside_h));
+        assert_eq!(group, Pt::new(16.0), "14pt row + 2pt reserved band");
+        assert_eq!(lookahead, group, "plain leading row");
+
+        // A 3-row merge span, followed by a plain row. The group is the whole
+        // span, so the lookahead has to measure four rows to answer about three.
+        let mut restart = tall_row(4);
+        restart.cells[0].vertical_merge = Some(VerticalMergeState::Restart);
+        let mut cont1 = tall_row(0);
+        cont1.cells[0].vertical_merge = Some(VerticalMergeState::Continue);
+        let mut cont2 = tall_row(0);
+        cont2.cells[0].vertical_merge = Some(VerticalMergeState::Continue);
+        let span = vec![restart, cont1, cont2, tall_row(1)];
+        let (lookahead, group) = lookahead_and_first_group(&span, Some(&inside_h));
+        assert!(group > Pt::new(16.0), "a span is taller than one row");
+        assert_eq!(lookahead, group, "3-row vMerge span");
+
+        // §17.4.6 `cantSplit` — still a group of one, but one the paginator may
+        // not divide, so the lookahead's number is the only thing standing
+        // between it and an overflowing page.
+        let mut atomic: Vec<TableRowInput> = (0..3).map(|_| tall_row(2)).collect();
+        atomic[0].cant_split = Some(true);
+        let (lookahead, group) = lookahead_and_first_group(&atomic, Some(&inside_h));
+        assert_eq!(group, Pt::new(30.0), "two 14pt lines + the 2pt band");
+        assert_eq!(lookahead, group, "cantSplit leading row");
+    }
+
+    // ── §17.4.49 repeated headers ───────────────────────────────────────────
+
+    /// A row whose one cell holds one 14pt line per entry — each fragment is
+    /// 30pt wide in a 40pt column, so no two share a line.
+    fn labelled_row(lines: &[&str]) -> TableRowInput {
+        one_cell_row(vec![LayoutBlock::Paragraph {
+            fragments: lines.iter().map(|t| text_frag(t, 30.0)).collect(),
+            style: ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }])
+    }
+
+    /// Every `Text` command as `(text, x, y)`.
+    fn text_at(slice: &TableSlice) -> Vec<(String, f32, f32)> {
+        slice
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { text, position, .. } => {
+                    Some((text.to_string(), position.x.raw(), position.y.raw()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// §17.4.49: a repeated header is the *same* row drawn again, so it must
+    /// land at the same x and the same y on every slice — a continuation slice
+    /// begins at its own origin, and the header is the first thing emitted into
+    /// it.
+    ///
+    /// Three slices, so "every continuation" means more than one. The body row
+    /// under the header must then start exactly one header-row height down, on
+    /// each of them — taken from a monolithic layout of the header row alone
+    /// rather than typed in, so the assertion is that the repeat *occupies* the
+    /// height it measured.
+    #[test]
+    fn a_repeated_header_lands_at_the_same_place_on_every_slice() {
+        let mut header = labelled_row(&["HDR "]);
+        header.is_header = Some(true);
+        header.cant_split = Some(true);
+        let body = |t: &str| {
+            let mut r = labelled_row(&[t, "x "]);
+            r.cant_split = Some(true);
+            r
+        };
+        let rows = vec![header, body("A0 "), body("B0 "), body("C0 ")];
+
+        let header_only = layout_table(
+            &rows[..1],
+            &[Pt::new(40.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(header_only.size.height, Pt::new(14.0));
+
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(45.0),
+                page_height: Pt::new(50.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 3, "header + one 28pt body row per page");
+
+        let mut header_positions = Vec::new();
+        for (i, slice) in slices.iter().enumerate() {
+            let texts = text_at(slice);
+            let hdr: Vec<_> = texts.iter().filter(|t| t.0 == "HDR ").collect();
+            assert_eq!(hdr.len(), 1, "slice {i}: the header appears exactly once");
+            header_positions.push((hdr[0].1, hdr[0].2));
+
+            let body_top = texts
+                .iter()
+                .filter(|t| t.0 != "HDR ")
+                .map(|t| t.2)
+                .fold(f32::INFINITY, f32::min);
+            assert_eq!(
+                body_top - hdr[0].2,
+                header_only.size.height.raw(),
+                "slice {i}: the body starts one header-row height below the header"
+            );
+        }
+        assert_eq!(
+            header_positions,
+            vec![header_positions[0]; 3],
+            "the repeat is the same row at the same place, not a re-flow"
+        );
+
+        // …and the bodies themselves are neither lost nor repeated.
+        let bodies: Vec<String> = slices
+            .iter()
+            .flat_map(|s| text_at(s).into_iter().map(|t| t.0))
+            .filter(|t| t.ends_with("0 "))
+            .filter(|t| t != "HDR ")
+            .collect();
+        assert_eq!(bodies, vec!["A0 ", "B0 ", "C0 "]);
+    }
+
+    /// §17.4.49 against a page too short for the header itself, where
+    /// `remaining -= header_height` goes negative before a single body row is
+    /// placed and `next_page_height - header_height` is negative too.
+    ///
+    /// The arithmetic is allowed to go negative — there is genuinely less than
+    /// no room — but two things must survive it: the paginator terminates, and
+    /// no body row is lost or drawn twice. Swept across page heights either
+    /// side of the header's own, so the properties are asserted where the
+    /// header fits, where it exactly fills a page, and where it does not fit at
+    /// all.
+    #[test]
+    fn header_repetition_conserves_body_content_at_every_page_height() {
+        let mut header = labelled_row(&["H0 ", "H1 ", "H2 ", "H3 ", "H4 "]); // 70pt
+        header.is_header = Some(true);
+        header.cant_split = Some(true);
+        let body = |t: &str| {
+            let mut r = labelled_row(&[t, "x "]); // 28pt
+            r.cant_split = Some(true);
+            r
+        };
+        let rows = vec![header, body("A0 "), body("B0 "), body("C0 ")];
+
+        for page in [20.0f32, 50.0, 70.0, 71.0, 100.0, 200.0] {
+            let slices = layout_table_paginated(
+                &rows,
+                &[Pt::new(40.0)],
+                Pt::ZERO,
+                Pt::new(14.0),
+                None,
+                None,
+                &TablePaginationConfig {
+                    available_height: Pt::new(100.0),
+                    page_height: Pt::new(page),
+                    suppress_first_row_top: false,
+                },
+            );
+
+            let all: Vec<String> = slices
+                .iter()
+                .flat_map(|s| text_at(s).into_iter().map(|t| t.0))
+                .collect();
+            let bodies: Vec<&String> = all
+                .iter()
+                .filter(|t| t.starts_with(['A', 'B', 'C']))
+                .collect();
+            assert_eq!(
+                bodies,
+                vec!["A0 ", "B0 ", "C0 "],
+                "page={page}: every body row exactly once, in order"
+            );
+            // The header's first line appears once per slice — never twice on
+            // one, never missing from a continuation.
+            let headers_per_slice: Vec<usize> = slices
+                .iter()
+                .map(|s| text_at(s).iter().filter(|t| t.0 == "H0 ").count())
+                .collect();
+            assert_eq!(
+                headers_per_slice,
+                vec![1; slices.len()],
+                "page={page}: one header per slice"
+            );
+        }
+    }
+
+    // ── Slice assembly ──────────────────────────────────────────────────────
+
+    /// The shading → content → borders layering is a property of *every* slice,
+    /// not only of a table that fits on one page: `SliceBuilder::finish`
+    /// concatenates the three buffers once per slice, so a paginated table gets
+    /// the guarantee three times over rather than once at the end.
+    ///
+    /// Pinned on the final command list, which is what the painter walks. Were
+    /// the order to come out per row instead of per slice, a cell's background
+    /// would be painted over the previous row's shared bottom edge.
+    #[test]
+    fn every_slice_layers_shading_then_content_then_borders() {
+        const GREY: RgbColor = RgbColor {
+            r: 200,
+            g: 200,
+            b: 200,
+        };
+        const RED: RgbColor = RgbColor { r: 255, g: 0, b: 0 };
+        let line = TableBorderLine {
+            width: Pt::new(1.0),
+            color: RED,
+            style: TableBorderStyle::Single,
+        };
+        let rows: Vec<TableRowInput> = (0..4)
+            .map(|i| {
+                let mut r = labelled_row(&[if i % 2 == 0 { "even " } else { "odd " }]);
+                r.cells[0].shading = Some(GREY);
+                r.cant_split = Some(true);
+                r
+            })
+            .collect();
+
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(40.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&TableBorderConfig {
+                top: Some(line),
+                bottom: Some(line),
+                left: Some(line),
+                right: Some(line),
+                inside_h: Some(line),
+                inside_v: Some(line),
+            }),
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(40.0),
+                page_height: Pt::new(40.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert!(slices.len() >= 2, "got {} slices", slices.len());
+
+        for (i, slice) in slices.iter().enumerate() {
+            let find = |pred: &dyn Fn(&DrawCommand) -> bool| slice.commands.iter().position(pred);
+            let shading = find(&|c| matches!(c, DrawCommand::Rect { color, .. } if *color == GREY))
+                .unwrap_or_else(|| panic!("slice {i}: no shading"));
+            let text = find(&|c| matches!(c, DrawCommand::Text { .. }))
+                .unwrap_or_else(|| panic!("slice {i}: no content"));
+            let border = find(&|c| matches!(c, DrawCommand::Rect { color, .. } if *color == RED))
+                .unwrap_or_else(|| panic!("slice {i}: no borders"));
+            assert!(
+                shading < text && text < border,
+                "slice {i}: expected shading({shading}) < content({text}) < borders({border})"
+            );
+        }
+    }
+
+    /// §17.4.45 / issue #168: the outer rectangle of a spaced table, at exact
+    /// coordinates on both slices of a two-page split.
+    ///
+    /// `carries_top` and `carries_bottom` are what the flags mean geometrically.
+    /// The first slice holds the table's top edge and not its bottom, the last
+    /// the reverse, and each slice's verticals run the whole way to whichever
+    /// side is a page cut rather than a table edge — inset under a horizontal
+    /// only where one exists. That last part is why the two slices' verticals
+    /// differ in *both* origin and length rather than just in length.
+    ///
+    /// One 100pt slot at a 20pt spacing: the table is 120pt wide, each row box
+    /// is one 14pt line plus its own 20pt leading gap, and only the last slice
+    /// adds the trailing gap at the table's bottom edge — 68pt against 88pt.
+    /// The cells sit at x = 20..100, so a rect touching x = 0 or x = 120 can
+    /// only belong to the table's own rectangle.
+    #[test]
+    fn a_paginated_spaced_tables_outline_is_exact_on_each_slice() {
+        let line = TableBorderLine {
+            width: Pt::new(1.0),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
+        let rows: Vec<TableRowInput> = (0..4).map(|_| labelled_row(&["r "])).collect();
+        let slices = layout_table_paginated(
+            &rows,
+            &[Pt::new(100.0)],
+            Pt::new(20.0),
+            Pt::new(14.0),
+            Some(&TableBorderConfig {
+                top: Some(line),
+                bottom: Some(line),
+                left: Some(line),
+                right: Some(line),
+                inside_h: Some(line),
+                inside_v: Some(line),
+            }),
+            None,
+            &TablePaginationConfig {
+                available_height: Pt::new(90.0),
+                page_height: Pt::new(90.0),
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(slices.len(), 2, "two 34pt row boxes per 90pt page");
+
+        // The table's own rectangle: every rect that touches its left or right
+        // bound. A cell's edges live between x = 20 and x = 100.
+        let outline = |slice: &TableSlice| -> Vec<(f32, f32, f32, f32)> {
+            slice
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    DrawCommand::Rect { rect, .. } => {
+                        let (x, w) = (rect.origin.x.raw(), rect.size.width.raw());
+                        (x == 0.0 || x + w == 120.0).then_some((
+                            x,
+                            rect.origin.y.raw(),
+                            w,
+                            rect.size.height.raw(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(slices[0].size, PtSize::new(Pt::new(120.0), Pt::new(68.0)));
+        assert_eq!(
+            outline(&slices[0]),
+            vec![
+                (0.0, 0.0, 120.0, 1.0), // the table's top edge, on the first slice only
+                (0.0, 1.0, 1.0, 67.0),  // left, inset under the top, running to the cut
+                (119.0, 1.0, 1.0, 67.0),
+            ],
+        );
+
+        assert_eq!(slices[1].size, PtSize::new(Pt::new(120.0), Pt::new(88.0)));
+        assert_eq!(
+            outline(&slices[1]),
+            vec![
+                (0.0, 87.0, 120.0, 1.0), // the bottom edge, on the last slice only
+                (0.0, 0.0, 1.0, 87.0),   // left, from the cut down to that bottom
+                (119.0, 0.0, 1.0, 87.0),
+            ],
+        );
     }
 }
