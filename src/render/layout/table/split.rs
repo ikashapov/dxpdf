@@ -519,15 +519,56 @@ mod tests {
     }
 
     fn measure(rows: &[TableRowInput]) -> super::super::types::MeasuredTable {
+        measure_cols(rows, 1)
+    }
+
+    fn measure_cols(rows: &[TableRowInput], cols: usize) -> super::super::types::MeasuredTable {
         super::super::measure::measure_table_rows(
             rows,
-            &[Pt::new(40.0)],
+            &vec![Pt::new(40.0); cols],
             Pt::ZERO,
             Pt::new(14.0),
             None,
             None,
             false,
         )
+    }
+
+    /// One cell of `n` 14pt lines (each fragment wraps to its own line at a
+    /// 40pt column) with uniform margins, carrying `style`.
+    fn cell_n_lines(n: usize, margin: f32, style: ParagraphStyle) -> TableCellInput {
+        TableCellInput {
+            blocks: vec![LayoutBlock::Paragraph {
+                fragments: (0..n).map(|i| text_frag(&format!("L{i} "))).collect(),
+                style,
+                page_break_before: false,
+                footnotes: vec![],
+                floating_images: vec![],
+                floating_shapes: vec![],
+            }],
+            margins: PtEdgeInsets::new(
+                Pt::new(margin),
+                Pt::new(margin),
+                Pt::new(margin),
+                Pt::new(margin),
+            ),
+            grid_span: 1,
+            shading: None,
+            cell_borders: None,
+            vertical_merge: None,
+            vertical_align: CellVAlign::Top,
+        }
+    }
+
+    fn row_of(cells: Vec<TableCellInput>) -> TableRowInput {
+        TableRowInput {
+            cells,
+            height_rule: None,
+            is_header: None,
+            cant_split: None,
+            grid_before: 0,
+            border_overrides: None,
+        }
     }
 
     /// **The termination invariant** for `mod.rs`'s continuation loop.
@@ -1031,6 +1072,240 @@ mod tests {
             ys(&second),
             vec![0.0, 14.0],
             "the threshold command continues, rebased by the shift"
+        );
+    }
+
+    // ── A row of more than one cell ─────────────────────────────────────────
+    //
+    // Every test above uses a single-cell row, where the row's cut and the
+    // cell's are the same number. They differ the moment a row has two cells:
+    // each cell finds its own cut, and the row has to reconcile them.
+
+    /// §17.4.6: the row's first half must be tall enough for **every** cell's
+    /// retained content, so `first_half_height` is the maximum over the cells,
+    /// not the minimum and not the sum.
+    ///
+    /// Two 6-line cells against 60pt of room, differing only in their §17.4.68
+    /// margins, which is what makes their cuts differ. The bare cell has the
+    /// whole 60pt to spend and cuts after its 4th line (§17.3.1.44 widow
+    /// control allows cuts at 28, 42 and 56; 70 overruns), needing
+    /// 56 + 0 + 0 = 56pt. The 5pt-margined cell has 50pt of budget, so its last
+    /// legal cut is at 42, needing 42 + 5 + 5 = 52pt. The row takes 56.
+    ///
+    /// Taking the minimum instead would clip the bare cell's fourth line
+    /// against the cut edge; taking the sum would leave a 108pt hole.
+    #[test]
+    fn the_row_first_half_takes_the_tallest_cells_cut_not_the_shortest() {
+        let rows = vec![row_of(vec![
+            cell_n_lines(6, 0.0, ParagraphStyle::default()),
+            cell_n_lines(6, 5.0, ParagraphStyle::default()),
+        ])];
+        let measured = measure_cols(&rows, 2);
+        assert_eq!(
+            measured.rows[0].height,
+            Pt::new(94.0),
+            "the row is the taller cell: 6 lines plus 2 × 5pt of margin"
+        );
+
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available: Pt::new(60.0),
+        })
+        .expect("both cells offer a legal cut within 60pt");
+        let parts = split_row_at(&measured.rows[0], &cut);
+
+        assert_eq!(
+            parts.first.height,
+            Pt::new(56.0),
+            "the bare cell needs 56pt; the margined one only 52"
+        );
+        assert_eq!(
+            texts(&parts.first.entries[0].layout.commands),
+            vec!["L0 ", "L1 ", "L2 ", "L3 "],
+            "the bare cell keeps four lines"
+        );
+        assert_eq!(
+            texts(&parts.first.entries[1].layout.commands),
+            vec!["L0 ", "L1 ", "L2 "],
+            "its margins cost the second cell a line — the two cuts differ"
+        );
+        assert_eq!(texts(&parts.second.entries[0].layout.commands).len(), 2);
+        assert_eq!(texts(&parts.second.entries[1].layout.commands).len(), 3);
+        assert_eq!(
+            parts.second.height,
+            Pt::new(94.0 - 56.0),
+            "the continuation loses the largest shift across the cells"
+        );
+    }
+
+    /// [`CellCut::KeepAll`] in a row that also has a cell that *can* be cut.
+    ///
+    /// §17.3.1.14 `keepLines` makes the second cell's only paragraph
+    /// internally atomic, so it exposes no legal cut and cannot be divided —
+    /// the same position an image-only cell is in, reached here without one.
+    /// Its whole visible height then becomes a floor on the row's first half:
+    /// 84pt, above the 56 the splittable cell asked for. Without that floor the
+    /// uncut cell's last two lines would be drawn past the cut edge, on top of
+    /// whatever follows the table.
+    ///
+    /// The splittable cell still cuts at its own 56 — raising the floor must
+    /// not make the row keep everything.
+    #[test]
+    fn an_uncuttable_cell_raises_the_rows_first_half_to_its_own_full_height() {
+        let keep_lines = ParagraphStyle {
+            keep_lines: true,
+            ..Default::default()
+        };
+        let rows = vec![row_of(vec![
+            cell_n_lines(6, 0.0, ParagraphStyle::default()),
+            cell_n_lines(6, 0.0, keep_lines),
+        ])];
+        let measured = measure_cols(&rows, 2);
+
+        let cut = find_row_cut(&RowCutInput {
+            mr: &measured.rows[0],
+            row: &rows[0],
+            available: Pt::new(90.0),
+        })
+        .expect("84pt of uncuttable content fits in 90");
+        let parts = split_row_at(&measured.rows[0], &cut);
+
+        assert_eq!(
+            parts.first.height,
+            Pt::new(84.0),
+            "the uncuttable cell's full six lines, not the 56 the other asked for"
+        );
+        assert_eq!(
+            texts(&parts.first.entries[1].layout.commands).len(),
+            6,
+            "an uncuttable cell arrives whole on the first half"
+        );
+        assert!(
+            texts(&parts.second.entries[1].layout.commands).is_empty(),
+            "…and contributes nothing to the continuation"
+        );
+        assert_eq!(
+            texts(&parts.first.entries[0].layout.commands),
+            vec!["L0 ", "L1 ", "L2 ", "L3 "],
+            "the splittable cell still cuts at its own legal point"
+        );
+    }
+
+    /// The other side of that floor: when the uncuttable cell's full height
+    /// does **not** fit in the space left on the page, there is no safe cut at
+    /// all and `find_row_cut` declines, so the caller spills the whole row.
+    ///
+    /// Identical to the test above but for the room offered — 60pt against the
+    /// same 84pt of uncuttable content — which is what makes the pair
+    /// meaningful: the difference in outcome can only come from the check.
+    #[test]
+    fn a_row_declines_to_split_when_its_uncuttable_cell_would_overflow() {
+        let keep_lines = ParagraphStyle {
+            keep_lines: true,
+            ..Default::default()
+        };
+        let rows = vec![row_of(vec![
+            cell_n_lines(6, 0.0, ParagraphStyle::default()),
+            cell_n_lines(6, 0.0, keep_lines),
+        ])];
+        let measured = measure_cols(&rows, 2);
+
+        assert!(
+            find_row_cut(&RowCutInput {
+                mr: &measured.rows[0],
+                row: &rows[0],
+                available: Pt::new(60.0),
+            })
+            .is_none(),
+            "the splittable cell fits, but the uncuttable one does not — and a \
+             cut that overflows it is not a cut"
+        );
+    }
+
+    // ── §17.3.1.19 outline marks, which have no y of their own ──────────────
+
+    fn outline_begin() -> DrawCommand {
+        use crate::render::layout::draw_command::{OutlineHeading, OutlineMark};
+        DrawCommand::Outline(OutlineMark::Begin(OutlineHeading {
+            node_id: 1,
+            level: crate::model::OutlineLevel::new(1),
+            title: "Heading".into(),
+        }))
+    }
+
+    /// A marked-content boundary draws nothing and has no position, so
+    /// `command_primary_y` gives it the top of the cell. Two consequences, and
+    /// the second is the one that matters.
+    ///
+    /// A heading whose paragraph is cut keeps its outline entry on the page it
+    /// starts on — the same rule the paragraph splitter applies. And because
+    /// **both** marks take the same zero, the `Begin`/`End` pair is never
+    /// divided: each half of a split row is balanced, where splitting the pair
+    /// would leave the first half's node open over the rest of the document and
+    /// the second half closing a node it never opened.
+    #[test]
+    fn an_outline_mark_stays_with_the_first_half_and_keeps_its_pair_together() {
+        use crate::render::geometry::PtOffset;
+        use crate::render::layout::draw_command::OutlineMark;
+
+        assert_eq!(
+            command_primary_y(&outline_begin()),
+            Pt::ZERO,
+            "a mark has no y of its own; it takes the cell's top"
+        );
+
+        let text_at = |y: f32| DrawCommand::Text {
+            shaped: None,
+            position: PtOffset::new(Pt::ZERO, Pt::new(y)),
+            text: format!("y{y}").into(),
+            font_family: Rc::from("Test"),
+            char_spacing: Pt::ZERO,
+            font_size: Pt::new(12.0),
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
+            color: RgbColor::BLACK,
+            text_scale: 1.0,
+        };
+        // A heading spanning the cut: its `End` sits after content that lands
+        // on the continuation.
+        let cmds = vec![
+            outline_begin(),
+            text_at(5.0),
+            text_at(20.0),
+            DrawCommand::Outline(OutlineMark::End),
+        ];
+        let (first, second) = partition_commands(
+            &cmds,
+            &CellCut::CutAt {
+                content_cut_y: Pt::new(14.0),
+                line_cut_y: Pt::new(14.0),
+                shift: Pt::new(14.0),
+            },
+        );
+
+        let marks = |v: &[DrawCommand]| -> Vec<&'static str> {
+            v.iter()
+                .filter_map(|c| match c {
+                    DrawCommand::Outline(OutlineMark::Begin(_)) => Some("begin"),
+                    DrawCommand::Outline(OutlineMark::End) => Some("end"),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            marks(&first),
+            vec!["begin", "end"],
+            "both marks stay on the first half, so it is balanced"
+        );
+        assert!(
+            marks(&second).is_empty(),
+            "and the continuation carries no half of a pair"
+        );
+        assert_eq!(
+            texts(&second),
+            vec!["y20"],
+            "only the content past the cut continues"
         );
     }
 }
