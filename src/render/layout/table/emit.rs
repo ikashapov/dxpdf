@@ -23,16 +23,15 @@ pub(super) struct TableCommandBuffers<'a> {
     pub(super) border_commands: &'a mut Vec<DrawCommand>,
 }
 
-/// Where a row sits in its table, for the two §17.4.84 questions a row cannot
+/// Where a row sits in its table, for the one §17.4.84 question a row cannot
 /// answer from its own `MeasuredRow`: how tall a `vMerge="restart"` cell's whole
-/// merged span is, and whether the row *below* continues one of this row's
-/// cells.
+/// merged span is.
 ///
 /// `emit_one_row` takes it as an `Option`, and `None` is not "the caller did not
 /// bother". A split row's half is the only caller that passes it, and
 /// `build_row_groups` flags a group non-splittable when any of its cells is
 /// merged — so a split half is never part of a merge and there is nothing for
-/// these lookups to find.
+/// this lookup to find.
 #[derive(Clone, Copy)]
 struct RowContext<'a> {
     measured: &'a MeasuredTable,
@@ -196,18 +195,47 @@ fn emit_one_row(
             bufs.content_commands.push(cmd);
         }
 
-        let continues_below = row_ctx.is_some_and(|ctx| {
-            ctx.row_idx + 1 < ctx.rows.len()
-                && is_vmerge_continue(&ctx.rows[ctx.row_idx + 1], entry.grid_col)
-        });
-        let bottom_border_gap = if has_reserved_bottom_gap {
-            if continues_below {
-                mr.border_gap_below
-            } else {
-                border_width(b_bottom)
-            }
-        } else {
+        // How far this cell's border box reaches past its content, into the
+        // band `measure_table_rows` reserved below the row for its bottom
+        // borders. The choice decides who owns the corner squares where this
+        // cell's verticals cross that band, and there are two cases.
+        //
+        // A cell that **paints** a bottom border takes exactly that border's
+        // width and stops, so the horizontal owns those corners — it spans the
+        // full cell width, which is the convention [`emit_cell_borders`] states.
+        //
+        // A cell that paints **nothing** there takes the whole band, and has
+        // to: no other cell can reach it. Neighbours' bottom borders span their
+        // own widths only, so a vertical stopping at the content box leaves the
+        // band unpainted at its own x — one hole per interior row boundary,
+        // exactly one border wide. That is the reported defect, from a §17.4.66
+        // `nil` top-and-bottom spacer column between two halves of a form: the
+        // gutter's verticals were the only edges left that could own those
+        // corners, and they were yielding them to a horizontal that does not
+        // exist. The table's *last* row never showed it, because with no band
+        // reserved the bottom border is inset into the content box and the
+        // vertical already spans the lot.
+        //
+        // This subsumes the §17.4.84 vMerge case that used to be spelled out
+        // here: a cell the row below continues has its bottom cleared during
+        // resolution, so it paints nothing and reaches through the band, which
+        // is what an unbroken merged cell needs.
+        //
+        // A cell whose bottom is *narrower* than the band it shares — two cells
+        // in one row declaring different `w:sz` — still stops at its own width,
+        // leaving the rest of the band unpainted at its x. That is a different
+        // question, and an open one: where within a boundary band a border
+        // narrower than the band belongs. **Word reference render needed**: one
+        // row whose two cells declare bottom borders of different widths,
+        // measuring whether the narrower line sits flush with the upper row's
+        // content, flush with the lower row's, or centred between them.
+        let own_bottom = border_width(b_bottom);
+        let bottom_border_gap = if !has_reserved_bottom_gap {
             Pt::ZERO
+        } else if own_bottom > Pt::ZERO {
+            own_bottom
+        } else {
+            mr.border_gap_below
         };
         emit_cell_borders(
             bufs.border_commands,
@@ -716,6 +744,189 @@ mod tests {
             border_bands.contains(&(30.0, 32.0)),
             "row 1 ends the slice at y=30; its bottom border belongs in the \
              reserved gap 30..32, got {border_bands:?}"
+        );
+    }
+
+    // ── The corner square at a row boundary ─────────────────────────────────
+
+    /// The spacer column a generated form uses as a visual gutter: a narrow
+    /// cell declaring §17.4.66 `nil` on its top and bottom, saying nothing
+    /// about its sides (they inherit `insideV`).
+    fn nil_top_bottom_cell() -> TableCellInput {
+        use crate::render::layout::table::types::{CellBorderConfig, CellBorderOverride};
+        let mut c = cell(1, None, None);
+        c.cell_borders = Some(CellBorderConfig {
+            top: Some(CellBorderOverride::Suppress),
+            bottom: Some(CellBorderOverride::Suppress),
+            left: None,
+            right: None,
+        });
+        c
+    }
+
+    /// Two rows of `[cell | nil-top-and-bottom spacer | cell]` under a
+    /// `Tabellenraster`-shaped border config — every side plus insideH/insideV
+    /// at 0.5pt. Columns 100 / 20 / 100, so the spacer's right edge (the
+    /// vertical it wins from `insideV`) is painted at x = 119.5..120.
+    fn spacer_table() -> crate::render::layout::table::TableSlice {
+        let rows = vec![
+            row(vec![
+                cell(1, None, None),
+                nil_top_bottom_cell(),
+                cell(1, None, None),
+            ]),
+            row(vec![
+                cell(1, None, None),
+                nil_top_bottom_cell(),
+                cell(1, None, None),
+            ]),
+        ];
+        crate::render::layout::table::layout_table(
+            &rows,
+            &[Pt::new(100.0), Pt::new(20.0), Pt::new(100.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&all_edges(single(0.5, RED))),
+            None,
+            false,
+        )
+    }
+
+    /// Every border rect as `(x0, x1, y0, y1)`.
+    fn border_rects(cmds: &[DrawCommand]) -> Vec<(f32, f32, f32, f32)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, color } if *color == RED => Some((
+                    rect.origin.x.raw(),
+                    rect.origin.x.raw() + rect.size.width.raw(),
+                    rect.origin.y.raw(),
+                    rect.origin.y.raw() + rect.size.height.raw(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The y ranges within `0..height` that **no** border rect paints along the
+    /// vertical line at `probe_x`. A continuous border line leaves none.
+    fn unpainted_along(cmds: &[DrawCommand], probe_x: f32, height: f32) -> Vec<(f32, f32)> {
+        let mut spans: Vec<(f32, f32)> = border_rects(cmds)
+            .into_iter()
+            .filter(|(x0, x1, _, _)| *x0 <= probe_x && probe_x <= *x1)
+            .map(|(_, _, y0, y1)| (y0, y1))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut gaps = Vec::new();
+        let mut reached = 0.0f32;
+        for (y0, y1) in spans {
+            if y0 > reached + 0.001 {
+                gaps.push((reached, y0));
+            }
+            reached = reached.max(y1);
+        }
+        if reached < height - 0.001 {
+            gaps.push((reached, height));
+        }
+        gaps
+    }
+
+    /// The reported defect: at every interior row boundary of the user's form,
+    /// a 0.5 × 0.5pt square of the spacer column's vertical border was painted
+    /// by nobody, showing as a 1-2px hole at the top-left corner of the cell
+    /// to its right.
+    ///
+    /// [MS-OI29500] §17.4.66 leaves each cell's four edges to be painted, and
+    /// says nothing about corners — that is this engine's own convention
+    /// (see [`emit_cell_borders`]): a horizontal owns the corners of its cell
+    /// because it spans the full cell width, and the verticals are inset
+    /// between them. The convention is only sound while a horizontal *paints*.
+    /// Where the author suppressed it with `nil`, no horizontal owns that
+    /// corner and the vertical must not yield it.
+    ///
+    /// A row's bottom border lives in a band **below** the row's content box,
+    /// reserved by `measure_table_rows` at the widest bottom border in the row.
+    /// A cell whose own bottom paints nothing contributes nothing to that band
+    /// and used to stop short of it, leaving the band unpainted at its own
+    /// vertical edges — the hole.
+    ///
+    /// Asserted over **every** vertical edge in the table rather than the
+    /// spacer's alone: in this table every column boundary carries `insideV`
+    /// down both rows, so each is one unbroken line from the table's top to its
+    /// bottom, and any convention that leaves a corner to nobody breaks one of
+    /// them.
+    #[test]
+    fn every_vertical_border_is_unbroken_from_the_tables_top_to_its_bottom() {
+        let table = spacer_table();
+        let h = table.size.height.raw();
+        assert_eq!(h, 56.5, "28pt row + 0.5pt reserved band + 28pt row");
+
+        let rects = border_rects(&table.commands);
+        let mut probes: Vec<String> = Vec::new();
+        for (x0, x1, y0, y1) in rects.iter().copied() {
+            if x1 - x0 >= y1 - y0 {
+                continue; // horizontal
+            }
+            let probe_x = (x0 + x1) * 0.5;
+            let gaps = unpainted_along(&table.commands, probe_x, h);
+            if !gaps.is_empty() {
+                probes.push(format!("x={probe_x}: unpainted {gaps:?}"));
+            }
+        }
+        // The four column boundaries: the table's own two sides and the two
+        // interior edges `insideV` supplies (one of them the spacer's right).
+        let xs: std::collections::BTreeSet<i32> = rects
+            .iter()
+            .filter(|(x0, x1, y0, y1)| x1 - x0 < y1 - y0)
+            .map(|(x0, _, _, _)| (x0 * 10.0).round() as i32)
+            .collect();
+        assert_eq!(
+            xs.len(),
+            4,
+            "expected four vertical edges to probe, got {xs:?}"
+        );
+        assert!(
+            probes.is_empty(),
+            "border lines broken: {probes:?} in rects {rects:?}"
+        );
+    }
+
+    /// The other half of the same invariant: a corner is painted by *exactly*
+    /// one edge. Extending every vertical through the reserved band would
+    /// satisfy the test above and paint each bordered cell's corners twice —
+    /// invisible while the two edges share a colour, and wrong the moment they
+    /// do not, since the later rect would win the corner.
+    #[test]
+    fn no_two_border_rects_overlap() {
+        let table = spacer_table();
+        let rects = border_rects(&table.commands);
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                let overlap =
+                    a.1.min(b.1) - a.0.max(b.0) > 0.001 && a.3.min(b.3) - a.2.max(b.2) > 0.001;
+                assert!(!overlap, "border rects overlap: {a:?} and {b:?}");
+            }
+        }
+    }
+
+    /// The control. A cell whose bottom *does* paint keeps yielding the band to
+    /// it: its verticals stop at the row's content box, exactly as before.
+    /// Pins the fix to the case where nothing else paints the corner.
+    #[test]
+    fn a_bordered_cell_still_yields_the_reserved_band_to_its_own_bottom_border() {
+        let table = spacer_table();
+        // Column 0's right edge, at x = 99.5..100 — the vertical it wins from
+        // `insideV` against column 1's left.
+        let verticals: Vec<(f32, f32)> = border_rects(&table.commands)
+            .into_iter()
+            .filter(|(x0, x1, _, _)| (*x0 - 99.5).abs() < 0.001 && (*x1 - 100.0).abs() < 0.001)
+            .map(|(_, _, y0, y1)| (y0, y1))
+            .collect();
+        assert_eq!(
+            verticals,
+            vec![(0.5, 28.0), (28.5, 56.0)],
+            "row 0's vertical stops at its content box (0.5..28, the band \
+             28..28.5 being its own bottom border's), and row 1's runs between \
+             its own top and bottom borders"
         );
     }
 }

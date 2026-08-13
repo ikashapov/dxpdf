@@ -559,10 +559,21 @@ fn colour_luminance(b: &TableBorderLine) -> (u32, u32, u32) {
 /// Emit all four borders for a cell as filled rectangles.
 /// Borders are drawn INWARD from the cell edge per OOXML.
 ///
-/// Horizontal borders (top/bottom) own the corner squares — they span the
-/// full cell width. Vertical borders (left/right) fill only the space
-/// between the horizontals. This eliminates anti-aliasing gaps at corners
-/// that plagued the previous stroke-based approach.
+/// **Every corner square is painted by exactly one of the two edges that meet
+/// there.** Horizontal borders (top/bottom) own the corners, because they span
+/// the full cell width; the verticals fill only what is left between them. Both
+/// halves are load-bearing — painting a corner twice lets the second rect win it
+/// when the two edges differ in colour, and painting it not at all leaves a hole
+/// one border wide, which is what the stroke-based approach this replaced left
+/// at every corner through anti-aliasing.
+///
+/// The rule holds only while a horizontal *paints*. Where this cell's own top
+/// or bottom is [`CellEdge::Absent`] or [`CellEdge::Suppressed`], no horizontal
+/// owns that corner and the vertical takes it, by insetting against a width of
+/// zero. What the caller owes in return is a box reaching to the far side of the
+/// corner in question: a row's bottom border sits in a band *below* the row's
+/// content box, so `emit_one_row` extends the box through that band for a cell
+/// whose bottom paints nothing. See the comment there.
 pub(super) fn emit_cell_borders(
     commands: &mut Vec<DrawCommand>,
     b: CellBorders,
@@ -597,16 +608,19 @@ pub(super) fn emit_cell_borders(
         );
     }
 
-    // Vertical borders: between horizontal borders (no corner overlap).
-    let top_inset = if top.is_some() { top_w } else { Pt::ZERO };
-    let bot_inset = if bottom.is_some() { bot_w } else { Pt::ZERO };
-    let v_height = row_h - top_inset - bot_inset;
+    // Vertical borders: whatever the horizontals leave between them. The inset
+    // at each end is the width the horizontal there actually paints, which is
+    // zero when it paints none — and that is precisely how a vertical comes to
+    // own a corner no horizontal can. (Guarding these on `top.is_some()` /
+    // `bottom.is_some()` would read as the same rule and be dead code: an edge
+    // that paints nothing already has a zero width.)
+    let v_height = row_h - top_w - bot_w;
     if v_height > Pt::ZERO {
         if let Some(ref border) = left {
             emit_border_rect(
                 commands,
                 border,
-                PtRect::from_xywh(cell_x, row_y + top_inset, left_w, v_height),
+                PtRect::from_xywh(cell_x, row_y + top_w, left_w, v_height),
                 false,
             );
         }
@@ -614,12 +628,7 @@ pub(super) fn emit_cell_borders(
             emit_border_rect(
                 commands,
                 border,
-                PtRect::from_xywh(
-                    cell_x + cell_w - right_w,
-                    row_y + top_inset,
-                    right_w,
-                    v_height,
-                ),
+                PtRect::from_xywh(cell_x + cell_w - right_w, row_y + top_w, right_w, v_height),
                 false,
             );
         }
