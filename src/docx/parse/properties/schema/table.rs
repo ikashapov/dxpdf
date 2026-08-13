@@ -242,35 +242,78 @@ impl TblPrXml {
 }
 
 impl From<TblLookXml> for TableLook {
+    /// §17.4.55: the legacy `@val` bitmask and the six modern attributes are
+    /// **not** two spellings of the same six flags to be merged flag by flag.
+    ///
+    /// [MS-OI29500] Part 1 §17.4.55 note (c) is exact about it: "Word reads
+    /// the val attribute if, and only if, none of the attributes specified in
+    /// this subsection are present." So one modern attribute anywhere on the
+    /// element makes the whole bitmask unread — a per-flag fallback would make
+    /// that sentence say nothing, and would let `val`'s *cleared* bits switch
+    /// regions off that the document never mentioned.
+    ///
+    /// # What an unmentioned sibling then means is a choice, not a rule
+    ///
+    /// The erratum settles only which source is read. It does not say what an
+    /// attribute the element omits resolves to once `val` is out of the
+    /// picture, and neither does §17.4.55: `CT_TblLook`'s attributes are
+    /// optional `ST_OnOff` with no schema default.
+    ///
+    /// **The choice taken here is `true` — every region on.** The evidence is
+    /// second-implementation: LibreOffice tested Word for tdf#167843 and
+    /// concluded that all unspecified attributes default to true, and its
+    /// regression fixture (`<w:tblLook w:val="04A0" w:firstRow="0"/>`, which
+    /// `tbl_pr_tbl_look_val_04a0_with_first_row_off` reproduces below) asserts
+    /// firstColumn, lastColumn and lastRow all on. That is testimony about
+    /// Word, not documentation of it.
+    ///
+    /// It is applied to all six uniformly, including `noHBand`/`noVBand`,
+    /// where `true` switches banding *off* rather than on. Splitting the rule
+    /// — four flags one way, two the other — would be a second choice with no
+    /// evidence behind it at all, and a uniform "unset bits read as set" is
+    /// also the simplest thing an implementation holding a bitmask would do.
+    ///
+    /// **What would settle it**: a Word render of a table whose style defines
+    /// a `band1Horz` layer, carrying `<w:tblLook w:firstRow="0"/>` and nothing
+    /// else. Banding paints iff Word's unspecified `noHBand` is false, which
+    /// is the one flag where the uniform reading and the "regions on" reading
+    /// disagree.
     fn from(x: TblLookXml) -> Self {
-        // Per [MS-OI29500] §2.1.1583: explicit attribute wins per-flag,
-        // legacy `val` supplies the fallback bit when the attribute is absent.
-        let from_val = |bit: fn(TblLookHex) -> bool| x.val.map(bit);
+        let stated = [
+            x.first_row,
+            x.last_row,
+            x.first_column,
+            x.last_column,
+            x.no_h_band,
+            x.no_v_band,
+        ];
+        if stated.iter().all(Option::is_none) {
+            // Nothing modern present, so `val` is read — and if it is absent
+            // too the element states nothing at all. §17.4.55 note (a)'s
+            // absent-element default belongs to the consumer, which cannot
+            // tell an omitted element from an empty one unless the parser
+            // keeps quiet here.
+            return match x.val {
+                Some(v) => Self {
+                    first_row: Some(v.first_row()),
+                    last_row: Some(v.last_row()),
+                    first_column: Some(v.first_column()),
+                    last_column: Some(v.last_column()),
+                    no_h_band: Some(v.no_h_band()),
+                    no_v_band: Some(v.no_v_band()),
+                },
+                None => Self::default(),
+            };
+        }
+        // `is_none_or` *is* the rule: an unstated attribute reads as true.
+        let attr = |a: Option<AttrBool>| Some(a.is_none_or(|b| b.0));
         Self {
-            first_row: x
-                .first_row
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::first_row)),
-            last_row: x
-                .last_row
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::last_row)),
-            first_column: x
-                .first_column
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::first_column)),
-            last_column: x
-                .last_column
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::last_column)),
-            no_h_band: x
-                .no_h_band
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::no_h_band)),
-            no_v_band: x
-                .no_v_band
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::no_v_band)),
+            first_row: attr(x.first_row),
+            last_row: attr(x.last_row),
+            first_column: attr(x.first_column),
+            last_column: attr(x.last_column),
+            no_h_band: attr(x.no_h_band),
+            no_v_band: attr(x.no_v_band),
         }
     }
 }
@@ -555,6 +598,11 @@ mod tests {
         assert_eq!(l.first_row, Some(true));
         assert_eq!(l.last_row, Some(false));
         assert_eq!(l.no_h_band, Some(true));
+        // The three the element never mentions are still answered — see
+        // `From<TblLookXml> for TableLook` for why, and on what evidence.
+        assert_eq!(l.first_column, Some(true));
+        assert_eq!(l.last_column, Some(true));
+        assert_eq!(l.no_v_band, Some(true));
     }
 
     /// [MS-OI29500] §2.1.1583: legacy `@val` hex bitfield must decode to the
@@ -598,18 +646,59 @@ mod tests {
         assert_eq!(l.no_v_band, Some(false));
     }
 
-    /// Per [MS-OI29500]: when both legacy `val` and explicit attributes are
-    /// specified, the explicit attribute wins per-flag. Sample3 has tables
-    /// shaped like `<tblLook val="04A0" firstRow="1" noHBand="0" .../>`.
+    /// [MS-OI29500] Part 1 §17.4.55 note (c): "Word reads the val attribute
+    /// if, and only if, **none** of the attributes specified in this
+    /// subsection are present." One modern attribute therefore suppresses
+    /// `val` for *every* flag, not merely for its own — which is the whole
+    /// content of the rule, since a per-flag reading would make the sentence
+    /// say nothing.
+    ///
+    /// `val="0000"` clears all six bits, so under a per-flag fallback the
+    /// four unmentioned flags would arrive as `Some(false)`.
     #[test]
-    fn tbl_pr_tbl_look_explicit_attrs_override_val() {
+    fn tbl_pr_tbl_look_one_explicit_attr_suppresses_val_for_every_flag() {
         let (tp, _) =
             parse_tbl_pr(r#"<tblPr><tblLook val="0000" firstRow="1" noVBand="1"/></tblPr>"#);
         let l = tp.look.cloned().unwrap();
-        assert_eq!(l.first_row, Some(true), "explicit firstRow=1 wins");
-        assert_eq!(l.last_row, Some(false), "from val=0000");
-        assert_eq!(l.first_column, Some(false), "from val=0000");
-        assert_eq!(l.no_v_band, Some(true), "explicit noVBand=1 wins");
+        assert_eq!(l.first_row, Some(true), "explicit firstRow=1");
+        assert_eq!(l.no_v_band, Some(true), "explicit noVBand=1");
+        assert_eq!(l.last_row, Some(true), "not from val=0000");
+        assert_eq!(l.first_column, Some(true), "not from val=0000");
+        assert_eq!(l.last_column, Some(true), "not from val=0000");
+        assert_eq!(l.no_h_band, Some(true), "not from val=0000");
+    }
+
+    /// LibreOffice's tdf#167843 regression fixture, verbatim: `val="04A0"`
+    /// alongside a single `firstRow="0"`. 04A0 clears lastRow (0x040) and
+    /// lastColumn (0x100) and clears noHBand (0x200) — none of which may
+    /// reach the model, because note (c) says the whole bitmask is unread.
+    #[test]
+    fn tbl_pr_tbl_look_val_04a0_with_first_row_off() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="04A0" firstRow="0"/></tblPr>"#);
+        let l = tp.look.cloned().unwrap();
+        assert_eq!(l.first_row, Some(false));
+        assert_eq!(l.last_row, Some(true), "04A0's cleared lastRow is not read");
+        assert_eq!(l.first_column, Some(true));
+        assert_eq!(l.last_column, Some(true), "nor its cleared lastColumn");
+        assert_eq!(l.no_h_band, Some(true), "nor its cleared noHBand");
+        assert_eq!(l.no_v_band, Some(true));
+    }
+
+    /// A `<w:tblLook/>` that states nothing at all states nothing: `val` is
+    /// absent too, so there is no bitmask to read and no attribute to fill
+    /// in from. What an entirely silent element means is §17.4.55 note (a)'s
+    /// question, and it is answered by the resolver
+    /// (`render::resolve::conditional::ActiveRegions::WORD_DEFAULT`), not here.
+    #[test]
+    fn tbl_pr_tbl_look_empty_element_states_nothing() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook/></tblPr>"#);
+        let l = tp.look.cloned().unwrap();
+        assert_eq!(l.first_row, None);
+        assert_eq!(l.last_row, None);
+        assert_eq!(l.first_column, None);
+        assert_eq!(l.last_column, None);
+        assert_eq!(l.no_h_band, None);
+        assert_eq!(l.no_v_band, None);
     }
 
     #[test]
