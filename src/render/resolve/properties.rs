@@ -136,22 +136,50 @@ pub fn merge_paragraph_properties(target: &mut ParagraphProperties, base: &Parag
     }
 }
 
-/// §17.7.2: merge table properties from a parent table style.
-/// Only `cell_margins` is merged — other table properties (borders, width, etc.)
-/// are resolved separately through the table-level cascade in `build_table`.
+/// §17.7.2 / §17.7.4.3: merge a parent table style's `<w:tblPr>` into a child's.
+///
+/// The unit of inheritance is the **property**, not the `<w:tblPr>` element that
+/// carries it: `basedOn` says the child "inherits all of the properties of the
+/// base style", and the child then layers its own on top. So a child that states
+/// one `tblPr` child element keeps the parent's every other property.
+///
+/// This used to merge `cell_margins` alone, on the stated grounds that the rest
+/// was "resolved separately through the table-level cascade in `build_table`".
+/// That was never true — there is no `basedOn` walk there, only a single map
+/// lookup by the leaf `style_id` — so a `<w:tblLayout>` in the child was enough
+/// to erase the parent's borders outright.
+///
+/// `style_id` is the one exclusion, for the reason
+/// [`overlay_table_properties`] excludes it: a `tblStyle` reference inside a
+/// style's own `tblPr` would be a second inheritance edge competing with
+/// `basedOn`, which §17.7 does not define and which invites a resolution loop.
+/// Nothing reads `ResolvedStyle::table`'s `style_id` — `build_table` takes the
+/// reference off the `<w:tbl>` — so leaving it unmerged costs nothing.
 pub fn merge_table_properties(
     target: &mut Option<TableProperties>,
     base: &Option<TableProperties>,
 ) {
-    match (target.as_mut(), base.as_ref()) {
-        (Some(t), Some(b)) => {
-            merge_opt(&mut t.cell_margins, &b.cell_margins);
-        }
-        (None, Some(_)) => {
-            *target = base.clone();
-        }
-        _ => {}
-    }
+    let Some(b) = base.as_ref() else { return };
+    // A child with no `<w:tblPr>` at all inherits the parent's outright, which
+    // is the same rule with nothing on the left of it — hence one path, so the
+    // two cases cannot drift apart.
+    let t = target.get_or_insert_with(TableProperties::default);
+    merge_fields!(
+        t,
+        b,
+        alignment,
+        width,
+        layout,
+        indent,
+        borders,
+        cell_margins,
+        cell_spacing,
+        look,
+        style_row_band_size,
+        style_col_band_size,
+        positioning,
+        overlap,
+    );
 }
 
 /// §17.7.6: overlay a `wholeTable` conditional layer onto a table style's own
@@ -711,15 +739,15 @@ mod tests {
         assert!(target.auto_space_dn.is_some());
     }
 
-    // ── wholeTable table-property overlay (§17.7.6) ──────────────────────
+    // ── table-property cascade (§17.7.2 inheritance, §17.7.6 overlay) ────
 
-    /// Every field must be listed in `overlay_table_properties`. If a field is
-    /// added to `TableProperties` and not to the overlay, a `wholeTable` style
-    /// setting it would be silently dropped — this fails instead.
-    #[test]
-    fn table_properties_overlay_covers_every_field() {
+    /// A `TableProperties` with **every** field set, so a test can assert that
+    /// a cascade step carried all of them. Shared by the inheritance and
+    /// overlay coverage tests below — one place to add a new field to, which is
+    /// what makes forgetting one a failure in both directions.
+    fn every_table_property() -> TableProperties {
         use crate::model::geometry::EdgeInsets;
-        let overlay = TableProperties {
+        TableProperties {
             style_id: Some(StyleId::new("Ignored")),
             alignment: Dup::from(Some(Alignment::Center)),
             width: Dup::from(Some(TableMeasure::Auto)),
@@ -763,7 +791,83 @@ mod tests {
                 y: None,
             })),
             overlap: Dup::from(Some(TableOverlap::Never)),
-        };
+        }
+    }
+
+    /// Every field must be listed in [`merge_table_properties`]. A field added
+    /// to `TableProperties` and not to the merge would be unreachable from a
+    /// parent table style — silently, since the child would simply render
+    /// without it. This fails instead.
+    #[test]
+    fn table_properties_merge_covers_every_field() {
+        let base = every_table_property();
+        // `Some(default)` is the case the old code got wrong: a child that has
+        // a `<w:tblPr>` at all, but states none of these properties in it.
+        let mut target = Some(TableProperties::default());
+        merge_table_properties(&mut target, &Some(base.clone()));
+        let out = target.expect("target stays present");
+
+        assert_eq!(out.alignment, base.alignment);
+        assert_eq!(out.width, base.width);
+        assert_eq!(out.layout, base.layout);
+        assert_eq!(out.indent, base.indent);
+        assert!(out.borders.cloned().is_some(), "borders inherited"); // no PartialEq on TableBorders
+        assert_eq!(out.cell_margins, base.cell_margins);
+        assert_eq!(out.cell_spacing, base.cell_spacing);
+        assert!(out.look.cloned().is_some(), "look inherited"); // no PartialEq on TableLook
+        assert_eq!(out.style_row_band_size, base.style_row_band_size);
+        assert_eq!(out.style_col_band_size, base.style_col_band_size);
+        assert_eq!(out.positioning, base.positioning);
+        assert_eq!(out.overlap, base.overlap);
+        // The one deliberate exclusion: `basedOn` is the inheritance edge, and
+        // a `tblStyle` inside a style's own `tblPr` must not become a second.
+        assert_eq!(
+            out.style_id, None,
+            "style_id must not be inherited — see merge_table_properties"
+        );
+    }
+
+    /// A child that declares no `<w:tblPr>` at all takes the parent's, and by
+    /// the same rule — so the two arms cannot drift apart.
+    #[test]
+    fn a_table_style_with_no_tbl_pr_inherits_the_parents() {
+        let base = every_table_property();
+        let mut target = None;
+        merge_table_properties(&mut target, &Some(base.clone()));
+        let out = target.expect("an absent tblPr becomes the parent's");
+        assert_eq!(out.width, base.width);
+        assert_eq!(out.alignment, base.alignment);
+        assert_eq!(out.style_id, None, "…still without the style reference");
+    }
+
+    /// §17.7.2: what the child states wins, per property — the parent fills
+    /// only the gaps.
+    #[test]
+    fn table_properties_merge_lets_the_child_win_per_property() {
+        let base = every_table_property();
+        let mut target = Some(TableProperties {
+            alignment: Dup::from(Some(Alignment::End)),
+            ..Default::default()
+        });
+        merge_table_properties(&mut target, &Some(base.clone()));
+        let out = target.expect("target stays present");
+        assert_eq!(
+            out.alignment,
+            Dup::from(Some(Alignment::End)),
+            "the child's own alignment survives"
+        );
+        assert_eq!(
+            out.width, base.width,
+            "…and the parent still fills what the child left unset"
+        );
+    }
+
+    /// Every field must be listed in `overlay_table_properties`. If a field is
+    /// added to `TableProperties` and not to the overlay, a `wholeTable` style
+    /// setting it would be silently dropped — this fails instead.
+    #[test]
+    fn table_properties_overlay_covers_every_field() {
+        let overlay = every_table_property();
         let out = overlay_table_properties(None, &overlay);
 
         assert_eq!(out.alignment, overlay.alignment);

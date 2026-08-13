@@ -132,6 +132,25 @@ fn styles_with(style_body: &str) -> String {
     )
 }
 
+/// A stylesheet where `TestTbl` — the style every fixture table names — is
+/// `basedOn` a second style that carries `parent_body`.
+fn styles_derived_from(parent_body: &str, child_body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="ParentTbl">
+    <w:name w:val="Parent Table"/>
+    {parent_body}
+  </w:style>
+  <w:style w:type="table" w:styleId="TestTbl">
+    <w:name w:val="Test Table"/>
+    <w:basedOn w:val="ParentTbl"/>
+    {child_body}
+  </w:style>
+</w:styles>"#
+    )
+}
+
 fn layout(document_xml: &str, styles_xml: &str) -> Vec<LayoutedPage> {
     let doc = dxpdf::docx::parse(&make_docx(document_xml, styles_xml)).expect("parse");
     dxpdf::render::resolve_and_layout(doc).1
@@ -428,6 +447,101 @@ fn a_table_style_can_forbid_float_overlap() {
         r#"<w:tblOverlap w:val="never"/>"#,
         "",
         "tblOverlap",
+    );
+}
+
+// ── §17.7.4.3: `basedOn` inheritance of the style's own `<w:tblPr>` ─────────
+
+/// A `<w:tblPr>` carrying one of every table property that reaches layout.
+const EVERY_TABLE_PROPERTY: &str = r#"<w:tblPr>
+    <w:tblStyleRowBandSize w:val="2"/>
+    <w:tblStyleColBandSize w:val="2"/>
+    <w:tblW w:w="7200" w:type="dxa"/>
+    <w:jc w:val="center"/>
+    <w:tblCellSpacing w:w="144" w:type="dxa"/>
+    <w:tblInd w:w="720" w:type="dxa"/>
+    <w:tblBorders>
+      <w:top w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+      <w:bottom w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+      <w:left w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+      <w:right w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+      <w:insideH w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+      <w:insideV w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+    </w:tblBorders>
+    <w:tblCellMar>
+      <w:top w:w="60" w:type="dxa"/><w:left w:w="120" w:type="dxa"/>
+      <w:bottom w:w="60" w:type="dxa"/><w:right w:w="120" w:type="dxa"/>
+    </w:tblCellMar>
+    <w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
+               w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
+  </w:tblPr>"#;
+
+/// §17.7.4.3: a style "inherits all of the properties of the base style". The
+/// unit of inheritance is the **property**, not the `<w:tblPr>` element that
+/// carries it — so a child that declares one child element must not thereby
+/// discard every other property the parent declared.
+///
+/// The child here declares `<w:tblLayout>`, which is as unrelated as a
+/// `tblPr` child gets and moves nothing on its own. Before the fix that lone
+/// element was enough to erase the parent's borders, width, alignment,
+/// indentation, cell spacing, `tblLook` and band sizes in one go.
+#[test]
+fn a_child_table_style_inherits_every_property_it_does_not_restate() {
+    let bands = r#"<w:tblStylePr w:type="band1Horz">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+           </w:tblStylePr>"#;
+    let expected = layout(
+        &table_document(""),
+        &styles_with(&format!("{EVERY_TABLE_PROPERTY}{bands}")),
+    );
+    let inherited = layout(
+        &table_document(""),
+        &styles_derived_from(
+            EVERY_TABLE_PROPERTY,
+            &format!(r#"<w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>{bands}"#),
+        ),
+    );
+
+    assert!(
+        page_geometry(&expected)
+            .iter()
+            .any(|g| g.ends_with("#0000FF")),
+        "the fixture must draw the parent's borders, or it discriminates nothing"
+    );
+    assert_eq!(
+        page_geometry(&inherited),
+        page_geometry(&expected),
+        "declaring one unrelated `tblPr` child must not drop the inherited ones"
+    );
+}
+
+/// …and the child's own value still wins where it states one, leaving the rest
+/// of the parent's showing. Inheritance that replaced wholesale and inheritance
+/// that never applied would both pass the test above if the child said nothing;
+/// this is the half that pins "layered on top".
+#[test]
+fn a_child_table_style_overrides_only_the_properties_it_restates() {
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            EVERY_TABLE_PROPERTY,
+            r#"<w:tblPr><w:jc w:val="start"/></w:tblPr>"#,
+        ),
+    );
+    // The parent centers a 360 pt table in a 468 pt content area, which would
+    // put its left edge at 126 pt; the child pulls it back to the left margin,
+    // where the parent's `tblInd` then applies. First text: 72 (margin) + 36
+    // (tblInd) + 7.2 (one cell spacing) + 6 (left cell margin).
+    assert_eq!(
+        text_xs(&derived).first().copied(),
+        Some(121.20),
+        "the child's own jc wins over the parent's"
+    );
+    assert!(
+        page_geometry(&derived)
+            .iter()
+            .any(|g| g.ends_with("#0000FF")),
+        "…while the parent's borders, which the child never mentions, survive"
     );
 }
 
