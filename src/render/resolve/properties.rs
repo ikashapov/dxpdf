@@ -4,7 +4,10 @@
 //! This implements the OOXML style inheritance cascade.
 
 use crate::model::Dup;
-use crate::model::{ParagraphProperties, RunProperties, TabAlignment, TableProperties};
+use crate::model::{
+    ParagraphProperties, RunProperties, TabAlignment, TableCellProperties, TableProperties,
+    TableStyleOverride,
+};
 
 /// Fill any `None` fields in `$target` from the corresponding fields in `$base`.
 ///
@@ -180,6 +183,99 @@ pub fn merge_table_properties(
         positioning,
         overlap,
     );
+}
+
+/// §17.7.2: merge a parent's `<w:tcPr>` into a child's, property by property.
+///
+/// Only reached through [`merge_table_style_overrides`] — a `tcPr` on a *cell*
+/// has no parent to inherit from, it *is* the exception over the table default.
+pub fn merge_table_cell_properties(target: &mut TableCellProperties, base: &TableCellProperties) {
+    merge_fields!(
+        target,
+        base,
+        width,
+        borders,
+        shading,
+        margins,
+        vertical_align,
+        vertical_merge,
+        grid_span,
+        text_direction,
+        no_wrap,
+        cnf_style,
+    );
+}
+
+/// §17.7.6 + §17.7.4.3: layer a child table style's `<w:tblStylePr>` set over
+/// its parent's.
+///
+/// Conditional formatting is part of the style *definition*, so `basedOn`
+/// carries it like any other property — a user style derived from a banded
+/// built-in inherits that built-in's bands. The layers are keyed by `w:type`,
+/// and where both levels define the same type they merge **property by
+/// property**: the child's values win and the parent's fill the gaps. That is
+/// the granularity §17.7.2 uses at every other level of the cascade, and it is
+/// what keeps a child that restates one region's shading from also discarding
+/// that region's inherited run formatting.
+///
+/// `trPr` is the exception, merged whole rather than per field:
+/// `TableRowProperties` carries `grid_before`/`grid_after` as plain `u32` with
+/// no "unset" state, so a per-field merge could not tell an inherited value from
+/// a declared zero. Nothing reads a style-level `trPr` today, so the choice is
+/// currently unobservable; giving those two fields a carrier is what would let
+/// this merge like the rest.
+///
+/// The parent's layers come first in the result, in the parent's own order,
+/// with child-only types appended — [`resolve_cell_conditional`] looks each
+/// type up by key, so the order only has to be deterministic, not meaningful.
+///
+/// [`resolve_cell_conditional`]: super::conditional::resolve_cell_conditional
+pub fn merge_table_style_overrides(
+    child: Vec<TableStyleOverride>,
+    parent: &[TableStyleOverride],
+) -> Vec<TableStyleOverride> {
+    if parent.is_empty() {
+        return child;
+    }
+    let mut out = parent.to_vec();
+    for mut layer in child {
+        let Some(base) = out
+            .iter_mut()
+            .find(|o| o.override_type == layer.override_type)
+        else {
+            out.push(layer);
+            continue;
+        };
+        merge_bag(
+            &mut layer.paragraph_properties,
+            &base.paragraph_properties,
+            merge_paragraph_properties,
+        );
+        merge_bag(
+            &mut layer.run_properties,
+            &base.run_properties,
+            merge_run_properties,
+        );
+        merge_table_properties(&mut layer.table_properties, &base.table_properties);
+        merge_bag(
+            &mut layer.table_cell_properties,
+            &base.table_cell_properties,
+            merge_table_cell_properties,
+        );
+        merge_opt(&mut layer.table_row_properties, &base.table_row_properties);
+        *base = layer;
+    }
+    out
+}
+
+/// Merge one `Option`-carried property bag from `base` into `target`: `merge`
+/// runs when both levels have one, and an absent target simply takes the base's.
+fn merge_bag<T: Clone>(target: &mut Option<T>, base: &Option<T>, merge: fn(&mut T, &T)) {
+    match (target.as_mut(), base.as_ref()) {
+        (Some(t), Some(b)) => merge(t, b),
+        (None, Some(_)) => target.clone_from(base),
+        _ => {}
+    }
 }
 
 /// §17.7.6: overlay a `wholeTable` conditional layer onto a table style's own
@@ -888,6 +984,236 @@ mod tests {
             out.style_id, None,
             "style_id must not be overlaid — see overlay_table_properties"
         );
+    }
+
+    // ── §17.7.6 conditional layers through `basedOn` ─────────────────────
+
+    /// A `tblStylePr` layer carrying a shading fill and/or a bold toggle.
+    fn layer(
+        override_type: TableStyleOverrideType,
+        fill: Option<u32>,
+        bold: Option<bool>,
+    ) -> TableStyleOverride {
+        TableStyleOverride {
+            override_type,
+            paragraph_properties: None,
+            run_properties: bold.map(|b| RunProperties {
+                bold: Some(b),
+                ..Default::default()
+            }),
+            table_properties: None,
+            table_row_properties: None,
+            table_cell_properties: fill.map(|f| TableCellProperties {
+                shading: Dup::from(Some(Shading {
+                    fill: Color::Rgb(f),
+                    pattern: ShadingPattern::Clear,
+                    color: Color::Auto,
+                })),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn fill_of(layer: &TableStyleOverride) -> Option<Color> {
+        layer
+            .table_cell_properties
+            .as_ref()
+            .and_then(|p| p.shading.get())
+            .map(|s| s.fill)
+    }
+
+    /// A child that defines no layer of that type inherits the parent's whole.
+    #[test]
+    fn conditional_layers_descend_when_the_child_defines_none() {
+        let parent = vec![layer(
+            TableStyleOverrideType::FirstRow,
+            Some(0xFF0000),
+            None,
+        )];
+        let out = merge_table_style_overrides(vec![], &parent);
+        assert_eq!(out.len(), 1);
+        assert_eq!(fill_of(&out[0]), Some(Color::Rgb(0xFF0000)));
+    }
+
+    /// Two layers of the same type merge per property rather than replacing:
+    /// the child's shading wins, the parent's run formatting survives.
+    #[test]
+    fn conditional_layers_of_the_same_type_merge_property_by_property() {
+        let parent = vec![layer(
+            TableStyleOverrideType::FirstRow,
+            Some(0xFF0000),
+            Some(true),
+        )];
+        let child = vec![layer(
+            TableStyleOverrideType::FirstRow,
+            Some(0x00FF00),
+            None,
+        )];
+        let out = merge_table_style_overrides(child, &parent);
+
+        assert_eq!(out.len(), 1, "one layer per type, not two");
+        assert_eq!(
+            fill_of(&out[0]),
+            Some(Color::Rgb(0x00FF00)),
+            "the child's own shading wins"
+        );
+        assert_eq!(
+            out[0].run_properties.as_ref().and_then(|r| r.bold),
+            Some(true),
+            "the parent's run formatting, which the child never restates, survives"
+        );
+    }
+
+    /// …and the same holds *inside* a layer's `<w:tcPr>`: a child that states
+    /// one cell property keeps the parent's others for that region, rather than
+    /// its `tcPr` replacing the parent's whole.
+    #[test]
+    fn a_layers_cell_properties_merge_property_by_property_too() {
+        let parent = vec![layer(
+            TableStyleOverrideType::FirstRow,
+            Some(0xFF0000),
+            None,
+        )];
+        let mut child_layer = layer(TableStyleOverrideType::FirstRow, None, None);
+        child_layer.table_cell_properties = Some(TableCellProperties {
+            vertical_align: Dup::from(Some(CellVerticalAlign::Center)),
+            ..Default::default()
+        });
+        let out = merge_table_style_overrides(vec![child_layer], &parent);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0]
+                .table_cell_properties
+                .as_ref()
+                .and_then(|p| p.vertical_align.cloned()),
+            Some(CellVerticalAlign::Center),
+            "the child's own vAlign applies"
+        );
+        assert_eq!(
+            fill_of(&out[0]),
+            Some(Color::Rgb(0xFF0000)),
+            "…and the parent's shading for the same region is not discarded with it"
+        );
+    }
+
+    /// A layer's `<w:trPr>` descends whole, which is the documented exception:
+    /// `TableRowProperties` has no "unset" state for `grid_before`/`grid_after`,
+    /// so it cannot merge per field. Pinned so the exception stays a decision.
+    #[test]
+    fn a_layers_row_properties_descend_whole() {
+        let mut parent_layer = layer(TableStyleOverrideType::FirstRow, None, None);
+        parent_layer.table_row_properties = Some(TableRowProperties {
+            is_header: Some(true),
+            ..Default::default()
+        });
+        let child = vec![layer(
+            TableStyleOverrideType::FirstRow,
+            Some(0x00FF00),
+            None,
+        )];
+        let out = merge_table_style_overrides(child, &[parent_layer]);
+
+        assert_eq!(
+            out[0]
+                .table_row_properties
+                .as_ref()
+                .and_then(|r| r.is_header),
+            Some(true),
+            "a child layer that states no trPr takes the parent's"
+        );
+    }
+
+    /// Types only one level defines are kept from both — the merge is keyed by
+    /// `w:type`, not a replacement of the set.
+    #[test]
+    fn conditional_layers_are_keyed_by_type() {
+        let parent = vec![
+            layer(TableStyleOverrideType::FirstRow, Some(0xFF0000), None),
+            layer(TableStyleOverrideType::Band1Horz, Some(0x0000FF), None),
+        ];
+        let child = vec![layer(TableStyleOverrideType::LastRow, Some(0x00FF00), None)];
+        let out = merge_table_style_overrides(child, &parent);
+
+        let by_type = |t| out.iter().find(|o| o.override_type == t).and_then(fill_of);
+        assert_eq!(
+            by_type(TableStyleOverrideType::FirstRow),
+            Some(Color::Rgb(0xFF0000))
+        );
+        assert_eq!(
+            by_type(TableStyleOverrideType::Band1Horz),
+            Some(Color::Rgb(0x0000FF))
+        );
+        assert_eq!(
+            by_type(TableStyleOverrideType::LastRow),
+            Some(Color::Rgb(0x00FF00))
+        );
+        assert_eq!(out.len(), 3);
+    }
+
+    /// A styleless parent is the common case — it must be a pass-through, and
+    /// must not disturb the child's own order.
+    #[test]
+    fn conditional_layers_pass_through_an_empty_parent() {
+        let child = vec![
+            layer(TableStyleOverrideType::LastRow, Some(0x00FF00), None),
+            layer(TableStyleOverrideType::FirstRow, Some(0xFF0000), None),
+        ];
+        let out = merge_table_style_overrides(child.clone(), &[]);
+        assert_eq!(out.len(), child.len());
+        assert_eq!(out[0].override_type, TableStyleOverrideType::LastRow);
+        assert_eq!(out[1].override_type, TableStyleOverrideType::FirstRow);
+    }
+
+    /// Every field must be listed in [`merge_table_cell_properties`], or a
+    /// parent layer's value for it would be unreachable from a child layer of
+    /// the same type.
+    #[test]
+    fn table_cell_properties_merge_covers_every_field() {
+        use crate::model::geometry::PartialEdgeInsets;
+        let base = TableCellProperties {
+            width: Dup::from(Some(TableMeasure::Auto)),
+            borders: Dup::from(Some(TableCellBorders {
+                top: None,
+                bottom: None,
+                left: None,
+                right: None,
+                tl2br: None,
+                tr2bl: None,
+                inside_h: None,
+                inside_v: None,
+            })),
+            shading: Dup::from(Some(Shading {
+                fill: Color::Rgb(0xFF0000),
+                pattern: ShadingPattern::Clear,
+                color: Color::Auto,
+            })),
+            margins: Dup::from(Some(PartialEdgeInsets {
+                top: Some(Dimension::new(1)),
+                right: None,
+                bottom: None,
+                left: None,
+            })),
+            vertical_align: Dup::from(Some(CellVerticalAlign::Center)),
+            vertical_merge: Dup::from(Some(VerticalMerge::Restart)),
+            grid_span: Dup::from(Some(2)),
+            text_direction: Dup::from(Some(TextDirection::TopToBottomRightToLeft)),
+            no_wrap: Some(true),
+            cnf_style: Dup::from(Some(CnfStyle::FIRST_ROW)),
+        };
+        let mut target = TableCellProperties::default();
+        merge_table_cell_properties(&mut target, &base);
+
+        assert_eq!(target.width, base.width);
+        assert!(target.borders.cloned().is_some(), "borders"); // no PartialEq
+        assert_eq!(target.shading, base.shading);
+        assert_eq!(target.margins, base.margins);
+        assert_eq!(target.vertical_align, base.vertical_align);
+        assert_eq!(target.vertical_merge, base.vertical_merge);
+        assert_eq!(target.grid_span, base.grid_span);
+        assert_eq!(target.text_direction, base.text_direction);
+        assert_eq!(target.no_wrap, base.no_wrap);
+        assert_eq!(target.cnf_style, base.cnf_style);
     }
 
     /// The overlay direction is the opposite of `merge_table_properties`:

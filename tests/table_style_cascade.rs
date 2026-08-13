@@ -582,3 +582,185 @@ fn a_zero_tbl_ind_indents_exactly_as_an_absent_one() {
          text on the left margin rather than one cell margin past it"
     );
 }
+
+// ── §17.7.6 + §17.7.4.3: `basedOn` inheritance of `<w:tblStylePr>` ──────────
+
+/// A `tblStylePr` is part of the style definition, so `basedOn` carries it like
+/// any other property. A user style derived from a banded built-in used to lose
+/// every conditional layer the built-in defined.
+#[test]
+fn a_child_table_style_inherits_the_parents_conditional_layers() {
+    let first_row_red = r#"<w:tblStylePr w:type="firstRow">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+           </w:tblStylePr>"#;
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            &format!("<w:tblPr/>{first_row_red}"),
+            r#"<w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>"#,
+        ),
+    );
+    assert_eq!(
+        page_geometry(&derived)
+            .iter()
+            .filter(|g| g.ends_with("#FF0000"))
+            .count(),
+        2,
+        "the parent's firstRow layer must shade both cells of the first row"
+    );
+}
+
+/// Two layers of the same `w:type` merge property by property — the child's own
+/// values win and the parent's fill the gaps — rather than the child's layer
+/// replacing the parent's whole layer. That is the granularity §17.7.2 uses at
+/// every other level of the cascade.
+#[test]
+fn a_child_conditional_layer_merges_with_the_parents_of_the_same_type() {
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            r#"<w:tblPr/>
+               <w:tblStylePr w:type="firstRow">
+                 <w:rPr><w:color w:val="FF0000"/></w:rPr>
+                 <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr>
+               </w:tblStylePr>"#,
+            // The child restates only the shading.
+            r#"<w:tblPr/>
+               <w:tblStylePr w:type="firstRow">
+                 <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="0000FF"/></w:tcPr>
+               </w:tblStylePr>"#,
+        ),
+    );
+    let geometry = page_geometry(&derived);
+    assert_eq!(
+        geometry
+            .iter()
+            .filter(|g| g.starts_with("rect") && g.ends_with("#0000FF"))
+            .count(),
+        2,
+        "the child's own shading wins"
+    );
+    assert_eq!(
+        geometry
+            .iter()
+            .filter(|g| g.starts_with("rect") && g.ends_with("#00FF00"))
+            .count(),
+        0,
+        "…and fully replaces the parent's, rather than both being drawn"
+    );
+    assert_eq!(
+        geometry
+            .iter()
+            .filter(|g| g.starts_with("text") && g.ends_with("#FF0000"))
+            .count(),
+        2,
+        "…while the parent's run color, which the child never restates, survives"
+    );
+}
+
+/// The table-level half: an inherited `wholeTable` layer carries a `tblPr`, and
+/// that has to reach `build_table`'s cascade, which reads it off the style's
+/// folded table properties rather than off the conditional chain.
+///
+/// Written so the child *restates* the property, which is the case that
+/// discriminates. A child that stayed silent would inherit the parent's already
+/// folded value through plain `tblPr` inheritance and prove nothing about the
+/// layer. Here the inherited layer has to outrank the child's own `tblPr` —
+/// see `resolve_one`'s comment for why that is the reading taken and what
+/// would settle it.
+#[test]
+fn an_inherited_whole_table_layer_outranks_the_childs_own_tbl_pr() {
+    let borders = |color: &str| {
+        format!(
+            r#"<w:tblBorders>
+                 <w:top w:val="single" w:sz="24" w:space="0" w:color="{color}"/>
+                 <w:bottom w:val="single" w:sz="24" w:space="0" w:color="{color}"/>
+                 <w:left w:val="single" w:sz="24" w:space="0" w:color="{color}"/>
+                 <w:right w:val="single" w:sz="24" w:space="0" w:color="{color}"/>
+                 <w:insideH w:val="single" w:sz="24" w:space="0" w:color="{color}"/>
+                 <w:insideV w:val="single" w:sz="24" w:space="0" w:color="{color}"/>
+               </w:tblBorders>"#
+        )
+    };
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            &format!(
+                r#"<w:tblPr/>
+                   <w:tblStylePr w:type="wholeTable">
+                     <w:tblPr>{}</w:tblPr>
+                   </w:tblStylePr>"#,
+                borders("0000FF")
+            ),
+            &format!("<w:tblPr>{}</w:tblPr>", borders("FF0000")),
+        ),
+    );
+    let geometry = page_geometry(&derived);
+    assert!(
+        geometry.iter().any(|g| g.ends_with("#0000FF")),
+        "an inherited wholeTable tblPr must reach the table-level cascade"
+    );
+    assert_eq!(
+        geometry.iter().filter(|g| g.ends_with("#FF0000")).count(),
+        0,
+        "…and sit above the child's own tblPr, exactly as its own would"
+    );
+}
+
+/// A layer type only the child defines is added, not dropped, and the parent's
+/// other types stay — the merge is by `w:type`, not a replacement of the set.
+#[test]
+fn conditional_layers_the_child_alone_defines_are_added_to_the_parents() {
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            r#"<w:tblPr/>
+               <w:tblStylePr w:type="firstRow">
+                 <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+               </w:tblStylePr>"#,
+            r#"<w:tblPr/>
+               <w:tblStylePr w:type="lastRow">
+                 <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr>
+               </w:tblStylePr>"#,
+        ),
+    );
+    let geometry = page_geometry(&derived);
+    assert_eq!(
+        geometry.iter().filter(|g| g.ends_with("#FF0000")).count(),
+        2,
+        "the parent's firstRow survives"
+    );
+    assert_eq!(
+        geometry.iter().filter(|g| g.ends_with("#00FF00")).count(),
+        2,
+        "…alongside the child's own lastRow"
+    );
+}
+
+/// The same, one level down: a child layer's `<w:tcPr>` merges with the
+/// parent's for that region rather than replacing it, so stating one cell
+/// property does not discard the region's inherited shading.
+#[test]
+fn a_child_layers_cell_properties_merge_with_the_parents() {
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            r#"<w:tblPr/>
+               <w:tblStylePr w:type="firstRow">
+                 <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+               </w:tblStylePr>"#,
+            r#"<w:tblPr/>
+               <w:tblStylePr w:type="firstRow">
+                 <w:tcPr><w:vAlign w:val="center"/></w:tcPr>
+               </w:tblStylePr>"#,
+        ),
+    );
+    assert_eq!(
+        page_geometry(&derived)
+            .iter()
+            .filter(|g| g.ends_with("#FF0000"))
+            .count(),
+        2,
+        "a child tcPr that states only vAlign must not drop the parent's shading"
+    );
+}

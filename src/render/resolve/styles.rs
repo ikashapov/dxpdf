@@ -6,7 +6,10 @@ use crate::model::{
     ParagraphProperties, RunProperties, StyleId, StyleSheet, TableProperties, Theme,
 };
 
-use super::properties::{merge_paragraph_properties, merge_run_properties, merge_table_properties};
+use super::properties::{
+    merge_paragraph_properties, merge_run_properties, merge_table_properties,
+    merge_table_style_overrides,
+};
 
 /// A fully resolved style — all `basedOn` inheritance has been applied.
 #[derive(Clone, Debug)]
@@ -124,14 +127,19 @@ fn resolve_one(
         super::fonts::resolve_font_set_themes(&mut run.fonts, th);
     }
 
-    // §17.7.2: table property inheritance — cell margins from parent table styles.
+    // §17.7.2: table property inheritance — the parent's own `<w:tblPr>` and
+    // its `<w:tblStylePr>` conditional layers both descend, because both are
+    // part of the style definition `basedOn` inherits.
     let mut table = style.table_properties.clone();
+    let mut overrides = style.table_style_overrides.clone();
     // Merge from resolved parent (if it exists and was successfully resolved).
     if let Some(ref parent_id) = style.based_on {
         if let Some(parent_resolved) = resolved.get(parent_id) {
             merge_paragraph_properties(&mut para, &parent_resolved.paragraph);
             merge_run_properties(&mut run, &parent_resolved.run);
             merge_table_properties(&mut table, &parent_resolved.table);
+            overrides =
+                merge_table_style_overrides(overrides, &parent_resolved.table_style_overrides);
         }
     }
 
@@ -167,8 +175,26 @@ fn resolve_one(
             run,
             // §17.7.6: applied after the parent merge, so `wholeTable` overrides
             // both this style's own `tblPr` and anything inherited.
-            table: fold_whole_table(table, &style.table_style_overrides),
-            table_style_overrides: style.table_style_overrides.clone(),
+            //
+            // Folded from the *merged* layers, not this style's own, so an
+            // inherited `wholeTable` behaves exactly as a locally declared one
+            // — the same layer cannot apply at the cell level (through
+            // `resolve_cell_conditional`, which reads the merged list) and not
+            // at the table level.
+            //
+            // That settles a question §17.7 does not: whether an inherited
+            // conditional layer outranks the *child's own* `<w:tblPr>`. It does
+            // here, because the rule this repo already took is that
+            // `wholeTable` sits above the style's own `tblPr`, and inheritance
+            // is defined on the style definition rather than on a
+            // level-by-level resolved result. The alternative reading — each
+            // level folds its own layers, then the results inherit — would let
+            // the child's `tblPr` win. A **Word reference render** of a user
+            // style whose `basedOn` parent declares `wholeTable` borders, and
+            // which declares different borders in its own `tblPr`, is what
+            // would decide it.
+            table: fold_whole_table(table, &overrides),
+            table_style_overrides: overrides,
             is_toc_entry,
         },
     );
