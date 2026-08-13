@@ -709,10 +709,18 @@ fn an_inherited_whole_table_layer_outranks_the_childs_own_tbl_pr() {
 
 /// A layer type only the child defines is added, not dropped, and the parent's
 /// other types stay — the merge is by `w:type`, not a replacement of the set.
+///
+/// The `lastRow` region has to be switched on explicitly: §17.4.55's absent
+/// `tblLook` is Word's 0x04A0, which leaves lastRow clear. Without this the
+/// child's layer would resolve to nothing and the assertion below would be
+/// measuring the region flag rather than the layer merge.
 #[test]
 fn conditional_layers_the_child_alone_defines_are_added_to_the_parents() {
     let derived = layout(
-        &table_document(""),
+        &table_document(
+            r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:firstColumn="0"
+                          w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>"#,
+        ),
         &styles_derived_from(
             r#"<w:tblPr/>
                <w:tblStylePr w:type="firstRow">

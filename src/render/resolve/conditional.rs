@@ -18,6 +18,81 @@ pub struct CellConditionalFormatting {
     pub paragraph_properties: Option<ParagraphProperties>,
 }
 
+/// §17.4.55 `<w:tblLook>` with every question answered.
+///
+/// [`TableLook`] records what the file *said* — each flag is `None` when the
+/// document left it out. This records what the renderer must *do*, which is a
+/// different question, because an unstated flag still has an answer. Keeping
+/// the two apart is what lets the default live in exactly one place instead of
+/// being restated as six `unwrap_or`s at the read site.
+///
+/// The band flags are held in their *positive* sense (`h_band` = banding on),
+/// which is the inverse of the file's `w:noHBand` / `w:noVBand`, so the
+/// double negative is resolved once here rather than at every use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveRegions {
+    pub first_row: bool,
+    pub last_row: bool,
+    pub first_column: bool,
+    pub last_column: bool,
+    pub h_band: bool,
+    pub v_band: bool,
+}
+
+impl ActiveRegions {
+    /// What Word assumes when `<w:tblLook>` is omitted: the bitmask **0x04A0**.
+    ///
+    /// [MS-OI29500] Part 1 §17.4.55 note (a) is explicit that the standard and
+    /// Word disagree here — the standard says an omitted element means 0x0000,
+    /// every region off, and states that in Word it is assumed to be 0x04A0.
+    /// Word's reading is the one documents are authored against, so it is the
+    /// one used. (Neither reading is "all regions on", which is what this
+    /// resolver assumed before and which no source supports.)
+    ///
+    /// 0x04A0 decodes against the bit constants in
+    /// `docx::parse::properties::schema::table::TblLookHex` as
+    /// firstRow (0x020) + firstColumn (0x080) + noVBand (0x400):
+    ///
+    /// | flag        | mask    | 0x04A0 | region                    |
+    /// |-------------|---------|--------|---------------------------|
+    /// | firstRow    | `0x020` | set    | active                    |
+    /// | lastRow     | `0x040` | clear  | inactive                  |
+    /// | firstColumn | `0x080` | set    | active                    |
+    /// | lastColumn  | `0x100` | clear  | inactive                  |
+    /// | noHBand     | `0x200` | clear  | row banding **active**    |
+    /// | noVBand     | `0x400` | set    | column banding inactive   |
+    pub const WORD_DEFAULT: Self = Self {
+        first_row: true,
+        last_row: false,
+        first_column: true,
+        last_column: false,
+        h_band: true,
+        v_band: false,
+    };
+
+    /// Resolve a table's `<w:tblLook>`, absent or partial, to the six answers.
+    ///
+    /// An absent element is [`Self::WORD_DEFAULT`] per note (a). A flag the
+    /// element leaves unstated falls back the same way — which in practice
+    /// only reaches an empty `<w:tblLook/>`, since the parse seam
+    /// (`From<TblLookXml> for TableLook`) answers every flag as soon as the
+    /// element states anything at all. An element that states nothing carries
+    /// no information, so treating it as absent is the same rule, not a
+    /// second one.
+    pub fn resolve(look: Option<&TableLook>) -> Self {
+        let d = Self::WORD_DEFAULT;
+        let Some(look) = look else { return d };
+        Self {
+            first_row: look.first_row.unwrap_or(d.first_row),
+            last_row: look.last_row.unwrap_or(d.last_row),
+            first_column: look.first_column.unwrap_or(d.first_column),
+            last_column: look.last_column.unwrap_or(d.last_column),
+            h_band: !look.no_h_band.unwrap_or(!d.h_band),
+            v_band: !look.no_v_band.unwrap_or(!d.v_band),
+        }
+    }
+}
+
 /// Grid position and dimension context for a single cell.
 pub struct CellGridPosition {
     pub row_idx: usize,
@@ -98,13 +173,16 @@ fn applicable_regions(
 ) -> Vec<TableStyleOverrideType> {
     let mut regions = Vec::new();
 
-    // §17.4.56: tblLook flags. When absent, all regions are active.
-    let first_row_active = look.and_then(|l| l.first_row).unwrap_or(true);
-    let last_row_active = look.and_then(|l| l.last_row).unwrap_or(true);
-    let first_col_active = look.and_then(|l| l.first_column).unwrap_or(true);
-    let last_col_active = look.and_then(|l| l.last_column).unwrap_or(true);
-    let h_band_active = !look.and_then(|l| l.no_h_band).unwrap_or(false);
-    let v_band_active = !look.and_then(|l| l.no_v_band).unwrap_or(false);
+    // §17.4.55: which regions the table's `tblLook` switches on. The default
+    // for anything the file left unstated lives on `ActiveRegions` — there is
+    // exactly one of it, and it is *not* "everything on".
+    let active = ActiveRegions::resolve(look);
+    let first_row_active = active.first_row;
+    let last_row_active = active.last_row;
+    let first_col_active = active.first_column;
+    let last_col_active = active.last_column;
+    let h_band_active = active.h_band;
+    let v_band_active = active.v_band;
 
     // §17.7.6 priority 1: vertical banding (banded columns). Pushed *before*
     // horizontal banding so that — per the spec's ascending order (band1Vert,
@@ -270,6 +348,22 @@ mod tests {
         }
     }
 
+    /// Every region switched on explicitly — the shape a `<w:tblLook>` has once
+    /// the parse seam has answered every flag. Tests that are about something
+    /// *other* than the `tblLook` default use this so they keep testing what
+    /// they say: an absent `tblLook` is Word's 0x04A0, which leaves lastRow,
+    /// lastColumn and vertical banding off.
+    fn all_regions_on() -> TableLook {
+        TableLook {
+            first_row: Some(true),
+            last_row: Some(true),
+            first_column: Some(true),
+            last_column: Some(true),
+            no_h_band: Some(false),
+            no_v_band: Some(false),
+        }
+    }
+
     // ── Region detection ─────────────────────────────────────────────
 
     #[test]
@@ -281,7 +375,8 @@ mod tests {
 
     #[test]
     fn last_row_detected() {
-        let regions = applicable_regions(5, 2, 6, 6, None, 1, 1);
+        let look = all_regions_on();
+        let regions = applicable_regions(5, 2, 6, 6, Some(&look), 1, 1);
         assert!(regions.contains(&TableStyleOverrideType::LastRow));
         assert!(!regions.contains(&TableStyleOverrideType::FirstRow));
     }
@@ -294,7 +389,8 @@ mod tests {
 
     #[test]
     fn last_col_detected() {
-        let regions = applicable_regions(2, 5, 6, 6, None, 1, 1);
+        let look = all_regions_on();
+        let regions = applicable_regions(2, 5, 6, 6, Some(&look), 1, 1);
         assert!(regions.contains(&TableStyleOverrideType::LastCol));
     }
 
@@ -308,8 +404,83 @@ mod tests {
 
     #[test]
     fn se_corner_detected() {
-        let regions = applicable_regions(5, 5, 6, 6, None, 1, 1);
+        let look = all_regions_on();
+        let regions = applicable_regions(5, 5, 6, 6, Some(&look), 1, 1);
         assert!(regions.contains(&TableStyleOverrideType::SeCell));
+    }
+
+    // ── §17.4.55: an absent `w:tblLook` is Word's 0x04A0 ─────────────
+    //
+    // [MS-OI29500] Part 1 §17.4.55 note (a): the standard says an omitted
+    // `<w:tblLook>` means the bitmask 0x0000 — every region off. Word assumes
+    // **0x04A0** instead, and Word's reading is the one documents are authored
+    // against. 0x04A0 = firstRow (0x020) + firstColumn (0x080) + noVBand
+    // (0x400), so: first row on, first column on, horizontal banding on
+    // (noHBand clear), and last row, last column and vertical banding off.
+
+    #[test]
+    fn absent_tbl_look_activates_first_row_first_column_and_horizontal_banding() {
+        assert!(
+            applicable_regions(0, 2, 6, 6, None, 1, 1).contains(&TableStyleOverrideType::FirstRow),
+            "0x04A0 sets firstRow (0x020)"
+        );
+        assert!(
+            applicable_regions(2, 0, 6, 6, None, 1, 1).contains(&TableStyleOverrideType::FirstCol),
+            "0x04A0 sets firstColumn (0x080)"
+        );
+        assert!(
+            applicable_regions(1, 2, 6, 6, None, 1, 1).contains(&TableStyleOverrideType::Band1Horz),
+            "0x04A0 leaves noHBand (0x200) clear, so row banding is active"
+        );
+    }
+
+    #[test]
+    fn absent_tbl_look_leaves_last_row_inactive() {
+        let regions = applicable_regions(5, 2, 6, 6, None, 1, 1);
+        assert!(
+            !regions.contains(&TableStyleOverrideType::LastRow),
+            "0x04A0 leaves lastRow (0x040) clear: {regions:?}"
+        );
+    }
+
+    #[test]
+    fn absent_tbl_look_leaves_last_column_inactive() {
+        let regions = applicable_regions(2, 5, 6, 6, None, 1, 1);
+        assert!(
+            !regions.contains(&TableStyleOverrideType::LastCol),
+            "0x04A0 leaves lastColumn (0x100) clear: {regions:?}"
+        );
+    }
+
+    #[test]
+    fn absent_tbl_look_leaves_vertical_banding_inactive() {
+        let regions = applicable_regions(2, 2, 6, 6, None, 1, 1);
+        assert!(
+            !regions.contains(&TableStyleOverrideType::Band1Vert)
+                && !regions.contains(&TableStyleOverrideType::Band2Vert),
+            "0x04A0 sets noVBand (0x400), so column banding is off: {regions:?}"
+        );
+    }
+
+    /// A corner region is the intersection of two row/column regions, so the
+    /// three corners that need lastRow or lastColumn go with them.
+    #[test]
+    fn absent_tbl_look_leaves_every_corner_but_nw_inactive() {
+        assert!(
+            applicable_regions(0, 0, 6, 6, None, 1, 1).contains(&TableStyleOverrideType::NwCell),
+            "firstRow x firstColumn are both set"
+        );
+        for (region, r, c) in [
+            (TableStyleOverrideType::NeCell, 0, 5),
+            (TableStyleOverrideType::SwCell, 5, 0),
+            (TableStyleOverrideType::SeCell, 5, 5),
+        ] {
+            let regions = applicable_regions(r, c, 6, 6, None, 1, 1);
+            assert!(
+                !regions.contains(&region),
+                "{region:?} needs lastRow or lastColumn, which 0x04A0 clears: {regions:?}"
+            );
+        }
     }
 
     #[test]
@@ -499,6 +670,9 @@ mod tests {
             ),
         ];
         // Interior cell (1,1): band_row=0 → Band1Horz, band_col=0 → Band1Vert.
+        // Vertical banding has to be switched on explicitly — an absent
+        // `tblLook` is 0x04A0, which sets noVBand.
+        let look = all_regions_on();
         let result = resolve_cell_conditional(
             &CellGridPosition {
                 row_idx: 1,
@@ -508,7 +682,7 @@ mod tests {
                 row_band_size: 1,
                 col_band_size: 1,
             },
-            None,
+            Some(&look),
             &overrides,
         );
         let shading = result.cell_properties.unwrap().shading.cloned().unwrap();
@@ -672,7 +846,10 @@ mod tests {
                 None,
             ),
         ];
-        let result = resolve_cell_conditional(&pos(1, 1), None, &overrides);
+        // Vertical banding is only active when the `tblLook` says so — 0x04A0,
+        // the absent-element default, sets noVBand.
+        let look = all_regions_on();
+        let result = resolve_cell_conditional(&pos(1, 1), Some(&look), &overrides);
         assert_eq!(
             result
                 .cell_properties
