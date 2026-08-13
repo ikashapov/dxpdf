@@ -674,6 +674,59 @@ fn a_zero_tbl_ind_indents_exactly_as_an_absent_one() {
     );
 }
 
+/// The same rule at the **direct** level, which the guard also changed and no
+/// test reached: `<w:tblInd w:w="0"/>` written on the `<w:tbl>` used to mean
+/// "an indent element is present, so do not shift" and now means "the resolved
+/// indent is zero, so shift" — the rule the comment at the site states, applied
+/// where the style-level test cannot see it. Word cannot tell a declared zero
+/// from an undeclared one either.
+///
+/// No corpus table has this shape (a full-width left-aligned table with a
+/// direct zero `tblInd`), so nothing pinned it; the style level is the only
+/// place the corpus exercises, and a guard written for the style level alone
+/// would pass that test while silently deciding this one.
+#[test]
+fn a_direct_zero_tbl_ind_indents_exactly_as_an_absent_one() {
+    let cell_mar = r#"<w:tblCellMar>
+          <w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>
+        </w:tblCellMar>"#;
+    let full_width = r#"<w:tblW w:w="5000" w:type="pct"/>"#;
+    let styles = styles_with("<w:tblPr/>");
+
+    let absent = layout(&table_document(&format!("{full_width}{cell_mar}")), &styles);
+    let explicit_zero = layout(
+        &table_document(&format!(
+            r#"{full_width}<w:tblInd w:w="0" w:type="dxa"/>{cell_mar}"#
+        )),
+        &styles,
+    );
+    assert_eq!(
+        page_geometry(&explicit_zero),
+        page_geometry(&absent),
+        "a zero tblInd written directly on the table must render as an \
+         undeclared one"
+    );
+    assert_eq!(
+        text_xs(&absent).first().copied(),
+        Some(72.0),
+        "and both must be the shifted placement"
+    );
+
+    // The discriminator: a *non-zero* direct `tblInd` is still taken literally,
+    // so the parity above is not "the guard ignores tblInd".
+    let non_zero = layout(
+        &table_document(&format!(
+            r#"{full_width}<w:tblInd w:w="720" w:type="dxa"/>{cell_mar}"#
+        )),
+        &styles,
+    );
+    assert_ne!(
+        page_geometry(&non_zero),
+        page_geometry(&absent),
+        "720 twips of indent must move the table"
+    );
+}
+
 // ── §17.7.6 + §17.7.4.3: `basedOn` inheritance of `<w:tblStylePr>` ──────────
 
 /// A `tblStylePr` is part of the style definition, so `basedOn` carries it like
