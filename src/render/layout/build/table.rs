@@ -428,6 +428,19 @@ pub(super) fn build_table(
     let declared_grid: Vec<Dimension<Twips>> = t.grid.iter().map(|g| g.width).collect();
     let grid = seat_every_cell(&declared_grid, &t.rows);
     let num_cols = if grid.is_empty() {
+        // This arm cannot produce a non-zero answer, which is worth stating
+        // because it reads like the handler for a missing `<w:tblGrid>` and is
+        // not. `seat_every_cell` returns an empty grid only when **no row has
+        // a cell**: one cell demands one column, which is already more than an
+        // empty grid declares, so a table with any cell at all comes back with
+        // appended columns instead. Whenever this line runs, every row is
+        // empty and the maximum below is 0 too.
+        //
+        // Hence it does not consult `w:gridSpan` — adding that would change
+        // nothing — and it is kept rather than deleted so that a later change
+        // to the seating rule finds an answer here instead of a hole. A
+        // mutation to any other expression survives the whole suite; that is
+        // this branch being dead, not a gap in the tests.
         t.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0)
     } else {
         grid.len()
