@@ -23,35 +23,47 @@ pub(super) struct RowCutInput<'a> {
     pub(super) available: Pt,
 }
 
-/// Per-cell split decision: where to partition the commands and how far
-/// to shift the tail commands so the continuation half has the cell's
-/// natural top margin.
-struct CellCut {
-    /// Partition threshold: commands with primary-Y strictly less than
-    /// this value stay on the first half (cell-box coordinates).
-    content_cut_y: Pt,
-    /// Partition threshold for the [`CellLine`] cut model, in cell-content
-    /// coordinates (i.e. `content_cut_y - margin_top`): lines whose box top is
-    /// strictly less stay on the first half.
-    line_cut_y: Pt,
-    /// Amount by which second-half commands (and continuation line tops) are
-    /// shifted up so that the first surviving line lands at the continuation
-    /// cell's natural top margin.
-    shift: Pt,
-}
-
-impl CellCut {
-    /// "Don't split" sentinel — all commands and lines stay on the first half.
+/// Per-cell split decision: whether the cell is cut at all, and if so where to
+/// partition the commands and how far to shift the tail commands so the
+/// continuation half has the cell's natural top margin.
+///
+/// "Not cut" is a variant rather than an out-of-range threshold. The two
+/// thresholds are `Pt`, an `f32` newtype, so an infinite sentinel survives
+/// every comparison the module makes today and would silently turn into
+/// `inf`/`NaN` the first time one of them was added to or subtracted from
+/// anything — a failure that reaches the page as a missing cell rather than as
+/// a panic.
+enum CellCut {
+    /// The cell is not cut: all its commands and lines stay on the first half.
     ///
     /// Used for a cell that can't be cut text-wise — too few baselines, or
     /// image/shape-only content — since you cannot cut through an image. The
     /// caller adds the cell's full visible height to the row's required
     /// first-half height instead of a partial one.
-    fn keep_all() -> Self {
-        Self {
-            content_cut_y: Pt::new(f32::INFINITY),
-            line_cut_y: Pt::new(f32::INFINITY),
-            shift: Pt::ZERO,
+    KeepAll,
+    /// The cell is cut, at these thresholds.
+    CutAt {
+        /// Partition threshold: commands with primary-Y strictly less than
+        /// this value stay on the first half (cell-box coordinates).
+        content_cut_y: Pt,
+        /// Partition threshold for the [`CellLine`] cut model, in cell-content
+        /// coordinates (i.e. `content_cut_y - margin_top`): lines whose box top
+        /// is strictly less stay on the first half.
+        line_cut_y: Pt,
+        /// Amount by which second-half commands (and continuation line tops)
+        /// are shifted up so that the first surviving line lands at the
+        /// continuation cell's natural top margin.
+        shift: Pt,
+    },
+}
+
+impl CellCut {
+    /// How far the continuation half is rebased. Zero for an uncut cell, whose
+    /// continuation is empty.
+    fn shift(&self) -> Pt {
+        match self {
+            Self::KeepAll => Pt::ZERO,
+            Self::CutAt { shift, .. } => *shift,
         }
     }
 }
@@ -73,7 +85,7 @@ pub(super) struct SplitCut {
 /// Returns `None` in two cases: no cell has at least one line that fits
 /// within `available - margins.vertical()`, or every cell does but honoring
 /// the row's non-splittable cells' full visible height (see
-/// [`CellCut::keep_all`]) would itself overflow `available` — in both cases
+/// `CellCut::KeepAll`) would itself overflow `available` — in both cases
 /// the caller spills the whole row to the next page instead.
 pub(super) fn find_row_cut(input: &RowCutInput<'_>) -> Option<SplitCut> {
     let mut cells: Vec<CellCut> = Vec::with_capacity(input.row.cells.len());
@@ -101,7 +113,7 @@ pub(super) fn find_row_cut(input: &RowCutInput<'_>) -> Option<SplitCut> {
                 non_splittable_heights.push(Pt::ZERO);
             }
             None => {
-                cells.push(CellCut::keep_all());
+                cells.push(CellCut::KeepAll);
                 // Cell's natural visible height (content + vertical margins)
                 // must fit on the first half — we can't cut through an
                 // image or shape.
@@ -188,7 +200,7 @@ fn cut_for_cell(
     let shift = cont_top;
     let half_h = cont_top + margin_top + margin_bottom;
     Some((
-        CellCut {
+        CellCut::CutAt {
             content_cut_y: margin_top + cont_top,
             line_cut_y: cont_top,
             shift,
@@ -269,21 +281,19 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
     // the first half. Whatever's left in the original row height is what
     // the continuation needs to render (top/bottom margins are already
     // included in `mr.height`, so no additional padding is needed).
-    let max_shift = cut.cells.iter().map(|c| c.shift).fold(Pt::ZERO, Pt::max);
+    let max_shift = cut.cells.iter().map(CellCut::shift).fold(Pt::ZERO, Pt::max);
     let second_h = (mr.height - max_shift).max(Pt::ZERO);
 
     let mut first_entries: Vec<CellLayoutEntry> = Vec::with_capacity(mr.entries.len());
     let mut second_entries: Vec<CellLayoutEntry> = Vec::with_capacity(mr.entries.len());
 
     for (entry, cc) in mr.entries.iter().zip(cut.cells.iter()) {
-        let (first_cmds, second_cmds) =
-            partition_commands(&entry.layout.commands, cc.content_cut_y, cc.shift);
+        let (first_cmds, second_cmds) = partition_commands(&entry.layout.commands, cc);
         // Partition the cut model too, rebasing the continuation's line tops by
         // the same shift, so a further split of the continuation (mod.rs's
         // iterative loop) re-evaluates §17.3.1.44 widow control against the
         // lines that actually remain.
-        let (first_lines, second_lines) =
-            partition_lines(&entry.layout.lines, cc.line_cut_y, cc.shift);
+        let (first_lines, second_lines) = partition_lines(&entry.layout.lines, cc);
         first_entries.push(CellLayoutEntry {
             layout: crate::render::layout::cell::CellLayout {
                 commands: first_cmds,
@@ -297,7 +307,7 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
         second_entries.push(CellLayoutEntry {
             layout: crate::render::layout::cell::CellLayout {
                 commands: second_cmds,
-                content_height: (entry.layout.content_height - cc.shift).max(Pt::ZERO),
+                content_height: (entry.layout.content_height - cc.shift()).max(Pt::ZERO),
                 lines: second_lines,
             },
             cell_x: entry.cell_x,
@@ -349,41 +359,56 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
     }
 }
 
-/// Split a command list at `cut_y`. Commands whose primary Y < `cut_y`
-/// go to the first half; the rest land in the second half shifted up by
-/// `shift` so they start at the continuation cell's natural top margin.
+/// Split a command list at the cell's `content_cut_y`. Commands whose primary Y
+/// is strictly less go to the first half; the rest land in the second half
+/// shifted up by `shift` so they start at the continuation cell's natural top
+/// margin. An uncut cell keeps everything on the first half.
 fn partition_commands(
     commands: &[DrawCommand],
-    cut_y: Pt,
-    shift: Pt,
+    cut: &CellCut,
 ) -> (Vec<DrawCommand>, Vec<DrawCommand>) {
+    let CellCut::CutAt {
+        content_cut_y,
+        shift,
+        ..
+    } = cut
+    else {
+        return (commands.to_vec(), Vec::new());
+    };
     let mut first = Vec::new();
     let mut second = Vec::new();
     for cmd in commands {
-        if command_primary_y(cmd) < cut_y {
+        if command_primary_y(cmd) < *content_cut_y {
             first.push(cmd.clone());
         } else {
             let mut c = cmd.clone();
-            c.shift_y(-shift);
+            c.shift_y(-*shift);
             second.push(c);
         }
     }
     (first, second)
 }
 
-/// Partition the [`CellLine`] cut model at `cut_y` (cell-content coords).
-/// Lines whose box top is `< cut_y` stay on the first half; the rest form the
-/// continuation, with their tops rebased up by `shift` so the model tracks the
-/// continuation's own coordinates for any further split.
-fn partition_lines(lines: &[CellLine], cut_y: Pt, shift: Pt) -> (Vec<CellLine>, Vec<CellLine>) {
+/// Partition the [`CellLine`] cut model at the cell's `line_cut_y` (cell-content
+/// coords). Lines whose box top is strictly less stay on the first half; the
+/// rest form the continuation, with their tops rebased up by `shift` so the
+/// model tracks the continuation's own coordinates for any further split. An
+/// uncut cell keeps every line on the first half.
+fn partition_lines(lines: &[CellLine], cut: &CellCut) -> (Vec<CellLine>, Vec<CellLine>) {
+    let CellCut::CutAt {
+        line_cut_y, shift, ..
+    } = cut
+    else {
+        return (lines.to_vec(), Vec::new());
+    };
     let mut first = Vec::new();
     let mut second = Vec::new();
     for line in lines {
-        if line.top_y < cut_y {
+        if line.top_y < *line_cut_y {
             first.push(line.clone());
         } else {
             let mut l = line.clone();
-            l.top_y -= shift;
+            l.top_y -= *shift;
             second.push(l);
         }
     }
@@ -557,7 +582,7 @@ mod tests {
             available: Pt::new(60.0),
         })
         .expect("a 6-line row must be splittable at 60pt");
-        let max_shift = cut.cells.iter().map(|c| c.shift).fold(Pt::ZERO, Pt::max);
+        let max_shift = cut.cells.iter().map(CellCut::shift).fold(Pt::ZERO, Pt::max);
         assert!(
             max_shift > Pt::ZERO,
             "shift must be positive or the continuation loop cannot progress"
@@ -781,7 +806,14 @@ mod tests {
             keep_next: false,
         };
         let lines = vec![line_at(0.0, 0), line_at(14.0, 0), line_at(28.0, 0)];
-        let (first, second) = partition_lines(&lines, Pt::new(14.0), Pt::new(14.0));
+        let (first, second) = partition_lines(
+            &lines,
+            &CellCut::CutAt {
+                content_cut_y: Pt::new(14.0),
+                line_cut_y: Pt::new(14.0),
+                shift: Pt::new(14.0),
+            },
+        );
 
         assert_eq!(first.len(), 1, "only the line strictly above the cut stays");
         assert_eq!(second.len(), 2);
@@ -906,6 +938,51 @@ mod tests {
         );
     }
 
+    /// `CellCut::KeepAll` means exactly what the infinite threshold it replaced
+    /// meant: nothing crosses to the continuation, and nothing is rebased. A
+    /// cell that cannot be cut — an image — must arrive whole on the first half.
+    #[test]
+    fn an_uncut_cell_keeps_every_command_and_line_on_the_first_half() {
+        use crate::render::geometry::PtRect;
+        let cmds = vec![
+            DrawCommand::Rect {
+                rect: PtRect::from_xywh(Pt::ZERO, Pt::ZERO, Pt::new(10.0), Pt::new(2.0)),
+                color: crate::render::resolve::color::RgbColor::BLACK,
+            },
+            DrawCommand::Rect {
+                rect: PtRect::from_xywh(Pt::ZERO, Pt::new(99.0), Pt::new(10.0), Pt::new(2.0)),
+                color: crate::render::resolve::color::RgbColor::BLACK,
+            },
+        ];
+        let lines = vec![
+            CellLine {
+                top_y: Pt::ZERO,
+                para: 0,
+                interior_atomic: false,
+                widow_control: false,
+                keep_next: false,
+            },
+            CellLine {
+                top_y: Pt::new(99.0),
+                para: 0,
+                interior_atomic: false,
+                widow_control: false,
+                keep_next: false,
+            },
+        ];
+
+        let (first_cmds, second_cmds) = partition_commands(&cmds, &CellCut::KeepAll);
+        assert_eq!(first_cmds.len(), 2, "no command crosses the cut");
+        assert!(second_cmds.is_empty());
+
+        let (first_lines, second_lines) = partition_lines(&lines, &CellCut::KeepAll);
+        assert_eq!(first_lines.len(), 2, "no line crosses the cut");
+        assert!(second_lines.is_empty());
+        assert_eq!(first_lines[1].top_y, Pt::new(99.0), "nothing is rebased");
+
+        assert_eq!(CellCut::KeepAll.shift(), Pt::ZERO);
+    }
+
     /// The command partition boundary, exercised directly.
     ///
     /// It cannot be reached through real layout: `command_primary_y` uses a
@@ -928,7 +1005,14 @@ mod tests {
         };
         let cmds = vec![rect_at(0.0), rect_at(14.0), rect_at(28.0)];
 
-        let (first, second) = partition_commands(&cmds, Pt::new(14.0), Pt::new(14.0));
+        let (first, second) = partition_commands(
+            &cmds,
+            &CellCut::CutAt {
+                content_cut_y: Pt::new(14.0),
+                line_cut_y: Pt::new(14.0),
+                shift: Pt::new(14.0),
+            },
+        );
 
         let ys = |v: &[DrawCommand]| -> Vec<f32> {
             v.iter()
