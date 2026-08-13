@@ -1,0 +1,470 @@
+//! §17.7.2 / §17.7.6: what a **table style** declares must reach the table.
+//!
+//! The cascade a table sees has three levels — direct `<w:tblPr>` on the
+//! `<w:tbl>`, the style it names, and that style's `basedOn` ancestors — and
+//! every one of them speaks the same vocabulary (`CT_TblPrBase`). The tests
+//! here are written as *parity*: a property declared in the style must produce
+//! the same page as the same property declared directly on the table, and both
+//! must differ from a control that declares it nowhere. That formulation is the
+//! spec statement itself ("the current style inherits all of the properties of
+//! the base style", §17.7.4.3) rather than a transcription of current output,
+//! and it stays true if the geometry these properties drive is ever refined.
+//!
+//! No document in `test-files/` exercises a table style that declares anything
+//! other than borders and cell margins, so the fixtures are built here: the XML
+//! *is* the point of each test, and a `.docx` would hide it.
+
+use std::io::Write;
+
+use dxpdf::render::layout::draw_command::{DrawCommand, LayoutedPage};
+
+fn make_docx(document_xml: &str, styles_xml: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let o = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        zip.start_file("[Content_Types].xml", o).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"#,
+        )
+        .unwrap();
+
+        zip.start_file("_rels/.rels", o).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+        )
+        .unwrap();
+
+        zip.start_file("word/_rels/document.xml.rels", o).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"#,
+        )
+        .unwrap();
+
+        zip.start_file("word/styles.xml", o).unwrap();
+        zip.write_all(styles_xml.as_bytes()).unwrap();
+
+        zip.start_file("word/document.xml", o).unwrap();
+        zip.write_all(document_xml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    buf
+}
+
+/// A 4×2 table whose only *direct* table property is the style reference, plus
+/// whatever `direct_tbl_pr` adds. Four rows and two columns is the smallest
+/// grid that still distinguishes a row band size of 1 from 2 and a column band
+/// size of 1 from 2.
+///
+/// The page geometry is stated explicitly rather than defaulted so the expected
+/// positions are readable off the fixture: 12240 − 2×1440 twips of content is
+/// 468 pt wide, starting at x = 72 pt, and the 2×2000-twip grid makes the table
+/// 200 pt wide.
+fn table_document(direct_tbl_pr: &str) -> String {
+    let cell = |t: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                 <w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>"#
+        )
+    };
+    let row = |a: &str, b: &str| format!("<w:tr>{}{}</w:tr>", cell(a), cell(b));
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tblPr><w:tblStyle w:val="TestTbl"/>{direct_tbl_pr}</w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+      {}{}{}{}
+    </w:tbl>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"
+               w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"#,
+        row("A", "B"),
+        row("C", "D"),
+        row("E", "F"),
+        row("G", "H"),
+    )
+}
+
+/// Two copies of [`table_document`]'s table, back to back, so that `tblOverlap`
+/// has a second float to collide with — §17.4.57 governs table-vs-table
+/// overlap and says nothing about a lone float.
+fn two_tables_document(direct_tbl_pr: &str) -> String {
+    let one = table_document(direct_tbl_pr);
+    // Splice a second `<w:tbl>` in ahead of the section properties.
+    let (body, tail) = one.split_once("<w:sectPr>").expect("fixture has a sectPr");
+    let table = {
+        let start = body.find("<w:tbl>").expect("fixture has a table");
+        &body[start..]
+    };
+    format!("{body}{table}<w:sectPr>{tail}")
+}
+
+/// A stylesheet with one table style, `TestTbl`, whose body is `style_body`.
+fn styles_with(style_body: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="TestTbl">
+    <w:name w:val="Test Table"/>
+    {style_body}
+  </w:style>
+</w:styles>"#
+    )
+}
+
+fn layout(document_xml: &str, styles_xml: &str) -> Vec<LayoutedPage> {
+    let doc = dxpdf::docx::parse(&make_docx(document_xml, styles_xml)).expect("parse");
+    dxpdf::render::resolve_and_layout(doc).1
+}
+
+/// Every drawn thing, as a stable string — positions to two decimals, colors in
+/// hex. Comparing these compares the *page*, so a property that fails to reach
+/// layout shows up whatever it would have moved.
+fn page_geometry(pages: &[LayoutedPage]) -> Vec<String> {
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            DrawCommand::Text {
+                position,
+                text,
+                color,
+                ..
+            } => Some(format!(
+                "text {text:?} @ {:.2},{:.2} #{:02X}{:02X}{:02X}",
+                position.x.raw(),
+                position.y.raw(),
+                color.r,
+                color.g,
+                color.b
+            )),
+            DrawCommand::Rect { rect, color, .. } => Some(format!(
+                "rect {:.2},{:.2} {:.2}x{:.2} #{:02X}{:02X}{:02X}",
+                rect.origin.x.raw(),
+                rect.origin.y.raw(),
+                rect.size.width.raw(),
+                rect.size.height.raw(),
+                color.r,
+                color.g,
+                color.b
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// x of every text run, in draw order.
+fn text_xs(pages: &[LayoutedPage]) -> Vec<f32> {
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            DrawCommand::Text { position, .. } => Some(position.x.raw()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// §17.7.2: the whole point of a style. A property in the style must render
+/// exactly as the same property written directly on the `<w:tbl>` — and the
+/// control, which writes it in neither place, must differ, or the assertion
+/// above it proves nothing.
+///
+/// `style_extra` is appended to the style body after its `<w:tblPr>`, which is
+/// where a `tblLook`/band-size case puts the `tblStylePr` layers it needs to be
+/// observable at all.
+#[track_caller]
+fn assert_style_matches_direct(tbl_pr: &str, style_extra: &str, what: &str) {
+    assert_style_matches_direct_with(&table_document, "", tbl_pr, style_extra, what);
+}
+
+/// [`assert_style_matches_direct`] over a different fixture, and with a
+/// `constant_tbl_pr` written directly on the table in *all three* variants —
+/// the background a property needs in order to be observable at all
+/// (`tblOverlap` says nothing about a table that does not float).
+#[track_caller]
+fn assert_style_matches_direct_with(
+    document: &dyn Fn(&str) -> String,
+    constant_tbl_pr: &str,
+    tbl_pr: &str,
+    style_extra: &str,
+    what: &str,
+) {
+    let control = layout(
+        &document(constant_tbl_pr),
+        &styles_with(&format!("<w:tblPr/>{style_extra}")),
+    );
+    let direct = layout(
+        &document(&format!("{constant_tbl_pr}{tbl_pr}")),
+        &styles_with(&format!("<w:tblPr/>{style_extra}")),
+    );
+    let from_style = layout(
+        &document(constant_tbl_pr),
+        &styles_with(&format!("<w:tblPr>{tbl_pr}</w:tblPr>{style_extra}")),
+    );
+
+    assert_ne!(
+        page_geometry(&control),
+        page_geometry(&direct),
+        "{what}: the fixture does not discriminate — writing it directly on the \
+         table changes nothing, so the style assertion below is vacuous"
+    );
+    assert_eq!(
+        page_geometry(&from_style),
+        page_geometry(&direct),
+        "{what}: declared in the table style, it must render as if declared \
+         directly on the table"
+    );
+}
+
+// ── §17.7.2: each `CT_TblPrBase` property, declared in the style ────────────
+
+/// §17.4.28 `jc` — the table's horizontal alignment within the content area.
+#[test]
+fn a_table_style_can_align_the_table() {
+    assert_style_matches_direct(r#"<w:jc w:val="center"/>"#, "", "jc");
+
+    // The absolute placement, so a regression that moves *both* sides of the
+    // parity together still fails: 72 pt left margin + half of (468 − 200).
+    let centered = layout(
+        &table_document(""),
+        &styles_with(r#"<w:tblPr><w:jc w:val="center"/></w:tblPr>"#),
+    );
+    assert_eq!(
+        text_xs(&centered).first().copied(),
+        Some(206.0),
+        "a 200 pt table centered in a 468 pt content area starts at 72 + 134"
+    );
+}
+
+/// §17.4.63 `tblW` — the table's preferred width, which the grid is scaled to.
+#[test]
+fn a_table_style_can_set_the_table_width() {
+    assert_style_matches_direct(r#"<w:tblW w:w="7200" w:type="dxa"/>"#, "", "tblW");
+
+    let widened = layout(
+        &table_document(""),
+        &styles_with(r#"<w:tblPr><w:tblW w:w="7200" w:type="dxa"/></w:tblPr>"#),
+    );
+    assert_eq!(
+        text_xs(&widened).first().copied(),
+        Some(72.0),
+        "a left-aligned table still starts at the left margin"
+    );
+    assert_eq!(
+        text_xs(&widened).get(1).copied(),
+        Some(252.0),
+        "7200 twips = 360 pt scales the two equal grid columns to 180 pt each"
+    );
+}
+
+/// §17.4.51 `tblInd` — indentation from the leading margin.
+#[test]
+fn a_table_style_can_indent_the_table() {
+    assert_style_matches_direct(r#"<w:tblInd w:w="720" w:type="dxa"/>"#, "", "tblInd");
+
+    let indented = layout(
+        &table_document(""),
+        &styles_with(r#"<w:tblPr><w:tblInd w:w="720" w:type="dxa"/></w:tblPr>"#),
+    );
+    assert_eq!(
+        text_xs(&indented).first().copied(),
+        Some(108.0),
+        "720 twips = 36 pt past the 72 pt left margin"
+    );
+}
+
+/// §17.4.44 `tblCellSpacing` — the gap carved out between and around cells.
+#[test]
+fn a_table_style_can_set_cell_spacing() {
+    assert_style_matches_direct(
+        r#"<w:tblCellSpacing w:w="144" w:type="dxa"/>"#,
+        "",
+        "tblCellSpacing",
+    );
+}
+
+/// §17.4.55 `tblLook` — which conditional regions of the style are switched on.
+/// Only observable through a `tblStylePr` layer, so the style carries one.
+#[test]
+fn a_table_style_can_set_its_own_tbl_look() {
+    let first_row_red = r#"<w:tblStylePr w:type="firstRow">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+           </w:tblStylePr>"#;
+    assert_style_matches_direct(
+        r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
+                      w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>"#,
+        first_row_red,
+        "tblLook",
+    );
+
+    let suppressed = layout(
+        &table_document(""),
+        &styles_with(&format!(
+            r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
+                                   w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
+               {first_row_red}"#
+        )),
+    );
+    assert_eq!(
+        page_geometry(&suppressed)
+            .iter()
+            .filter(|g| g.ends_with("#FF0000"))
+            .count(),
+        0,
+        "firstRow=0 in the style's own tblLook switches the firstRow layer off"
+    );
+}
+
+/// §17.4.68 `tblStyleRowBandSize` — how many rows one horizontal band spans.
+#[test]
+fn a_table_style_can_set_the_row_band_size() {
+    let bands = r#"<w:tblStylePr w:type="band1Horz">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+           </w:tblStylePr>
+           <w:tblStylePr w:type="band2Horz">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr>
+           </w:tblStylePr>"#;
+    // firstRow/lastRow off so all four rows band, noVBand so only rows band.
+    let look = r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
+                             w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>"#;
+    assert_style_matches_direct(
+        &format!(r#"{look}<w:tblStyleRowBandSize w:val="2"/>"#),
+        bands,
+        "tblStyleRowBandSize",
+    );
+
+    let banded = layout(
+        &table_document(""),
+        &styles_with(&format!(
+            r#"<w:tblPr><w:tblStyleRowBandSize w:val="2"/>{look}</w:tblPr>{bands}"#
+        )),
+    );
+    let reds = page_geometry(&banded)
+        .iter()
+        .filter(|g| g.ends_with("#FF0000"))
+        .count();
+    assert_eq!(
+        reds, 4,
+        "a band size of 2 puts rows 0-1 (four cells) in band1, not rows 0 and 2"
+    );
+}
+
+/// §17.4.67 `tblStyleColBandSize` — how many columns one vertical band spans.
+#[test]
+fn a_table_style_can_set_the_column_band_size() {
+    let bands = r#"<w:tblStylePr w:type="band1Vert">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+           </w:tblStylePr>
+           <w:tblStylePr w:type="band2Vert">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="00FF00"/></w:tcPr>
+           </w:tblStylePr>"#;
+    // noHBand so row banding cannot override column banding (§17.7.6 order).
+    let look = r#"<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0"
+                             w:lastColumn="0" w:noHBand="1" w:noVBand="0"/>"#;
+    assert_style_matches_direct(
+        &format!(r#"{look}<w:tblStyleColBandSize w:val="2"/>"#),
+        bands,
+        "tblStyleColBandSize",
+    );
+
+    let banded = layout(
+        &table_document(""),
+        &styles_with(&format!(
+            r#"<w:tblPr><w:tblStyleColBandSize w:val="2"/>{look}</w:tblPr>{bands}"#
+        )),
+    );
+    let geometry = page_geometry(&banded);
+    assert_eq!(
+        geometry.iter().filter(|g| g.ends_with("#FF0000")).count(),
+        8,
+        "a band size of 2 puts both columns in band1 — all eight cells"
+    );
+    assert_eq!(
+        geometry.iter().filter(|g| g.ends_with("#00FF00")).count(),
+        0,
+        "…and none in band2"
+    );
+}
+
+/// §17.4.58 `tblpPr` — floating-table positioning. `CT_TblPrBase` carries it,
+/// so a style may declare it even though Word's UI cannot write one there.
+#[test]
+fn a_table_style_can_float_the_table() {
+    assert_style_matches_direct(
+        r#"<w:tblpPr w:vertAnchor="text" w:tblpY="360" w:tblpXSpec="center"/>"#,
+        "",
+        "tblpPr",
+    );
+}
+
+/// §17.4.57 `tblOverlap` — only meaningful once the table floats, so `tblpPr`
+/// is the constant background here and `tblOverlap` is the variable.
+#[test]
+fn a_table_style_can_forbid_float_overlap() {
+    assert_style_matches_direct_with(
+        &two_tables_document,
+        r#"<w:tblpPr w:vertAnchor="text" w:tblpY="0"/>"#,
+        r#"<w:tblOverlap w:val="never"/>"#,
+        "",
+        "tblOverlap",
+    );
+}
+
+/// §17.4.51: an explicitly-zero `tblInd` is the same indent as none.
+///
+/// Not a tautology in this engine: a full-width left-aligned table at zero
+/// indent is shifted left by its left cell margin, so cell content lines up
+/// with body text, and that shift used to be conditioned on *no `tblInd`
+/// element* rather than on the resolved value being zero. Since every built-in
+/// Word table style declares `<w:tblInd w:w="0"/>`, reading the style level
+/// turns the two spellings into different renders unless the condition is
+/// stated on the value — which is what this pins.
+#[test]
+fn a_zero_tbl_ind_indents_exactly_as_an_absent_one() {
+    let cell_mar = r#"<w:tblCellMar>
+          <w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>
+        </w:tblCellMar>"#;
+    let full_width = r#"<w:tblW w:w="5000" w:type="pct"/>"#;
+    let absent = layout(
+        &table_document(full_width),
+        &styles_with(&format!("<w:tblPr>{cell_mar}</w:tblPr>")),
+    );
+    let explicit_zero = layout(
+        &table_document(full_width),
+        &styles_with(&format!(
+            r#"<w:tblPr><w:tblInd w:w="0" w:type="dxa"/>{cell_mar}</w:tblPr>"#
+        )),
+    );
+    assert_eq!(
+        page_geometry(&explicit_zero),
+        page_geometry(&absent),
+        "a declared zero indent must render as an undeclared one"
+    );
+    assert_eq!(
+        text_xs(&absent).first().copied(),
+        Some(72.0),
+        "and both must be the shifted placement, which puts the first cell's \
+         text on the left margin rather than one cell margin past it"
+    );
+}

@@ -146,10 +146,19 @@ pub(super) fn build_table(
         .as_ref()
         .and_then(|sid| ctx.resolved.styles.get(sid));
 
+    // §17.7.2: the table style's own `<w:tblPr>`, already folded through
+    // `basedOn` and `wholeTable` by style resolution. Every table property
+    // below cascades direct-then-style through it, because a style's `tblPr`
+    // and a table's are the same content model (`CT_TblPrBase`) — there is no
+    // property the one may state and the other may not.
+    //
+    // `cell_margins` and `borders` merge *per edge*, since §17.4.42 and
+    // §17.4.38 define those as edge-wise exceptions; every other property is a
+    // single value, so the direct occurrence simply wins outright.
+    let style_table = raw_table_style.and_then(|s| s.table.as_ref());
+
     // §17.4.42: default cell margins from table style cascade.
-    let style_cell_margins = raw_table_style
-        .and_then(|s| s.table.as_ref())
-        .and_then(|tp| tp.cell_margins.cloned());
+    let style_cell_margins = style_table.and_then(|tp| tp.cell_margins.cloned());
     // Per-edge merge: direct tblCellMar overrides style per-edge, with
     // unspecified edges (value 0) falling back to the style's value.
     // Word merges per-edge rather than replacing the entire set.
@@ -184,9 +193,65 @@ pub(super) fn build_table(
         (None, None) => None,
     };
 
+    // §17.4.63 `tblW`, §17.4.28 `jc`, §17.4.51 `tblInd`, §17.4.44
+    // `tblCellSpacing`, §17.4.55 `tblLook`, §17.4.67/§17.4.68 the band sizes,
+    // §17.4.58 `tblpPr` and §17.4.57 `tblOverlap` — each read once here so the
+    // several sites below cannot disagree about which level won.
+    //
+    // `tblpPr`/`tblOverlap` are included because `CT_TblPrBase` carries them
+    // and §17.7.2 states no exception, not because Word's UI can write them
+    // into a style: it cannot, so a document that exercises this path came
+    // from another producer.
+    let width = t
+        .properties
+        .width
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.width.get()));
+    let alignment = t
+        .properties
+        .alignment
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.alignment.get()))
+        .copied();
+    let table_indent = t
+        .properties
+        .indent
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.indent.get()));
+    let tbl_look = t
+        .properties
+        .look
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.look.get()));
+    let row_band_size = t
+        .properties
+        .style_row_band_size
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.style_row_band_size.get()))
+        .copied()
+        .unwrap_or(1);
+    let col_band_size = t
+        .properties
+        .style_col_band_size
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.style_col_band_size.get()))
+        .copied()
+        .unwrap_or(1);
+    let positioning = t
+        .properties
+        .positioning
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.positioning.get()));
+    let overlap = t
+        .properties
+        .overlap
+        .get()
+        .or_else(|| style_table.and_then(|tp| tp.overlap.get()))
+        .copied();
+
     // §17.4.63: resolve table width from tblW.
     let is_auto_width = matches!(
-        t.properties.width.get(),
+        width,
         None | Some(model::TableMeasure::Auto) | Some(model::TableMeasure::Nil)
     );
     let cell_margins_h = default_cell_margins
@@ -200,10 +265,10 @@ pub(super) fn build_table(
     // centered tables have different cell margins (cf. the stacked
     // "Anhang: Sauberkeit" tables in the Volvo Annahme-Protokoll).
     let extends_for_alignment = !matches!(
-        t.properties.alignment.get(),
+        alignment,
         Some(model::Alignment::Center) | Some(model::Alignment::End)
     );
-    let target_width = match t.properties.width.get() {
+    let target_width = match width {
         Some(model::TableMeasure::Pct(pct)) => {
             // §17.4.63: percentage in fiftieths of a percent. 5000 = 100%.
             let ratio = pct.raw() as f32 / 5000.0;
@@ -222,6 +287,10 @@ pub(super) fn build_table(
     // Word scales grid column widths proportionally to match tblW in both
     // fixed and auto layouts. Only when tblW is auto/nil do we keep the raw
     // grid widths (no preferred width was specified).
+    //
+    // `tblLayout` is therefore the one `CT_TblPrBase` property with no cascade
+    // above: it has no read site to cascade *to*. Giving it one would be dead
+    // code, so when auto-fit lands it must take its style level with it.
     let col_widths = if is_auto_width && !grid_cols.is_empty() {
         grid_cols.clone()
     } else {
@@ -232,23 +301,24 @@ pub(super) fn build_table(
     // be left between all cells", not extra width. Reserving one spacing here
     // and offsetting each cell by one in `measure_table_rows` yields exactly
     // `cell_spacing` between adjacent cells *and* at both table edges.
-    let cell_spacing = resolve_cell_spacing(t.properties.cell_spacing.cloned());
+    let cell_spacing = resolve_cell_spacing(
+        t.properties
+            .cell_spacing
+            .get()
+            .or_else(|| style_table.and_then(|tp| tp.cell_spacing.get()))
+            .copied(),
+    );
     let col_widths = reserve_cell_spacing(col_widths, cell_spacing);
     let style_overrides = raw_table_style
         .map(|s| s.table_style_overrides.as_slice())
         .unwrap_or(&[]);
-    let tbl_look = t.properties.look.get();
-    let row_band_size = t.properties.style_row_band_size.cloned().unwrap_or(1);
-    let col_band_size = t.properties.style_col_band_size.cloned().unwrap_or(1);
     let num_rows = t.rows.len();
 
     // §17.4.38: resolve table borders — merge direct properties over table style.
     // Direct tblBorders may specify only a subset of edges (e.g. insideH=none);
     // unspecified edges inherit from the table style. Computed up front so
     // per-row tblPrEx merges (§17.4.61) below have a stable basis.
-    let style_borders = raw_table_style
-        .and_then(|s| s.table.as_ref())
-        .and_then(|tp| tp.borders.get());
+    let style_borders = style_table.and_then(|tp| tp.borders.get());
     let tbl_borders = match (t.properties.borders.get(), style_borders) {
         (Some(direct), Some(style)) => Some(merge_table_borders(direct, style)),
         (Some(direct), None) => Some(*direct),
@@ -396,7 +466,7 @@ pub(super) fn build_table(
     // not carried into `TableFloatInfo` — a horizontally-offset or
     // margin/page-anchored-horizontally table places as if none of those were
     // set.
-    let float_info = t.properties.positioning.get().map(|pos| {
+    let float_info = positioning.map(|pos| {
         super::super::section::TableFloatInfo {
             right_gap: pos.right_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             bottom_gap: pos.bottom_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
@@ -407,7 +477,7 @@ pub(super) fn build_table(
             vert_anchor: pos.vert_anchor.unwrap_or(crate::model::TableAnchor::Text),
             // §17.4.57: tblOverlap controls collision behavior with
             // other floats on the same page.
-            overlap: t.properties.overlap.cloned(),
+            overlap,
         }
     });
 
@@ -415,15 +485,29 @@ pub(super) fn build_table(
     // For full-width left-aligned tables, MS Word shifts the table left
     // by the default cell margin so cell content aligns with paragraph text.
     let is_full_width = matches!(
-        t.properties.width.get(),
+        width,
         Some(model::TableMeasure::Pct(pct)) if pct.raw() >= 5000
     );
     let is_left_aligned = !matches!(
-        t.properties.alignment.get(),
+        alignment,
         Some(model::Alignment::Center) | Some(model::Alignment::End)
     );
-    let indent = match t.properties.indent.get() {
-        Some(model::TableMeasure::Twips(tw)) => Pt::from(*tw),
+    // The shift is keyed on the *resolved* indent being zero, not on the
+    // absence of a `tblInd` element. Those were the same question only while
+    // the style level was unread: every built-in Word table style declares
+    // `<w:tblInd w:w="0" w:type="dxa"/>`, so reading the style would otherwise
+    // suppress the shift on essentially every Word document — silently undoing
+    // the corpus tuning the shift exists for, without anything having decided
+    // to. An explicitly-zero indent and an absent one are the same indent, and
+    // Word cannot tell them apart either.
+    //
+    // A *non-zero* indent is still taken literally. Whether Word measures
+    // `tblInd` to the table's border box or to the first cell's text edge — the
+    // reading under which the shift is not a special case at all but the same
+    // rule at zero — is not settled here; a **Word reference render** of a
+    // full-width left-aligned table at a non-zero `tblInd` would settle it.
+    let indent = match table_indent {
+        Some(model::TableMeasure::Twips(tw)) if tw.raw() != 0 => Pt::from(*tw),
         _ if is_full_width && is_left_aligned => -default_cell_margins
             .map(|m| Pt::from(m.left))
             .unwrap_or(Pt::ZERO),
@@ -436,7 +520,7 @@ pub(super) fn build_table(
         cell_spacing,
         border_config,
         indent,
-        alignment: t.properties.alignment.cloned(),
+        alignment,
         float_info,
     }
 }
