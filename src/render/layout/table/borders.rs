@@ -7,9 +7,12 @@
 //! three states are what makes the whole thing expressible — an omitted edge
 //! and a `val="nil"` one paint the same nothing but inherit differently.
 //!
-//! Emission is the smaller half: [`emit_cell_borders`] for a cell's own edges
-//! and [`emit_table_outline`] for the outer rectangle a §17.4.45-spaced table
-//! needs, since its cells no longer touch the table's boundary.
+//! Emission is the smaller half, and splits the same way the geometry does:
+//! [`emit_cell_borders`] paints what is inside one cell's box, [`OpenBand`] owns
+//! the strip between two rows — which is inside neither, and is where every
+//! reported corner defect has been — and [`emit_table_outline`] draws the outer
+//! rectangle a §17.4.45-spaced table needs, since its cells no longer touch the
+//! table's boundary.
 
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtRect;
@@ -556,46 +559,92 @@ fn colour_luminance(b: &TableBorderLine) -> (u32, u32, u32) {
     (r + bl + 2 * g, bl + 2 * g, g)
 }
 
+/// One cell's box, as the border emitter needs it.
+///
+/// `h` is the row's **content** height and `band_below` the strip §17.4.38
+/// reserves under it for the row's bottom borders. They are separate fields
+/// because they are separate things to the edges that read them: the bottom
+/// border sits at the top of the band where one is reserved and is inset into
+/// the content box where none is, while the verticals stop where the bottom
+/// border starts either way. Adding them together before the call — which is
+/// what this took before — made one number mean both, and left the caller
+/// computing the vertical's extent a second time to compensate.
+#[derive(Clone, Copy)]
+pub(super) struct CellBox {
+    pub(super) x: Pt,
+    pub(super) w: Pt,
+    /// Top of the row's content box.
+    pub(super) y: Pt,
+    /// Height of the row's content box, **excluding** `band_below`.
+    pub(super) h: Pt,
+    /// §17.4.38: the band reserved below this row for its bottom borders. Zero
+    /// on the table's last row and on a row that ends a page slice at a cut,
+    /// where the bottom border is inset into the content box instead.
+    pub(super) band_below: Pt,
+}
+
+/// The x-intervals a cell's two vertical borders paint in, empty where an edge
+/// paints nothing.
+///
+/// Both [`emit_cell_borders`] and every crossing of an [`OpenBand`] read the
+/// intervals from here, so a vertical border and its crossing of a row boundary
+/// cannot disagree about where the vertical is.
+pub(super) fn vertical_bands(
+    b: &CellBorders,
+    cell_x: Pt,
+    cell_w: Pt,
+) -> [Option<(TableBorderLine, Pt, Pt)>; 2] {
+    [
+        b.left.line().map(|l| (l, cell_x, cell_x + l.width)),
+        b.right
+            .line()
+            .map(|l| (l, cell_x + cell_w - l.width, cell_x + cell_w)),
+    ]
+}
+
 /// Emit all four borders for a cell as filled rectangles.
 /// Borders are drawn INWARD from the cell edge per OOXML.
 ///
-/// **Every corner square is painted by exactly one of the two edges that meet
-/// there.** Horizontal borders (top/bottom) own the corners, because they span
-/// the full cell width; the verticals fill only what is left between them. Both
-/// halves are load-bearing — painting a corner twice lets the second rect win it
-/// when the two edges differ in colour, and painting it not at all leaves a hole
-/// one border wide, which is what the stroke-based approach this replaced left
-/// at every corner through anti-aliasing.
+/// **A cell paints inside its own box and nowhere else, and every corner square
+/// of that box is painted by exactly one of the two edges that meet there.**
+/// Horizontal borders (top/bottom) own the corners, because they span the full
+/// cell width; the verticals fill only what is left between them. Both halves
+/// are load-bearing — painting a corner twice lets the second rect win it when
+/// the two edges differ in colour, and painting it not at all leaves a hole one
+/// border wide, which is what the stroke-based approach this replaced left at
+/// every corner through anti-aliasing.
 ///
-/// The rule holds only while a horizontal *paints*. Where this cell's own top
-/// or bottom is [`CellEdge::Absent`] or [`CellEdge::Suppressed`], no horizontal
-/// owns that corner and the vertical takes it, by insetting against a width of
-/// zero. What the caller owes in return is a box reaching to the far side of the
-/// corner in question: a row's bottom border sits in a band *below* the row's
-/// content box, so `emit_one_row` extends the box through that band for a cell
-/// whose bottom paints nothing. See the comment there.
-pub(super) fn emit_cell_borders(
-    commands: &mut Vec<DrawCommand>,
-    b: CellBorders,
-    cell_x: Pt,
-    cell_w: Pt,
-    row_y: Pt,
-    row_h: Pt,
-) {
+/// Inside the box the rule needs nothing from outside it: a corner square exists
+/// only where the horizontal paints, since an edge that paints nothing has zero
+/// width and leaves no square to own. (Guarding the insets on `top.is_some()` /
+/// `bottom.is_some()` would read as the same rule and be dead code.)
+///
+/// What this function deliberately does **not** decide is the strip between one
+/// row and the next, which belongs to neither of the two cells that touch it.
+/// See [`OpenBand`] — that strip is where all three reported corner defects
+/// were.
+pub(super) fn emit_cell_borders(commands: &mut Vec<DrawCommand>, b: CellBorders, cell: CellBox) {
     // Resolution is over by now, so `Suppressed` and `Absent` are the same
     // thing here: nothing to paint.
-    let (top, bottom, left, right) = (b.top.line(), b.bottom.line(), b.left.line(), b.right.line());
+    let (top, bottom) = (b.top.line(), b.bottom.line());
     let top_w = top.map(|b| b.width).unwrap_or(Pt::ZERO);
     let bot_w = bottom.map(|b| b.width).unwrap_or(Pt::ZERO);
-    let left_w = left.map(|b| b.width).unwrap_or(Pt::ZERO);
-    let right_w = right.map(|b| b.width).unwrap_or(Pt::ZERO);
+
+    // Where the bottom border starts, which is also where the verticals stop:
+    // the top of the reserved band, or `bot_w` above the content box's foot
+    // where no band was reserved.
+    let bottom_y = if cell.band_below > Pt::ZERO {
+        cell.y + cell.h
+    } else {
+        cell.y + cell.h - bot_w
+    };
 
     // Horizontal borders: full cell width, covering corner squares.
     if let Some(ref border) = top {
         emit_border_rect(
             commands,
             border,
-            PtRect::from_xywh(cell_x, row_y, cell_w, top_w),
+            PtRect::from_xywh(cell.x, cell.y, cell.w, top_w),
             true,
         );
     }
@@ -603,35 +652,130 @@ pub(super) fn emit_cell_borders(
         emit_border_rect(
             commands,
             border,
-            PtRect::from_xywh(cell_x, row_y + row_h - bot_w, cell_w, bot_w),
+            PtRect::from_xywh(cell.x, bottom_y, cell.w, bot_w),
             true,
         );
     }
 
-    // Vertical borders: whatever the horizontals leave between them. The inset
-    // at each end is the width the horizontal there actually paints, which is
-    // zero when it paints none — and that is precisely how a vertical comes to
-    // own a corner no horizontal can. (Guarding these on `top.is_some()` /
-    // `bottom.is_some()` would read as the same rule and be dead code: an edge
-    // that paints nothing already has a zero width.)
-    let v_height = row_h - top_w - bot_w;
+    // Vertical borders: whatever the horizontals leave between them.
+    let v_height = bottom_y - (cell.y + top_w);
     if v_height > Pt::ZERO {
-        if let Some(ref border) = left {
+        for (border, x0, x1) in vertical_bands(&b, cell.x, cell.w).into_iter().flatten() {
             emit_border_rect(
                 commands,
-                border,
-                PtRect::from_xywh(cell_x, row_y + top_w, left_w, v_height),
+                &border,
+                PtRect::from_xywh(x0, cell.y + top_w, x1 - x0, v_height),
                 false,
             );
         }
-        if let Some(ref border) = right {
-            emit_border_rect(
-                commands,
-                border,
-                PtRect::from_xywh(cell_x + cell_w - right_w, row_y + top_w, right_w, v_height),
-                false,
-            );
+    }
+}
+
+/// §17.4.38: the strip between one row's content box and the next row's, and
+/// what has been painted in it so far.
+///
+/// A row's bottom borders are drawn *below* its content — `measure_table_rows`
+/// reserves the strip at the widest bottom border in the row — so the strip
+/// belongs to the row boundary rather than to either row, and the verticals of
+/// both rows end at it. It is the only place in a table where a square can be
+/// reached by a border from a cell that does not contain it, and all three
+/// reported corner defects were there.
+///
+/// The three had one shape between them. Each cell painted its four edges from
+/// its own resolved borders and yielded its corner squares to its own
+/// horizontal, which is sound *inside* the cell's box, where that horizontal
+/// spans the full width. In the strip it is not sound at all: the horizontal
+/// covering a square there can be in the row above, the vertical needing it can
+/// be in the row below, and a cell asked only about its own two edges answers
+/// "nobody" without noticing that anything else meets there.
+///
+/// So the strip is a value passed from the row above to the row below instead of
+/// a length each row re-derives. It records the x-intervals already painted —
+/// first by the bottom borders that paint in it, then by each vertical that
+/// crosses it — and every crossing asks it first. Both halves of the convention
+/// are then structural rather than arithmetic:
+///
+/// * nothing is painted twice, because a crossing records its interval before
+///   the next asker sees it, and
+/// * nothing is left unpainted, because the last asker's claim is
+///   unconditional — a vertical whose x is still clear takes the strip there,
+///   whichever row it is in.
+pub(super) struct OpenBand {
+    /// Top of the strip; meaningless when `height` is zero.
+    top: Pt,
+    /// Height of the strip. Zero where the row above reserved none: the table's
+    /// last row, a row that ends a page slice at a cut, and every row of a
+    /// §17.4.45-spaced table, whose rows share no edge to reserve for.
+    height: Pt,
+    /// x-intervals of the strip already painted, in the order they were
+    /// claimed.
+    painted: Vec<(Pt, Pt)>,
+}
+
+impl Default for OpenBand {
+    /// No strip at all — what a page slice starts with, its first row having no
+    /// row above it to have reserved one.
+    fn default() -> Self {
+        Self {
+            top: Pt::ZERO,
+            height: Pt::ZERO,
+            painted: Vec::new(),
         }
+    }
+}
+
+impl OpenBand {
+    /// The strip under a row whose content box ends at `top`, before anything
+    /// has been painted in it.
+    pub(super) fn new(top: Pt, height: Pt) -> Self {
+        Self {
+            top,
+            height,
+            painted: Vec::new(),
+        }
+    }
+
+    /// Record that `x0..x1` of the strip is painted — what a bottom border does
+    /// across the whole width of its cell.
+    pub(super) fn cover(&mut self, x0: Pt, x1: Pt) {
+        self.painted.push((x0, x1));
+    }
+
+    /// Carry `line` across the strip at `x0..x1`, unless something already
+    /// paints there.
+    ///
+    /// The single place a vertical border crosses a row boundary. It is reached
+    /// from both sides — by the row above once its bottom borders are in, then
+    /// by the row below — so whichever of the two has an edge at that x carries
+    /// the line across, and a second one arriving finds the interval taken.
+    pub(super) fn cross(
+        &mut self,
+        commands: &mut Vec<DrawCommand>,
+        line: &TableBorderLine,
+        x0: Pt,
+        x1: Pt,
+    ) {
+        if self.height <= Pt::ZERO || self.covers(x0, x1) {
+            return;
+        }
+        emit_border_rect(
+            commands,
+            line,
+            PtRect::from_xywh(x0, self.top, x1 - x0, self.height),
+            false,
+        );
+        self.painted.push((x0, x1));
+    }
+
+    /// Whether the strip is painted across `x0..x1`, decided at the midpoint.
+    ///
+    /// Every interval here is either a cell's full width or one border's
+    /// thickness at a cell edge, and a crossing sits wholly inside a cell — so
+    /// an interval either contains the crossing or is disjoint from it, and the
+    /// midpoint tells the two apart without an epsilon.
+    fn covers(&self, x0: Pt, x1: Pt) -> bool {
+        let mid = x0 + (x1 - x0) * 0.5;
+        self.painted.iter().any(|(a, b)| *a <= mid && mid <= *b)
     }
 }
 
@@ -1575,6 +1719,18 @@ mod tests {
     /// stands in for the other: the outline is the table's own 220 × 88
     /// rectangle, the cell edges are the cells'. The outline is emitted last,
     /// after every row.
+    ///
+    /// §17.4.38: **every one of a cell's borders is inside its own box**, which
+    /// with a spacing is the whole of the cell — there is no shared edge and no
+    /// band reserved for one, as `measure_table_rows` says where it declines to
+    /// reserve it. Row 0's bottom therefore sits at 33..34, flush with the
+    /// inside of its box, exactly as its top sits flush with the inside of the
+    /// other end. It used to be drawn at 34..35, one width *below* the box and
+    /// so inside the 20pt spacing, because the emitter extended a cell's border
+    /// box by its own bottom border's width whenever a row followed it —
+    /// a rule meant for the band between two rows that share an edge, applied
+    /// where there is no band and no shared edge. A spacing narrower than the
+    /// border would have put a cell's bottom border inside the next row's box.
     #[test]
     fn a_spaced_table_paints_its_cell_edges_and_its_outline_at_exact_coordinates() {
         let result = layout_table(
@@ -1594,13 +1750,13 @@ mod tests {
         assert_eq!(
             rects(&result.commands),
             vec![
-                // Row 0 (box 20..34, its bottom border in the 1pt band below).
-                // Its top and left are the table's own edges, which a spaced
-                // cell does not take — they belong to the outline.
-                (20.0, 34.0, 80.0, 1.0),  // cell 0 bottom (insideH)
-                (99.0, 20.0, 1.0, 14.0),  // cell 0 right  (insideV)
-                (120.0, 34.0, 80.0, 1.0), // cell 1 bottom
-                (120.0, 20.0, 1.0, 14.0), // cell 1 left
+                // Row 0 (box 20..34, its bottom border inside it). Its top and
+                // left are the table's own edges, which a spaced cell does not
+                // take — they belong to the outline.
+                (20.0, 33.0, 80.0, 1.0),  // cell 0 bottom (insideH)
+                (99.0, 20.0, 1.0, 13.0),  // cell 0 right  (insideV), inset above it
+                (120.0, 33.0, 80.0, 1.0), // cell 1 bottom
+                (120.0, 20.0, 1.0, 13.0), // cell 1 left
                 // Row 1 (box 54..68). Its bottom is the table's own edge.
                 (20.0, 54.0, 80.0, 1.0),  // cell 0 top (insideH)
                 (99.0, 55.0, 1.0, 13.0),  // cell 0 right, inset under its top

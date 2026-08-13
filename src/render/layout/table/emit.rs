@@ -5,7 +5,9 @@ use crate::render::geometry::PtRect;
 
 use crate::render::layout::draw_command::DrawCommand;
 
-use super::borders::{border_width, emit_cell_borders, CellBorders, CellEdge};
+use super::borders::{
+    border_width, emit_cell_borders, vertical_bands, CellBorders, CellBox, CellEdge, OpenBand,
+};
 use super::grid::is_vmerge_continue;
 use super::types::{
     CellVAlign, MeasuredRow, MeasuredTable, TableBorderLine, TableRowInput, VerticalMergeState,
@@ -21,6 +23,31 @@ pub(super) struct TableCommandBuffers<'a> {
     pub(super) commands: &'a mut Vec<DrawCommand>,
     pub(super) content_commands: &'a mut Vec<DrawCommand>,
     pub(super) border_commands: &'a mut Vec<DrawCommand>,
+}
+
+/// The vertical state a page slice accumulates as rows are emitted into it.
+///
+/// Two things travel together because a row needs both and neither survives the
+/// slice: where the next row's box starts, and the [`OpenBand`] the last row
+/// left behind it. Carrying the band here is what lets a row see the boundary it
+/// shares with the row above — which on a continuation slice is the repeated
+/// header or the other half of a split row, not the row before it in the
+/// document.
+pub(super) struct SliceCursor {
+    /// Where the next row's box starts, in table-local coordinates.
+    pub(super) y: Pt,
+    /// §17.4.38: the band the row above reserved and did not finish painting.
+    band: OpenBand,
+}
+
+impl SliceCursor {
+    /// A fresh slice: at its top, with no band above its first row.
+    pub(super) fn new() -> Self {
+        Self {
+            y: Pt::ZERO,
+            band: OpenBand::default(),
+        }
+    }
 }
 
 /// Where a row sits in its table, for the one §17.4.84 question a row cannot
@@ -49,7 +76,7 @@ pub(super) fn emit_table_rows(
     measured: &MeasuredTable,
     rows: &[TableRowInput],
     row_range: std::ops::Range<usize>,
-    cursor_y: &mut Pt,
+    cursor: &mut SliceCursor,
     bufs: &mut TableCommandBuffers<'_>,
     top_border_override: Option<TableBorderLine>,
 ) {
@@ -67,7 +94,7 @@ pub(super) fn emit_table_rows(
         emit_one_row(
             mr,
             &rows[row_idx],
-            cursor_y,
+            cursor,
             bufs,
             if is_first_in_range {
                 top_border_override
@@ -92,7 +119,7 @@ pub(super) fn emit_table_rows(
 pub(super) fn emit_split_row(
     mr: &MeasuredRow,
     row: &TableRowInput,
-    cursor_y: &mut Pt,
+    cursor: &mut SliceCursor,
     bufs: &mut TableCommandBuffers<'_>,
     top_border_override: Option<TableBorderLine>,
     has_reserved_bottom_gap: bool,
@@ -100,7 +127,7 @@ pub(super) fn emit_split_row(
     emit_one_row(
         mr,
         row,
-        cursor_y,
+        cursor,
         bufs,
         top_border_override,
         has_reserved_bottom_gap,
@@ -111,7 +138,7 @@ pub(super) fn emit_split_row(
 fn emit_one_row(
     mr: &MeasuredRow,
     row: &TableRowInput,
-    cursor_y: &mut Pt,
+    cursor: &mut SliceCursor,
     bufs: &mut TableCommandBuffers<'_>,
     top_border_override: Option<TableBorderLine>,
     // Whether space was reserved below this row for its bottom border, so the
@@ -131,8 +158,22 @@ fn emit_one_row(
     // §17.4.45: the row's box starts one cell-spacing below the cursor; its
     // content box is what remains. Both are zero-cost when no spacing is set.
     let leading = mr.leading_gap;
-    let row_top = *cursor_y + leading;
+    let row_top = cursor.y + leading;
     let row_height = mr.height - leading;
+    // §17.4.38: the band under this row, if one was reserved. Not a positional
+    // fact — see `has_reserved_bottom_gap`.
+    let band_below = if has_reserved_bottom_gap {
+        mr.border_gap_below
+    } else {
+        Pt::ZERO
+    };
+
+    // The band the row above left open, crossed by this row's verticals
+    // wherever it is still unpainted. Every hole reported so far was here: the
+    // row above finished with the band, and nothing asked the row below whether
+    // it had an edge that needed to reach through it. See [`OpenBand`].
+    cross_band(&mut cursor.band, bufs.border_commands, mr);
+
     for (cell_ci, (entry, cell_input)) in mr.entries.iter().zip(row.cells.iter()).enumerate() {
         // §17.4.84: the merged span, used below for vAlign and here for
         // shading. Hoisted above the shading so both read the same height —
@@ -195,48 +236,6 @@ fn emit_one_row(
             bufs.content_commands.push(cmd);
         }
 
-        // How far this cell's border box reaches past its content, into the
-        // band `measure_table_rows` reserved below the row for its bottom
-        // borders. The choice decides who owns the corner squares where this
-        // cell's verticals cross that band, and there are two cases.
-        //
-        // A cell that **paints** a bottom border takes exactly that border's
-        // width and stops, so the horizontal owns those corners — it spans the
-        // full cell width, which is the convention [`emit_cell_borders`] states.
-        //
-        // A cell that paints **nothing** there takes the whole band, and has
-        // to: no other cell can reach it. Neighbours' bottom borders span their
-        // own widths only, so a vertical stopping at the content box leaves the
-        // band unpainted at its own x — one hole per interior row boundary,
-        // exactly one border wide. That is the reported defect, from a §17.4.66
-        // `nil` top-and-bottom spacer column between two halves of a form: the
-        // gutter's verticals were the only edges left that could own those
-        // corners, and they were yielding them to a horizontal that does not
-        // exist. The table's *last* row never showed it, because with no band
-        // reserved the bottom border is inset into the content box and the
-        // vertical already spans the lot.
-        //
-        // This subsumes the §17.4.84 vMerge case that used to be spelled out
-        // here: a cell the row below continues has its bottom cleared during
-        // resolution, so it paints nothing and reaches through the band, which
-        // is what an unbroken merged cell needs.
-        //
-        // A cell whose bottom is *narrower* than the band it shares — two cells
-        // in one row declaring different `w:sz` — still stops at its own width,
-        // leaving the rest of the band unpainted at its x. That is a different
-        // question, and an open one: where within a boundary band a border
-        // narrower than the band belongs. **Word reference render needed**: one
-        // row whose two cells declare bottom borders of different widths,
-        // measuring whether the narrower line sits flush with the upper row's
-        // content, flush with the lower row's, or centred between them.
-        let own_bottom = border_width(b_bottom);
-        let bottom_border_gap = if !has_reserved_bottom_gap {
-            Pt::ZERO
-        } else if own_bottom > Pt::ZERO {
-            own_bottom
-        } else {
-            mr.border_gap_below
-        };
         emit_cell_borders(
             bufs.border_commands,
             CellBorders {
@@ -245,14 +244,55 @@ fn emit_one_row(
                 left: b_left,
                 right: b_right,
             },
-            entry.cell_x,
-            entry.cell_w,
-            row_top,
-            row_height + bottom_border_gap,
+            CellBox {
+                x: entry.cell_x,
+                w: entry.cell_w,
+                y: row_top,
+                h: row_height,
+                band_below,
+            },
         );
     }
 
-    *cursor_y += mr.height + mr.border_gap_below;
+    // Open the band below this row: its own bottom borders paint in it first —
+    // each across the full width of its cell — and then its verticals cross
+    // whatever is left. The row after this one is handed what remains.
+    //
+    // A cell whose bottom is *narrower* than the band it shares — two cells in
+    // one row declaring different `w:sz` — paints flush with the band's top and
+    // claims the whole of its x anyway, so the rest of the band stays unpainted
+    // under it. That is a different question, and an open one: where within a
+    // boundary band a border narrower than the band belongs. **Word reference
+    // render needed**: one row whose two cells declare bottom borders of
+    // different widths, measuring whether the narrower line sits flush with the
+    // upper row's content, flush with the lower row's, or centred between them.
+    let mut band = OpenBand::new(row_top + row_height, band_below);
+    for (entry, borders) in mr.entries.iter().zip(mr.borders.iter()) {
+        if borders.bottom.line().is_some() {
+            band.cover(entry.cell_x, entry.cell_x + entry.cell_w);
+        }
+    }
+    cross_band(&mut band, bufs.border_commands, mr);
+    cursor.band = band;
+    cursor.y += mr.height + mr.border_gap_below;
+}
+
+/// Every vertical border in the row crosses `band` wherever it is still
+/// unpainted.
+///
+/// Called once per row for each of the two bands it touches, which is what makes
+/// the two sides of a row boundary the same question asked twice rather than two
+/// rules that have to agree. The band itself decides who paints — see
+/// [`OpenBand`].
+fn cross_band(band: &mut OpenBand, commands: &mut Vec<DrawCommand>, mr: &MeasuredRow) {
+    for (entry, borders) in mr.entries.iter().zip(mr.borders.iter()) {
+        for (line, x0, x1) in vertical_bands(borders, entry.cell_x, entry.cell_w)
+            .into_iter()
+            .flatten()
+        {
+            band.cross(commands, &line, x0, x1);
+        }
+    }
 }
 
 /// Total vertical space owned by a vMerge=Restart cell at `grid_col`.
@@ -619,12 +659,12 @@ mod tests {
         let mut commands = Vec::new();
         let mut content = Vec::new();
         let mut borders = Vec::new();
-        let mut cursor_y = Pt::ZERO;
+        let mut cursor = SliceCursor::new();
         emit_table_rows(
             &measured,
             &rows,
             0..1,
-            &mut cursor_y,
+            &mut cursor,
             &mut TableCommandBuffers {
                 commands: &mut commands,
                 content_commands: &mut content,
@@ -668,12 +708,12 @@ mod tests {
         let mut commands = Vec::new();
         let mut content = Vec::new();
         let mut borders = Vec::new();
-        let mut cursor_y = Pt::ZERO;
+        let mut cursor = SliceCursor::new();
         emit_table_rows(
             &measured,
             &rows,
             0..2,
-            &mut cursor_y,
+            &mut cursor,
             &mut TableCommandBuffers {
                 commands: &mut commands,
                 content_commands: &mut content,
@@ -897,15 +937,234 @@ mod tests {
     /// do not, since the later rect would win the corner.
     #[test]
     fn no_two_border_rects_overlap() {
-        let table = spacer_table();
-        let rects = border_rects(&table.commands);
-        for (i, a) in rects.iter().enumerate() {
-            for b in &rects[i + 1..] {
-                let overlap =
-                    a.1.min(b.1) - a.0.max(b.0) > 0.001 && a.3.min(b.3) - a.2.max(b.2) > 0.001;
-                assert!(!overlap, "border rects overlap: {a:?} and {b:?}");
+        for (name, table) in [("spacer", spacer_table()), ("gutter", gutter_row_table())] {
+            let rects = border_rects(&table.commands);
+            for (i, a) in rects.iter().enumerate() {
+                for b in &rects[i + 1..] {
+                    let overlap =
+                        a.1.min(b.1) - a.0.max(b.0) > 0.001 && a.3.min(b.3) - a.2.max(b.2) > 0.001;
+                    assert!(!overlap, "{name}: border rects overlap: {a:?} and {b:?}");
+                }
             }
         }
+    }
+
+    // ── The junction, which is where all three corner defects were ──────────
+
+    /// A cell declaring §17.4.66 `nil` on both of its **sides**, so the row it
+    /// sits in paints no vertical border there at all.
+    fn nil_sides_cell() -> TableCellInput {
+        use crate::render::layout::table::types::{CellBorderConfig, CellBorderOverride};
+        let mut c = cell(1, None, None);
+        c.cell_borders = Some(CellBorderConfig {
+            top: None,
+            bottom: None,
+            left: Some(CellBorderOverride::Suppress),
+            right: Some(CellBorderOverride::Suppress),
+        });
+        c
+    }
+
+    /// The spacer cell of a **gutter row**: `nil` on all four edges, so neither
+    /// a horizontal nor a vertical paints anywhere on it.
+    fn nil_all_edges_cell() -> TableCellInput {
+        use crate::render::layout::table::types::{CellBorderConfig, CellBorderOverride};
+        let mut c = cell(1, None, None);
+        c.cell_borders = Some(CellBorderConfig {
+            top: Some(CellBorderOverride::Suppress),
+            bottom: Some(CellBorderOverride::Suppress),
+            left: Some(CellBorderOverride::Suppress),
+            right: Some(CellBorderOverride::Suppress),
+        });
+        c
+    }
+
+    /// `spacer_table` with a **gutter row** in the middle — a short row whose
+    /// cells declare `nil` on both sides, which the reporting document uses as
+    /// the horizontal counterpart of its spacer column. The row still paints
+    /// the bottom borders that separate it from the row below, so a band is
+    /// reserved under it; what it does not paint is a single vertical.
+    ///
+    /// That is what makes the junction below the gutter row's spacer different
+    /// from every case already covered: the square where the spacer column's
+    /// vertical crosses that band belongs, geometrically, to a cell whose own
+    /// bottom and own right are both empty — while the vertical that needs it
+    /// is one row *below* and the horizontal that stops at it is one column to
+    /// the *right*.
+    fn gutter_row_table() -> crate::render::layout::table::TableSlice {
+        let normal = || {
+            row(vec![
+                cell(1, None, None),
+                nil_top_bottom_cell(),
+                cell(1, None, None),
+            ])
+        };
+        let gutter = || {
+            row(vec![
+                nil_sides_cell(),
+                nil_all_edges_cell(),
+                nil_sides_cell(),
+            ])
+        };
+        let rows = vec![normal(), gutter(), normal()];
+        crate::render::layout::table::layout_table(
+            &rows,
+            &[Pt::new(100.0), Pt::new(20.0), Pt::new(100.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&all_edges(single(0.5, RED))),
+            None,
+            false,
+        )
+    }
+
+    /// Every junction square that **no** rect paints.
+    ///
+    /// A junction is where a vertical border and a horizontal one meet: the
+    /// vertical's x-band crossed with the horizontal's y-band, for any pair that
+    /// touch or overlap on both axes. Two borders that meet there are two lines
+    /// joining, and the square they join in has to be ink — whichever of them
+    /// paints it. A grid that leaves one empty shows the 1–2px notch three
+    /// separate reports have now described.
+    ///
+    /// Deliberately *not* a per-cell check: every one of those defects was a
+    /// square whose two owning edges were both empty while the borders needing
+    /// it were in the neighbouring row and the neighbouring column. Asking the
+    /// question of the rects alone is what makes it blind to which cell they
+    /// came from.
+    ///
+    /// A square counts as painted when **one** rect covers it, which is the
+    /// stronger reading and sound here: these tables have a single grid, so no
+    /// junction can straddle the seam between two abutting horizontals. The
+    /// corpus-wide audit in `tests/table_border_corners.rs` tests the union
+    /// instead, because two tables' grids can differ by a fraction of a point
+    /// and do.
+    fn unpainted_junctions(cmds: &[DrawCommand]) -> Vec<(f32, f32, f32, f32)> {
+        const EPS: f32 = 0.001;
+        let rects = border_rects(cmds);
+        let (vertical, horizontal): (Vec<_>, Vec<_>) = rects
+            .iter()
+            .copied()
+            .partition(|(x0, x1, y0, y1)| x1 - x0 < y1 - y0);
+
+        let mut missing = Vec::new();
+        for (vx0, vx1, vy0, vy1) in vertical {
+            for (hx0, hx1, hy0, hy1) in horizontal.iter().copied() {
+                // Touching or overlapping on both axes: the two lines meet.
+                if vx1 < hx0 - EPS || vx0 > hx1 + EPS || hy1 < vy0 - EPS || hy0 > vy1 + EPS {
+                    continue;
+                }
+                let square = (vx0, vx1, hy0, hy1);
+                let covered = rects.iter().any(|(x0, x1, y0, y1)| {
+                    *x0 <= square.0 + EPS
+                        && *x1 >= square.1 - EPS
+                        && *y0 <= square.2 + EPS
+                        && *y1 >= square.3 - EPS
+                });
+                if !covered && !missing.contains(&square) {
+                    missing.push(square);
+                }
+            }
+        }
+        missing
+    }
+
+    /// The junction invariant on the table every existing corner test uses:
+    /// a control, so a failure below is about the gutter row and not about the
+    /// audit itself.
+    #[test]
+    fn the_spacer_tables_junctions_are_all_painted() {
+        let missing = unpainted_junctions(&spacer_table().commands);
+        assert!(
+            missing.is_empty(),
+            "unpainted junction squares (x0,x1,y0,y1): {missing:?}"
+        );
+    }
+
+    /// §17.4.38: a `double` border crossing a band is still **two lines side by
+    /// side**, not two stacked.
+    ///
+    /// A band crossing is a piece of a vertical border, and `emit_border_rect`
+    /// splits a double one along the axis it is told: two sub-rects left and
+    /// right for a vertical, top and bottom for a horizontal. Told the wrong
+    /// axis, the crossing still fills its x — so continuity, the corner audit
+    /// and the overlap check all pass while the double border turns into a
+    /// pair of rungs across the gap.
+    ///
+    /// `spacer_table`'s two rows at 3pt double borders instead of 0.5pt single
+    /// ones: each row is 28pt as it is there, the band between them is 3pt (the
+    /// widest bottom border in row 0), and the spacer's right edge is the
+    /// vertical that crosses it — as two 1pt (`sz`/3) lines spanning the band's
+    /// full 3pt height.
+    #[test]
+    fn a_double_border_crosses_a_band_as_two_lines_side_by_side() {
+        let rows = vec![
+            row(vec![
+                cell(1, None, None),
+                nil_top_bottom_cell(),
+                cell(1, None, None),
+            ]),
+            row(vec![
+                cell(1, None, None),
+                nil_top_bottom_cell(),
+                cell(1, None, None),
+            ]),
+        ];
+        let double = TableBorderLine {
+            width: Pt::new(3.0),
+            color: RED,
+            style: crate::render::layout::table::types::TableBorderStyle::Double,
+        };
+        let table = crate::render::layout::table::layout_table(
+            &rows,
+            &[Pt::new(100.0), Pt::new(20.0), Pt::new(100.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&all_edges(double)),
+            None,
+            false,
+        );
+
+        // The band is the 3pt strip between the two rows' content boxes.
+        let (band_top, band_bottom) = (28.0, 31.0);
+        let in_band: Vec<(f32, f32, f32, f32)> = border_rects(&table.commands)
+            .into_iter()
+            .filter(|(x0, x1, y0, y1)| {
+                *y0 >= band_top - 0.001
+                    && *y1 <= band_bottom + 0.001
+                    && *x0 > 100.0
+                    && *x1 < 120.001
+            })
+            .collect();
+        assert_eq!(
+            in_band,
+            vec![(117.0, 118.0, 28.0, 31.0), (119.0, 120.0, 28.0, 31.0)],
+            "the spacer's right edge crosses the band as its own two sub-lines, \
+             each `sz`/3 wide and the full height of the band"
+        );
+    }
+
+    /// The reported defect, third manifestation: a junction square below a row
+    /// that paints **no** vertical of its own.
+    ///
+    /// The gutter row's spacer cell has `nil` on all four edges, so the square
+    /// where the spacer column's vertical crosses the band under that row is
+    /// painted by neither of the two edges that geometrically own it. The
+    /// vertical that arrives there comes up from the row *below*, and the
+    /// horizontal that stops at it belongs to the cell one column to the
+    /// *right* — neither of which the owning cell can see. The user reports it
+    /// as a missing corner at the top-left of the cell to the right of the
+    /// gutter.
+    #[test]
+    fn a_junction_below_a_row_that_paints_no_vertical_is_still_painted() {
+        let table = gutter_row_table();
+        let missing = unpainted_junctions(&table.commands);
+        assert!(
+            missing.is_empty(),
+            "unpainted junction squares (x0,x1,y0,y1): {missing:?} \
+             in rects {:?}",
+            border_rects(&table.commands)
+        );
     }
 
     // ── §17.4.83 vAlign, and the §17.4.38 border inset it composes with ─────

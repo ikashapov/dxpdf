@@ -25,7 +25,7 @@ pub use grid::compute_column_widths;
 pub use types::*;
 
 use borders::emit_table_outline;
-use emit::{emit_split_row, emit_table_rows, TableCommandBuffers};
+use emit::{emit_split_row, emit_table_rows, SliceCursor, TableCommandBuffers};
 use grid::{build_row_groups, row_group_end};
 use measure::measure_table_rows;
 use split::{find_row_cut, split_row_at, RowCutInput};
@@ -85,8 +85,8 @@ struct SliceBuilder {
     commands: Vec<DrawCommand>,
     content_commands: Vec<DrawCommand>,
     border_commands: Vec<DrawCommand>,
-    /// Vertical cursor, advanced by each `emit_*` call.
-    cursor_y: Pt,
+    /// Vertical state, advanced by each `emit_*` call.
+    cursor: SliceCursor,
 }
 
 impl SliceBuilder {
@@ -95,21 +95,21 @@ impl SliceBuilder {
             commands: Vec::new(),
             content_commands: Vec::new(),
             border_commands: Vec::new(),
-            cursor_y: Pt::ZERO,
+            cursor: SliceCursor::new(),
         }
     }
 
     /// The cursor and the three buffers, borrowed disjointly so one `emit_*`
     /// call can take both at once.
-    fn emit_into(&mut self) -> (&mut Pt, TableCommandBuffers<'_>) {
+    fn emit_into(&mut self) -> (&mut SliceCursor, TableCommandBuffers<'_>) {
         let Self {
             commands,
             content_commands,
             border_commands,
-            cursor_y,
+            cursor,
         } = self;
         (
-            cursor_y,
+            cursor,
             TableCommandBuffers {
                 commands,
                 content_commands,
@@ -145,7 +145,7 @@ impl SliceBuilder {
         carries_top: bool,
         carries_bottom: bool,
     ) -> TableSlice {
-        let height = self.cursor_y
+        let height = self.cursor.y
             + if carries_bottom {
                 cell_spacing
             } else {
@@ -211,12 +211,12 @@ pub fn layout_table(
 
     let mut builder = SliceBuilder::new();
     // Monolithic table: no top border override needed — borders are resolved correctly.
-    let (cursor_y, mut buffers) = builder.emit_into();
+    let (cursor, mut buffers) = builder.emit_into();
     emit_table_rows(
         &measured,
         rows,
         0..measured.rows.len(),
-        cursor_y,
+        cursor,
         &mut buffers,
         None,
     );
@@ -495,14 +495,14 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                 } else {
                     None
                 };
-                let (cursor_y, mut buffers) = builder.emit_into();
+                let (cursor, mut buffers) = builder.emit_into();
                 match item {
                     SliceItem::Range(range) => {
                         emit_table_rows(
                             &measured,
                             rows,
                             range.clone(),
-                            cursor_y,
+                            cursor,
                             &mut buffers,
                             top_override,
                         );
@@ -517,7 +517,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                         emit_split_row(
                             mr,
                             &rows[*row_idx],
-                            cursor_y,
+                            cursor,
                             &mut buffers,
                             top_override,
                             has_reserved_bottom_gap,
