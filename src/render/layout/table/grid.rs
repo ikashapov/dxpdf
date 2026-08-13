@@ -311,6 +311,51 @@ mod tests {
         );
     }
 
+    /// §17.4.48: *"The table shall satisfy the shared columns as specified by
+    /// the `tblGrid` element"* — so a grid that carries proportions decides the
+    /// column **count** as well as the widths, and `num_cols` is consulted only
+    /// for a grid that carries none. Every other test here happens to pass a
+    /// matching count, which cannot tell the two rules apart.
+    ///
+    /// A row with more cells than `<w:gridCol>`s is repaired upstream by
+    /// `build::table::seat_every_cell`, which grows the grid; this function is
+    /// not the place that reconciles them, and a `num_cols` that overrode the
+    /// grid here would silently re-partition a grid that was already correct.
+    #[test]
+    fn a_usable_grid_decides_the_column_count_not_the_callers_number() {
+        let grid = vec![Pt::new(100.0), Pt::new(200.0)];
+        for num_cols in [0usize, 1, 2, 5] {
+            let widths = compute_column_widths(&grid, num_cols, Pt::new(600.0));
+            assert_eq!(
+                widths,
+                vec![Pt::new(200.0), Pt::new(400.0)],
+                "num_cols = {num_cols} must not change the grid's own partition"
+            );
+        }
+    }
+
+    /// The scale is `available / total`, so whatever units the grid was written
+    /// in, the result sums to the available width — that is what puts the
+    /// table's right edge where `tblW` asked for it — and the columns keep
+    /// their declared ratio.
+    ///
+    /// The grid here sums to 151, which divides nothing exactly, so an
+    /// implementation that rounded or truncated per column would miss the total.
+    #[test]
+    fn a_scaled_grid_sums_to_the_available_width_and_keeps_its_ratios() {
+        let grid = vec![Pt::new(37.0), Pt::new(101.0), Pt::new(13.0)];
+        let widths = compute_column_widths(&grid, 3, Pt::new(468.0));
+        let total: Pt = widths.iter().copied().sum();
+        assert!(
+            (total.raw() - 468.0).abs() < 1e-3,
+            "columns sum to {total:?}, not the 468 pt offered"
+        );
+        assert!(
+            (widths[1].raw() / widths[0].raw() - 101.0 / 37.0).abs() < 1e-4,
+            "the 101:37 ratio did not survive scaling: {widths:?}"
+        );
+    }
+
     // ── grid_before lookups ──────────────────────────────────────────────────────────────────────────────
 
     use super::super::types::CellVAlign;
@@ -357,6 +402,20 @@ mod tests {
         assert_eq!(cell_index_at_grid_col(&row, 1), Some(0));
         assert_eq!(cell_index_at_grid_col(&row, 2), Some(1));
         assert_eq!(cell_index_at_grid_col(&row, 3), None);
+    }
+
+    /// §17.4.17: `w:gridSpan w:val="0"` is well-formed and meaningless, so a
+    /// cell that exists covers at least one column — the `max(1)` every grid
+    /// walk in this engine spells. Without it the first cell would cover no
+    /// column at all and every later cell in the row would answer for the one
+    /// to its left, which is the shift that costs a row's last cell its
+    /// §17.7.6 `lastCol` layer.
+    #[test]
+    fn a_zero_grid_span_still_covers_one_column() {
+        let row = row_with_offsets(vec![empty_cell(0), empty_cell(1)], 0);
+        assert_eq!(cell_index_at_grid_col(&row, 0), Some(0));
+        assert_eq!(cell_index_at_grid_col(&row, 1), Some(1));
+        assert_eq!(cell_index_at_grid_col(&row, 2), None);
     }
 
     #[test]
@@ -490,6 +549,15 @@ mod tests {
         row.cant_split = Some(true);
         let groups = build_row_groups(&[row], &measured(&[(20.0, 0.0)]));
         assert!(!groups[0].splittable);
+    }
+
+    /// A table with no rows produces no groups. The loop is `while i <
+    /// rows.len()` over an index `row_group_end` advances, so an empty table is
+    /// the one input where it must terminate without ever reading
+    /// `measured.rows` — which is empty too, and would panic on the slice.
+    #[test]
+    fn build_row_groups_on_no_rows_yields_no_groups() {
+        assert!(build_row_groups(&[], &measured(&[])).is_empty());
     }
 
     /// A nested table's commands can't be bisected cleanly, so its row is
@@ -631,5 +699,108 @@ mod tests {
             [14.0, 14.0],
             "the Continue is in column 1; column 0's restart has no continuation"
         );
+    }
+
+    /// §17.4.84: a `gridSpan` restart anchors its merge on its **first** grid
+    /// column and no other — this pass walks down from `entry.grid_col`, which
+    /// is where the cell starts, and `merged_span_height` repeats the same walk
+    /// when it emits. A `Continue` under that column joins the span; one beside
+    /// it, in the second column the restart also covers, does not.
+    ///
+    /// The two halves are the same table with the lower row's two cells
+    /// swapped, so nothing but which column the `Continue` sits in can explain
+    /// the difference. `build::table::promote_orphan_vmerge_continues` pins the
+    /// same rule at the build layer; this is the pass that has to agree with it,
+    /// and it was the disagreement between the two that dropped a cell's text.
+    #[test]
+    fn a_wide_restart_is_continued_only_under_its_first_column() {
+        let wide_restart = || TableCellInput {
+            grid_span: 2,
+            ..merged_cell(Some(VerticalMergeState::Restart))
+        };
+        let expand = |lower: Vec<TableCellInput>| {
+            let rows = vec![plain_row(vec![wide_restart()]), plain_row(lower)];
+            let layouts = vec![
+                vec![layout_entry(84.0, 0)],
+                vec![layout_entry(0.0, 0), layout_entry(0.0, 1)],
+            ];
+            let mut heights = [Pt::new(14.0), Pt::new(14.0)];
+            expand_rows_for_vmerge(&rows, &layouts, &mut heights);
+            [heights[0].raw(), heights[1].raw()]
+        };
+
+        assert_eq!(
+            expand(vec![
+                merged_cell(Some(VerticalMergeState::Continue)), // column 0
+                merged_cell(None),                               // column 1
+            ]),
+            [14.0, 70.0],
+            "under the restart's first column: a span, so 84 − 14 lands below"
+        );
+        assert_eq!(
+            expand(vec![
+                merged_cell(None),                               // column 0
+                merged_cell(Some(VerticalMergeState::Continue)), // column 1
+            ]),
+            [14.0, 14.0],
+            "beside it: the restart's column holds an ordinary cell, so no span"
+        );
+    }
+
+    /// Two merges opening in the same row, of different lengths. The §17.4.84
+    /// invariant each has to satisfy is its own: a span must end up at least as
+    /// tall as its restart cell's content, and no restart row may be grown for
+    /// it.
+    ///
+    /// The shorter span's numbers are exact — its two rows are untouched by the
+    /// longer span, whose whole shortfall lands on row 2 — so its last row grows
+    /// by exactly its own 30 pt. The longer span's last row is asserted as a
+    /// bound instead, and that is deliberate: the two expansions run in cell
+    /// order and do not see each other, so column 0 is sized against row 1's
+    /// height *before* column 1 grows it. Visiting the restarts in the other
+    /// order gives column 0's span 100 pt rather than 130. Pinning either number
+    /// would pin the iteration order as though it had been chosen; the bound
+    /// holds under both.
+    #[test]
+    fn two_restarts_in_one_row_each_get_room_for_their_own_content() {
+        let rows = vec![
+            plain_row(vec![
+                merged_cell(Some(VerticalMergeState::Restart)), // column 0, rows 0–2
+                merged_cell(Some(VerticalMergeState::Restart)), // column 1, rows 0–1
+            ]),
+            plain_row(vec![
+                merged_cell(Some(VerticalMergeState::Continue)),
+                merged_cell(Some(VerticalMergeState::Continue)),
+            ]),
+            plain_row(vec![
+                merged_cell(Some(VerticalMergeState::Continue)),
+                merged_cell(None),
+            ]),
+        ];
+        let layouts = vec![
+            vec![layout_entry(100.0, 0), layout_entry(50.0, 1)],
+            vec![layout_entry(0.0, 0), layout_entry(0.0, 1)],
+            vec![layout_entry(0.0, 0), layout_entry(0.0, 1)],
+        ];
+        let mut heights = [Pt::new(10.0); 3];
+
+        expand_rows_for_vmerge(&rows, &layouts, &mut heights);
+
+        assert_eq!(heights[0].raw(), 10.0, "no restart row is ever grown");
+        assert_eq!(
+            heights[1].raw(),
+            40.0,
+            "the two-row span's last row takes its own 50 − 20 shortfall"
+        );
+        assert_eq!(
+            heights[0].raw() + heights[1].raw(),
+            50.0,
+            "so that span totals its restart cell's content exactly"
+        );
+        assert!(
+            heights[0].raw() + heights[1].raw() + heights[2].raw() >= 100.0,
+            "the three-row span must still cover its 100 pt: {heights:?}"
+        );
+        assert!(heights[2].raw() >= 10.0, "and no row may shrink");
     }
 }
