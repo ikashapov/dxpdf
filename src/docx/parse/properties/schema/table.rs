@@ -230,7 +230,7 @@ impl TblPrXml {
             borders: Dup::from(self.tbl_borders).map(Into::into),
             cell_margins: Dup::from(self.tbl_cell_mar).map(Into::into),
             cell_spacing: Dup::from(self.tbl_cell_spacing).map(Into::into),
-            look: Dup::from(self.tbl_look).map(Into::into),
+            look: Dup::from(self.tbl_look).filter_map(tbl_look),
             style_row_band_size: Dup::from(self.tbl_style_row_band_size).map(|v| v.val),
             style_col_band_size: Dup::from(self.tbl_style_col_band_size).map(|v| v.val),
             positioning: Dup::from(self.tblp_pr).map(Into::into),
@@ -241,81 +241,96 @@ impl TblPrXml {
     }
 }
 
-impl From<TblLookXml> for TableLook {
-    /// §17.4.55: the legacy `@val` bitmask and the six modern attributes are
-    /// **not** two spellings of the same six flags to be merged flag by flag.
-    ///
-    /// [MS-OI29500] Part 1 §17.4.55 note (c) is exact about it: "Word reads
-    /// the val attribute if, and only if, none of the attributes specified in
-    /// this subsection are present." So one modern attribute anywhere on the
-    /// element makes the whole bitmask unread — a per-flag fallback would make
-    /// that sentence say nothing, and would let `val`'s *cleared* bits switch
-    /// regions off that the document never mentioned.
-    ///
-    /// # What an unmentioned sibling then means is a choice, not a rule
-    ///
-    /// The erratum settles only which source is read. It does not say what an
-    /// attribute the element omits resolves to once `val` is out of the
-    /// picture, and neither does §17.4.55: `CT_TblLook`'s attributes are
-    /// optional `ST_OnOff` with no schema default.
-    ///
-    /// **The choice taken here is `true` — every region on.** The evidence is
-    /// second-implementation: LibreOffice tested Word for tdf#167843 and
-    /// concluded that all unspecified attributes default to true, and its
-    /// regression fixture (`<w:tblLook w:val="04A0" w:firstRow="0"/>`, which
-    /// `tbl_pr_tbl_look_val_04a0_with_first_row_off` reproduces below) asserts
-    /// firstColumn, lastColumn and lastRow all on. That is testimony about
-    /// Word, not documentation of it.
-    ///
-    /// It is applied to all six uniformly, including `noHBand`/`noVBand`,
-    /// where `true` switches banding *off* rather than on. Splitting the rule
-    /// — four flags one way, two the other — would be a second choice with no
-    /// evidence behind it at all, and a uniform "unset bits read as set" is
-    /// also the simplest thing an implementation holding a bitmask would do.
-    ///
-    /// **What would settle it**: a Word render of a table whose style defines
-    /// a `band1Horz` layer, carrying `<w:tblLook w:firstRow="0"/>` and nothing
-    /// else. Banding paints iff Word's unspecified `noHBand` is false, which
-    /// is the one flag where the uniform reading and the "regions on" reading
-    /// disagree.
-    fn from(x: TblLookXml) -> Self {
-        let stated = [
-            x.first_row,
-            x.last_row,
-            x.first_column,
-            x.last_column,
-            x.no_h_band,
-            x.no_v_band,
-        ];
-        if stated.iter().all(Option::is_none) {
-            // Nothing modern present, so `val` is read — and if it is absent
-            // too the element states nothing at all. §17.4.55 note (a)'s
-            // absent-element default belongs to the consumer, which cannot
-            // tell an omitted element from an empty one unless the parser
-            // keeps quiet here.
-            return match x.val {
-                Some(v) => Self {
-                    first_row: Some(v.first_row()),
-                    last_row: Some(v.last_row()),
-                    first_column: Some(v.first_column()),
-                    last_column: Some(v.last_column()),
-                    no_h_band: Some(v.no_h_band()),
-                    no_v_band: Some(v.no_v_band()),
-                },
-                None => Self::default(),
-            };
-        }
-        // `is_none_or` *is* the rule: an unstated attribute reads as true.
-        let attr = |a: Option<AttrBool>| Some(a.is_none_or(|b| b.0));
-        Self {
-            first_row: attr(x.first_row),
-            last_row: attr(x.last_row),
-            first_column: attr(x.first_column),
-            last_column: attr(x.last_column),
-            no_h_band: attr(x.no_h_band),
-            no_v_band: attr(x.no_v_band),
-        }
+/// §17.4.55 `<w:tblLook>` → the model, or `None` when the element states
+/// nothing at all.
+///
+/// The legacy `@val` bitmask and the six modern attributes are **not** two
+/// spellings of the same six flags to be merged flag by flag.
+///
+/// [MS-OI29500] Part 1 §17.4.55 note (c) is exact about it: "Word reads
+/// the val attribute if, and only if, none of the attributes specified in
+/// this subsection are present." So one modern attribute anywhere on the
+/// element makes the whole bitmask unread — a per-flag fallback would make
+/// that sentence say nothing, and would let `val`'s *cleared* bits switch
+/// regions off that the document never mentioned.
+///
+/// # What an unmentioned sibling then means is a choice, not a rule
+///
+/// The erratum settles only which source is read. It does not say what an
+/// attribute the element omits resolves to once `val` is out of the
+/// picture, and neither does §17.4.55: `CT_TblLook`'s attributes are
+/// optional `ST_OnOff` with no schema default.
+///
+/// **The choice taken here is `true` — every region on.** The evidence is
+/// second-implementation: LibreOffice tested Word for tdf#167843 and
+/// concluded that all unspecified attributes default to true, and its
+/// regression fixture (`<w:tblLook w:val="04A0" w:firstRow="0"/>`, which
+/// `tbl_pr_tbl_look_val_04a0_with_first_row_off` reproduces below) asserts
+/// firstColumn, lastColumn and lastRow all on. That is testimony about
+/// Word, not documentation of it.
+///
+/// It is applied to all six uniformly, including `noHBand`/`noVBand`,
+/// where `true` switches banding *off* rather than on. Splitting the rule
+/// — four flags one way, two the other — would be a second choice with no
+/// evidence behind it at all, and a uniform "unset bits read as set" is
+/// also the simplest thing an implementation holding a bitmask would do.
+///
+/// **What would settle it**: a Word render of a table whose style defines
+/// a `band1Horz` layer, carrying `<w:tblLook w:firstRow="0"/>` and nothing
+/// else. Banding paints iff Word's unspecified `noHBand` is false, which
+/// is the one flag where the uniform reading and the "regions on" reading
+/// disagree.
+///
+/// # Why an entirely silent element yields `None` rather than a silent value
+///
+/// `<w:tblLook/>` states no `@val` and no attribute, so there is nothing to
+/// read from: it carries exactly what the *absent* element carries, which is
+/// nothing. §17.4.55 note (a)'s absent-element default is the consumer's
+/// question — `render::resolve::conditional::ActiveRegions::WORD_DEFAULT`
+/// answers it — and the consumer can only answer it correctly if the two
+/// spellings of "nothing" arrive here looking alike.
+///
+/// A `TableLook` with six `None` flags *looked* alike and was not, because the
+/// carrier is a `crate::model::Dup`: any value at all reports the element as
+/// **present**, and "this level did not set the property" (§17.7.2) is
+/// precisely `Dup::is_absent`. So a silent `<w:tblLook/>` on a `<w:tbl>` beat
+/// the table style's `tblLook` and replaced it with the absent-element
+/// default, and a silent one in a child style beat its `basedOn` parent's the
+/// same way — each switching off conditional layers the surviving level had
+/// switched on. Dropping the occurrence is what makes the two spellings
+/// interchangeable at *every* level of the cascade, rather than at whichever
+/// read site remembered to ask.
+fn tbl_look(x: TblLookXml) -> Option<TableLook> {
+    let stated = [
+        x.first_row,
+        x.last_row,
+        x.first_column,
+        x.last_column,
+        x.no_h_band,
+        x.no_v_band,
+    ];
+    if stated.iter().all(Option::is_none) {
+        // Nothing modern present, so `val` is read — and if it is absent too
+        // the element states nothing at all.
+        return x.val.map(|v| TableLook {
+            first_row: Some(v.first_row()),
+            last_row: Some(v.last_row()),
+            first_column: Some(v.first_column()),
+            last_column: Some(v.last_column()),
+            no_h_band: Some(v.no_h_band()),
+            no_v_band: Some(v.no_v_band()),
+        });
     }
+    // `is_none_or` *is* the rule: an unstated attribute reads as true.
+    let attr = |a: Option<AttrBool>| Some(a.is_none_or(|b| b.0));
+    Some(TableLook {
+        first_row: attr(x.first_row),
+        last_row: attr(x.last_row),
+        first_column: attr(x.first_column),
+        last_column: attr(x.last_column),
+        no_h_band: attr(x.no_h_band),
+        no_v_band: attr(x.no_v_band),
+    })
 }
 
 impl From<TblpPrXml> for TablePositioning {
@@ -627,7 +642,7 @@ mod tests {
         assert_eq!(l.last_row, Some(false));
         assert_eq!(l.no_h_band, Some(true));
         // The three the element never mentions are still answered — see
-        // `From<TblLookXml> for TableLook` for why, and on what evidence.
+        // `tbl_look` for why, and on what evidence.
         assert_eq!(l.first_column, Some(true));
         assert_eq!(l.last_column, Some(true));
         assert_eq!(l.no_v_band, Some(true));
@@ -717,16 +732,37 @@ mod tests {
     /// in from. What an entirely silent element means is §17.4.55 note (a)'s
     /// question, and it is answered by the resolver
     /// (`render::resolve::conditional::ActiveRegions::WORD_DEFAULT`), not here.
+    ///
+    /// "States nothing" has to mean **absent from the cascade**, not "present
+    /// with six unstated flags": `Dup::is_absent` is what §17.7.2's "this
+    /// level did not set the property" reads, so a value here — however empty
+    /// — shadows every level below. This asserted the six `None`s until that
+    /// consequence was measured; see `tbl_look`.
     #[test]
     fn tbl_pr_tbl_look_empty_element_states_nothing() {
         let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook/></tblPr>"#);
-        let l = tp.look.cloned().unwrap();
-        assert_eq!(l.first_row, None);
-        assert_eq!(l.last_row, None);
-        assert_eq!(l.first_column, None);
-        assert_eq!(l.last_column, None);
-        assert_eq!(l.no_h_band, None);
-        assert_eq!(l.no_v_band, None);
+        assert!(
+            tp.look.is_absent(),
+            "an element stating nothing must not occupy the cascade slot"
+        );
+    }
+
+    /// The converse, and the guard on the line the check above draws: an
+    /// element stating *one* attribute is a value, and every flag it does not
+    /// mention is answered rather than left to the level below.
+    #[test]
+    fn tbl_pr_tbl_look_one_stated_attr_is_still_a_value() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook lastRow="1"/></tblPr>"#);
+        let l = tp.look.cloned().expect("one stated attribute is a value");
+        assert_eq!(l.last_row, Some(true));
+        assert_eq!(l.first_row, Some(true), "unstated reads as true");
+    }
+
+    /// …and so is a bare `@val`, whose bitmask answers all six.
+    #[test]
+    fn tbl_pr_tbl_look_a_bare_val_is_still_a_value() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="0000"/></tblPr>"#);
+        assert!(!tp.look.is_absent(), "a bitmask states all six flags");
     }
 
     #[test]

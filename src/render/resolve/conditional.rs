@@ -73,12 +73,14 @@ impl ActiveRegions {
     /// Resolve a table's `<w:tblLook>`, absent or partial, to the six answers.
     ///
     /// An absent element is [`Self::WORD_DEFAULT`] per note (a). A flag the
-    /// element leaves unstated falls back the same way — which in practice
-    /// only reaches an empty `<w:tblLook/>`, since the parse seam
-    /// (`From<TblLookXml> for TableLook`) answers every flag as soon as the
-    /// element states anything at all. An element that states nothing carries
-    /// no information, so treating it as absent is the same rule, not a
-    /// second one.
+    /// element leaves unstated falls back the same way, which is the same rule
+    /// and not a second one — though nothing now reaches it, because the parse
+    /// seam (`docx::parse::properties::schema::table::tbl_look`) answers every
+    /// flag as soon as the element states anything at all, and drops the
+    /// occurrence entirely when it states nothing. That drop is what keeps an
+    /// empty `<w:tblLook/>` from shadowing the table style's; this function
+    /// sees `None` for both spellings and cannot tell them apart, which is the
+    /// point.
     pub fn resolve(look: Option<&TableLook>) -> Self {
         let d = Self::WORD_DEFAULT;
         let Some(look) = look else { return d };

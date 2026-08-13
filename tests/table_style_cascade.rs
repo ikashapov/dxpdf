@@ -355,6 +355,97 @@ fn a_table_style_can_set_its_own_tbl_look() {
     );
 }
 
+/// A `lastRow` layer painted red, and how many cells it painted — the probe
+/// every `tblLook` case below reads, since `tblLook` has no geometry of its own.
+fn red_cells(pages: &[LayoutedPage]) -> usize {
+    page_geometry(pages)
+        .iter()
+        .filter(|g| g.starts_with("rect") && g.ends_with("#FF0000"))
+        .count()
+}
+
+const LAST_ROW_RED: &str = r#"<w:tblStylePr w:type="lastRow">
+             <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
+           </w:tblStylePr>"#;
+
+/// §17.4.55 × §17.7.2: an **empty** `<w:tblLook/>` states nothing, so it cannot
+/// shadow the style's.
+///
+/// `CT_TblLook`'s six attributes are optional `ST_OnOff` with no schema
+/// default, and `@val` is optional too — `<w:tblLook/>` therefore carries no
+/// information at all, which is the same amount the *absent* element carries.
+/// §17.4.55 note (a)'s absent-element default (Word's 0x04A0, `lastRow` off)
+/// is what the consumer applies when nothing in the cascade said otherwise;
+/// applying it because the direct level wrote an empty element discards a
+/// `lastRow="1"` the style did state, and the last row loses its shading.
+#[test]
+fn an_empty_tbl_look_does_not_shadow_the_styles() {
+    let styles = styles_with(&format!(
+        r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0"
+                               w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
+           {LAST_ROW_RED}"#
+    ));
+
+    let absent = layout(&table_document(""), &styles);
+    assert_eq!(
+        red_cells(&absent),
+        2,
+        "with no direct tblLook the style's lastRow=1 shades both cells of the \
+         last row — without which the assertion below is vacuous"
+    );
+
+    let empty = layout(&table_document("<w:tblLook/>"), &styles);
+    assert_eq!(
+        red_cells(&empty),
+        2,
+        "an empty <w:tblLook/> states nothing, so the style's tblLook still \
+         governs and the last row stays shaded"
+    );
+}
+
+/// The control on the other side: an element that *does* state something still
+/// replaces the style's, so the fix above cannot be "the direct level never
+/// wins". `lastRow="0"` switches the layer back off.
+#[test]
+fn a_stated_tbl_look_still_shadows_the_styles() {
+    let styles = styles_with(&format!(
+        r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0"
+                               w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
+           {LAST_ROW_RED}"#
+    ));
+    let overridden = layout(&table_document(r#"<w:tblLook w:lastRow="0"/>"#), &styles);
+    assert_eq!(
+        red_cells(&overridden),
+        0,
+        "a direct tblLook that states lastRow=0 replaces the style's wholesale"
+    );
+}
+
+/// The same question one level up, which is why the repair belongs at the parse
+/// seam rather than in one `.or_else`: a child style's empty `<w:tblLook/>` must
+/// not discard the `tblLook` its `basedOn` parent declared either. §17.7.4.3
+/// gives the child every property it does not restate, and an element stating
+/// nothing has restated nothing.
+#[test]
+fn an_empty_tbl_look_in_a_child_style_does_not_shadow_the_parents() {
+    let derived = layout(
+        &table_document(""),
+        &styles_derived_from(
+            &format!(
+                r#"<w:tblPr><w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0"
+                                       w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>
+                   {LAST_ROW_RED}"#
+            ),
+            r#"<w:tblPr><w:tblLook/></w:tblPr>"#,
+        ),
+    );
+    assert_eq!(
+        red_cells(&derived),
+        2,
+        "the child restated nothing, so the parent's lastRow=1 still governs"
+    );
+}
+
 /// §17.4.68 `tblStyleRowBandSize` — how many rows one horizontal band spans.
 #[test]
 fn a_table_style_can_set_the_row_band_size() {
