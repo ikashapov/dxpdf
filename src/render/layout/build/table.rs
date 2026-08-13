@@ -554,6 +554,31 @@ pub(super) fn build_table(
         Some(model::TableMeasure::Pct(pct)) => {
             // §17.4.63 / §17.18.90: the `pct` scale is fiftieths of a percent,
             // which `Dimension<FiftiethPercent>` carries and divides by.
+            //
+            // # The base is the caller's width, not the page's
+            //
+            // §17.4.63 says a `pct` table width is relative to "the text
+            // extents of the page", i.e. the page width less its margins.
+            // `available_width` is that only for a *top-level* table; for a
+            // nested one it is the enclosing cell's inner width, so the two
+            // bases diverge exactly when a table is nested.
+            //
+            // Left as the cell's width deliberately, and it is a choice rather
+            // than an oversight. Read literally, §17.4.63 makes a nested table
+            // declaring 100% as wide as the page's text column however narrow
+            // the cell holding it — which would draw it straight out of its own
+            // cell, and no implementation does that. §17.4.71 gives `tcW`'s
+            // `pct` a different base again ("the overall width of the table"),
+            // so the two sibling elements do not even agree on what a
+            // percentage is measured against.
+            //
+            // The corpus reaches this once: of 398 tables, exactly 1 is nested
+            // *and* `pct` — `sample-docx-files-sample1.docx` at `w="4000"`
+            // (80%), in a cell narrower than the page. Changing the base would
+            // move that table and nothing else, and there is no reference to
+            // move it toward. **Word reference render needed**: a nested table
+            // at `w:tblW w:type="pct" w:w="5000"` inside a half-width cell
+            // separates the two readings in one measurement.
             let ratio = pct.to_fraction();
             let base = if *pct >= Dimension::FULL && extends_for_alignment {
                 available_width + cell_margins_h
