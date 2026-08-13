@@ -347,26 +347,11 @@ pub(super) fn build_table(
         .iter()
         .enumerate()
         .map(|(row_idx, row)| {
-            let num_cells = row.cells.len();
             let cells: Vec<TableCellInput> = row
                 .cells
                 .iter()
                 .enumerate()
                 .map(|(col_idx, cell)| {
-                    let cond = resolve_cell_conditional(
-                        &CellGridPosition {
-                            row_idx,
-                            col_idx,
-                            num_rows,
-                            num_cols: num_cells,
-                            row_band_size,
-                            col_band_size,
-                        },
-                        tbl_look,
-                        style_overrides,
-                    );
-
-                    // Compute available width for nested content.
                     // §17.4.17: gridBefore offsets the row's first cell to the
                     // right by that many grid columns; subsequent spans accumulate.
                     let span = cell.properties.grid_span.cloned().unwrap_or(1) as usize;
@@ -375,6 +360,28 @@ pub(super) fn build_table(
                         grid_start +=
                             row.cells[ci].properties.grid_span.cloned().unwrap_or(1) as usize;
                     }
+
+                    // §17.7.6: the cell's *grid* position, which is what decides
+                    // its column regions — see `applicable_regions` for Word's
+                    // own answer. `col_idx` and this row's cell count would be
+                    // the same thing only while no row spans or skips a column,
+                    // and a table with `gridSpan`/`gridBefore` is exactly the
+                    // table a conditional style is worth getting right on.
+                    let cond = resolve_cell_conditional(
+                        &CellGridPosition {
+                            row_idx,
+                            grid_col: grid_start,
+                            grid_span: span,
+                            num_rows,
+                            num_cols,
+                            row_band_size,
+                            col_band_size,
+                        },
+                        tbl_look,
+                        style_overrides,
+                    );
+
+                    // Compute available width for nested content.
                     // A row may address more grid columns than `tblGrid` declares —
                     // a `gridBefore` past the end, or simply more `<w:tc>` than
                     // `<w:gridCol>`. Both occur in real producer output and Word
