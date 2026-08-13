@@ -3214,6 +3214,139 @@ mod tests {
         assert!(y_p2 >= margin_top - 1.0);
     }
 
+    // ── §17.4.28 + §17.4.44 — a table is aligned on its *outer* width ──
+    //
+    // `build/table.rs::reserve_cell_spacing` carves one `tblCellSpacing` out
+    // of the grid, so `col_widths` is the table's own width *minus* the
+    // spacing; `measure.rs` puts the spacing back to get the outer width the
+    // table actually occupies. Aligning on the slot sum alone therefore lands
+    // a centred table half a spacing off and a right-aligned one a whole
+    // spacing off — invisible in the corpus, where no table sets both `w:jc`
+    // and `w:tblCellSpacing`, and stated here so it stays fixed.
+    //
+    // Asserted through geometry rather than arithmetic: centred means equal
+    // gaps to the two content edges, right-aligned means the table's right
+    // edge meets the content edge.
+
+    /// A one-cell table that draws its issue-#168 outer outline, so the
+    /// table's outer edges are readable off the page.
+    fn aligned_spaced_table(
+        alignment: Option<crate::model::Alignment>,
+        cell_spacing: f32,
+        float_info: Option<super::TableFloatInfo>,
+    ) -> LayoutBlock {
+        let line = TableBorderLine {
+            width: Pt::new(1.0),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
+        LayoutBlock::Table {
+            rows: vec![row_with_label("x")],
+            col_widths: vec![Pt::new(100.0)],
+            cell_spacing: Pt::new(cell_spacing),
+            border_config: Some(TableBorderConfig {
+                top: Some(line),
+                bottom: Some(line),
+                left: Some(line),
+                right: Some(line),
+                inside_h: None,
+                inside_v: None,
+            }),
+            indent: Pt::ZERO,
+            alignment,
+            float_info,
+            style_id: None,
+        }
+    }
+
+    /// The left and right edges of everything the table painted. The issue-#168
+    /// outline spans the full outer width and every cell border sits inside it,
+    /// so this bounding span *is* the table's outer span.
+    fn painted_x_span(page: &crate::render::layout::draw_command::LayoutedPage) -> (f32, f32) {
+        let rects: Vec<_> = page
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Rect { rect, .. } => {
+                    Some((rect.origin.x.raw(), (rect.origin.x + rect.size.width).raw()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!rects.is_empty(), "table must paint its borders");
+        (
+            rects.iter().map(|r| r.0).fold(f32::INFINITY, f32::min),
+            rects.iter().map(|r| r.1).fold(f32::NEG_INFINITY, f32::max),
+        )
+    }
+
+    #[test]
+    fn a_centered_spaced_table_sits_equidistant_from_both_content_edges() {
+        let config = small_config();
+        let blocks = vec![aligned_spaced_table(
+            Some(crate::model::Alignment::Center),
+            20.0,
+            None,
+        )];
+        let pages = layout_section(&blocks, &config, None, Pt::ZERO, Pt::new(14.0), None);
+        let (left, right) = painted_x_span(&pages[0]);
+        let content_left = config.margins.left.raw();
+        let content_right = content_left + config.content_width().raw();
+        assert!(
+            (left - content_left - (content_right - right)).abs() < 0.01,
+            "centred: left gap {} must equal right gap {} (table spans {left}..{right})",
+            left - content_left,
+            content_right - right,
+        );
+    }
+
+    #[test]
+    fn a_right_aligned_spaced_table_ends_at_the_content_edge() {
+        let config = small_config();
+        let blocks = vec![aligned_spaced_table(
+            Some(crate::model::Alignment::End),
+            20.0,
+            None,
+        )];
+        let pages = layout_section(&blocks, &config, None, Pt::ZERO, Pt::new(14.0), None);
+        let (_, right) = painted_x_span(&pages[0]);
+        let content_right = (config.margins.left + config.content_width()).raw();
+        assert!(
+            (right - content_right).abs() < 0.01,
+            "right-aligned: table right edge {right} must meet the content edge {content_right}",
+        );
+    }
+
+    /// The floating branch (§17.4.58) reads the width off the laid-out table
+    /// rather than re-deriving it, and is the control the body path had to be
+    /// brought in line with — it must not move.
+    #[test]
+    fn a_centered_spaced_floating_table_sits_equidistant_too() {
+        let config = small_config();
+        let blocks = vec![aligned_spaced_table(
+            Some(crate::model::Alignment::Center),
+            20.0,
+            Some(super::TableFloatInfo {
+                right_gap: Pt::ZERO,
+                bottom_gap: Pt::ZERO,
+                x_align: None,
+                y_offset: Pt::ZERO,
+                vert_anchor: crate::model::TableAnchor::Page,
+                overlap: None,
+            }),
+        )];
+        let pages = layout_section(&blocks, &config, None, Pt::ZERO, Pt::new(14.0), None);
+        let (left, right) = painted_x_span(&pages[0]);
+        let content_left = config.margins.left.raw();
+        let content_right = content_left + config.content_width().raw();
+        assert!(
+            (left - content_left - (content_right - right)).abs() < 0.01,
+            "centred float: left gap {} must equal right gap {}",
+            left - content_left,
+            content_right - right,
+        );
+    }
+
     // ── §17.3.1.24 paragraph border grouping tests ─────────────────────
 
     #[test]

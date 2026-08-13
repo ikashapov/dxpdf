@@ -2429,7 +2429,15 @@ pub(crate) fn layout_section_with_clearance(
                 );
 
                 // §17.4.28 / §17.4.51: compute table x position.
-                let table_width: Pt = col_widths.iter().copied().sum();
+                //
+                // The width to align on is the table's *outer* width, which
+                // every slice already reports — §17.4.44 spacing was carved
+                // out of the slots by `build/table.rs::reserve_cell_spacing`,
+                // so `sum(col_widths)` is the table's width *minus* one
+                // `tblCellSpacing` and centring on it lands the table half a
+                // spacing off. Every slice spans the same width; take the
+                // first (there is always one).
+                let table_width = slices.first().map_or(Pt::ZERO, |s| s.size.width);
                 let table_x = table_x_offset(
                     *alignment,
                     *indent,

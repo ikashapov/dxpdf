@@ -2300,4 +2300,38 @@ mod tests {
              laid out whole"
         );
     }
+
+    /// §17.4.44: the width a table *occupies* is the slot sum **plus** one
+    /// `tblCellSpacing`, because `build/table.rs::reserve_cell_spacing` already
+    /// took that spacing out of the slots. Reported the same way by both paths
+    /// and on every slice, so a caller placing the table never has to re-derive
+    /// it — which is what `section/layout.rs` used to do, and got wrong.
+    #[test]
+    fn the_reported_width_is_the_outer_width_including_cell_spacing() {
+        let spacing = Pt::new(6.0);
+        let rows = vec![one_cell_row(vec![]), one_cell_row(vec![])];
+        let widths = [Pt::new(94.0)];
+        let outer = Pt::new(100.0);
+
+        let whole = layout_table(&rows, &widths, spacing, Pt::new(14.0), None, None, false);
+        assert_eq!(whole.size.width, outer, "94pt of slots + 6pt of spacing");
+
+        let split = layout_table_paginated(
+            &rows,
+            &widths,
+            spacing,
+            Pt::new(14.0),
+            None,
+            None,
+            &TablePaginationConfig {
+                available_height: spacing * 1.5,
+                page_height: spacing * 1.5,
+                suppress_first_row_top: false,
+            },
+        );
+        assert_eq!(split.len(), 2, "precondition: the table paginated");
+        for (i, slice) in split.iter().enumerate() {
+            assert_eq!(slice.size.width, outer, "slice {i} spans the same width");
+        }
+    }
 }
