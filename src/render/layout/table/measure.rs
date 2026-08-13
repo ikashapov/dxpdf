@@ -210,8 +210,8 @@ pub(super) fn measure_table_rows(
 mod tests {
     use super::super::borders::CellEdge;
     use super::super::types::{
-        CellBorderConfig, CellBorderOverride, CellVAlign, TableBorderConfig, TableBorderLine,
-        TableBorderStyle, TableCellInput, TableRowInput,
+        CellBorderConfig, CellBorderOverride, CellVAlign, RowHeightRule, TableBorderConfig,
+        TableBorderLine, TableBorderStyle, TableCellInput, TableRowInput, VerticalMergeState,
     };
     use super::measure_table_rows;
     use crate::render::dimension::Pt;
@@ -268,6 +268,87 @@ mod tests {
             cant_split: None,
             grid_before: 0,
             border_overrides: None,
+        }
+    }
+
+    /// §17.4.80: `row`, plus a `trHeight` constraint.
+    fn row_sized(cells: Vec<TableCellInput>, rule: RowHeightRule) -> TableRowInput {
+        TableRowInput {
+            height_rule: Some(rule),
+            ..row(cells)
+        }
+    }
+
+    /// §17.4.15: `row`, starting `grid_before` grid columns in.
+    fn row_at(cells: Vec<TableCellInput>, grid_before: u32) -> TableRowInput {
+        TableRowInput {
+            grid_before,
+            ..row(cells)
+        }
+    }
+
+    /// One 14 pt line per `words` entry that does not fit beside its
+    /// predecessor. `default_line_height` is 10 pt everywhere below, but the
+    /// fragment's own 10 pt ascent + 4 pt descent wins, so each emitted line is
+    /// exactly 14 pt tall.
+    fn text_block(words: &[(&str, f32)]) -> crate::render::layout::section::LayoutBlock {
+        use crate::render::fonts::Toggle;
+        use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
+        use std::rc::Rc;
+
+        let font = Rc::new(FontProps {
+            rtl: Toggle::Absent,
+            family: Rc::from("Test"),
+            size: Pt::new(12.0),
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
+            underline: false,
+            char_spacing: Pt::ZERO,
+            text_scale: 1.0,
+            underline_position: Pt::ZERO,
+            underline_thickness: Pt::ZERO,
+        });
+        crate::render::layout::section::LayoutBlock::Paragraph {
+            fragments: words
+                .iter()
+                .map(|&(text, width)| Fragment::Text {
+                    shaped: None,
+                    level: crate::i18n::bidi::BidiLevel::LTR,
+                    text: text.into(),
+                    break_after: crate::render::layout::fragment::fixture_break_after(text),
+                    font: font.clone(),
+                    color: RgbColor::BLACK,
+                    width: Pt::new(width),
+                    trimmed_width: Pt::new(width),
+                    metrics: TextMetrics {
+                        ascent: Pt::new(10.0),
+                        descent: Pt::new(4.0),
+                        leading: Pt::ZERO,
+                    },
+                    hyperlink_url: None,
+                    shading: None,
+                    border: None,
+                    baseline_offset: Pt::ZERO,
+                    text_offset: Pt::ZERO,
+                    is_footnote_ref: false,
+                })
+                .collect(),
+            style: crate::render::layout::paragraph::ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    /// A one-column cell holding `lines` lines of text — each word is 30 pt
+    /// wide and breakable, so a 30 pt content width puts one per line.
+    fn cell_of(lines: usize) -> TableCellInput {
+        TableCellInput {
+            blocks: vec![text_block(
+                &(0..lines).map(|_| ("aa ", 30.0)).collect::<Vec<_>>(),
+            )],
+            ..cell(1, None)
         }
     }
 
@@ -727,5 +808,367 @@ mod tests {
         assert!(spaced.rows[0].borders[0].left.line().is_none());
         assert!(spaced.rows[1].borders[1].bottom.line().is_none());
         assert!(spaced.rows[1].borders[1].right.line().is_none());
+    }
+
+    // ── §17.4.80 row height rules ────────────────────────────────────────
+    //
+    // `RowHeightRule` reached layout with no layout test of its own: `mod.rs`
+    // pins `AtLeast` in the one direction where it wins, and `Exact` had only a
+    // parse test. Both arms of the `match` below are decided here, together
+    // with the two orderings around them — the rule runs *before* the cell
+    // spacing gap is added and *before* `expand_rows_for_vmerge`.
+
+    /// A one-column table 50 pt wide, so `cell_of(n)` is exactly `n` lines.
+    fn sized_table(rows: &[TableRowInput]) -> super::MeasuredTable {
+        measure_table_rows(
+            rows,
+            &[Pt::new(50.0)],
+            Pt::ZERO,
+            Pt::new(10.0),
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// The measurement the rules are compared against: three 14 pt lines.
+    #[test]
+    fn an_unconstrained_row_is_as_tall_as_its_content() {
+        let m = sized_table(&[row(vec![cell_of(3)])]);
+        assert_eq!(m.rows[0].height, Pt::new(42.0), "three 14 pt lines");
+    }
+
+    /// §17.4.80 `hRule="exact"`: *"the height of the row shall be exactly the
+    /// value specified"*. Shorter content does not shrink it.
+    #[test]
+    fn an_exact_row_height_holds_when_the_content_is_shorter() {
+        let m = sized_table(&[row_sized(
+            vec![cell_of(1)],
+            RowHeightRule::Exact(Pt::new(40.0)),
+        )]);
+        assert_eq!(
+            m.rows[0].height,
+            Pt::new(40.0),
+            "14 pt of content, 40 pt row"
+        );
+    }
+
+    /// …and taller content does not grow it, which is the half `atLeast` does
+    /// not share: `exact` is a ceiling as well as a floor. Three rows of the
+    /// same declared height and wildly different content must come out the same
+    /// height, and the 3-line row is calibrated by
+    /// `an_unconstrained_row_is_as_tall_as_its_content` at 42 pt — so the
+    /// equality is not vacuous.
+    ///
+    /// What this deliberately does **not** assert is where the overflowing
+    /// content goes. dxpdf does not clip it: the fourth line is painted below
+    /// the row's box and overprints whatever follows the table. That is a known
+    /// open defect rather than a decision — §17.4.80 states the height and says
+    /// nothing about the overflow, LibreOffice clips, and no Word render is on
+    /// record — so pinning the overflow here would pin a guess. The height,
+    /// which the section does state, is pinned.
+    #[test]
+    fn an_exact_row_height_holds_when_the_content_is_taller() {
+        let heights: Vec<Pt> = [0usize, 3, 8]
+            .iter()
+            .map(|&n| {
+                sized_table(&[row_sized(
+                    vec![cell_of(n)],
+                    RowHeightRule::Exact(Pt::new(20.0)),
+                )])
+                .rows[0]
+                    .height
+            })
+            .collect();
+        assert_eq!(
+            heights,
+            vec![Pt::new(20.0); 3],
+            "an exact row is its declared height whatever it holds"
+        );
+    }
+
+    /// §17.4.80 `hRule="atLeast"` is a floor and only a floor — the same two
+    /// contents that leave an `exact` row unmoved decide an `atLeast` one.
+    #[test]
+    fn an_at_least_row_height_is_a_floor_that_taller_content_overrides() {
+        let at_least = |n| {
+            sized_table(&[row_sized(
+                vec![cell_of(n)],
+                RowHeightRule::AtLeast(Pt::new(20.0)),
+            )])
+            .rows[0]
+                .height
+        };
+        assert_eq!(at_least(1), Pt::new(20.0), "14 pt of content raised to 20");
+        assert_eq!(
+            at_least(3),
+            Pt::new(42.0),
+            "42 pt of content is not cut to 20"
+        );
+    }
+
+    /// §17.4.80 × §17.4.45: the height rule sizes the row's **content**, and
+    /// the leading gap is reserved on top of it. So a row does not lose the
+    /// height its author declared to a gap the author did not — its content box
+    /// is the declared height at every spacing, and only the row's outer box
+    /// grows.
+    ///
+    /// Stated as the difference between two spacings rather than as one number,
+    /// because that is the invariant: `height - leading_gap` is the rule's own
+    /// answer, unchanged.
+    #[test]
+    fn an_exact_row_height_is_measured_before_the_cell_spacing_gap() {
+        let spacing = Pt::new(6.0);
+        let rows = [row_sized(
+            vec![cell_of(1)],
+            RowHeightRule::Exact(Pt::new(40.0)),
+        )];
+        // The slot is pre-shrunk by `reserve_cell_spacing` on the build side.
+        let spaced = measure_table_rows(
+            &rows,
+            &[Pt::new(44.0)],
+            spacing,
+            Pt::new(10.0),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(spaced.rows[0].leading_gap, spacing);
+        assert_eq!(
+            spaced.rows[0].height - spaced.rows[0].leading_gap,
+            Pt::new(40.0),
+            "the declared height is the content box, not the outer box"
+        );
+        assert_eq!(spaced.rows[0].height, Pt::new(46.0));
+    }
+
+    /// §17.4.80 × §17.4.84: the height rule runs **before**
+    /// `expand_rows_for_vmerge`, and that pass puts a span's shortfall on the
+    /// span's *last* row (issue #165). Together those two facts decide the case
+    /// neither settles alone: an `exact` restart row keeps exactly its declared
+    /// height, and every point the merged content still needs lands below it.
+    ///
+    /// The span totals the restart cell's content height exactly, which is what
+    /// makes this more than a restatement of `expand_puts_overflow_on_the_last_
+    /// row_of_the_span` — that test starts from two rows of natural height, and
+    /// here the first row's height is the rule's answer rather than its
+    /// content's.
+    #[test]
+    fn an_exact_height_on_a_vmerge_restart_row_is_kept_and_the_span_grows_below() {
+        let restart = TableCellInput {
+            vertical_merge: Some(VerticalMergeState::Restart),
+            ..cell_of(3)
+        };
+        let continued = TableCellInput {
+            vertical_merge: Some(VerticalMergeState::Continue),
+            ..cell(1, None)
+        };
+        let m = sized_table(&[
+            row_sized(vec![restart], RowHeightRule::Exact(Pt::new(10.0))),
+            row(vec![continued]),
+        ]);
+
+        assert_eq!(
+            m.rows[0].height,
+            Pt::new(10.0),
+            "the restart row keeps the height it declared"
+        );
+        assert_eq!(
+            m.rows[1].height,
+            Pt::new(32.0),
+            "the last row of the span absorbs the remaining 42 − 10"
+        );
+        assert_eq!(
+            m.rows[0].height + m.rows[1].height,
+            Pt::new(42.0),
+            "and the span totals the merged cell's content exactly"
+        );
+    }
+
+    // ── §17.4.15 × §17.4.45 ──────────────────────────────────────────────
+
+    /// `gridBefore` and `tblCellSpacing` both displace a cell rightward, and no
+    /// test crossed them: every `gridBefore` case ran at zero spacing and every
+    /// spacing case at zero `gridBefore`.
+    ///
+    /// They compose **by construction**, which is what is asserted: the columns
+    /// a `gridBefore` skips are grid columns like any other, so a cell in
+    /// column 1 must land exactly where column 1's cell lands in a row that
+    /// declares no `gridBefore`. A formula that dropped either term — or applied
+    /// the spacing twice for a displaced cell — fails that parity.
+    #[test]
+    fn grid_before_and_cell_spacing_place_a_cell_in_the_same_column() {
+        let spacing = Pt::new(10.0);
+        // Three 30 pt slots plus one spacing is a 100 pt table.
+        let slots = vec![Pt::new(30.0); 3];
+        let rows = vec![
+            row(vec![cell(1, None), cell(1, None), cell(1, None)]),
+            row_at(vec![cell(1, None), cell(1, None)], 1),
+        ];
+        let m = measure_table_rows(
+            &rows,
+            &slots,
+            spacing,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+
+        let full = &m.rows[0].entries;
+        let offset = &m.rows[1].entries;
+        for (i, e) in offset.iter().enumerate() {
+            assert_eq!(
+                (e.cell_x, e.cell_w),
+                (full[i + 1].cell_x, full[i + 1].cell_w),
+                "the displaced row's cell {i} must sit in grid column {}",
+                i + 1
+            );
+        }
+        // Absolute, so the parity above cannot be satisfied by moving both rows
+        // together: one whole slot in, then one spacing, with one gap taken out
+        // of the slot's own width.
+        assert_eq!(offset[0].cell_x, Pt::new(40.0), "30 pt of slot + one gap");
+        assert_eq!(
+            offset[0].cell_w,
+            Pt::new(20.0),
+            "the 30 pt slot less one gap"
+        );
+        // The skipped column is still part of the table, so the gap between the
+        // table's left edge and the first *drawn* cell is one column wider than
+        // in the undisplaced row — and the table's own width is untouched.
+        assert_eq!(m.table_width, Pt::new(100.0));
+    }
+
+    // ── §17.4.21 / §17.4.80: a row with no cells ─────────────────────────
+
+    /// `<w:tr/>` with no `<w:tc>` is well-formed. §17.4.21 says a row's height
+    /// is determined by the glyphs in its cells, so a row with none has none —
+    /// and having none it must displace nothing: its neighbours land exactly
+    /// where they land in a table that never contained it.
+    ///
+    /// The populated rows carry a line of text so that "zero" is a measurement
+    /// rather than the default every empty cell already produces.
+    #[test]
+    fn a_row_with_no_cells_is_zero_height_and_moves_nothing() {
+        let slots = vec![Pt::new(50.0), Pt::new(50.0)];
+        let populated = || row(vec![cell_of(1), cell_of(1)]);
+        let measure = |rows: &[TableRowInput]| {
+            measure_table_rows(
+                rows,
+                &slots,
+                Pt::ZERO,
+                Pt::new(10.0),
+                Some(&all_single()),
+                None,
+                false,
+            )
+        };
+        let gapped = measure(&[populated(), row(vec![]), populated()]);
+        let control = measure(&[populated(), populated()]);
+
+        assert!(gapped.rows[1].entries.is_empty(), "no cells, no entries");
+        assert_eq!(gapped.rows[1].height, Pt::ZERO, "no cells, no height");
+        assert_eq!(gapped.table_width, control.table_width);
+
+        for (mine, theirs) in [(0usize, 0usize), (2, 1)] {
+            assert_eq!(
+                gapped.rows[mine].height, control.rows[theirs].height,
+                "row {mine} changed height"
+            );
+            let got: Vec<_> = gapped.rows[mine]
+                .entries
+                .iter()
+                .map(|e| (e.cell_x, e.cell_w))
+                .collect();
+            let want: Vec<_> = control.rows[theirs]
+                .entries
+                .iter()
+                .map(|e| (e.cell_x, e.cell_w))
+                .collect();
+            assert_eq!(got, want, "row {mine} moved");
+        }
+        // …and the populated rows really are 14 pt, so the zero above is a
+        // difference and not the table's uniform answer.
+        assert_eq!(gapped.rows[0].height, Pt::new(14.0));
+    }
+
+    // ── §17.4.66: a border wider than the margin it sits behind ──────────
+
+    /// The cell's content is laid out inside `cell_w` less however much its own
+    /// borders stick out past its margins, so text and border cannot overlap.
+    /// Nothing pinned that deflation: `cell_w` is unchanged by it, so it is
+    /// only visible in what the content does with the width it is given.
+    ///
+    /// Two words of 30 pt in a 62 pt cell: they fit on one line with no border,
+    /// and a 10 pt left border leaves 52 pt, which is one word short.
+    #[test]
+    fn a_border_wider_than_the_margin_narrows_the_content_and_can_force_a_wrap() {
+        let heavy = single(10.0);
+        let with_left_border = TableCellInput {
+            cell_borders: Some(CellBorderConfig {
+                top: None,
+                bottom: None,
+                left: Some(CellBorderOverride::Border(heavy)),
+                right: None,
+            }),
+            ..cell_of(2)
+        };
+        let measure = |c: TableCellInput| {
+            measure_table_rows(
+                &[row(vec![c])],
+                &[Pt::new(62.0)],
+                Pt::ZERO,
+                Pt::new(10.0),
+                None,
+                None,
+                false,
+            )
+        };
+
+        let plain = measure(cell_of(2));
+        let bordered = measure(with_left_border);
+        assert_eq!(
+            plain.rows[0].height,
+            Pt::new(14.0),
+            "60 pt of text fits across a 62 pt cell"
+        );
+        assert_eq!(
+            bordered.rows[0].height,
+            Pt::new(28.0),
+            "…and not across the 52 pt the 10 pt border leaves"
+        );
+        assert_eq!(
+            bordered.rows[0].entries[0].cell_w, plain.rows[0].entries[0].cell_w,
+            "the cell's own box is unchanged — only its content width narrows"
+        );
+    }
+
+    // ── §17.4.48: a `gridSpan` the grid cannot hold ──────────────────────
+
+    /// A row may address more grid columns than the grid declares. Upstream
+    /// `seat_every_cell` grows the grid so this cannot reach layout from a
+    /// document, but the clamp here is what keeps a malformed input from
+    /// panicking on the slice — and a clamp that inverted the range would panic
+    /// just as an unclamped end would.
+    ///
+    /// The cell gets every column that exists, which is the most width it could
+    /// have had: its box ends exactly at the table's right edge.
+    #[test]
+    fn a_span_past_the_end_of_the_grid_takes_every_column_there_is() {
+        let cols = vec![Pt::new(100.0), Pt::new(100.0)];
+        let m = measure_table_rows(
+            &[row(vec![cell(5, None)])],
+            &cols,
+            Pt::ZERO,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+        let e = &m.rows[0].entries[0];
+        assert_eq!(e.cell_x, Pt::ZERO);
+        assert_eq!(e.cell_w, Pt::new(200.0), "both declared columns, not five");
+        assert_eq!(e.cell_x + e.cell_w, m.table_width, "flush with the table");
     }
 }
