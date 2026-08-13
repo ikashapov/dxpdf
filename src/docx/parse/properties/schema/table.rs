@@ -18,6 +18,7 @@ use crate::docx::parse::primitives::st_enums::{
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
 use crate::docx::parse::primitives::{last_toggle, OnOff};
+use crate::docx::parse::serde_xml::UnknownChildren;
 
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
@@ -63,6 +64,11 @@ pub(crate) struct TblPrXml {
     tblp_pr: Vec<TblpPrXml>,
     #[serde(rename = "tblOverlap", default)]
     tbl_overlap: Vec<ValAttr<StTblOverlap>>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 /// `<w:tblLayout w:type="fixed"/>` — note `@type` (not `@val`).
@@ -205,10 +211,16 @@ pub(crate) struct TblPrExXml {
         deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
     tbl_cell_spacing: Vec<TableMeasureXml>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
     fn from(x: TblPrExXml) -> Self {
+        x.unknown.warn_once("w:tblPrEx");
         Self {
             borders: Dup::from(x.tbl_borders).into_value().map(Into::into),
             cell_spacing: Dup::from(x.tbl_cell_spacing).into_value().map(Into::into),
@@ -218,6 +230,7 @@ impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
 
 impl TblPrXml {
     pub(crate) fn split(self) -> (TableProperties, Option<StyleId>) {
+        self.unknown.warn_once("w:tblPr");
         let style_id = Dup::from(self.tbl_style)
             .into_value()
             .map(|v| StyleId::new(v.val));
@@ -399,6 +412,11 @@ pub(crate) struct TrPrXml {
     /// not fail deserialization.
     #[serde(rename = "del", default)]
     del: Vec<RowRevisionMarkerXml>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 /// CT_TrackChange as it appears in `<w:trPr>` — presence-only, so no field is
@@ -451,6 +469,7 @@ impl From<TrHeightXml> for TableRowHeight {
 
 impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
+        x.unknown.warn_once("w:trPr");
         Self {
             height: Dup::from(x.tr_height).map(Into::into),
             is_header: last_toggle(x.tbl_header),
@@ -505,6 +524,11 @@ pub(crate) struct TcPrXml {
     no_wrap: Vec<OnOff>,
     #[serde(rename = "cnfStyle", default)]
     cnf_style: Vec<CnfStyleXml>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 /// `<w:vMerge/>` — absent `@val` means "continue"; `@val="restart"` starts a
@@ -535,6 +559,7 @@ impl From<TcPrXml> for TableCellProperties {
     /// Every duplicable child is carried into the model whole; `Dup::get`
     /// applies last-wins where a consumer reads it. See `model::dup`.
     fn from(x: TcPrXml) -> Self {
+        x.unknown.warn_once("w:tcPr");
         Self {
             width: x.tc_w.into_iter().map(Into::into).collect(),
             borders: x.tc_borders.into_iter().map(Into::into).collect(),
@@ -1056,5 +1081,111 @@ mod tests {
         let tc = parse_tc_pr(r#"<tcPr><tcMar><top w="100" type="dxa"/></tcMar></tcPr>"#);
         assert!(!tc.margins.is_duplicated());
         assert_eq!(tc.margins.all().len(), 1);
+    }
+
+    // ── unmodelled children are reported, not dropped ──
+    //
+    // A plain-struct property bag silently discards an element it does not
+    // name, which is why `w:hMerge` and `w:bidiVisual` were invisible at
+    // runtime rather than merely unimplemented. These pin both directions:
+    // an unnamed child is captured by name, and a named one never is.
+
+    #[test]
+    fn tbl_pr_records_an_unmodelled_child() {
+        let x: TblPrXml =
+            quick_xml::de::from_str(r#"<tblPr><tblStyle val="Grid"/><bidiVisual/></tblPr>"#)
+                .unwrap();
+        assert_eq!(x.unknown.names(), ["bidiVisual"]);
+        // The modelled sibling is unaffected by the catch-all.
+        assert_eq!(
+            x.split().1.map(|s| s.as_str().to_string()),
+            Some("Grid".into())
+        );
+    }
+
+    #[test]
+    fn tc_pr_records_an_unmodelled_child() {
+        let x: TcPrXml =
+            quick_xml::de::from_str(r#"<tcPr><gridSpan val="2"/><hMerge val="restart"/></tcPr>"#)
+                .unwrap();
+        assert_eq!(x.unknown.names(), ["hMerge"]);
+        assert_eq!(
+            TableCellProperties::from(x).grid_span.get().copied(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn tr_pr_records_an_unmodelled_child() {
+        let x: TrPrXml =
+            quick_xml::de::from_str(r#"<trPr><cantSplit/><divId val="7"/></trPr>"#).unwrap();
+        assert_eq!(x.unknown.names(), ["divId"]);
+        assert_eq!(TableRowProperties::from(x).cant_split, Some(true));
+    }
+
+    #[test]
+    fn tbl_pr_ex_records_an_unmodelled_child() {
+        let x: TblPrExXml =
+            quick_xml::de::from_str(r#"<tblPrEx><tblLayout type="fixed"/></tblPrEx>"#).unwrap();
+        assert_eq!(
+            x.unknown.names(),
+            ["tblLayout"],
+            "tblPrEx models only borders and cell spacing today, so its own \
+             tblLayout is unmodelled and must say so"
+        );
+    }
+
+    /// The trap detector for the three tests above: if a *modelled* child ever
+    /// reached the catch-all, every real document would log a warning for a
+    /// property that is in fact implemented, and the report would be noise.
+    #[test]
+    fn a_bag_of_only_modelled_children_reports_nothing() {
+        let tbl: TblPrXml = quick_xml::de::from_str(
+            r#"<tblPr><tblStyle val="G"/><tblW w="5000" type="pct"/><jc val="center"/>
+               <tblLayout type="fixed"/><tblInd w="100" type="dxa"/>
+               <tblCellSpacing w="40" type="dxa"/><tblLook val="04A0"/>
+               <tblStyleRowBandSize val="1"/><tblStyleColBandSize val="2"/>
+               <tblOverlap val="never"/></tblPr>"#,
+        )
+        .unwrap();
+        assert!(
+            tbl.unknown.names().is_empty(),
+            "tblPr: {:?}",
+            tbl.unknown.names()
+        );
+
+        let tr: TrPrXml = quick_xml::de::from_str(
+            r#"<trPr><trHeight val="300" hRule="atLeast"/><tblHeader/><cantSplit/>
+               <jc val="center"/><gridBefore val="1"/><gridAfter val="1"/>
+               <wBefore w="10" type="dxa"/><wAfter w="10" type="dxa"/>
+               <tblCellSpacing w="40" type="dxa"/></trPr>"#,
+        )
+        .unwrap();
+        assert!(
+            tr.unknown.names().is_empty(),
+            "trPr: {:?}",
+            tr.unknown.names()
+        );
+
+        let tc: TcPrXml = quick_xml::de::from_str(
+            r#"<tcPr><tcW w="100" type="dxa"/><shd fill="FF0000"/><vAlign val="center"/>
+               <vMerge val="restart"/><gridSpan val="2"/><noWrap/>
+               <textDirection val="tbRl"/><tcMar><top w="1" type="dxa"/></tcMar></tcPr>"#,
+        )
+        .unwrap();
+        assert!(
+            tc.unknown.names().is_empty(),
+            "tcPr: {:?}",
+            tc.unknown.names()
+        );
+
+        let ex: TblPrExXml =
+            quick_xml::de::from_str(r#"<tblPrEx><tblCellSpacing w="40" type="dxa"/></tblPrEx>"#)
+                .unwrap();
+        assert!(
+            ex.unknown.names().is_empty(),
+            "tblPrEx: {:?}",
+            ex.unknown.names()
+        );
     }
 }
