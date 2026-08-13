@@ -619,6 +619,16 @@ mod tests {
         assert_eq!(tp.alignment, Dup::from(Some(Alignment::Center)));
     }
 
+    /// §17.18.87: the *other* value of `ST_TblLayoutType`, and the only one
+    /// that names the auto-fit algorithm — `<w:tblLayout w:type="fixed"/>` was
+    /// the sole spelling the corpus contained, so this half went untested and
+    /// unparseable together. See `StTblLayoutType`.
+    #[test]
+    fn tbl_pr_layout_autofit() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLayout type="autofit"/></tblPr>"#);
+        assert_eq!(tp.layout, Dup::from(Some(TableLayout::Autofit)));
+    }
+
     #[test]
     fn tbl_pr_borders_and_margins() {
         let (tp, _) = parse_tbl_pr(

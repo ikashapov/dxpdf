@@ -85,9 +85,16 @@ pub enum TableMeasure {
     Nil,
 }
 
+/// §17.18.87 `ST_TblLayoutType`, one variant per enumerated value.
+///
+/// `Autofit`, not `Auto`: the type's two values are `fixed` and `autofit`, and
+/// the `auto` §17.4.52's prose names as the default is a typo for the latter —
+/// see
+/// [`StTblLayoutType`](crate::docx::parse::primitives::st_enums::StTblLayoutType),
+/// which states the evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableLayout {
-    Auto,
+    Autofit,
     Fixed,
 }
 
