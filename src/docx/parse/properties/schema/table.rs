@@ -374,6 +374,34 @@ pub(crate) struct TrPrXml {
         deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
     tbl_cell_spacing: Vec<TableMeasureXml>,
+    /// `<w:del>` — CT_TrPr's row-deletion marker, and the form **Word** writes
+    /// when a row is deleted with change tracking on. Only its presence is
+    /// read (see [`TrPrXml::marks_row_deleted`]); the `w:id`/`w:author`/
+    /// `w:date` attributes describe the edit, not the document, and this
+    /// parser renders the final view rather than the revision history.
+    ///
+    /// `Vec` for the same reason as the toggles above — a repeated child must
+    /// not fail deserialization.
+    #[serde(rename = "del", default)]
+    del: Vec<RowRevisionMarkerXml>,
+}
+
+/// CT_TrackChange as it appears in `<w:trPr>` — presence-only, so no field is
+/// modelled. Distinct from body-level `IgnoredXml` so this schema does not
+/// depend on the body schema, which depends on it.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct RowRevisionMarkerXml {}
+
+impl TrPrXml {
+    /// Whether this row is marked deleted by `<w:trPr><w:del/>`.
+    ///
+    /// Read at the parse seam rather than carried on `TableRowProperties`,
+    /// because that is where the same question is answered for runs: a
+    /// `<w:del>`-wrapped run never reaches the model either. The model
+    /// describes the document, not the edits that produced it.
+    pub(crate) fn marks_row_deleted(&self) -> bool {
+        !self.del.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

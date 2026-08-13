@@ -467,6 +467,18 @@ fn convert_table(t: TableXml, ctx: &mut ConvertCtx) -> Table {
 /// Range markers, proofreading errors, permission ranges, and the
 /// `tblPr`/`tblGrid` duplicates produced by `$value` are dropped — they
 /// have no rendered effect at table level. Document order is preserved.
+///
+/// Revision handling is the **final** view, the same rule
+/// [`append_para_children`] applies to runs: insert-side wrappers (`<w:ins>`,
+/// `<w:moveTo>`) contribute their rows and delete-side ones (`<w:del>`,
+/// `<w:moveFrom>`) do not. Rows and runs must answer this the same way or a
+/// single document renders half in each view.
+///
+/// A row is deleted in either of two spellings, and both are handled here: the
+/// table-level wrapper above, and `<w:del>` inside the row's own `<w:trPr>` —
+/// which is the one **Word** writes. The `trPr` form is the reason this cannot
+/// be a wrapper-only rule: Word wraps the deleted row's runs in `<w:del>` too,
+/// so ignoring the row marker left an empty row that belongs to neither view.
 fn collect_table_rows(children: Vec<TableChildXml>) -> Vec<TableRowXml> {
     let mut rows = Vec::with_capacity(children.len());
     for child in children {
@@ -477,10 +489,10 @@ fn collect_table_rows(children: Vec<TableChildXml>) -> Vec<TableRowXml> {
                     rows.extend(collect_table_rows(content.children));
                 }
             }
-            TableChildXml::Ins(rt)
-            | TableChildXml::Del(rt)
-            | TableChildXml::MoveFrom(rt)
-            | TableChildXml::MoveTo(rt) => rows.extend(rt.rows),
+            // Insert side: the rows are in the final document.
+            TableChildXml::Ins(rt) | TableChildXml::MoveTo(rt) => rows.extend(rt.rows),
+            // Delete side: they are not.
+            TableChildXml::Del(_) | TableChildXml::MoveFrom(_) => {}
             TableChildXml::CustomXml(cx) => {
                 rows.extend(collect_table_rows(cx.children));
             }
@@ -496,6 +508,15 @@ fn collect_table_rows(children: Vec<TableChildXml>) -> Vec<TableRowXml> {
             | TableChildXml::Other => {}
         }
     }
+    // Applied once over everything gathered above, so a row marked deleted in
+    // its own `<w:trPr>` goes whether it sat bare in the table, inside an
+    // `<w:ins>`, or inside an `<w:sdt>`. Idempotent, so the recursive calls
+    // having already run it costs nothing.
+    // `last()` is [`Dup`]'s §17.7.2 last-wins rule spelled out on a borrow —
+    // the same occurrence `convert_table_row`'s `Dup::from(r.tr_pr)` resolves
+    // to, so a document that repeats `<w:trPr>` cannot have the deletion read
+    // off one copy and every other property off another.
+    rows.retain(|r| !r.tr_pr.last().is_some_and(|pr| pr.marks_row_deleted()));
     rows
 }
 
@@ -700,6 +721,135 @@ mod tests {
                    </w:ins></w:p>"#
             ),
             "link"
+        );
+    }
+
+    // ── Revision-tracked *rows* (same final view as revision-tracked runs) ──
+
+    /// The concatenated text of each surviving row of a `<w:tbl>`, in document
+    /// order. Reads the converted model rather than the schema, so it measures
+    /// what a renderer would be handed.
+    fn table_row_texts(xml: &str) -> Vec<String> {
+        let t: TableXml = quick_xml::de::from_str(xml).unwrap();
+        let mut ctx = ConvertCtx::new();
+        convert_table(t, &mut ctx)
+            .rows
+            .into_iter()
+            .map(|r| {
+                r.cells
+                    .into_iter()
+                    .flat_map(|c| c.content)
+                    .filter_map(|b| match b {
+                        Block::Paragraph(p) => Some(collect_text(&p.content)),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// A `<w:tbl>` of three rows, the middle one wrapped in `wrapper`.
+    fn table_with_wrapped_row(wrapper: &str) -> String {
+        format!(
+            r#"<w:tbl xmlns:w="x">
+                 <w:tblPr/>
+                 <w:tblGrid><w:gridCol w:w="100"/></w:tblGrid>
+                 <w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc></w:tr>
+                 <w:{wrapper} w:id="1" w:author="a" w:date="d">
+                   <w:tr><w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr>
+                 </w:{wrapper}>
+                 <w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr>
+               </w:tbl>"#
+        )
+    }
+
+    /// A `<w:tbl>` of three rows, the middle one carrying `marker` in its
+    /// `<w:trPr>` — the form Word writes when a row is deleted or inserted with
+    /// change tracking on.
+    fn table_with_marked_row(marker: &str) -> String {
+        format!(
+            r#"<w:tbl xmlns:w="x">
+                 <w:tblPr/>
+                 <w:tblGrid><w:gridCol w:w="100"/></w:tblGrid>
+                 <w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc></w:tr>
+                 <w:tr>
+                   <w:trPr>{marker}</w:trPr>
+                   <w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>
+                 </w:tr>
+                 <w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr>
+               </w:tbl>"#
+        )
+    }
+
+    /// A table-level `<w:del>` is the delete side of a tracked change, exactly
+    /// as `<w:del>` around a run is — and this parser renders the *final* view,
+    /// so both go. Keeping deleted rows while dropping deleted runs left the
+    /// engine rendering the final view for text and the original view for
+    /// rows, in the same document.
+    #[test]
+    fn del_wrapped_rows_are_dropped() {
+        assert_eq!(table_row_texts(&table_with_wrapped_row("del")), ["A", "C"]);
+    }
+
+    /// The move-away side goes with it (`move_to_rendered_move_from_dropped`
+    /// is the run-level twin).
+    #[test]
+    fn move_from_wrapped_rows_are_dropped() {
+        assert_eq!(
+            table_row_texts(&table_with_wrapped_row("moveFrom")),
+            ["A", "C"]
+        );
+    }
+
+    /// The insert side is part of the final document and must survive — the
+    /// control that a "drop tracked rows" fix would break.
+    #[test]
+    fn ins_and_move_to_wrapped_rows_are_kept() {
+        assert_eq!(
+            table_row_texts(&table_with_wrapped_row("ins")),
+            ["A", "B", "C"]
+        );
+        assert_eq!(
+            table_row_texts(&table_with_wrapped_row("moveTo")),
+            ["A", "B", "C"]
+        );
+    }
+
+    /// `<w:del>` inside `<w:trPr>` is how **Word** marks a deleted row — the
+    /// table-level wrapper above is the other spelling, and the one Word does
+    /// not use. Unmodelled, it left the row in place; its runs are separately
+    /// wrapped in `<w:del>` and already dropped, so the row rendered as an
+    /// empty ghost belonging to neither view of the document.
+    #[test]
+    fn a_row_deleted_in_its_tr_pr_is_dropped() {
+        assert_eq!(
+            table_row_texts(&table_with_marked_row(
+                r#"<w:del w:id="1" w:author="a" w:date="d"/>"#
+            )),
+            ["A", "C"]
+        );
+    }
+
+    /// `<w:ins>` in the same position marks an *inserted* row, which the final
+    /// view keeps. Pins that the two markers are told apart rather than the
+    /// row being dropped for carrying any revision mark at all.
+    #[test]
+    fn a_row_inserted_in_its_tr_pr_is_kept() {
+        assert_eq!(
+            table_row_texts(&table_with_marked_row(
+                r#"<w:ins w:id="1" w:author="a" w:date="d"/>"#
+            )),
+            ["A", "B", "C"]
+        );
+    }
+
+    /// A row whose `<w:trPr>` carries ordinary properties is untouched — the
+    /// new field must not turn every `trPr` into a deletion.
+    #[test]
+    fn a_row_with_an_unrelated_tr_pr_is_kept() {
+        assert_eq!(
+            table_row_texts(&table_with_marked_row(r#"<w:cantSplit/>"#)),
+            ["A", "B", "C"]
         );
     }
 
