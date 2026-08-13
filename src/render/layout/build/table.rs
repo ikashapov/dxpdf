@@ -123,6 +123,66 @@ fn reserve_cell_spacing(col_widths: Vec<Pt>, cell_spacing: Pt) -> Vec<Pt> {
     col_widths.into_iter().map(|w| w * scale).collect()
 }
 
+/// §17.4.63: an auto-width table keeps its declared `<w:tblGrid>` verbatim,
+/// unless that grid is wide enough to carry the table off the **paper**, in
+/// which case it is scaled down until it is not.
+///
+/// # This is a containment guard, not an autofit implementation
+///
+/// A `<w:tblW w:type="auto"/>` table states no preferred width, so there is
+/// nothing for §17.4.63's scaling to scale *to*. Word would run its autofit
+/// algorithm here; ECMA-376 defines no such algorithm, this engine does not
+/// implement one (see `table::grid::compute_column_widths`), and inventing one
+/// under the name of a bug fix is how a renderer acquires behaviour nobody
+/// chose. So the declared grid is still used as declared. The only thing added
+/// is a floor under it.
+///
+/// # Why the paper edge, and not the text column
+///
+/// Clamping to `available_width` is the obvious guard and the corpus refutes
+/// it. Three of the 52 documents ship an auto table whose grid exceeds the text
+/// column — `sample-docx-files-sample3.docx` by 101 twips, `ELH_2025-12-18` and
+/// `KAB_2026-03-25` by ~172 twips across 39 tables — and every one of those 39
+/// also declares `<w:tblLayout w:type="fixed"/>`, §17.4.53's instruction to use
+/// the declared column widths rather than compute any. Those tables reach a few
+/// points into the right margin, on the paper and fully legible. Normalising
+/// them to the text column would restyle 40 tables of real Word and LibreOffice
+/// output on no authority at all.
+///
+/// What survives that is narrower and needs no algorithm: content drawn past
+/// the sheet is *gone* from the PDF, under every reading of every layout
+/// property. So the limit is the width from the left margin to the right paper
+/// edge — a table placed at the left margin, which is where a top-level table
+/// with no `tblInd` sits, then ends exactly at the sheet's edge in the worst
+/// case. Two known imprecisions, both deliberate, since a guard that has to be
+/// exact is a layout algorithm again:
+///
+/// * a table displaced rightward (`w:tblInd`, `w:jc`, `w:tblpX`) can still
+///   reach past the edge by that displacement;
+/// * a *nested* table is measured against the page rather than against its
+///   cell, so it may still overflow the cell — but the enclosing table's own
+///   width already keeps it on the sheet.
+///
+/// **Word reference render needed**: what width Word actually gives an
+/// overflowing `w:type="auto"` table, at `tblLayout` both `fixed` and
+/// `autofit`. That measurement is what would replace this guard with a rule.
+fn clamp_auto_grid_to_page(
+    grid_cols: &[Pt],
+    num_cols: usize,
+    available_width: Pt,
+    page: &crate::render::layout::page::PageConfig,
+) -> Vec<Pt> {
+    let declared: Pt = grid_cols.iter().copied().sum();
+    // `max(available_width)` so a pathological page — margins wider than the
+    // sheet, which `PageConfig::content_width` also has to defend against —
+    // cannot make the limit narrower than the space the caller just offered.
+    let limit = (page.page_size.width - page.margins.left).max(available_width);
+    if declared <= limit {
+        return grid_cols.to_vec();
+    }
+    compute_column_widths(grid_cols, num_cols, limit)
+}
+
 /// Recursively build a table: resolve styles, conditional formatting, and
 /// recurse into each cell's content blocks.
 pub(super) fn build_table(
@@ -304,7 +364,7 @@ pub(super) fn build_table(
     // above: it has no read site to cascade *to*. Giving it one would be dead
     // code, so when auto-fit lands it must take its style level with it.
     let col_widths = if is_auto_width && !grid_cols.is_empty() {
-        grid_cols.clone()
+        clamp_auto_grid_to_page(&grid_cols, num_cols, available_width, &state.page_config)
     } else {
         compute_column_widths(&grid_cols, num_cols, target_width)
     };
@@ -1098,6 +1158,66 @@ mod tests {
         let out = reserve_cell_spacing(widths, Pt::new(60.0));
         assert_eq!(out, vec![Pt::ZERO, Pt::ZERO]);
         assert!(out.iter().all(|w| *w >= Pt::ZERO));
+    }
+
+    // ── §17.4.63 clamp_auto_grid_to_page ─────────────────────────────────
+    //
+    // `tests/table_auto_width.rs` pins the end-to-end consequence and the
+    // reasoning; these pin the arithmetic and the two edges of the branch.
+
+    /// Letter, 1-inch margins: text column 468 pt, paper 612 pt, so the guard's
+    /// limit is 612 − 72 = 540 pt.
+    fn letter() -> crate::render::layout::page::PageConfig {
+        crate::render::layout::page::PageConfig::default()
+    }
+
+    #[test]
+    fn a_fitting_auto_grid_is_returned_verbatim() {
+        let grid = vec![Pt::new(100.0), Pt::new(200.0)];
+        assert_eq!(
+            clamp_auto_grid_to_page(&grid, 2, Pt::new(468.0), &letter()),
+            grid
+        );
+    }
+
+    /// The guard's line is the paper edge, not the text column: 500 pt overflows
+    /// the 468 pt column by 32 and is still left alone. A clamp written against
+    /// `available_width` fails here, which is the point — 40 tables of real Word
+    /// output in the corpus have exactly this shape.
+    #[test]
+    fn a_grid_past_the_text_column_but_on_the_paper_is_left_alone() {
+        let grid = vec![Pt::new(500.0)];
+        assert_eq!(
+            clamp_auto_grid_to_page(&grid, 1, Pt::new(468.0), &letter()),
+            grid
+        );
+    }
+
+    /// Past the paper, the grid is scaled — proportionally, so the columns keep
+    /// their declared ratio rather than being equalised.
+    #[test]
+    fn a_grid_past_the_paper_is_scaled_to_the_paper() {
+        let out = clamp_auto_grid_to_page(
+            &[Pt::new(800.0), Pt::new(400.0)],
+            2,
+            Pt::new(468.0),
+            &letter(),
+        );
+        let total: Pt = out.iter().copied().sum();
+        assert_eq!(total, Pt::new(540.0), "scaled to the left margin → paper");
+        assert_eq!(out, vec![Pt::new(360.0), Pt::new(180.0)], "ratio kept 2:1");
+    }
+
+    /// A page whose margins exceed its width is expressible in the file format
+    /// (`PageConfig::content_width` defends against the same thing), and would
+    /// otherwise give a negative limit and negative column widths. The offered
+    /// width is the floor.
+    #[test]
+    fn a_page_narrower_than_its_own_margins_falls_back_to_the_offered_width() {
+        let mut page = letter();
+        page.margins.left = Pt::new(900.0);
+        let out = clamp_auto_grid_to_page(&[Pt::new(1000.0)], 1, Pt::new(468.0), &page);
+        assert_eq!(out, vec![Pt::new(468.0)]);
     }
 
     // ── §17.4.85 promote_orphan_vmerge_continues ─────────────────────────
