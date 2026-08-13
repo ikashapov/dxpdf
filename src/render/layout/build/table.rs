@@ -144,7 +144,7 @@ fn reserve_cell_spacing(col_widths: Vec<Pt>, cell_spacing: Pt) -> Vec<Pt> {
 /// it. Three of the 52 documents ship an auto table whose grid exceeds the text
 /// column — `sample-docx-files-sample3.docx` by 101 twips, `ELH_2025-12-18` and
 /// `KAB_2026-03-25` by ~172 twips across 39 tables — and every one of those 39
-/// also declares `<w:tblLayout w:type="fixed"/>`, §17.4.53's instruction to use
+/// also declares `<w:tblLayout w:type="fixed"/>`, §17.4.52's instruction to use
 /// the declared column widths rather than compute any. Those tables reach a few
 /// points into the right margin, on the paper and fully legible. Normalising
 /// them to the text column would restyle 40 tables of real Word and LibreOffice

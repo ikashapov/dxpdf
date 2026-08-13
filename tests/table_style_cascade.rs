@@ -124,7 +124,7 @@ fn table_document(direct_tbl_pr: &str) -> String {
 }
 
 /// Two copies of [`table_document`]'s table, back to back, so that `tblOverlap`
-/// has a second float to collide with — §17.4.57 governs table-vs-table
+/// has a second float to collide with — §17.4.56 governs table-vs-table
 /// overlap and says nothing about a lone float.
 fn two_tables_document(direct_tbl_pr: &str) -> String {
     let one = table_document(direct_tbl_pr);
@@ -386,7 +386,7 @@ fn a_table_style_cannot_set_the_table_width() {
     );
 }
 
-/// §17.4.51 `tblInd` — indentation from the leading margin.
+/// §17.4.50 `tblInd` — indentation from the leading margin.
 #[test]
 fn a_table_style_can_indent_the_table() {
     assert_style_matches_direct(r#"<w:tblInd w:w="720" w:type="dxa"/>"#, "", "tblInd");
@@ -402,7 +402,7 @@ fn a_table_style_can_indent_the_table() {
     );
 }
 
-/// §17.4.44 `tblCellSpacing` — the gap carved out between and around cells.
+/// §17.4.45 `tblCellSpacing` — the gap carved out between and around cells.
 #[test]
 fn a_table_style_can_set_cell_spacing() {
     assert_style_matches_direct(
@@ -721,7 +721,7 @@ fn a_child_table_style_overrides_only_the_properties_it_restates() {
     );
 }
 
-/// §17.4.51: an explicitly-zero `tblInd` is the same indent as none.
+/// §17.4.50: an explicitly-zero `tblInd` is the same indent as none.
 ///
 /// Not a tautology in this engine: a full-width left-aligned table at zero
 /// indent is shifted left by its left cell margin, so cell content lines up

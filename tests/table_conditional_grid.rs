@@ -1,9 +1,9 @@
-//! §17.7.6 / §17.4.14: conditional-formatting regions are addressed by **grid
+//! §17.7.6 / §17.4.16: conditional-formatting regions are addressed by **grid
 //! column**, not by a cell's index within its row.
 //!
 //! The two readings only diverge once a row stops mapping one `<w:tc>` to one
-//! `<w:gridCol>` — `w:gridSpan` (§17.4.18) makes one cell cover several, and
-//! `w:gridBefore` (§17.4.17) makes the first cell start away from column 0.
+//! `<w:gridCol>` — `w:gridSpan` (§17.4.17) makes one cell cover several, and
+//! `w:gridBefore` (§17.4.15) makes the first cell start away from column 0.
 //! Every case below is built so that the cell-index reading and the grid-column
 //! reading predict *different* shading, which is the only thing that makes the
 //! assertions worth writing.
@@ -209,7 +209,7 @@ fn a_span_that_reaches_the_last_grid_column_is_the_last_column() {
     );
 }
 
-/// §17.4.17: `gridBefore` moves a row's first cell off grid column 0, so the
+/// §17.4.15: `gridBefore` moves a row's first cell off grid column 0, so the
 /// first `<w:tc>` is not in the first column region at all.
 #[test]
 fn grid_before_moves_the_first_cell_out_of_the_first_column_region() {
@@ -248,7 +248,7 @@ fn cell_with_raw_span(span: &str) -> String {
     )
 }
 
-/// §17.4.18: `gridSpan` counts the grid columns a cell covers, and a `<w:tc>`
+/// §17.4.17: `gridSpan` counts the grid columns a cell covers, and a `<w:tc>`
 /// that exists covers at least one. Every pass that walks the grid says so with
 /// `span.max(1)` — `measure_table_rows`, `emit_table_rows`,
 /// `find_cell_at_grid_col`, the orphan-`vMerge` repair — but the build layer's

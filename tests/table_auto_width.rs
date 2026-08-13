@@ -1,4 +1,4 @@
-//! §17.4.63 / §17.4.53 — how wide an auto-width table is allowed to get.
+//! §17.4.63 / §17.4.52 — how wide an auto-width table is allowed to get.
 //!
 //! A `<w:tblW w:type="auto"/>` table states no preferred width, so this engine
 //! keeps its `<w:tblGrid>` verbatim: Word's autofit algorithm is not
@@ -16,11 +16,11 @@
 //! corpus. Three real documents ship an auto table whose grid exceeds the text
 //! column — `sample-docx-files-sample3.docx` by 101 twips, `ELH_2025-12-18` and
 //! `KAB_2026-03-25` by ~172 twips across 39 tables — and all 39 of the latter
-//! declare `<w:tblLayout w:type="fixed"/>`, which is §17.4.53's instruction to
+//! declare `<w:tblLayout w:type="fixed"/>`, which is §17.4.52's instruction to
 //! use the declared widths rather than compute any. Word draws those tables a
 //! few points into the right margin, on the paper and fully visible; nothing is
 //! lost and nothing needs guarding. Normalising them to the text column would
-//! move 40 tables of real Word output to a width no reading of §17.4.53 asks
+//! move 40 tables of real Word output to a width no reading of §17.4.52 asks
 //! for.
 //!
 //! So the guard is drawn at the one line every reading agrees on: content that
@@ -122,7 +122,7 @@ fn drawn_right_edge(pages: &[LayoutedPage]) -> f32 {
 /// `<w:tblW w:type="auto"/>` drew the table to x=1072 on a 612 pt page, so
 /// 460 pt of it — borders, cell, text — fell off the paper and out of the PDF.
 ///
-/// Nothing in §17.4.63 or §17.4.53 licenses drawing off the page; the width to
+/// Nothing in §17.4.63 or §17.4.52 licenses drawing off the page; the width to
 /// use instead is genuinely open (see this file's header), and only the
 /// containment is asserted here.
 #[test]

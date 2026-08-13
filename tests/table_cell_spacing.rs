@@ -1,4 +1,4 @@
-//! §17.4.44 `w:tblCellSpacing` geometry — issue #165.
+//! §17.4.45 `w:tblCellSpacing` geometry — issue #165.
 //!
 //! `test-files/issue-165-cellspacing-scale.docx` is four otherwise-identical
 //! tables — same `w:tblW`, same three columns, same fixed layout — at spacings
@@ -16,7 +16,7 @@
 //! `TableRecalculate.js` insets a cell by `CellSpacing` on the table's outer
 //! edges and by `CellSpacing / 2` on every interior side, so an interior gap is
 //! two halves and an edge gap one whole — every gap equals the declared value.
-//! Neither ECMA-376 §17.4.44 nor [MS-OI29500] states any factor either. See
+//! Neither ECMA-376 §17.4.45 nor [MS-OI29500] states any factor either. See
 //! `build::table::resolve_cell_spacing` for the evidence in full.
 //!
 //! The doubling is far likelier to come from the probe than from a factor:
@@ -33,7 +33,7 @@
 //!
 //! * that the gap scales *linearly* with the declared value, rather than the
 //!   spec's "including the width of the table borders" hiding a constant offset;
-//! * that a row-level `w:tblCellSpacing` is ignored. §17.4.44 says it should
+//! * that a row-level `w:tblCellSpacing` is ignored. §17.4.45 says it should
 //!   *supersede* the table-level value, and this engine warns that it does not.
 //!   The last table exists so that gap has a test to fail when it is closed.
 
@@ -110,7 +110,7 @@ fn tables() -> Vec<Table> {
         .collect()
 }
 
-/// §17.4.44: the rendered gap *is* the declared value — no factor.
+/// §17.4.45: the rendered gap *is* the declared value — no factor.
 ///
 /// Corroborated by ONLYOFFICE's renderer; see the module docs. Read as a
 /// difference against the zero-spacing table, which cancels the cell margin and
@@ -132,7 +132,7 @@ fn the_rendered_gap_is_the_declared_spacing() {
 }
 
 /// And it scales linearly, which is what tells a factor from a constant offset.
-/// §17.4.44 folds "the width of the table borders" into the spacing, so an
+/// §17.4.45 folds "the width of the table borders" into the spacing, so an
 /// implementation that subtracted a border width would still look roughly
 /// doubled at one value and wrong at another.
 #[test]
@@ -167,7 +167,7 @@ fn spacing_is_carved_out_of_the_declared_table_width() {
     }
 }
 
-/// §17.4.44: a row-level `w:tblCellSpacing` "shall supersede" the table-level
+/// §17.4.45: a row-level `w:tblCellSpacing` "shall supersede" the table-level
 /// value. This engine ignores it and warns, so the last table renders exactly
 /// like the plain table-level-400 one.
 ///

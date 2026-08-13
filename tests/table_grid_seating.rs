@@ -1,4 +1,4 @@
-//! §17.4.14 / §17.4.71 — the `<w:tblGrid>` must have a column for every cell a
+//! §17.4.48 / §17.4.71 — the `<w:tblGrid>` must have a column for every cell a
 //! row declares, and what happens when it does not.
 //!
 //! # The invariant, and the one place the spec leaves open
@@ -24,7 +24,7 @@
 //! trap-detector for the repair in `build/table.rs::seat_every_cell`, which is
 //! gated strictly on a grid too short to seat some row: if that gate ever
 //! widens, these fail first. Seating counts exactly what the grid walk counts
-//! (§17.4.17 `gridBefore`, §17.4.18 `gridSpan`, §17.4.16 `gridAfter`), so each
+//! (§17.4.15 `gridBefore`, §17.4.17 `gridSpan`, §17.4.14 `gridAfter`), so each
 //! of those is pinned here as seating a grid rather than needing repair.
 
 use std::io::Write;
@@ -184,7 +184,7 @@ pub fn assert_cells(got: &[(f32, f32)], want: &[(f32, f32)], what: &str) {
 
 // ── The half that must never move ────────────────────────────────────────────
 
-/// §17.4.14: a grid with one column per cell is scaled to the declared `tblW`
+/// §17.4.48: a grid with one column per cell is scaled to the declared `tblW`
 /// and otherwise used as declared. 500/1000/1500 twips are one, two and three
 /// sixths of the grid, and the grid sums to 3000 against a declared `tblW` of
 /// 6000 — so the scale factor is 2 and the 300 pt table's columns come out at
@@ -214,7 +214,7 @@ fn a_grid_that_seats_every_cell_is_scaled_proportionally() {
     );
 }
 
-/// §17.4.18: a `gridSpan` cell occupies that many grid columns, so two cells
+/// §17.4.17: a `gridSpan` cell occupies that many grid columns, so two cells
 /// spanning 1 and 2 seat a three-column grid exactly and nothing is appended.
 #[test]
 fn grid_span_counts_toward_seating() {
@@ -236,7 +236,7 @@ fn grid_span_counts_toward_seating() {
     );
 }
 
-/// §17.4.17 / §17.4.16: `gridBefore` and `gridAfter` occupy grid columns that
+/// §17.4.15 / §17.4.14: `gridBefore` and `gridAfter` occupy grid columns that
 /// hold no cell, and both count toward seating — one cell plus one leading and
 /// two trailing skips seat a four-column grid.
 #[test]
@@ -371,7 +371,7 @@ fn an_unseated_cell_is_sized_from_its_declared_tcw() {
     );
 }
 
-/// §17.4.18: a `gridSpan` reaching past the end of the grid needs *every*
+/// §17.4.17: a `gridSpan` reaching past the end of the grid needs *every*
 /// column it declares, not just one. Cell `b` spans three columns from column
 /// 1, so columns 2 and 3 are missing; its 7200-twip `tcW` covers all three, of
 /// which the declared column 1 already supplies 4800, so the remaining 2400 is
@@ -457,7 +457,7 @@ fn a_table_with_no_grid_takes_its_columns_from_tcw() {
 /// This is the same direction §17.4.63's own reconciliation runs in, and it is
 /// the only choice here that is order-independent: taking the first or the last
 /// row's claim would make the result depend on row order, which no reading of
-/// §17.4.14 supports.
+/// §17.4.48 supports.
 ///
 /// The **wider row comes first** deliberately. With the narrow row first, "the
 /// last claim wins" and "the widest claim wins" agree, and a mutation replacing
@@ -494,7 +494,7 @@ fn the_widest_claim_on_an_appended_column_wins() {
     );
 }
 
-/// §17.4.17: `gridBefore` pushes a row's cells rightward, so it can be what
+/// §17.4.15: `gridBefore` pushes a row's cells rightward, so it can be what
 /// puts the last one past the end of the grid — the cells alone would fit.
 ///
 /// Two cells in a two-column grid are seated; the same two behind a
@@ -530,7 +530,7 @@ fn grid_before_can_be_what_unseats_a_cell() {
 
 /// The gate is about **cells**, not about grid columns in the abstract.
 ///
-/// §17.4.16 `gridAfter` declares trailing columns that hold no cell, so a grid
+/// §17.4.14 `gridAfter` declares trailing columns that hold no cell, so a grid
 /// too short to contain them loses nothing — there is no content in them to
 /// lose, and the repair's whole justification is content that would otherwise
 /// not be drawn. Repairing here would instead be a geometry change on

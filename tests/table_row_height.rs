@@ -1,4 +1,4 @@
-//! §17.4.85 / §17.4.1 — table row height, page-advance, and the two malformed
+//! §17.4.80 / §17.4.84 / §17.4.6 — table row height, page-advance, and the two malformed
 //! `w:vMerge` shapes.
 //!
 //! These defects are invisible at the `layout_table` level and only show up
@@ -89,7 +89,7 @@ fn lone_cell_table(vmerge: &str) -> Vec<u8> {
     ))
 }
 
-/// §17.4.85: a `vMerge="restart"` with no continuation is an ordinary cell.
+/// §17.4.84: a `vMerge="restart"` with no continuation is an ordinary cell.
 ///
 /// The row used to collapse to zero height while still drawing its content,
 /// so `after` was emitted *above* the table's own text instead of below it.
@@ -160,13 +160,13 @@ fn orphan_continue_table(vmerge: &str) -> Vec<u8> {
     ))
 }
 
-/// §17.4.85: a `<w:vMerge w:val="continue"/>` with **no `restart` above it**
+/// §17.4.84: a `<w:vMerge w:val="continue"/>` with **no `restart` above it**
 /// must not cost the cell its content.
 ///
-/// §17.4.85 describes `continue` only as continuing the merge begun by a
+/// §17.4.84 describes `continue` only as continuing the merge begun by a
 /// `restart`, and says nothing about a `continue` that begins one — so the
 /// engine is free to choose what an unpaired one means. It is *not* free to
-/// choose that the text disappears: no reading of §17.4.85 deletes content,
+/// choose that the text disappears: no reading of §17.4.84 deletes content,
 /// and a merged cell shows the *restart* cell's content precisely because
 /// there is one to show.
 ///
@@ -204,7 +204,7 @@ fn orphan_vmerge_continue_matches_the_unmerged_layout() {
 }
 
 /// The control that must not move: a `continue` that *does* have a `restart`
-/// above it is a real merge, and §17.4.85 makes the merged region show the
+/// above it is a real merge, and §17.4.84 makes the merged region show the
 /// restart cell's content — so the continue cell's own content stays hidden.
 /// A fix that simply stopped honouring `continue` would pass both tests above
 /// and fail this one.
@@ -236,7 +236,7 @@ fn a_paired_vmerge_continue_still_hides_its_own_content() {
     );
 }
 
-// ── §17.4.85 × §17.4.18: the orphan rule where `gridSpan` makes a cell wider
+// ── §17.4.84 × §17.4.17: the orphan rule where `gridSpan` makes a cell wider
 //    than one grid column ────────────────────────────────────────────────────
 //
 // Every orphan case above uses span-1 cells, where a cell *is* a grid column
@@ -249,7 +249,7 @@ fn a_paired_vmerge_continue_still_hides_its_own_content() {
 // for by nobody — `measure_table_rows` still hands it an empty `CellLayout`,
 // so its text never reaches the page.
 //
-// Written with the **bare** `<w:vMerge/>` spelling (§17.4.85: an absent `@val`
+// Written with the **bare** `<w:vMerge/>` spelling (§17.4.84: an absent `@val`
 // means `continue`), which is what real documents contain: all 98 `continue`
 // elements across the 52-document corpus are bare, and not one is written
 // `w:val="continue"`.
@@ -410,7 +410,7 @@ fn a_continue_below_a_wider_continue_matches_the_unmerged_layout() {
     }
 }
 
-/// §17.4.85: `<w:vMerge/>` with no `@val` **is** `continue`, and it is the
+/// §17.4.84: `<w:vMerge/>` with no `@val` **is** `continue`, and it is the
 /// spelling documents actually use — every one of the 98 `continue` elements in
 /// the 52-document corpus is bare. The span-1 orphan repair is asserted above
 /// against `w:val="continue"`; this pins that the bare spelling reaches the
@@ -464,7 +464,7 @@ fn a_bare_vmerge_that_is_paired_still_hides_its_own_content() {
     );
 }
 
-/// §17.4.1: a `cantSplit` row taller than a whole page fits nowhere, so the
+/// §17.4.6: a `cantSplit` row taller than a whole page fits nowhere, so the
 /// paginator must not advance to a fresh page it cannot use. It used to
 /// abandon an empty leading slice, which the section layer turned into a
 /// blank first page.
