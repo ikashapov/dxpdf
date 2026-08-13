@@ -908,6 +908,213 @@ mod tests {
         }
     }
 
+    // ── §17.4.83 vAlign, and the §17.4.38 border inset it composes with ─────
+
+    /// Every text command as `(x, y)`, sorted by x — so a cell is identified by
+    /// the column it sits in rather than by its position in the command list.
+    fn text_positions(cmds: &[DrawCommand]) -> Vec<(f32, f32)> {
+        let mut v: Vec<(f32, f32)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some((position.x.raw(), position.y.raw())),
+                _ => None,
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    }
+
+    /// §17.4.83: `top`, `center` and `bottom` place a cell's content at
+    /// `0`, `(row_h − content_h) / 2` and `row_h − content_h` below the row's
+    /// top edge. On a **plain** cell — no `vMerge` — `row_h` is the row's own
+    /// height, which `RowHeightRule::Exact` fixes at 60pt here so the arithmetic
+    /// does not depend on how tall a line happens to be.
+    ///
+    /// The three cells are in **one row**, so they share `row_h` by
+    /// construction and the two offsets are differences against the `top` cell
+    /// rather than against a literal baseline. `content_h` is taken from the
+    /// same table without the height rule, where the row *is* its content — so
+    /// the 23 and 46 below are derived, not measured off the output.
+    #[test]
+    fn valign_places_a_plain_cells_content_at_exact_offsets_in_the_row() {
+        let aligned = |align: CellVAlign| TableCellInput {
+            vertical_align: align,
+            ..cell(1, None, None)
+        };
+        let build = |rule: Option<crate::render::layout::table::RowHeightRule>| {
+            let rows = vec![TableRowInput {
+                cells: vec![
+                    aligned(CellVAlign::Top),
+                    aligned(CellVAlign::Center),
+                    aligned(CellVAlign::Bottom),
+                ],
+                height_rule: rule,
+                ..row(vec![])
+            }];
+            crate::render::layout::table::layout_table(
+                &rows,
+                &[Pt::new(50.0), Pt::new(50.0), Pt::new(50.0)],
+                Pt::ZERO,
+                Pt::new(14.0),
+                None,
+                None,
+                false,
+            )
+        };
+
+        // Without a height rule the row is exactly its content, so its height
+        // *is* `content_h`. vAlign has nothing to distribute and all three sit
+        // at the same y.
+        let natural = build(None);
+        let content_h = natural.size.height.raw();
+        assert_eq!(content_h, 14.0, "one default line");
+        let ys: Vec<f32> = text_positions(&natural.commands)
+            .iter()
+            .map(|p| p.1)
+            .collect();
+        assert_eq!(
+            ys,
+            vec![ys[0]; 3],
+            "with no spare height every alignment lands in the same place"
+        );
+
+        let tall = build(Some(crate::render::layout::table::RowHeightRule::Exact(
+            Pt::new(60.0),
+        )));
+        assert_eq!(tall.size.height, Pt::new(60.0));
+        let p = text_positions(&tall.commands);
+        assert_eq!(
+            p.iter().map(|q| q.0).collect::<Vec<_>>(),
+            vec![0.0, 50.0, 100.0],
+            "one cell per column, so the y values below are in top/center/bottom order"
+        );
+        let (top, center, bottom) = (p[0].1, p[1].1, p[2].1);
+        assert_eq!(top, ys[0], "`top` is unaffected by the row's spare height");
+        assert_eq!(
+            center - top,
+            (60.0 - content_h) / 2.0,
+            "`center` takes half the spare 46pt"
+        );
+        assert_eq!(
+            bottom - top,
+            60.0 - content_h,
+            "`bottom` takes all 46pt of it"
+        );
+    }
+
+    /// §17.4.38: a cell's border is drawn inside its box, so a top border wider
+    /// than the cell's own top margin pushes the content down by the
+    /// **difference** — the margin already holds part of the border's width.
+    /// A border no wider than the margin moves nothing.
+    ///
+    /// Three cells in one row, all with a 2pt top margin: no border, a 1pt
+    /// border (narrower than the margin), and a 5pt one. Only the third moves,
+    /// and by 5 − 2 = 3pt. Asserted as differences against the first, so the
+    /// test does not depend on where a baseline sits inside its line box.
+    #[test]
+    fn a_top_border_wider_than_the_cell_margin_pushes_content_down_by_the_difference() {
+        use crate::render::layout::table::types::{CellBorderConfig, CellBorderOverride};
+
+        let with_top = |width: Option<f32>| TableCellInput {
+            margins: PtEdgeInsets::new(Pt::new(2.0), Pt::ZERO, Pt::new(2.0), Pt::ZERO),
+            cell_borders: width.map(|w| CellBorderConfig {
+                top: Some(CellBorderOverride::Border(TableBorderLine {
+                    width: Pt::new(w),
+                    color: RED,
+                    style: crate::render::layout::table::types::TableBorderStyle::Single,
+                })),
+                bottom: None,
+                left: None,
+                right: None,
+            }),
+            ..cell(1, None, None)
+        };
+
+        let rows = vec![row(vec![
+            with_top(None),
+            with_top(Some(1.0)),
+            with_top(Some(5.0)),
+        ])];
+        let table = crate::render::layout::table::layout_table(
+            &rows,
+            &[Pt::new(50.0), Pt::new(50.0), Pt::new(50.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+
+        let p = text_positions(&table.commands);
+        assert_eq!(
+            p.iter().map(|q| q.0).collect::<Vec<_>>(),
+            vec![0.0, 50.0, 100.0]
+        );
+        assert_eq!(
+            p[1].1, p[0].1,
+            "a 1pt border fits inside the 2pt margin and moves nothing"
+        );
+        assert_eq!(
+            p[2].1 - p[0].1,
+            3.0,
+            "a 5pt border against a 2pt margin pushes the content down by 3pt"
+        );
+    }
+
+    /// …and a **bottom**-aligned cell's content does not move, because the
+    /// border inset is taken out of the same spare height the alignment
+    /// distributes: `dy_border + (row_h − content_h − dy_border)` is `row_h −
+    /// content_h` whatever the border is. §17.4.83 `bottom` means flush with
+    /// the cell's bottom, and a top border is not the bottom's business.
+    ///
+    /// The companion to the test above — that one pins the inset applying, this
+    /// one pins it cancelling — and together they are why the two terms are
+    /// added rather than either one replacing the other.
+    #[test]
+    fn a_top_border_does_not_move_bottom_aligned_content() {
+        use crate::render::layout::table::types::{CellBorderConfig, CellBorderOverride};
+
+        let bottom_aligned = |width: Option<f32>| TableCellInput {
+            vertical_align: CellVAlign::Bottom,
+            cell_borders: width.map(|w| CellBorderConfig {
+                top: Some(CellBorderOverride::Border(TableBorderLine {
+                    width: Pt::new(w),
+                    color: RED,
+                    style: crate::render::layout::table::types::TableBorderStyle::Single,
+                })),
+                bottom: None,
+                left: None,
+                right: None,
+            }),
+            ..cell(1, None, None)
+        };
+
+        let rows = vec![TableRowInput {
+            cells: vec![bottom_aligned(None), bottom_aligned(Some(5.0))],
+            height_rule: Some(crate::render::layout::table::RowHeightRule::Exact(Pt::new(
+                60.0,
+            ))),
+            ..row(vec![])
+        }];
+        let table = crate::render::layout::table::layout_table(
+            &rows,
+            &[Pt::new(50.0), Pt::new(50.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+            None,
+            false,
+        );
+
+        let p = text_positions(&table.commands);
+        assert_eq!(p.len(), 2);
+        assert_eq!(
+            p[1].1, p[0].1,
+            "bottom-aligned content is flush with the cell's bottom whether or \
+             not the cell has a top border"
+        );
+    }
+
     /// The control. A cell whose bottom *does* paint keeps yielding the band to
     /// it: its verticals stop at the row's content box, exactly as before.
     /// Pins the fix to the case where nothing else paints the corner.
