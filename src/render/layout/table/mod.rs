@@ -12,6 +12,7 @@
 
 use crate::render::dimension::Pt;
 use crate::render::geometry::{PtRect, PtSize};
+use crate::render::layout::draw_command::DrawCommand;
 
 mod borders;
 mod emit;
@@ -73,11 +74,109 @@ pub(crate) fn measure_leading_table_group_height(
     )
 }
 
+/// The buffers one slice is emitted into, and the tail that closes it.
+///
+/// Content and borders are collected apart and concatenated only at the end, so
+/// every border paints over every cell's content regardless of the order the
+/// rows were emitted in. Both emit paths — a table laid out whole and one laid
+/// out per page slice — fill the same three buffers and finish the same way,
+/// which is what this type is for.
+struct SliceBuilder {
+    commands: Vec<DrawCommand>,
+    content_commands: Vec<DrawCommand>,
+    border_commands: Vec<DrawCommand>,
+    /// Vertical cursor, advanced by each `emit_*` call.
+    cursor_y: Pt,
+}
+
+impl SliceBuilder {
+    fn new() -> Self {
+        Self {
+            commands: Vec::new(),
+            content_commands: Vec::new(),
+            border_commands: Vec::new(),
+            cursor_y: Pt::ZERO,
+        }
+    }
+
+    /// The cursor and the three buffers, borrowed disjointly so one `emit_*`
+    /// call can take both at once.
+    fn emit_into(&mut self) -> (&mut Pt, TableCommandBuffers<'_>) {
+        let Self {
+            commands,
+            content_commands,
+            border_commands,
+            cursor_y,
+        } = self;
+        (
+            cursor_y,
+            TableCommandBuffers {
+                commands,
+                content_commands,
+                border_commands,
+            },
+        )
+    }
+
+    /// Close the slice.
+    ///
+    /// `carries_top` / `carries_bottom` say whether this slice holds the
+    /// **table's** own top and bottom edges — true for the first and last slice
+    /// respectively, and both true for a table laid out whole, which is the
+    /// one-slice case. Two things follow from them:
+    ///
+    /// §17.4.44: each row reserves its own leading gap, so the only gap left to
+    /// add is the trailing one at the table's bottom edge. An intermediate slice
+    /// ends at a page cut rather than at the table's edge and gets none —
+    /// without that, a table that happens to paginate would lose the bottom gap
+    /// the same table keeps when it fits on one page.
+    ///
+    /// Issue #168: a spaced table's outer border is its own rectangle, because
+    /// the cells no longer touch the table's edges. Left and right bound every
+    /// slice; top and bottom follow the same two conditions the gap does.
+    /// §17.4.38's `suppress_first_row_top` is deliberately not consulted here:
+    /// with a gap between two tables there is no shared edge to collapse, so
+    /// there is nothing for it to suppress.
+    fn finish(
+        mut self,
+        table_width: Pt,
+        cell_spacing: Pt,
+        borders: Option<&TableBorderConfig>,
+        carries_top: bool,
+        carries_bottom: bool,
+    ) -> TableSlice {
+        let height = self.cursor_y
+            + if carries_bottom {
+                cell_spacing
+            } else {
+                Pt::ZERO
+            };
+
+        if cell_spacing > Pt::ZERO {
+            emit_table_outline(
+                &mut self.border_commands,
+                borders,
+                PtRect::from_xywh(Pt::ZERO, Pt::ZERO, table_width, height),
+                carries_top,
+                carries_bottom,
+            );
+        }
+
+        self.commands.append(&mut self.content_commands);
+        self.commands.append(&mut self.border_commands);
+        TableSlice {
+            commands: self.commands,
+            size: PtSize::new(table_width, height),
+        }
+    }
+}
+
 /// Lay out a table: compute column widths, lay out cells, emit borders.
 ///
 /// Monolithic — the whole table fits on one page, so unlike
 /// [`layout_table_paginated`] there is no top-border override to thread
-/// through: every border is already resolved correctly in one pass.
+/// through: every border is already resolved correctly in one pass. The result
+/// is a [`TableSlice`] because that is what a one-slice table is.
 ///
 /// §17.4.38: `suppress_first_row_top` suppresses the top border of the first row
 /// for adjacent table border collapse.
@@ -92,9 +191,9 @@ pub fn layout_table(
     borders: Option<&TableBorderConfig>,
     measure_text: super::paragraph::MeasureTextFn<'_>,
     suppress_first_row_top: bool,
-) -> TableLayout {
+) -> TableSlice {
     if rows.is_empty() || col_widths.is_empty() {
-        return TableLayout {
+        return TableSlice {
             commands: Vec::new(),
             size: PtSize::ZERO,
         };
@@ -110,60 +209,20 @@ pub fn layout_table(
         suppress_first_row_top,
     );
 
-    let mut commands = Vec::new();
-    let mut content_commands = Vec::new();
-    let mut border_commands = Vec::new();
-    let mut cursor_y = Pt::ZERO;
-
+    let mut builder = SliceBuilder::new();
     // Monolithic table: no top border override needed — borders are resolved correctly.
+    let (cursor_y, mut buffers) = builder.emit_into();
     emit_table_rows(
         &measured,
         rows,
         0..measured.rows.len(),
-        &mut cursor_y,
-        &mut TableCommandBuffers {
-            commands: &mut commands,
-            content_commands: &mut content_commands,
-            border_commands: &mut border_commands,
-        },
+        cursor_y,
+        &mut buffers,
         None,
     );
 
-    // §17.4.44: each row reserves its own leading gap, so the only one left to
-    // add is the trailing gap at the table's bottom edge.
-    let table_height = cursor_y + cell_spacing;
-
-    // Issue #168: a spaced table's outer border is its own rectangle, because
-    // the cells no longer touch the table's edges. `suppress_first_row_top`
-    // (§17.4.38 adjacent-table collapse) is deliberately not consulted: with a
-    // gap between two tables there is no shared edge to collapse, so there is
-    // nothing for it to suppress here.
-    if cell_spacing > Pt::ZERO {
-        emit_table_outline(
-            &mut border_commands,
-            borders,
-            PtRect::from_xywh(Pt::ZERO, Pt::ZERO, measured.table_width, table_height),
-            true,
-            true,
-        );
-    }
-
-    commands.append(&mut content_commands);
-    commands.append(&mut border_commands);
-
-    TableLayout {
-        commands,
-        size: PtSize::new(measured.table_width, table_height),
-    }
-}
-
-/// One page-slice of a table, produced by `layout_table_paginated`.
-#[derive(Debug)]
-pub struct TableSlice {
-    /// Draw commands positioned relative to this slice's top-left origin (0,0).
-    pub commands: Vec<super::draw_command::DrawCommand>,
-    /// Size of this slice.
-    pub size: PtSize,
+    // The whole table is one slice, so it carries both of the table's edges.
+    builder.finish(measured.table_width, cell_spacing, borders, true, true)
 }
 
 /// Pagination parameters for `layout_table_paginated`.
@@ -425,10 +484,7 @@ pub(crate) fn layout_table_paginated_with_page_heights(
         .iter()
         .enumerate()
         .map(|(slice_idx, items)| {
-            let mut commands = Vec::new();
-            let mut content_commands = Vec::new();
-            let mut border_commands = Vec::new();
-            let mut cursor_y = Pt::ZERO;
+            let mut builder = SliceBuilder::new();
             for (item_idx, item) in items.iter().enumerate() {
                 // First item on each continuation slice (slice_idx > 0) needs
                 // its top border restored if it was resolved away. The first
@@ -439,18 +495,15 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                 } else {
                     None
                 };
+                let (cursor_y, mut buffers) = builder.emit_into();
                 match item {
                     SliceItem::Range(range) => {
                         emit_table_rows(
                             &measured,
                             rows,
                             range.clone(),
-                            &mut cursor_y,
-                            &mut TableCommandBuffers {
-                                commands: &mut commands,
-                                content_commands: &mut content_commands,
-                                border_commands: &mut border_commands,
-                            },
+                            cursor_y,
+                            &mut buffers,
                             top_override,
                         );
                     }
@@ -464,50 +517,23 @@ pub(crate) fn layout_table_paginated_with_page_heights(
                         emit_split_row(
                             mr,
                             &rows[*row_idx],
-                            &mut cursor_y,
-                            &mut TableCommandBuffers {
-                                commands: &mut commands,
-                                content_commands: &mut content_commands,
-                                border_commands: &mut border_commands,
-                            },
+                            cursor_y,
+                            &mut buffers,
                             top_override,
                             has_reserved_bottom_gap,
                         );
                     }
                 }
             }
-            // §17.4.44: the trailing gap belongs to the table's bottom *edge*,
-            // so only the final slice gets it — an intermediate slice ends at a
-            // page cut, not at the table's edge. Without this a table that
-            // happens to paginate loses the bottom gap that the same table
-            // keeps when it fits on one page (see the monolithic path above).
-            let trailing_gap = if slice_idx == last_slice_idx {
-                cell_spacing
-            } else {
-                Pt::ZERO
-            };
-            let slice_height = cursor_y + trailing_gap;
-
-            // Issue #168: the outline follows the same two conditions the gap
-            // above does, for the same reason. A slice gets the table's top
-            // edge only if the table starts on it and its bottom edge only if
-            // the table ends on it; left and right bound every slice.
-            if cell_spacing > Pt::ZERO {
-                emit_table_outline(
-                    &mut border_commands,
-                    borders,
-                    PtRect::from_xywh(Pt::ZERO, Pt::ZERO, measured.table_width, slice_height),
-                    slice_idx == 0,
-                    slice_idx == last_slice_idx,
-                );
-            }
-
-            commands.append(&mut content_commands);
-            commands.append(&mut border_commands);
-            TableSlice {
-                commands,
-                size: PtSize::new(measured.table_width, slice_height),
-            }
+            // The table's own top edge is on the first slice and its own bottom
+            // edge on the last; every slice in between ends at a page cut.
+            builder.finish(
+                measured.table_width,
+                cell_spacing,
+                borders,
+                slice_idx == 0,
+                slice_idx == last_slice_idx,
+            )
         })
         .collect()
 }

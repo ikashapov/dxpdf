@@ -135,12 +135,17 @@ pub enum TableBorderStyle {
     Double,
 }
 
-/// Result of laying out a table.
+/// One page-slice of a table.
+///
+/// A table laid out whole (`layout_table`) is the one-slice case, so it is the
+/// same type: there is nothing a monolithic result carries that a slice does
+/// not, and two names for one shape only invited the caller to guess which one
+/// a given function returns.
 #[derive(Debug)]
-pub struct TableLayout {
-    /// Draw commands positioned relative to the table's top-left origin.
+pub struct TableSlice {
+    /// Draw commands positioned relative to this slice's top-left origin (0,0).
     pub commands: Vec<DrawCommand>,
-    /// Total size of the table.
+    /// Size of this slice.
     pub size: PtSize,
 }
 
