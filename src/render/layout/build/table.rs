@@ -1857,6 +1857,628 @@ mod tests {
         assert_eq!(rows[2].cells[1].vertical_merge, None);
     }
 
+    // ── `build_table`: the orchestrator's own output ──────────────────────
+    //
+    // `BuiltTable` carries seven fields and every one of them is several
+    // passes away from a pixel — a `col_widths` entry becomes a cell box only
+    // after measure, grid and emit have each had a say, and `float_info` only
+    // after the paginator has. The integration files pin what reaches the
+    // page; these pin the arithmetic that produces it, so a failure names the
+    // term that moved rather than the document that came out wrong.
+    //
+    // Every expected number is derived from the inputs and nothing else: 20
+    // twips to the point, 8 eighth-points to the point, `pct` in fiftieths of
+    // a percent (§17.18.90), and a width the caller offers rather than
+    // defaults.
+
+    use crate::render::fonts::FontRegistry;
+    use crate::render::layout::measurer::TextMeasurer;
+    use crate::render::resolve::ResolvedDocument;
+    use std::collections::HashMap;
+
+    /// The width every case below is offered: the Letter text column, which is
+    /// what a top-level table gets from the default page config (8.5 in − 2 ×
+    /// 1 in = 6.5 in = 468 pt).
+    const OFFERED: Pt = Pt::new(468.0);
+
+    /// Every width here is a twips-to-points division times a scale factor, so
+    /// the comparison carries a tolerance — well below the 0.01 pt that any of
+    /// the assertions turn on.
+    #[track_caller]
+    fn assert_pt(actual: Pt, expected: f32, what: &str) {
+        assert!(
+            (actual.raw() - expected).abs() < 0.005,
+            "{what}: expected {expected} pt, got {actual:?}"
+        );
+    }
+
+    fn total(widths: &[Pt]) -> Pt {
+        widths.iter().copied().sum()
+    }
+
+    /// A document whose stylesheet holds exactly `styles`, each a table style
+    /// carrying the given `<w:tblPr>` and nothing else.
+    fn resolved_with(styles: &[(&str, model::TableProperties)]) -> ResolvedDocument {
+        ResolvedDocument {
+            sections: Vec::new(),
+            styles: styles
+                .iter()
+                .map(|(id, table)| {
+                    (
+                        model::StyleId::new(*id),
+                        ResolvedStyle {
+                            paragraph: model::ParagraphProperties::default(),
+                            run: model::RunProperties::default(),
+                            table: Some(table.clone()),
+                            table_style_overrides: Vec::new(),
+                            is_toc_entry: false,
+                        },
+                    )
+                })
+                .collect(),
+            numbering: HashMap::new(),
+            font_families: Vec::new(),
+            media: HashMap::new(),
+            embedded_fonts: Vec::new(),
+            pic_bullets: HashMap::new(),
+            theme: None,
+            doc_defaults_paragraph: model::ParagraphProperties::default(),
+            doc_defaults_run: model::RunProperties::default(),
+            default_paragraph_style_id: None,
+            default_table_style_id: None,
+            footnotes: HashMap::new(),
+            endnotes: HashMap::new(),
+            even_and_odd_headers: false,
+            default_tab_stop: Dimension::new(720),
+        }
+    }
+
+    fn build_offered(
+        t: &Table,
+        offered: Pt,
+        styles: &[(&str, model::TableProperties)],
+    ) -> BuiltTable {
+        let resolved = resolved_with(styles);
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let ctx = BuildContext {
+            measurer: &measurer,
+            resolved: &resolved,
+        };
+        build_table(t, offered, &ctx, &mut BuildState::default())
+    }
+
+    /// The common case: the Letter text column, and an empty stylesheet.
+    fn build(t: &Table) -> BuiltTable {
+        build_offered(t, OFFERED, &[])
+    }
+
+    /// A table with `grid` declared in twips and one row of `cells` empty
+    /// cells, each spanning one column.
+    fn table_of(properties: model::TableProperties, grid: &[i64], cells: usize) -> Table {
+        Table {
+            properties,
+            grid: grid
+                .iter()
+                .map(|w| model::GridColumn {
+                    width: Dimension::new(*w),
+                })
+                .collect(),
+            rows: vec![model_row(0, &vec![1u32; cells])],
+        }
+    }
+
+    fn measure(m: model::TableMeasure) -> model::Dup<model::TableMeasure> {
+        model::Dup::from(Some(m))
+    }
+
+    fn dxa(twips: i64) -> model::TableMeasure {
+        model::TableMeasure::Twips(Dimension::new(twips))
+    }
+
+    fn pct(fiftieths: i64) -> model::TableMeasure {
+        model::TableMeasure::Pct(Dimension::new(fiftieths))
+    }
+
+    /// A `<w:tblCellMar>` stating all four sides, in twips.
+    fn cell_mar(
+        top: i64,
+        right: i64,
+        bottom: i64,
+        left: i64,
+    ) -> crate::model::geometry::EdgeInsets<Twips> {
+        crate::model::geometry::EdgeInsets::new(
+            Dimension::new(top),
+            Dimension::new(right),
+            Dimension::new(bottom),
+            Dimension::new(left),
+        )
+    }
+
+    /// §17.4.63 / §17.18.90: a `pct` table width is that fraction of the width
+    /// offered, and the full-width cell-margin extension is keyed on the
+    /// fraction **reaching** `FULL` — 5000 fiftieths, 100% — rather than on it
+    /// being large.
+    ///
+    /// One fiftieth of a percent short of full the base is the plain 468 pt
+    /// offered, so the table is 4999/5000 × 468 = 467.906 pt. At full the base
+    /// is 468 plus both of the table's cell margins, 2 × 108 twips = 10.8 pt,
+    /// for 478.8. Two widths one unit apart in the file come out 10.9 pt apart
+    /// on the page, and that discontinuity *is* the heuristic — see
+    /// `extends_for_alignment`'s comment for why a full-width table is the one
+    /// case Word widens.
+    ///
+    /// `tests/table_geometry_sizing.rs` pins each side of this on the page, but
+    /// only ever with cell margins **or** a sub-full percentage, never both:
+    /// with the comparison written `<= FULL` instead of `>= FULL` every one of
+    /// those cases still passes, and so does every table in the corpus.
+    #[test]
+    fn the_cell_margin_extension_begins_exactly_at_a_full_width_pct() {
+        let width = |w: model::TableMeasure| {
+            let props = model::TableProperties {
+                width: measure(w),
+                cell_margins: model::Dup::from(Some(cell_mar(0, 108, 0, 108))),
+                ..Default::default()
+            };
+            total(&build(&table_of(props, &[2000, 2000], 2)).col_widths)
+        };
+
+        assert_pt(width(pct(4999)), 467.9064, "one fiftieth short of full");
+        assert_pt(width(pct(5000)), 478.8, "at full, plus both cell margins");
+    }
+
+    /// §17.4.63: `auto` and `nil` both state *no* preferred width, so the
+    /// declared grid is kept as declared. `nil` in particular is not a
+    /// zero-width table — `CT_TblWidth`'s `nil` is the absence of a value, and
+    /// a table 0 pt wide is not a reading any section supports.
+    ///
+    /// The `dxa` control is what makes that a claim rather than an
+    /// observation: the same grid under a declared width is scaled to it.
+    #[test]
+    fn an_auto_or_nil_table_width_keeps_the_declared_grid() {
+        let grid = [1440, 2880]; // 72 pt and 144 pt, summing to 216
+        let cols = |w: Option<model::TableMeasure>| {
+            let props = model::TableProperties {
+                width: model::Dup::from(w),
+                ..Default::default()
+            };
+            build(&table_of(props, &grid, 2)).col_widths
+        };
+
+        for w in [
+            None,
+            Some(model::TableMeasure::Auto),
+            Some(model::TableMeasure::Nil),
+        ] {
+            let out = cols(w);
+            assert_pt(out[0], 72.0, &format!("{w:?}: column 0 as declared"));
+            assert_pt(out[1], 144.0, &format!("{w:?}: column 1 as declared"));
+        }
+
+        let scaled = cols(Some(dxa(2160))); // 108 pt against a 216 pt grid
+        assert_pt(scaled[0], 36.0, "a dxa width halves the same grid");
+        assert_pt(scaled[1], 72.0, "…keeping its declared 1:2 ratio");
+    }
+
+    /// §17.4.50: a `dxa` `tblInd` is that many twips of indent, and the direct
+    /// occurrence outranks the style's rather than adding to it.
+    ///
+    /// `tests/table_style_cascade.rs` pins that a style's `tblInd` reaches the
+    /// table at all, written as parity against the same element on the
+    /// `<w:tbl>`. What parity cannot show is the number, or which level wins
+    /// when both levels declare one — the case that decides whether the read is
+    /// a cascade or a sum.
+    #[test]
+    fn a_direct_tbl_ind_is_its_twips_in_points_and_outranks_the_styles() {
+        let style = model::TableProperties {
+            indent: measure(dxa(1440)),
+            ..Default::default()
+        };
+        let indent_of = |direct: Option<model::TableMeasure>| {
+            let props = model::TableProperties {
+                style_id: Some(model::StyleId::new("T")),
+                indent: model::Dup::from(direct),
+                width: measure(dxa(4000)),
+                ..Default::default()
+            };
+            build_offered(
+                &table_of(props, &[4000], 1),
+                OFFERED,
+                &[("T", style.clone())],
+            )
+            .indent
+        };
+
+        assert_pt(indent_of(None), 72.0, "1440 twips from the style");
+        assert_pt(indent_of(Some(dxa(720))), 36.0, "the direct 720 twips wins");
+    }
+
+    /// §17.4.50 / §17.4.63: the full-width left-aligned shift is keyed on the
+    /// **resolved indent being zero**, not on the `tblInd` element being
+    /// absent — and "resolves to zero" covers every measure this engine does
+    /// not read, not only `dxa 0`.
+    ///
+    /// `tblInd` is a `CT_TblWidth`, so a file may state `pct`, `auto` or `nil`
+    /// there. Only `dxa` is read, which is the same reading
+    /// `resolve_cell_spacing` applies to the same type — this engine has no
+    /// base to measure a percentage indent against, the table's own width being
+    /// the thing the indent helps place. **Word reference render needed**: a
+    /// table at `<w:tblInd w:w="2500" w:type="pct"/>` says whether Word reads
+    /// it and against what.
+    ///
+    /// What this pins regardless of that answer is the *rule*. Five spellings
+    /// that resolve to no indent must all take the shift, so a guard rewritten
+    /// as "the element is absent" fails on four of them; and the shift is
+    /// −5.4 pt, one left cell margin, not some other multiple.
+    /// `tests/table_style_cascade.rs` covers the two spellings the corpus has —
+    /// absent, and `dxa 0` — on the page.
+    #[test]
+    fn every_tbl_ind_that_resolves_to_no_indent_takes_the_full_width_shift() {
+        let indent_of = |ind: Option<model::TableMeasure>| {
+            let props = model::TableProperties {
+                width: measure(pct(5000)),
+                indent: model::Dup::from(ind),
+                cell_margins: model::Dup::from(Some(cell_mar(0, 108, 0, 108))),
+                ..Default::default()
+            };
+            build(&table_of(props, &[2000, 2000], 2)).indent
+        };
+
+        for ind in [
+            None,
+            Some(model::TableMeasure::Auto),
+            Some(model::TableMeasure::Nil),
+            Some(pct(2500)),
+            Some(dxa(0)),
+        ] {
+            assert_pt(indent_of(ind), -5.4, &format!("{ind:?} is no indent"));
+        }
+        assert_pt(
+            indent_of(Some(dxa(720))),
+            36.0,
+            "…while a real indent is still taken literally",
+        );
+    }
+
+    /// §17.4.28 / §17.4.63: the full-width extension and the negative shift are
+    /// one rule with two halves, and both are withheld from a table placed as a
+    /// unit — the `matches!(alignment, Center | End)` the two guards share.
+    ///
+    /// `tests/table_geometry_sizing.rs` pins absent-versus-`center` on the
+    /// page. The two spellings it cannot reach are `end`, the other arm of that
+    /// `matches!`, which no test at any level exercises; and `start`, the
+    /// explicit spelling of the very case the heuristic is written for, which
+    /// must behave exactly as an absent `w:jc` — the `matches!` is written as a
+    /// negation, so a `start` that fell through it would lose the shift.
+    #[test]
+    fn only_a_start_aligned_full_width_table_extends_by_its_cell_margins() {
+        let built = |jc: Option<model::Alignment>| {
+            let props = model::TableProperties {
+                width: measure(pct(5000)),
+                alignment: model::Dup::from(jc),
+                cell_margins: model::Dup::from(Some(cell_mar(0, 108, 0, 108))),
+                ..Default::default()
+            };
+            build(&table_of(props, &[2000, 2000], 2))
+        };
+
+        for jc in [None, Some(model::Alignment::Start)] {
+            let b = built(jc);
+            assert_eq!(b.alignment, jc, "the alignment passes through as declared");
+            assert_pt(total(&b.col_widths), 478.8, "468 + 2 × 5.4 pt of margin");
+            assert_pt(b.indent, -5.4, "…pulled left by the left cell margin");
+        }
+        for jc in [Some(model::Alignment::Center), Some(model::Alignment::End)] {
+            let b = built(jc);
+            assert_eq!(b.alignment, jc);
+            assert_pt(
+                total(&b.col_widths),
+                468.0,
+                &format!("{jc:?}: the offered width verbatim"),
+            );
+            assert_pt(b.indent, 0.0, &format!("{jc:?}: and no shift"));
+        }
+    }
+
+    /// §17.4.38: a direct `<w:tblBorders>` merges over the style's **per
+    /// edge** — an edge the table does not mention keeps the style's — and a
+    /// direct edge spelled `val="none"` still *wins* that merge, which is what
+    /// makes it remove the style's border rather than inherit it.
+    ///
+    /// That is the asymmetry with §17.4.66, where the same `none` on a **cell**
+    /// means inherit ([MS-OI29500] starts the cell cascade at "if the cell
+    /// border is omitted or none"), and where `nil` is the spelling that
+    /// suppresses. `tests/table_border_conflict.rs` pins the cell side on the
+    /// page; the last two assertions here put both levels in one fixture, since
+    /// "the same markup is read oppositely at two levels" is not a claim either
+    /// level can make alone.
+    #[test]
+    fn direct_table_borders_merge_over_the_styles_edge_by_edge() {
+        let line = |eighths: i64, style: model::BorderStyle| {
+            Some(model::Border {
+                style,
+                width: Dimension::new(eighths),
+                space: Dimension::ZERO,
+                color: model::Color::BLACK,
+            })
+        };
+        let style_borders = model::TableBorders {
+            top: line(8, model::BorderStyle::Single),
+            bottom: line(8, model::BorderStyle::Single),
+            left: line(8, model::BorderStyle::Single),
+            right: line(8, model::BorderStyle::Single),
+            inside_h: line(8, model::BorderStyle::Single),
+            inside_v: line(8, model::BorderStyle::Single),
+        };
+        let style = model::TableProperties {
+            borders: model::Dup::from(Some(style_borders)),
+            ..Default::default()
+        };
+        let props = model::TableProperties {
+            style_id: Some(model::StyleId::new("T")),
+            width: measure(dxa(4000)),
+            borders: model::Dup::from(Some(model::TableBorders {
+                top: line(16, model::BorderStyle::Single),
+                inside_h: line(8, model::BorderStyle::None),
+                bottom: None,
+                left: None,
+                right: None,
+                inside_v: None,
+            })),
+            ..Default::default()
+        };
+        let mut t = table_of(props, &[2000, 2000], 2);
+        t.rows[0].cells[0].properties.borders = model::Dup::from(Some(model::TableCellBorders {
+            top: line(8, model::BorderStyle::None),
+            bottom: line(8, model::BorderStyle::Nil),
+            left: None,
+            right: None,
+            inside_h: None,
+            inside_v: None,
+            tl2br: None,
+            tr2bl: None,
+        }));
+
+        let built = build_offered(&t, OFFERED, &[("T", style)]);
+        let b = built.border_config.expect("the style declares six edges");
+        assert_pt(
+            b.top.expect("the direct top").width,
+            2.0,
+            "16 eighths of a point, from the table",
+        );
+        for (edge, name) in [
+            (b.bottom, "bottom"),
+            (b.left, "left"),
+            (b.right, "right"),
+            (b.inside_v, "insideV"),
+        ] {
+            assert_pt(
+                edge.unwrap_or_else(|| panic!("{name} must survive from the style"))
+                    .width,
+                1.0,
+                &format!("{name}: 8 eighths, from the style"),
+            );
+        }
+        assert!(
+            b.inside_h.is_none(),
+            "a direct insideH of `none` must remove the style's, not inherit it"
+        );
+
+        let cell = built.rows[0].cells[0]
+            .cell_borders
+            .as_ref()
+            .expect("the cell declares two edges");
+        assert!(
+            cell.top.is_none(),
+            "the same `none` on a *cell* means inherit — §17.4.66, not §17.4.38"
+        );
+        assert!(
+            matches!(cell.bottom, Some(CellBorderOverride::Suppress)),
+            "…and `nil` is the cell spelling that does suppress, got {:?}",
+            cell.bottom
+        );
+    }
+
+    /// §17.4.42 / §17.4.68: two per-side cascades in series. The table's
+    /// default is the direct `<w:tblCellMar>` over the style's, and the cell's
+    /// margins are `<w:tcMar>` over *that*.
+    ///
+    /// One side stated at each level, with a different value at each, is what
+    /// separates them: a merge that replaced either set wholesale, or that
+    /// resolved the cell against the style rather than against the merged
+    /// default, lands a different number on three of the four sides.
+    ///
+    /// The table level cannot tell an absent side from an explicit zero —
+    /// `<w:tblCellMar>` parses to a whole `EdgeInsets`, missing sides collapsed
+    /// to 0 because §17.4.42 gives a table default no further inheritance — so
+    /// the merge reads 0 as "unstated". That is a limit of the model rather
+    /// than a choice made here, and its one visible consequence is that
+    /// `<w:left w:w="0"/>` on a `<w:tbl>` cannot override a style's non-zero
+    /// left. Stated, not asserted.
+    #[test]
+    fn cell_margins_cascade_per_side_from_the_style_through_the_table_to_the_cell() {
+        let style = model::TableProperties {
+            cell_margins: model::Dup::from(Some(cell_mar(100, 200, 300, 400))),
+            ..Default::default()
+        };
+        let props = model::TableProperties {
+            style_id: Some(model::StyleId::new("T")),
+            width: measure(dxa(4000)),
+            // Only `left` is stated; the other three are the parse seam's zero.
+            cell_margins: model::Dup::from(Some(cell_mar(0, 0, 0, 800))),
+            ..Default::default()
+        };
+        let mut t = table_of(props, &[4000], 1);
+        t.rows[0].cells[0].properties.margins =
+            model::Dup::from(Some(crate::model::geometry::PartialEdgeInsets::new(
+                Some(Dimension::new(600)),
+                None,
+                None,
+                None,
+            )));
+
+        let built = build_offered(&t, OFFERED, &[("T", style)]);
+        let m = built.rows[0].cells[0].margins;
+        assert_pt(m.top, 30.0, "the cell's own 600 twips");
+        assert_pt(
+            m.right,
+            10.0,
+            "the style's 200, restated at neither level below",
+        );
+        assert_pt(m.bottom, 15.0, "the style's 300, likewise");
+        assert_pt(m.left, 40.0, "the table's 800 over the style's 400");
+    }
+
+    /// §17.4.57: which of `<w:tblpPr>`'s ten attributes reach layout.
+    ///
+    /// Five do — `rightFromText` and `bottomFromText` as the two wrap gaps,
+    /// `tblpY` as the offset, `vertAnchor`, and `tblpXSpec`. Two more are
+    /// dropped *structurally*: `TableFloatInfo` has no field for `horzAnchor`
+    /// or `tblpYSpec` at all, so nothing here could carry them. The remaining
+    /// three — `tblpX`, `leftFromText`, `topFromText` — are parsed and
+    /// deliberately not carried, which `build_table` states at the site: a
+    /// horizontally-offset table places as if none of them were set.
+    ///
+    /// Each dropped attribute is given a value no honoured field could be
+    /// mistaken for, so a wire crossed between `left`/`right`, `top`/`bottom`
+    /// or `x`/`y` shows up as a wrong number rather than as a missing one.
+    #[test]
+    fn five_of_tbl_p_prs_ten_attributes_reach_the_float_info() {
+        let props = model::TableProperties {
+            width: measure(dxa(4000)),
+            positioning: model::Dup::from(Some(model::TablePositioning {
+                left_from_text: Some(Dimension::new(9999)),
+                right_from_text: Some(Dimension::new(100)),
+                top_from_text: Some(Dimension::new(9999)),
+                bottom_from_text: Some(Dimension::new(200)),
+                vert_anchor: Some(model::TableAnchor::Page),
+                horz_anchor: Some(model::TableAnchor::Margin),
+                x_align: Some(model::TableXAlign::Right),
+                y_align: Some(model::TableYAlign::Bottom),
+                x: Some(Dimension::new(9999)),
+                y: Some(Dimension::new(400)),
+            })),
+            overlap: model::Dup::from(Some(model::TableOverlap::Never)),
+            ..Default::default()
+        };
+        let f = build(&table_of(props, &[4000], 1))
+            .float_info
+            .expect("a tblpPr floats the table");
+
+        assert_pt(
+            f.right_gap,
+            5.0,
+            "rightFromText's 100 twips, not leftFromText",
+        );
+        assert_pt(f.bottom_gap, 10.0, "bottomFromText's 200, not topFromText");
+        assert_pt(f.y_offset, 20.0, "tblpY's 400, not tblpX");
+        assert_eq!(f.vert_anchor, model::TableAnchor::Page);
+        assert_eq!(f.x_align, Some(model::TableXAlign::Right));
+        assert_eq!(
+            f.overlap,
+            Some(model::TableOverlap::Never),
+            "§17.4.56 rides along, from its own element"
+        );
+    }
+
+    /// §17.4.57: an empty `<w:tblpPr>` still floats the table, at the
+    /// element's own defaults — no wrap gaps, no offset, and the `text`
+    /// vertical anchor the section names as the default.
+    ///
+    /// And `<w:tblOverlap>` alone does **not** float one. §17.4.56 says how a
+    /// float behaves when it meets another float, which is not a statement that
+    /// this table is one — so a table carrying only `tblOverlap` must come back
+    /// with no `float_info` at all, or the paginator would start treating an
+    /// ordinary table as anchored.
+    #[test]
+    fn an_empty_tbl_p_pr_floats_at_the_defaults_and_tbl_overlap_alone_does_not() {
+        let floated = model::TableProperties {
+            width: measure(dxa(4000)),
+            positioning: model::Dup::from(Some(model::TablePositioning {
+                left_from_text: None,
+                right_from_text: None,
+                top_from_text: None,
+                bottom_from_text: None,
+                vert_anchor: None,
+                horz_anchor: None,
+                x_align: None,
+                y_align: None,
+                x: None,
+                y: None,
+            })),
+            ..Default::default()
+        };
+        let f = build(&table_of(floated, &[4000], 1))
+            .float_info
+            .expect("an empty tblpPr still floats the table");
+        assert_pt(f.right_gap, 0.0, "no rightFromText is no gap");
+        assert_pt(f.bottom_gap, 0.0, "no bottomFromText is no gap");
+        assert_pt(f.y_offset, 0.0, "no tblpY is no offset");
+        assert_eq!(
+            f.vert_anchor,
+            model::TableAnchor::Text,
+            "§17.4.57's default vertical anchor"
+        );
+        assert_eq!(f.x_align, None);
+
+        let overlap_only = model::TableProperties {
+            width: measure(dxa(4000)),
+            overlap: model::Dup::from(Some(model::TableOverlap::Never)),
+            ..Default::default()
+        };
+        assert!(
+            build(&table_of(overlap_only, &[4000], 1))
+                .float_info
+                .is_none(),
+            "tblOverlap describes a float; it does not create one"
+        );
+    }
+
+    /// The width a nested table is built against is its cell's **inner**
+    /// width: the grid slot less the cell margins that will be drawn inside it.
+    ///
+    /// 8000 twips of `tblW` is 400 pt, the one-column grid takes all of it, and
+    /// the 108-twip left and right cell margins leave 389.2 pt of content. A
+    /// nested table at `pct 2500` is half of that, 194.6 pt.
+    ///
+    /// Note what each half of that pins. **That the offered width is the
+    /// cell's** is arithmetic, and is the assertion. **That the percentage is
+    /// then taken against it** is a divergence from §17.4.63, which defines the
+    /// `pct` base as the text extents of the *page* — `build_table` records why
+    /// it is not read literally (a nested table at 100% would be drawn straight
+    /// out of its cell, which no implementation does) and that a Word reference
+    /// render is what would settle it. This test moves with that decision; it
+    /// is not evidence for it.
+    #[test]
+    fn a_nested_table_is_offered_its_cells_inner_width() {
+        let nested = table_of(
+            model::TableProperties {
+                width: measure(pct(2500)),
+                ..Default::default()
+            },
+            &[1000],
+            1,
+        );
+        let outer = model::TableProperties {
+            width: measure(dxa(8000)),
+            cell_margins: model::Dup::from(Some(cell_mar(0, 108, 0, 108))),
+            ..Default::default()
+        };
+        let mut t = table_of(outer, &[8000], 1);
+        t.rows[0].cells[0].content = vec![Block::Table(Box::new(nested))];
+
+        let built = build(&t);
+        assert_pt(built.col_widths[0], 400.0, "8000 twips of declared width");
+        match &built.rows[0].cells[0].blocks[0] {
+            LayoutBlock::Table { col_widths, .. } => assert_pt(
+                total(col_widths),
+                194.6,
+                "half of 400 − 2 × 5.4 pt of cell margin",
+            ),
+            _ => panic!("the cell's first block is not the nested table"),
+        }
+    }
+
     /// §17.4.80: `hRule="auto"` ignores `val`, so the row carries **no** height
     /// constraint — it is not a zero-height minimum, and not a minimum of the
     /// stated value either.
