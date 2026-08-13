@@ -858,8 +858,25 @@ mod tests {
         }
     }
 
+    /// Every border rect of a 1×2 table, at its exact position and in the order
+    /// the painter walks them.
+    ///
+    /// [MS-OI29500] §17.4.66: the one shared vertical edge is resolved once and
+    /// drawn by the left cell, which is why there are seven rects and not eight.
+    /// A count alone cannot tell a correct seven from a wrong one, so every
+    /// number below is derived instead: each row is 14pt (one default line),
+    /// each column 100pt, and every border 0.5pt. Horizontals span the **full**
+    /// cell width and own the corners; the verticals fill the 13pt
+    /// (14 − 0.5 − 0.5) the horizontals leave between them, which is the
+    /// convention [`emit_cell_borders`] states. A cell's four edges are emitted
+    /// top, bottom, left, right, and the cells in row order.
     #[test]
     fn borders_emit_lines() {
+        let line = TableBorderLine {
+            width: Pt::new(0.5),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
         let rows = vec![TableRowInput {
             cells: vec![simple_cell("a"), simple_cell("b")],
             height_rule: None,
@@ -875,52 +892,33 @@ mod tests {
             Pt::ZERO,
             Pt::new(14.0),
             Some(&TableBorderConfig {
-                top: Some(TableBorderLine {
-                    width: Pt::new(0.5),
-                    color: RgbColor::BLACK,
-                    style: TableBorderStyle::Single,
-                }),
-                bottom: Some(TableBorderLine {
-                    width: Pt::new(0.5),
-                    color: RgbColor::BLACK,
-                    style: TableBorderStyle::Single,
-                }),
-                left: Some(TableBorderLine {
-                    width: Pt::new(0.5),
-                    color: RgbColor::BLACK,
-                    style: TableBorderStyle::Single,
-                }),
-                right: Some(TableBorderLine {
-                    width: Pt::new(0.5),
-                    color: RgbColor::BLACK,
-                    style: TableBorderStyle::Single,
-                }),
-                inside_h: Some(TableBorderLine {
-                    width: Pt::new(0.5),
-                    color: RgbColor::BLACK,
-                    style: TableBorderStyle::Single,
-                }),
-                inside_v: Some(TableBorderLine {
-                    width: Pt::new(0.5),
-                    color: RgbColor::BLACK,
-                    style: TableBorderStyle::Single,
-                }),
+                top: Some(line),
+                bottom: Some(line),
+                left: Some(line),
+                right: Some(line),
+                inside_h: Some(line),
+                inside_v: Some(line),
             }),
             None,
             false,
         );
 
-        // Borders are emitted as filled rects. Count border rects by
-        // excluding cell shading rects (which use non-BLACK colors or
-        // appear before borders in the command list).
-        let border_rect_count = result
-            .commands
-            .iter()
-            .filter(|c| matches!(c, DrawCommand::Rect { color, .. } if *color == RgbColor::BLACK))
-            .count();
-        // [MS-OI29500] §17.4.66: shared edges drawn once after conflict resolution.
-        // Top(2) + bottom(2) + left(1) + insideV(1) + right(1) = 7 border rects.
-        assert_eq!(border_rect_count, 7);
+        assert_eq!(
+            result.size,
+            crate::render::geometry::PtSize::new(Pt::new(200.0), Pt::new(14.0))
+        );
+        assert_eq!(
+            rects(&result.commands),
+            vec![
+                (0.0, 0.0, 100.0, 0.5),    // cell 0 top, full cell width
+                (0.0, 13.5, 100.0, 0.5),   // cell 0 bottom, flush with the row
+                (0.0, 0.5, 0.5, 13.0),     // cell 0 left, inset between them
+                (99.5, 0.5, 0.5, 13.0),    // cell 0 right — the shared edge
+                (100.0, 0.0, 100.0, 0.5),  // cell 1 top
+                (100.0, 13.5, 100.0, 0.5), // cell 1 bottom
+                (199.5, 0.5, 0.5, 13.0),   // cell 1 right; its left was resolved away
+            ],
+        );
     }
 
     /// §17.4.60 tblPrEx — when a row carries a `tblBorders` override,
@@ -1244,6 +1242,378 @@ mod tests {
         assert!(
             interior > 0,
             "the cells' own borders vanished; only the outline is left"
+        );
+    }
+
+    /// A cell of exactly `width × height` with no content, so a row's geometry
+    /// follows from `RowHeightRule::Exact` alone and not from text metrics.
+    fn sized_row(height: f32, cells: usize) -> TableRowInput {
+        TableRowInput {
+            cells: (0..cells)
+                .map(|_| TableCellInput {
+                    blocks: vec![],
+                    ..simple_cell("")
+                })
+                .collect(),
+            height_rule: Some(crate::render::layout::table::RowHeightRule::Exact(Pt::new(
+                height,
+            ))),
+            is_header: None,
+            cant_split: None,
+            grid_before: 0,
+            border_overrides: None,
+        }
+    }
+
+    fn double(width: f32) -> TableBorderLine {
+        TableBorderLine {
+            width: Pt::new(width),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Double,
+        }
+    }
+
+    // ── §17.18.2 `double`: two sub-lines, not one line ───────────────────────
+
+    /// The declared `w:sz` of a `double` border is the **total** width of the
+    /// pair — two lines of `sz/3` separated by a gap of `sz/3` — not the width
+    /// of each line. So a 3pt double is two 1pt lines a 1pt apart, filling
+    /// exactly the same 3pt band a 3pt `single` would fill, and
+    /// [`border_width`] reports 3pt for both.
+    ///
+    /// The split is along the edge's **short** axis: a horizontal border's two
+    /// lines are stacked vertically and each spans the full cell width, a
+    /// vertical border's sit side by side and each spans the full edge height.
+    /// Getting that backwards would produce two lines running the wrong way
+    /// through the border band, and a test that only counted rects would not
+    /// notice.
+    ///
+    /// One 100 × 20pt cell (`Exact` keeps the arithmetic free of text metrics),
+    /// every edge a 3pt double. The verticals run the 14pt (20 − 3 − 3) the
+    /// horizontals leave between them, exactly as for a single of the same
+    /// width — the sub-lines are *inside* the band, so they change nothing
+    /// about how the edges meet.
+    #[test]
+    fn a_double_border_paints_two_sub_lines_of_a_third_the_declared_width() {
+        let d = double(3.0);
+        let result = layout_table(
+            &[sized_row(20.0, 1)],
+            &[Pt::new(100.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&TableBorderConfig {
+                top: Some(d),
+                bottom: Some(d),
+                left: Some(d),
+                right: Some(d),
+                inside_h: None,
+                inside_v: None,
+            }),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            rects(&result.commands),
+            vec![
+                // Top: two full-width lines at the band's outer edges, 0..1 and
+                // 2..3 — a 1pt gap between them.
+                (0.0, 0.0, 100.0, 1.0),
+                (0.0, 2.0, 100.0, 1.0),
+                // Bottom: the same pair in the band 17..20.
+                (0.0, 17.0, 100.0, 1.0),
+                (0.0, 19.0, 100.0, 1.0),
+                // Left: split the other way — two 1pt columns in the band
+                // 0..3, each running the 14pt between the horizontals.
+                (0.0, 3.0, 1.0, 14.0),
+                (2.0, 3.0, 1.0, 14.0),
+                // Right: the same pair in the band 97..100.
+                (97.0, 3.0, 1.0, 14.0),
+                (99.0, 3.0, 1.0, 14.0),
+            ],
+        );
+    }
+
+    /// The band a `double` occupies is the band `border_width` reserves for it,
+    /// so a double and a single of the same `w:sz` meet their neighbours
+    /// identically — only the interior of the band differs.
+    ///
+    /// Asserted against the single as a control rather than against literals:
+    /// the claim is a relation between the two styles, and pinning the doubles'
+    /// coordinates alone could not tell "same band" from "same numbers I typed
+    /// twice".
+    #[test]
+    fn a_double_border_occupies_the_same_band_as_a_single_of_the_same_width() {
+        // The four edges are emitted in a fixed order (top, bottom, left,
+        // right), `rects_per_edge` rects each — itself an assertion: a single
+        // paints one line per edge, a double two.
+        let bands = |style: TableBorderStyle, rects_per_edge: usize| -> Vec<(f32, f32, f32, f32)> {
+            let line = TableBorderLine {
+                width: Pt::new(3.0),
+                color: RgbColor::BLACK,
+                style,
+            };
+            let result = layout_table(
+                &[sized_row(20.0, 1)],
+                &[Pt::new(100.0)],
+                Pt::ZERO,
+                Pt::new(14.0),
+                Some(&TableBorderConfig {
+                    top: Some(line),
+                    bottom: Some(line),
+                    left: Some(line),
+                    right: Some(line),
+                    inside_h: None,
+                    inside_v: None,
+                }),
+                None,
+                false,
+            );
+            let r = rects(&result.commands);
+            assert_eq!(
+                r.len(),
+                4 * rects_per_edge,
+                "{style:?}: four edges at {rects_per_edge} rect(s) each"
+            );
+            // Each edge's band is the bounding box of the rects it painted.
+            r.chunks(rects_per_edge)
+                .map(|edge| {
+                    let x0 = edge.iter().map(|e| e.0).fold(f32::INFINITY, f32::min);
+                    let y0 = edge.iter().map(|e| e.1).fold(f32::INFINITY, f32::min);
+                    let x1 = edge
+                        .iter()
+                        .map(|e| e.0 + e.2)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let y1 = edge
+                        .iter()
+                        .map(|e| e.1 + e.3)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    (x0, y0, x1 - x0, y1 - y0)
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            bands(TableBorderStyle::Double, 2),
+            bands(TableBorderStyle::Single, 1),
+            "a double fills the same four bands as a single of the same w:sz"
+        );
+    }
+
+    // ── §17.4.66 at a vertical edge, across a `w:gridSpan` boundary ──────────
+
+    /// Within a row, cell `ci`'s right edge and cell `ci+1`'s left edge always
+    /// meet at the same grid column, however wide either cell is — the walk
+    /// advances by `grid_span`, so cell adjacency and grid adjacency are the
+    /// same question here. (They are *not* at a horizontal edge, which is why
+    /// that pass resolves per grid column instead.)
+    ///
+    /// What a `gridSpan` changes is where the edge lands and how many there
+    /// are: the grid boundary **inside** the span carries no vertical at all,
+    /// and the one boundary that survives is resolved once and drawn by the
+    /// left cell.
+    ///
+    /// Three 50pt columns, row `[span-2 | plain]`. The span cell's own right is
+    /// `insideV` at 0.5pt; the plain cell declares a 2pt left. §17.4.66 step 2
+    /// gives it to the heavier border, drawn on the span cell's right at
+    /// x = 100 − 2, and the plain cell draws no left edge at all.
+    #[test]
+    fn a_gridspan_cell_resolves_one_vertical_edge_at_its_far_side() {
+        let mut wide = TableCellInput {
+            blocks: vec![],
+            ..simple_cell("")
+        };
+        wide.grid_span = 2;
+        let mut narrow = TableCellInput {
+            blocks: vec![],
+            ..simple_cell("")
+        };
+        narrow.cell_borders = Some(crate::render::layout::table::CellBorderConfig {
+            top: None,
+            bottom: None,
+            left: Some(crate::render::layout::table::CellBorderOverride::Border(
+                TableBorderLine {
+                    width: Pt::new(2.0),
+                    color: RgbColor::BLACK,
+                    style: TableBorderStyle::Single,
+                },
+            )),
+            right: None,
+        });
+
+        let outer = TableBorderLine {
+            width: Pt::new(1.0),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
+        let rows = vec![TableRowInput {
+            cells: vec![wide, narrow],
+            ..sized_row(20.0, 0)
+        }];
+        let result = layout_table(
+            &rows,
+            &[Pt::new(50.0), Pt::new(50.0), Pt::new(50.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&TableBorderConfig {
+                top: None,
+                bottom: None,
+                left: Some(outer),
+                right: Some(outer),
+                inside_h: None,
+                inside_v: Some(TableBorderLine {
+                    width: Pt::new(0.5),
+                    ..outer
+                }),
+            }),
+            None,
+            false,
+        );
+
+        assert_eq!(
+            rects(&result.commands),
+            vec![
+                // The table's own left edge, on the span cell.
+                (0.0, 0.0, 1.0, 20.0),
+                // The one interior vertical: the winner, 2pt, drawn inward from
+                // the span cell's right edge at x = 100.
+                (98.0, 0.0, 2.0, 20.0),
+                // The table's own right edge, on the plain cell.
+                (149.0, 0.0, 1.0, 20.0),
+            ],
+            "nothing may be painted at x = 50 — that grid boundary is interior \
+             to the span — and the plain cell must not repeat the shared edge"
+        );
+    }
+
+    // ── A row shorter than its own borders (§17.4.80 `hRule="exact"`) ────────
+
+    /// `<w:trHeight w:hRule="exact"/>` sets the row height outright, so a row
+    /// can be declared shorter than the borders it carries. Borders are drawn
+    /// *inward from the cell edge*, which for a 2pt row with 3pt horizontals
+    /// means the two of them overlap and there is nothing between them.
+    ///
+    /// Two things follow, and both are the point of this test. No rect is
+    /// emitted with a non-positive height — `v_height > 0` is what stops the
+    /// verticals from becoming inverted rectangles, which the painter would
+    /// render as nothing or as a smear depending on the backend. And the two
+    /// horizontals still paint at full width, so neither declared border is
+    /// silently dropped.
+    ///
+    /// The verticals *are* dropped, and there is nowhere to put them: the band
+    /// they would occupy has negative height. What a renderer should instead do
+    /// with a row shorter than its borders — grow it, or clip the borders into
+    /// it — is not something §17.4.80 or §17.4.66 settles, and this test
+    /// deliberately does not pin an answer to it.
+    #[test]
+    fn a_row_shorter_than_its_own_borders_drops_no_horizontal_and_inverts_nothing() {
+        let thick = TableBorderLine {
+            width: Pt::new(3.0),
+            color: RgbColor::BLACK,
+            style: TableBorderStyle::Single,
+        };
+        let thin = TableBorderLine {
+            width: Pt::new(1.0),
+            ..thick
+        };
+        let result = layout_table(
+            &[sized_row(2.0, 1)],
+            &[Pt::new(100.0)],
+            Pt::ZERO,
+            Pt::new(14.0),
+            Some(&TableBorderConfig {
+                top: Some(thick),
+                bottom: Some(thick),
+                left: Some(thin),
+                right: Some(thin),
+                inside_h: None,
+                inside_v: None,
+            }),
+            None,
+            false,
+        );
+        let r = rects(&result.commands);
+
+        assert!(
+            r.iter().all(|(_, _, w, h)| *w > 0.0 && *h > 0.0),
+            "no rect may be emitted with a non-positive extent, got {r:?}"
+        );
+        assert_eq!(r.len(), 2, "both horizontals, neither vertical: {r:?}");
+        assert_eq!(
+            (r[0].0, r[0].2, r[0].3),
+            (0.0, 100.0, 3.0),
+            "the top border keeps its declared width and spans the cell"
+        );
+        assert_eq!(r[0].1, 0.0, "and starts at the row's top edge");
+        assert_eq!(
+            (r[1].0, r[1].2, r[1].3),
+            (0.0, 100.0, 3.0),
+            "so does the bottom border"
+        );
+        assert_eq!(
+            r[1].1 + r[1].3,
+            2.0,
+            "the bottom border is flush with the row's bottom edge — drawn \
+             inward from it, which for a row shorter than the border puts its \
+             far side above the row's own top"
+        );
+    }
+
+    // ── §17.4.45 / issue #168: a spaced table, at exact coordinates ──────────
+
+    /// Every rect a spaced table emits, derived from its inputs.
+    ///
+    /// Two 100pt slots at a 20pt `w:tblCellSpacing`. The slots were already
+    /// shrunk by `build/table.rs::reserve_cell_spacing`, so the table's own
+    /// width is 200 + 20 = 220, and each cell is inset one spacing: cell 0 at
+    /// x = 20 with width 80, cell 1 at x = 120. Each row box is one 14pt line
+    /// plus its own 20pt leading gap, and the table adds one trailing gap at
+    /// its bottom edge: 34 + 34 + 20 = 88.
+    ///
+    /// [MS-OI29500] §17.4.66 — *"if the cell spacing is nonzero … all cell
+    /// borders and outer table borders display"* — so both appear, and neither
+    /// stands in for the other: the outline is the table's own 220 × 88
+    /// rectangle, the cell edges are the cells'. The outline is emitted last,
+    /// after every row.
+    #[test]
+    fn a_spaced_table_paints_its_cell_edges_and_its_outline_at_exact_coordinates() {
+        let result = layout_table(
+            &two_rows(),
+            &[Pt::new(100.0), Pt::new(100.0)],
+            Pt::new(20.0),
+            Pt::new(14.0),
+            Some(&all_borders(1.0)),
+            None,
+            false,
+        );
+        assert_eq!(
+            result.size,
+            crate::render::geometry::PtSize::new(Pt::new(220.0), Pt::new(88.0))
+        );
+
+        assert_eq!(
+            rects(&result.commands),
+            vec![
+                // Row 0 (box 20..34, its bottom border in the 1pt band below).
+                // Its top and left are the table's own edges, which a spaced
+                // cell does not take — they belong to the outline.
+                (20.0, 34.0, 80.0, 1.0),  // cell 0 bottom (insideH)
+                (99.0, 20.0, 1.0, 14.0),  // cell 0 right  (insideV)
+                (120.0, 34.0, 80.0, 1.0), // cell 1 bottom
+                (120.0, 20.0, 1.0, 14.0), // cell 1 left
+                // Row 1 (box 54..68). Its bottom is the table's own edge.
+                (20.0, 54.0, 80.0, 1.0),  // cell 0 top (insideH)
+                (99.0, 55.0, 1.0, 13.0),  // cell 0 right, inset under its top
+                (120.0, 54.0, 80.0, 1.0), // cell 1 top
+                (120.0, 55.0, 1.0, 13.0), // cell 1 left
+                // The table's own rectangle, drawn the way a cell's edges are:
+                // horizontals span the full width and own the corners, the
+                // verticals fill the 86pt between them.
+                (0.0, 0.0, 220.0, 1.0),
+                (0.0, 87.0, 220.0, 1.0),
+                (0.0, 1.0, 1.0, 86.0),
+                (219.0, 1.0, 1.0, 86.0),
+            ],
         );
     }
 }
