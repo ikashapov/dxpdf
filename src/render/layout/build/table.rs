@@ -98,6 +98,54 @@ fn row_height_rule(
 /// level *only* in two of its four tables, so it separates "Word applies a
 /// factor" from "Word sums the two declarations" — and its fourth table, with
 /// 400 at table level and 800 on the row, measures the sum directly.
+///
+/// # Why the row-level value is still not applied
+///
+/// Not because the precedence is unclear. The primary text gives it exactly:
+/// §17.4.45 (`tblPr`) is "superseded by a table-level exception (§17.4.44) or
+/// the row cell spacing value (§17.4.43) in that order", and §17.4.44
+/// (`tblPrEx`) is "superseded by the row cell spacing value (§17.4.43)". Row
+/// beats exception beats table, and §17.4.43 adds two sentences no other level
+/// has: row-level spacing is added *inside* the text margins where table-level
+/// is added *outside*, and "Row-level cell spacing shall not increase the width
+/// of the overall table."
+///
+/// **The one Word render on record contradicts "supersede".**
+/// `issue-165-cellspacing.docx` declares 400 at table level *and* 400 on the
+/// row. Superseding gives 400; Word draws about 800. Summing gives 800.
+/// A factor is ruled out by ONLYOFFICE above, so of the two readings left it is
+/// the spec's own that the measurement disagrees with — which is what
+/// [MS-OI29500] exists to record. Implementing §17.4.43 as written would move
+/// that fixture from matching the only Word measurement available to missing it
+/// by half, on the strength of text already known not to bind Word here.
+///
+/// **And a differing row is not a local change.** The gap is uniform because
+/// one spacing is carved out of the grid by `reserve_cell_spacing` and the same
+/// value insets every cell, so slots plus one spacing equal the table width. A
+/// row using a different value breaks that, and repairing it needs three
+/// answers nothing supplies:
+///
+/// * does the row re-carve the grid from its own spacing — misaligning its
+///   column boundaries with the rows above and below — or inset within the
+///   slots the table-level value produced, leaving the row short of the table
+///   edge? §17.4.43's "shall not increase the width of the overall table" rules
+///   out *growing* the table and does not choose between these.
+/// * what is the table's reported width when rows disagree? It is
+///   `sum(slots) + cell_spacing` today, and it drives pagination, floating-table
+///   registration and `jc` placement — so a wrong answer moves the whole table,
+///   not one row.
+/// * is border collapsing still table-wide? `collapse_borders` is
+///   `cell_spacing <= 0` for the entire table. With spacing on some rows only,
+///   a per-row answer would collapse one row's borders and not its neighbour's,
+///   and no section says whether Word does that.
+///
+/// **What would settle it**: a Word render of
+/// `issue-165-cellspacing-scale.docx`. Its two table-level-only tables give the
+/// factor, and its fourth table — 400 on the table, 800 on every row —
+/// distinguishes supersede (gap 800), sum (gap 1200) and table-wins (gap 400)
+/// in a single measurement, because all three predict a different number. A
+/// fifth table with the row value on *one* row only would answer the alignment
+/// and border-collapse questions above; the fixture does not have one yet.
 fn resolve_cell_spacing(m: Option<model::TableMeasure>) -> Pt {
     match m {
         Some(model::TableMeasure::Twips(tw)) => Pt::from(tw).max(Pt::ZERO),
@@ -726,11 +774,25 @@ pub(super) fn build_table(
             let mut cells = cells;
             normalize_row_uniform_vertical_insets(&mut cells);
 
-            // §17.4.43 / §17.4.44: a row (or its `tblPrEx`) may override the
-            // table's `tblCellSpacing`. Layout applies spacing per *table* —
-            // the grid slots are shrunk once, up front — so a per-row value
-            // cannot be honoured without a per-row grid. Report it rather than
-            // dropping it silently; the parsed value stays on the model.
+            // A row may override the table's `tblCellSpacing`, and the spec is
+            // unambiguous about the order. Verified against the primary text:
+            // §17.4.45 (`tblPr`) "shall be superseded by a table-level
+            // exception (§17.4.44) or the row cell spacing value (§17.4.43) in
+            // that order", and §17.4.44 (`tblPrEx`) "shall be superseded by
+            // the row cell spacing value (§17.4.43)". So trPr > tblPrEx > tblPr.
+            //
+            // It is still not applied, and the reason is not that the order is
+            // unclear. See `resolve_cell_spacing` for why: implementing it
+            // requires three answers the spec does not give and no render has
+            // measured, and the one Word render on record points *away* from
+            // "supersede". Report it rather than dropping it silently; the
+            // parsed value stays on the model, so nothing has to be reparsed
+            // when a render settles it.
+            //
+            // Note this fires only on *disagreement*. A row restating the
+            // table's own value resolves to the same gap either way, which is
+            // why `issue-165-cellspacing.docx` is silent here and
+            // `issue-165-cellspacing-scale.docx` — table 400, row 800 — is not.
             let row_spacing = row.properties.cell_spacing.cloned().or_else(|| {
                 row.property_exceptions
                     .as_ref()
