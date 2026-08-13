@@ -1,19 +1,23 @@
-//! Table measurement phase — cell layout and border resolution.
+//! Table measurement phase — cell layout, row heights, cell geometry.
+//!
+//! Border *resolution* is not here. `borders.rs` answers what each cell's four
+//! edges are (§17.4.66, including who owns each shared edge); this phase asks
+//! for that answer once, then spends its length on the question it is named
+//! for: how tall each row is and where each cell sits.
 
 use crate::render::dimension::Pt;
 
 use crate::render::layout::cell::{layout_cell, CellLayout};
 
-use super::borders::{
-    border_width, resolve_border_conflict, resolve_cell_effective_borders, CellBorders, CellEdge,
-};
-use super::grid::{cell_index_at_grid_col, expand_rows_for_vmerge, is_vmerge_continue};
+use super::borders::{border_width, resolve_table_cell_borders};
+use super::grid::{expand_rows_for_vmerge, is_vmerge_continue};
 use super::types::{
     CellLayoutEntry, MeasuredRow, MeasuredTable, RowHeightRule, TableBorderConfig, TableRowInput,
     VerticalMergeState,
 };
 
-/// Measure all table rows: resolve borders, lay out cell content, compute heights.
+/// Measure all table rows: lay out cell content, compute row heights and cell
+/// positions, carrying each cell's resolved borders (from `borders.rs`) along.
 /// This is the shared measurement phase used by both `layout_table` (monolithic)
 /// and `layout_table_paginated` (page-splitting).
 ///
@@ -58,200 +62,16 @@ pub(super) fn measure_table_rows(
     let num_rows = rows.len();
     let mut row_heights = Vec::with_capacity(num_rows);
 
-    // Pass 2a: resolve borders for every cell.
-    let mut resolved_borders: Vec<Vec<CellBorders>> = Vec::new();
-    {
-        let mut grid_indices: Vec<Vec<usize>> = Vec::new();
-        for (row_idx, row) in rows.iter().enumerate() {
-            let mut row_borders = Vec::new();
-            let mut row_grid = Vec::new();
-            // §17.4.17: gridBefore — the row's first cell starts at grid_col
-            // `grid_before`, leaving the leftmost columns empty.
-            let mut grid_idx = row.grid_before as usize;
-            // §17.4.61: a row may carry per-row border overrides
-            // (`<w:tblPrEx><w:tblBorders/></w:tblPrEx>`). When set,
-            // it's the *fully merged* effective table borders for this
-            // row — the build layer already overlaid the override on
-            // the table's own borders so the model-layer
-            // "explicitly none" vs "not specified" distinction is
-            // preserved during conversion. Use it verbatim; otherwise
-            // fall back to the table-wide config.
-            let row_table_borders = row.border_overrides.as_ref().or(borders);
-            for cell_input in row.cells.iter() {
-                let span = cell_input.grid_span.max(1) as usize;
-                let (mut b_top, mut b_bottom, b_left, b_right) = resolve_cell_effective_borders(
-                    cell_input,
-                    row_table_borders,
-                    row_idx,
-                    grid_idx,
-                    span,
-                    num_rows,
-                    col_widths.len(),
-                    cell_spacing > Pt::ZERO,
-                );
-                if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
-                    b_top = CellEdge::Absent;
-                }
-                if row_idx + 1 < num_rows && is_vmerge_continue(&rows[row_idx + 1], grid_idx) {
-                    b_bottom = CellEdge::Absent;
-                }
-                row_borders.push(CellBorders {
-                    top: b_top,
-                    bottom: b_bottom,
-                    left: b_left,
-                    right: b_right,
-                });
-                row_grid.push(grid_idx);
-                grid_idx += cell_input.grid_span.max(1) as usize;
-            }
-            resolved_borders.push(row_borders);
-            grid_indices.push(row_grid);
-        }
-
-        // [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ... then all
-        // cell borders and outer table borders display."* With a gap between
-        // them, adjacent cells share no edge, so there is no conflict to
-        // resolve and every cell keeps its own four borders. Collapsing them
-        // here would delete borders that must be drawn, and drawing both sides
-        // of a collapsed edge would double every line.
-        let collapse_borders = cell_spacing <= Pt::ZERO;
-
-        // §17.4.66: conflict resolution at vertical shared edges (a cell's
-        // right vs. its right neighbour's left). Drawn once on the left cell.
-        for row_idx in 0..if collapse_borders { num_rows } else { 0 } {
-            let num_cells = rows[row_idx].cells.len();
-            for cell_ci in 0..num_cells.saturating_sub(1) {
-                let right = resolved_borders[row_idx][cell_ci].right;
-                let left = resolved_borders[row_idx][cell_ci + 1].left;
-                let winner = resolve_border_conflict(right, left);
-                resolved_borders[row_idx][cell_ci].right = winner;
-                resolved_borders[row_idx][cell_ci + 1].left = CellEdge::Absent;
-            }
-        }
-
-        // [MS-OI29500] §17.4.66: conflict resolution at horizontal shared edges (row R's
-        // bottom vs. row R+1's top). Resolved *per grid column* because a
-        // `gridSpan` cell in one row can face several cells in the other:
-        //   • wide upper cell over several lower cells — resolving only the
-        //     first lower cell (and nulling the rest) drops their borders;
-        //   • wide lower cell under several upper cells — a nil spacer among
-        //     them must not punch a gap through the lower cell's border.
-        //
-        // The whole edge is then drawn from *one* side (all upper bottoms, or
-        // all lower tops). This matters visually: an upper-row bottom sits in
-        // the inter-row gap while a lower-row top sits just below it, so
-        // splitting a single line between the two sides would offset segments
-        // by the border width. A cell paints one border across its width, so
-        // a side can own the edge only if each of its cells spans a run of
-        // columns whose resolved border is uniform; upper is preferred (it
-        // keeps the aligned-grid path and page-split top restoration valid).
-        let ncols = col_widths.len();
-        for upper in 0..if collapse_borders {
-            num_rows.saturating_sub(1)
-        } else {
-            0
-        } {
-            let lower = upper + 1;
-
-            // Per-column resolved border for this inter-row edge.
-            let resolved: Vec<CellEdge> = (0..ncols)
-                .map(|gc| {
-                    let edge = |row: usize, pick: fn(&CellBorders) -> CellEdge| {
-                        cell_index_at_grid_col(&rows[row], gc)
-                            .map(|ci| pick(&resolved_borders[row][ci]))
-                            .unwrap_or(CellEdge::Absent)
-                    };
-                    resolve_border_conflict(edge(upper, |b| b.bottom), edge(lower, |b| b.top))
-                })
-                .collect();
-
-            // A row can paint the whole edge iff (a) it has a cell over every
-            // column that carries a border — a row whose `gridSpan` leaves a
-            // bordered column uncovered (its gridAfter gap) can't draw that
-            // column, so the other row must — and (b) each of its cells spans
-            // a uniform run of resolved columns (a cell paints one border
-            // across its width). Without (a), a partly-covered cell would draw
-            // its own top *and* the covering row its bottom → a doubled line.
-            let can_own = |row_idx: usize| -> bool {
-                let covers_bordered_cols = (0..ncols).all(|gc| {
-                    resolved[gc].line().is_none()
-                        || cell_index_at_grid_col(&rows[row_idx], gc).is_some()
-                });
-                covers_bordered_cols
-                    && grid_indices[row_idx]
-                        .iter()
-                        .enumerate()
-                        .all(|(ci, &start)| {
-                            let span = rows[row_idx].cells[ci].grid_span.max(1) as usize;
-                            let end = (start + span).min(ncols);
-                            start >= end
-                                || (start..end).all(|gc| resolved[gc].paints_same(resolved[start]))
-                        })
-            };
-
-            if !can_own(upper) && can_own(lower) {
-                // Wide upper cell can't paint the mixed edge; draw it entirely
-                // from the finer lower row so the line stays at one y (e.g. a
-                // label cell right of a nil spacer under a gridSpan header).
-                for (ci, &start) in grid_indices[lower].iter().enumerate() {
-                    let span = rows[lower].cells[ci].grid_span.max(1) as usize;
-                    let end = (start + span).min(ncols);
-                    if start < end {
-                        resolved_borders[lower][ci].top = resolved[start];
-                    }
-                }
-                for b in resolved_borders[upper].iter_mut() {
-                    b.bottom = CellEdge::Absent;
-                }
-            } else {
-                // Upper row owns the edge: each upper cell paints its uniform
-                // run (a nil spacer above a gridSpan cell resolves to that
-                // cell's inherited border, so no gap), and lower tops it
-                // covers are cleared. Columns an upper cell can't paint
-                // uniformly (only reachable in the both-non-uniform fallback)
-                // fall through to the lower cell.
-                let mut covered = vec![false; ncols];
-                for (ci, &start) in grid_indices[upper].iter().enumerate() {
-                    let span = rows[upper].cells[ci].grid_span.max(1) as usize;
-                    let end = (start + span).min(ncols);
-                    if start >= end {
-                        continue;
-                    }
-                    if (start..end).all(|gc| resolved[gc].paints_same(resolved[start])) {
-                        resolved_borders[upper][ci].bottom = resolved[start];
-                        for c in covered.iter_mut().take(end).skip(start) {
-                            *c = true;
-                        }
-                    } else {
-                        resolved_borders[upper][ci].bottom = CellEdge::Absent;
-                    }
-                }
-                for (ci, &start) in grid_indices[lower].iter().enumerate() {
-                    let span = rows[lower].cells[ci].grid_span.max(1) as usize;
-                    let end = (start + span).min(ncols);
-                    if start >= end {
-                        continue;
-                    }
-                    if (start..end).any(|gc| covered[gc]) {
-                        // Any column already painted from above → defer the
-                        // whole cell so a partly-covered span can't double up.
-                        resolved_borders[lower][ci].top = CellEdge::Absent;
-                    } else if (start..end).all(|gc| resolved[gc].paints_same(resolved[start])) {
-                        resolved_borders[lower][ci].top = resolved[start];
-                    } else {
-                        resolved_borders[lower][ci].top = CellEdge::Absent;
-                    }
-                }
-            }
-        }
-
-        // §17.4.38: suppress first-row top borders for adjacent table collapse.
-        if suppress_first_row_top && !resolved_borders.is_empty() {
-            for b in &mut resolved_borders[0] {
-                b.top = CellEdge::Absent;
-            }
-        }
-    }
+    // Pass 2a: §17.4.66 border resolution — what each cell declares, then who
+    // owns each shared edge. Both live in `borders.rs`; this phase only needs
+    // the answer.
+    let resolved_borders = resolve_table_cell_borders(
+        rows,
+        col_widths.len(),
+        borders,
+        cell_spacing,
+        suppress_first_row_top,
+    );
 
     // Pass 2b: lay out each cell.
     let mut row_cell_layouts: Vec<Vec<CellLayoutEntry>> = Vec::new();
