@@ -288,3 +288,270 @@ fn a_row_shorter_than_the_grid_is_left_short() {
         "a short row keeps its grid columns and stops",
     );
 }
+
+// ── The repair: a cell the grid cannot seat ──────────────────────────────────
+//
+// Every test below describes a file whose `<w:tblGrid>` has fewer columns than
+// some row has cells. That file contradicts itself — §17.4.71 says the table
+// "shall satisfy the shared columns as specified by the tblGrid element", and
+// there is no column for the last cell to be satisfied in — so a renderer must
+// decide what gives. What gave before was the cell: it was clamped to a
+// zero-width slice at the table's right edge, drawn on top of the previous
+// cell's border, its text unreadable and its column invisible. Content that
+// renders at zero width is gone from the PDF as surely as content drawn off the
+// paper, which is the same line `clamp_auto_grid_to_page` is drawn at.
+
+/// The core of it: a cell that exists gets a column. Two declared columns
+/// against four cells leaves cells 2 and 3 unseated; both must come out with a
+/// width, at distinct positions, inside the table.
+///
+/// Asserted structurally first — no cell at zero width, no two cells at the
+/// same x — because that is the property the repair exists for, and it holds
+/// whatever widths the appended columns are given.
+#[test]
+fn a_cell_the_grid_cannot_seat_still_gets_a_column() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800, 4800]),
+        &row(&format!(
+            "{}{}{}{}",
+            cell("a", Some((2400, "dxa")), None),
+            cell("b", Some((2400, "dxa")), None),
+            cell("c", Some((2400, "dxa")), None),
+            cell("d", Some((2400, "dxa")), None)
+        )),
+    ));
+
+    let cells = first_row_cells(&pages);
+    assert_eq!(cells.len(), 4, "four cells were declared: {cells:?}");
+    for (i, (x, w)) in cells.iter().enumerate() {
+        assert!(
+            *w > 0.0,
+            "cell {i} drew at zero width — the grid could not seat it and it \
+             was dropped rather than given a column: {cells:?}"
+        );
+        assert!(x.is_finite(), "cell {i} has no position: {cells:?}");
+    }
+    for i in 1..cells.len() {
+        assert!(
+            cells[i].0 > cells[i - 1].0 + 0.01,
+            "cells {} and {i} collapsed onto the same column: {cells:?}",
+            i - 1
+        );
+    }
+}
+
+/// And the width the appended column gets is the cell's own declared `tcW`
+/// — the only width evidence the file offers for a column the grid never
+/// mentioned.
+///
+/// The two unseated cells declare *different* widths (1200 and 3600 twips), so
+/// an implementation that appended a uniform column would fail here while
+/// passing the structural test above. The declared grid is kept as declared:
+/// 4800 + 4800 + 1200 + 3600 = 14400 twips scaled to the 9600-twip `tblW` is a
+/// factor of two thirds, giving 160, 160, 40 and 120 pt.
+#[test]
+fn an_unseated_cell_is_sized_from_its_declared_tcw() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800, 4800]),
+        &row(&format!(
+            "{}{}{}{}",
+            cell("a", Some((4800, "dxa")), None),
+            cell("b", Some((4800, "dxa")), None),
+            cell("c", Some((1200, "dxa")), None),
+            cell("d", Some((3600, "dxa")), None)
+        )),
+    ));
+
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(72.0, 160.0), (232.0, 160.0), (392.0, 40.0), (432.0, 120.0)],
+        "appended columns take the unseated cells' declared tcW",
+    );
+}
+
+/// §17.4.18: a `gridSpan` reaching past the end of the grid needs *every*
+/// column it declares, not just one. Cell `b` spans three columns from column
+/// 1, so columns 2 and 3 are missing; its 7200-twip `tcW` covers all three, of
+/// which the declared column 1 already supplies 4800, so the remaining 2400 is
+/// split between them.
+///
+/// 4800 + 4800 + 1200 + 1200 = 12000 twips scaled to 9600 is a factor of 0.8:
+/// 192 pt for each declared column and 48 pt for each appended one, so the span
+/// draws 192 + 48 + 48 = 288 pt from x = 72 + 192.
+#[test]
+fn a_span_the_grid_cannot_seat_gets_every_column_it_declares() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800, 4800]),
+        &row(&format!(
+            "{}{}",
+            cell("a", Some((4800, "dxa")), None),
+            cell("b", Some((7200, "dxa")), Some(3))
+        )),
+    ));
+
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(72.0, 192.0), (264.0, 288.0)],
+        "the span's missing columns share what its tcW leaves over",
+    );
+}
+
+/// A cell with no `tcW` at all still has to be seated — the repair is about
+/// the cell existing, not about it declaring a width. With no evidence to
+/// size the appended column, it takes the mean of the declared ones (4800),
+/// so three equal columns scale to 160 pt each.
+#[test]
+fn a_cell_with_no_declared_width_still_gets_a_column() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800, 4800]),
+        &row(&format!(
+            "{}{}{}",
+            cell("a", None, None),
+            cell("b", None, None),
+            cell("c", None, None)
+        )),
+    ));
+
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(72.0, 160.0), (232.0, 160.0), (392.0, 160.0)],
+        "a cell with no tcW takes the mean of the declared columns",
+    );
+}
+
+/// A `<w:tblGrid>` with no `<w:gridCol>` at all is the degenerate case of the
+/// same rule: *every* cell is unseated, so every column comes from `tcW`.
+///
+/// This is where the old equal-distribution fallback was worst. 1600/4800/3200
+/// twips is a 1:3:2 table, and it drew as three equal columns — the declared
+/// widths were not merely overridden, they were never consulted. They sum to
+/// the declared `tblW`, so the scale factor is 1: 80, 240 and 160 pt.
+#[test]
+fn a_table_with_no_grid_takes_its_columns_from_tcw() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        "",
+        &row(&format!(
+            "{}{}{}",
+            cell("a", Some((1600, "dxa")), None),
+            cell("b", Some((4800, "dxa")), None),
+            cell("c", Some((3200, "dxa")), None)
+        )),
+    ));
+
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(72.0, 80.0), (152.0, 240.0), (392.0, 160.0)],
+        "an absent grid is rebuilt from the declared cell widths",
+    );
+}
+
+/// Rows disagree about how wide an appended column should be, and the widest
+/// claim wins — a column narrower than that would put one of the two rows back
+/// where it started, squeezed into less than it declared.
+///
+/// This is the same direction §17.4.63's own reconciliation runs in, and it is
+/// the only choice here that is order-independent: taking the first or the last
+/// row's claim would make the result depend on row order, which no reading of
+/// §17.4.14 supports.
+///
+/// The **wider row comes first** deliberately. With the narrow row first, "the
+/// last claim wins" and "the widest claim wins" agree, and a mutation replacing
+/// the maximum with plain assignment passes — so the order is what gives this
+/// test its teeth.
+#[test]
+fn the_widest_claim_on_an_appended_column_wins() {
+    let rows = format!(
+        "{}{}",
+        row(&format!(
+            "{}{}{}",
+            cell("a", Some((4800, "dxa")), None),
+            cell("b", Some((4800, "dxa")), None),
+            cell("c", Some((4800, "dxa")), None)
+        )),
+        row(&format!(
+            "{}{}{}",
+            cell("d", Some((4800, "dxa")), None),
+            cell("e", Some((4800, "dxa")), None),
+            cell("f", Some((2400, "dxa")), None)
+        ))
+    );
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800, 4800]),
+        &rows,
+    ));
+
+    // 4800 + 4800 + max(2400, 4800) = 14400 twips over a 9600-twip table.
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(72.0, 160.0), (232.0, 160.0), (392.0, 160.0)],
+        "the appended column is as wide as the widest row claims",
+    );
+}
+
+/// §17.4.17: `gridBefore` pushes a row's cells rightward, so it can be what
+/// puts the last one past the end of the grid — the cells alone would fit.
+///
+/// Two cells in a two-column grid are seated; the same two behind a
+/// `gridBefore` of 1 are not, and the second has nowhere to go. Counting only
+/// the cells would miss it, which is exactly what the mutation check found:
+/// every other test here leaves `gridBefore` at 0, so dropping it from the
+/// demand broke nothing.
+///
+/// 4800 + 4800 + 2400 = 12000 twips scaled to 9600 is a factor of 0.8, and
+/// `gridBefore` leaves the first column empty, so the cells draw at 192 and 96
+/// pt from x = 72 + 192.
+#[test]
+fn grid_before_can_be_what_unseats_a_cell() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800, 4800]),
+        &row_with(
+            r#"<w:gridBefore w:val="1"/>"#,
+            &format!(
+                "{}{}",
+                cell("a", Some((4800, "dxa")), None),
+                cell("b", Some((2400, "dxa")), None)
+            ),
+        ),
+    ));
+
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(264.0, 192.0), (456.0, 96.0)],
+        "gridBefore counts toward the demand",
+    );
+}
+
+/// The gate is about **cells**, not about grid columns in the abstract.
+///
+/// §17.4.16 `gridAfter` declares trailing columns that hold no cell, so a grid
+/// too short to contain them loses nothing — there is no content in them to
+/// lose, and the repair's whole justification is content that would otherwise
+/// not be drawn. Repairing here would instead be a geometry change on
+/// speculation: it would halve this cell, which today fills the table and is
+/// perfectly legible.
+///
+/// Pinned so the narrowness is a decision with a test behind it. What Word does
+/// with a `gridAfter` that overruns the grid is open, and a **Word reference
+/// render** is what would settle it.
+#[test]
+fn a_grid_after_the_grid_cannot_hold_is_not_repaired() {
+    let pages = layout(&table_doc(
+        r#"<w:tblW w:w="9600" w:type="dxa"/>"#,
+        &grid(&[4800]),
+        &row_with(r#"<w:gridAfter w:val="1"/>"#, &cell("a", None, None)),
+    ));
+
+    // One declared column, scaled to the whole 9600-twip (480 pt) table.
+    assert_cells(
+        &first_row_cells(&pages),
+        &[(72.0, 480.0)],
+        "gridAfter must not append a column",
+    );
+}

@@ -1,4 +1,4 @@
-use crate::model::dimension::Dimension;
+use crate::model::dimension::{Dimension, Twips};
 use crate::model::{self, Block, Table, TableCell};
 use crate::render::dimension::Pt;
 use crate::render::geometry;
@@ -184,6 +184,188 @@ fn clamp_auto_grid_to_page(
     compute_column_widths(grid_cols, num_cols, limit)
 }
 
+/// §17.4.14 / §17.4.71: give every declared cell a grid column, appending
+/// columns to `<w:tblGrid>` when it is too short to seat one.
+///
+/// # What the spec settles, and what it does not
+///
+/// §17.4.63 (`tblW`) and §17.4.71 (`tcW`) carry the same paragraph verbatim:
+/// *"All widths in a table are considered preferred because: The table **shall**
+/// satisfy the shared columns as specified by the `tblGrid` element … Two or
+/// more widths can have conflicting values for the width of the same grid column
+/// … The table layout algorithm can require a preference to be overridden."*
+///
+/// So the grid is the invariant and both width elements are preferences that may
+/// lose to it — and the spec states the conflict without resolving it. That is
+/// why nothing here lets a `tcW` override the grid column it disagrees with:
+/// which one Word believes is open, and settling it needs a **Word reference
+/// render**, not a rule invented at this line. `w:tcW` is read here and nowhere
+/// else in `src/render/`.
+///
+/// What is *not* open is the seating. A grid with fewer columns than a row has
+/// cells cannot satisfy the shared columns for that row under any reading of the
+/// sentence above, because the last cell has no column to be satisfied in. The
+/// file contradicts itself and something has to give.
+///
+/// # Why the cell may not be what gives
+///
+/// It used to be. Both this module and `table/measure.rs` clamp the grid walk to
+/// the declared column count so a short grid cannot panic on a slice index —
+/// and the clamp gives the overrun cell an empty slice, so it laid out at zero
+/// width, stacked at the table's right edge under the previous cell's border.
+/// Its text, borders and shading were all emitted and none of them were legible.
+///
+/// Content drawn at zero width is gone from the PDF exactly as content drawn off
+/// the paper is, which is the line `clamp_auto_grid_to_page` above is already
+/// drawn at, and for the same reason: it is the one consequence every reading of
+/// every layout property agrees is wrong. So the grid grows to fit the cells
+/// rather than the cells shrinking to fit the grid.
+///
+/// # The repair is minimal, and that is a choice
+///
+/// The declared columns are kept exactly as declared and the missing ones are
+/// appended. Every row the grid *could* seat therefore lays out unchanged, which
+/// is the property that keeps this off all 398 tables in the corpus.
+///
+/// LibreOffice resolves the same input differently — `DomainMapperTableManager`
+/// discards the grid entirely once the cell count disagrees with it and rebuilds
+/// the separators from the declared cell widths — and that is the reading with
+/// 13 years of third-party-producer pressure behind it. It is also the larger
+/// change: it moves rows that were already seated. Neither is derivable from
+/// §17.4.14, and a **Word reference render** of a table whose grid is one column
+/// short is what would choose between them.
+///
+/// # Sizing an appended column
+///
+/// From the unseated cell's own `w:tcW`, which is the only width the file offers
+/// for a column the grid never mentioned. Where a cell straddles the end of the
+/// declared grid, the columns it already has are subtracted first and the
+/// remainder is split evenly across the new ones. Rows may disagree about the
+/// same appended column, and the widest claim wins: a narrower one would put
+/// some row back into less width than it declared, and taking the first or last
+/// row's claim instead would make the result depend on row order, which nothing
+/// in §17.4.14 supports.
+///
+/// Only `w:type="dxa"` counts. §17.4.71's `pct` is a fraction *of the table's
+/// own width*, and the table's width is computed from the grid this function
+/// returns — so reading it here would be circular. Such a cell falls to the
+/// same default as one that declares nothing: the mean of the declared columns,
+/// or an arbitrary equal unit when there are none, which reproduces the
+/// equal-distribution fallback in `compute_column_widths` exactly.
+///
+/// # Only cells count toward the demand
+///
+/// §17.4.17 `gridBefore` is counted because it displaces real cells rightward.
+/// §17.4.16 `gridAfter` is **not**: it declares trailing columns that hold no
+/// cell, so a grid too short for them loses no content, and appending for it
+/// would narrow a cell that renders perfectly well today on nothing but
+/// speculation. A row with no cells at all asks for nothing for the same
+/// reason.
+///
+/// # The demand is bounded by the cells, not by the attributes
+///
+/// `w:gridBefore` and `w:gridSpan` are both `ST_DecimalNumber`, so a file may
+/// state four billion of either, and this is the one function that would turn
+/// such a number into an allocation. The count of appended columns is therefore
+/// capped at the table's own cell count — enough for every cell to get a column,
+/// which is the whole invariant, and bounded by the size of the parsed document
+/// rather than by a value inside it. A pathological `gridSpan` degrades to a
+/// cell narrower than it asked for; it does not degrade to a cell that is not
+/// drawn, and it cannot size a 32 GB `Vec`.
+fn seat_every_cell(
+    declared: &[Dimension<Twips>],
+    rows: &[model::TableRow],
+) -> Vec<Dimension<Twips>> {
+    // §17.4.18: a `gridSpan` of 0 is well-formed and meaningless, so a cell
+    // that exists covers at least one column — `max(1)`, as every grid walk in
+    // this engine spells it.
+    let span_of =
+        |c: &model::TableCell| (*c.properties.grid_span.get().unwrap_or(&1)).max(1) as usize;
+    let demand = |r: &model::TableRow| {
+        (r.properties.grid_before as usize)
+            .saturating_add(r.cells.iter().map(span_of).sum::<usize>())
+    };
+
+    let cells: usize = rows.iter().map(|r| r.cells.len()).sum();
+    let needed = rows
+        .iter()
+        .filter(|r| !r.cells.is_empty())
+        .map(demand)
+        .max()
+        .unwrap_or(0)
+        .min(declared.len().saturating_add(cells));
+    if needed <= declared.len() {
+        // Every cell has a column: the grid is the invariant and it holds.
+        // This is every table in `test-files/` + `test-cases/`.
+        return declared.to_vec();
+    }
+
+    // What each appended column is claimed to be, by the widest claimant.
+    let mut claimed = vec![Dimension::<Twips>::ZERO; needed - declared.len()];
+    for row in rows {
+        let mut col = row.properties.grid_before as usize;
+        for cell in &row.cells {
+            let span = span_of(cell);
+            let end = col.saturating_add(span);
+            // `needed` is capped, so on malformed input a cell can reach past
+            // even the repaired grid. Only the claim is clamped, never the walk
+            // — `col` keeps advancing by the declared span so the cells that do
+            // fit stay in the columns they asked for.
+            let claim_to = end.min(needed);
+            let from = col.max(declared.len()).min(claim_to);
+            // The cell's declared width covers its whole span; the part of that
+            // span already inside the declared grid is subtracted before the
+            // remainder is shared out.
+            if from < claim_to {
+                if let Some(Some(tcw)) = cell.properties.width.get().map(dxa_twips) {
+                    let inside: i64 = declared[col.min(declared.len())..declared.len().min(end)]
+                        .iter()
+                        .map(|w| w.raw())
+                        .sum();
+                    let per = (tcw.raw() - inside).max(0) / (claim_to - from) as i64;
+                    if per > 0 {
+                        for slot in &mut claimed[from - declared.len()..claim_to - declared.len()] {
+                            *slot = (*slot).max(Dimension::new(per));
+                        }
+                    }
+                }
+            }
+            col = end;
+        }
+    }
+
+    // A column nobody sized takes the mean of the declared ones. With no
+    // declared columns either, any positive constant does: the grid is scaled
+    // to the table's width downstream, so all-equal columns land on exactly the
+    // equal distribution `compute_column_widths` would have produced.
+    let default = if declared.is_empty() {
+        Dimension::<Twips>::new(1)
+    } else {
+        Dimension::new(declared.iter().map(|w| w.raw()).sum::<i64>() / declared.len() as i64)
+    };
+    declared
+        .iter()
+        .copied()
+        .chain(
+            claimed
+                .into_iter()
+                .map(|w| if w > Dimension::ZERO { w } else { default }),
+        )
+        .collect()
+}
+
+/// A `CT_TblWidth` in twips, but only when it states one.
+///
+/// `pct` is deliberately excluded — see `seat_every_cell` for why its base is
+/// circular here. `auto` states no width at all (§17.4.71 calls the value
+/// ignored), and `nil` states zero, which is not a column width.
+fn dxa_twips(m: &model::TableMeasure) -> Option<Dimension<Twips>> {
+    match m {
+        model::TableMeasure::Twips(tw) if *tw > Dimension::ZERO => Some(*tw),
+        _ => None,
+    }
+}
+
 /// Recursively build a table: resolve styles, conditional formatting, and
 /// recurse into each cell's content blocks.
 pub(super) fn build_table(
@@ -192,13 +374,17 @@ pub(super) fn build_table(
     ctx: &BuildContext,
     state: &mut BuildState,
 ) -> BuiltTable {
-    // §17.4.14: grid column widths.
-    let num_cols = if t.grid.is_empty() {
+    // §17.4.14: grid column widths, after `seat_every_cell` has made sure the
+    // grid has a column for every cell — for all 398 corpus tables it already
+    // does, and the declared list comes back untouched.
+    let declared_grid: Vec<Dimension<Twips>> = t.grid.iter().map(|g| g.width).collect();
+    let grid = seat_every_cell(&declared_grid, &t.rows);
+    let num_cols = if grid.is_empty() {
         t.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0)
     } else {
-        t.grid.len()
+        grid.len()
     };
-    let grid_cols: Vec<Pt> = t.grid.iter().map(|g| Pt::from(g.width)).collect();
+    let grid_cols: Vec<Pt> = grid.iter().copied().map(Pt::from).collect();
 
     // §17.7.6: table style for conditional formatting, borders, cell margins.
     //
@@ -1087,6 +1273,109 @@ fn build_cell_blocks(
 mod tests {
     use super::*;
     use crate::render::layout::table::{CellVAlign, TableCellInput};
+
+    // ── §17.4.14 seat_every_cell ─────────────────────────────────────────
+    //
+    // The shapes here are the ones no `.docx` can express in a way a rendered
+    // page could then be measured — a four-billion-column row has no geometry
+    // to check — so they are asserted against the function directly.
+
+    /// A model row of `spans.len()` cells with the given `gridSpan`s.
+    fn model_row(grid_before: u32, spans: &[u32]) -> model::TableRow {
+        model::TableRow {
+            properties: model::TableRowProperties {
+                grid_before,
+                ..Default::default()
+            },
+            cells: spans
+                .iter()
+                .map(|s| model::TableCell {
+                    properties: model::TableCellProperties {
+                        grid_span: model::Dup::from(Some(*s)),
+                        ..Default::default()
+                    },
+                    content: Vec::new(),
+                })
+                .collect(),
+            rsids: Default::default(),
+            property_exceptions: None,
+        }
+    }
+
+    fn twips(v: &[i64]) -> Vec<Dimension<Twips>> {
+        v.iter().copied().map(Dimension::new).collect()
+    }
+
+    /// The gate: a grid that already seats every cell comes back untouched.
+    /// Every one of the 398 tables in `test-files/` + `test-cases/` is this
+    /// case, so this is the assertion that the repair is invisible to them.
+    ///
+    /// The early return it exercises is an optimisation, not the behaviour:
+    /// falling through with `needed == declared.len()` appends an empty list
+    /// and returns the same values, which the mutation check confirmed by
+    /// finding `<=` → `<` to be an equivalent mutant. What that mutation cannot
+    /// reach, `repair disabled entirely` in the integration mutation run does.
+    #[test]
+    fn a_seated_grid_is_returned_verbatim() {
+        let declared = twips(&[1000, 2000, 3000]);
+        let rows = vec![model_row(0, &[1, 1, 1]), model_row(1, &[2])];
+        assert_eq!(seat_every_cell(&declared, &rows), declared);
+    }
+
+    /// §17.4.17 `gridBefore` is `ST_DecimalNumber`, so a file may state four
+    /// billion of them. The demand is capped at one appended column per cell,
+    /// so the allocation is bounded by the document that was parsed rather than
+    /// by a number inside it — without the cap this asks for a 32 GB `Vec`.
+    #[test]
+    fn an_absurd_grid_before_cannot_size_the_allocation() {
+        let declared = twips(&[1000, 2000]);
+        let rows = vec![model_row(4_000_000_000, &[1])];
+        let seated = seat_every_cell(&declared, &rows);
+        assert_eq!(
+            seated.len(),
+            3,
+            "two declared columns plus one cell is the whole budget"
+        );
+    }
+
+    /// §17.4.18 `gridSpan` is the same type and gets the same bound. The cell
+    /// is still seated — it has a column and will be drawn — it is merely
+    /// narrower than the four billion columns it asked for.
+    #[test]
+    fn an_absurd_grid_span_cannot_size_the_allocation() {
+        let declared = twips(&[1000, 2000]);
+        let rows = vec![model_row(0, &[1, 4_000_000_000])];
+        let seated = seat_every_cell(&declared, &rows);
+        assert_eq!(seated.len(), 4, "two declared columns plus two cells");
+        assert!(
+            seated.iter().all(|w| *w > Dimension::ZERO),
+            "no column may be zero-width: {seated:?}"
+        );
+    }
+
+    /// A row with no cells asks for nothing, whatever its `gridBefore` says —
+    /// it is the same empty-column case as `gridAfter`, and there is no content
+    /// in it to lose. Without the filter this row would append 6 columns and
+    /// widen the table for every other row.
+    #[test]
+    fn a_row_with_no_cells_demands_no_columns() {
+        let declared = twips(&[1000, 2000]);
+        let rows = vec![model_row(6, &[]), model_row(0, &[1, 1])];
+        assert_eq!(seat_every_cell(&declared, &rows), declared);
+    }
+
+    /// An empty table — no grid, no rows — stays empty rather than becoming a
+    /// one-column table.
+    ///
+    /// Held by the cell budget rather than by `unwrap_or(0)`: with no cells the
+    /// cap is zero, so the demand is clamped to zero whatever the `unwrap_or`
+    /// says. The mutation check found `unwrap_or(1)` to be equivalent for
+    /// exactly that reason, which is worth knowing — the two guards overlap
+    /// here, and removing either still leaves this correct.
+    #[test]
+    fn a_table_with_no_rows_and_no_grid_stays_empty() {
+        assert!(seat_every_cell(&[], &[]).is_empty());
+    }
 
     fn cell_with_margins(top: f32, right: f32, bottom: f32, left: f32) -> TableCellInput {
         TableCellInput {
