@@ -854,22 +854,21 @@ mod tests {
     }
 
     /// …and taller content does not grow it, which is the half `atLeast` does
-    /// not share: `exact` is a ceiling as well as a floor. Three rows of the
-    /// same declared height and wildly different content must come out the same
-    /// height, and the 3-line row is calibrated by
-    /// `an_unconstrained_row_is_as_tall_as_its_content` at 42 pt — so the
-    /// equality is not vacuous.
+    /// not share: `exact` is a ceiling as well as a floor. All three rows below
+    /// hold more than the 20 pt they declare — 42, 112 and 280 pt of it, the
+    /// first calibrated by `an_unconstrained_row_is_as_tall_as_its_content` —
+    /// so the equality cannot be met by any rule that reads the content.
     ///
     /// What this deliberately does **not** assert is where the overflowing
-    /// content goes. dxpdf does not clip it: the fourth line is painted below
-    /// the row's box and overprints whatever follows the table. That is a known
-    /// open defect rather than a decision — §17.4.80 states the height and says
-    /// nothing about the overflow, LibreOffice clips, and no Word render is on
-    /// record — so pinning the overflow here would pin a guess. The height,
-    /// which the section does state, is pinned.
+    /// content goes. dxpdf does not clip it: the lines that do not fit are
+    /// painted below the row's box and overprint whatever follows the table.
+    /// That is a known open defect rather than a decision — §17.4.80 states the
+    /// height and says nothing about the overflow, LibreOffice clips, and no
+    /// Word render is on record — so pinning the overflow here would pin a
+    /// guess. The height, which the section does state, is pinned.
     #[test]
     fn an_exact_row_height_holds_when_the_content_is_taller() {
-        let heights: Vec<Pt> = [0usize, 3, 8]
+        let heights: Vec<Pt> = [3usize, 8, 20]
             .iter()
             .map(|&n| {
                 sized_table(&[row_sized(

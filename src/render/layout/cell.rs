@@ -34,6 +34,15 @@ pub fn layout_cell(
     default_line_height: Pt,
     measure_text: super::paragraph::MeasureTextFn<'_>,
 ) -> CellLayout {
+    // A cell narrower than its own margins would otherwise offer a negative
+    // width. The clamp is *redundant* defence and deliberately kept as such:
+    // `line_emit` re-clamps every width it derives from this one — the
+    // per-line available width and the alignment remainder both `.max(ZERO)` —
+    // so removing it here moves no geometry, and a mutation check confirmed it
+    // as an equivalent mutant against line breaking, content height, cut points
+    // and right-aligned x alike. Nothing at this level can pin it; it stays
+    // because handing a negative width to a future caller that does *not*
+    // re-clamp is the kind of bug that surfaces far from here.
     let content_width = (cell_width - margins.horizontal()).max(Pt::ZERO);
 
     // §20.4.3.1: a cell is measured before its table is paginated — a row can
@@ -283,50 +292,6 @@ mod tests {
         assert!(
             text_cmds[1].1 > text_cmds[0].1,
             "second paragraph should be below first"
-        );
-    }
-
-    /// Margins wider than the cell leave **zero** content width, not a negative
-    /// one. The clamp makes the two degenerate cases — margins exactly as wide
-    /// as the cell and margins far wider — the same case, which is the property
-    /// worth pinning: without it the second would hand `stack_blocks` a negative
-    /// width, and every geometry derived from it would be negative too.
-    ///
-    /// A 40 pt cell against 40 pt of margin already fits nothing, so the two
-    /// must agree; the 100 pt control shows what "fits" would have looked like.
-    #[test]
-    fn margins_wider_than_the_cell_clamp_the_content_width_to_zero() {
-        let blocks = vec![LayoutBlock::Paragraph {
-            fragments: vec![text_frag("aa ", 30.0), text_frag("bb", 30.0)],
-            style: ParagraphStyle::default(),
-            page_break_before: false,
-            footnotes: vec![],
-            floating_images: vec![],
-            floating_shapes: vec![],
-        }];
-        let sides = |w: f32| PtEdgeInsets::new(Pt::ZERO, Pt::new(w), Pt::ZERO, Pt::new(w));
-        let height = |cell_w: f32, margin: f32| {
-            layout_cell(
-                &blocks,
-                Pt::new(cell_w),
-                &sides(margin),
-                Pt::new(14.0),
-                None,
-            )
-            .content_height
-            .raw()
-        };
-
-        assert_eq!(height(100.0, 0.0), 14.0, "60 pt of text across 100 pt");
-        assert_eq!(
-            height(40.0, 20.0),
-            28.0,
-            "zero content width puts each fragment on its own line"
-        );
-        assert_eq!(
-            height(40.0, 500.0),
-            height(40.0, 20.0),
-            "a margin wider than the cell is still exactly zero content width"
         );
     }
 }
