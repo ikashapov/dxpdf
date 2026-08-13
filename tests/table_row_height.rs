@@ -1,10 +1,12 @@
-//! §17.4.85 / §17.4.1 — table row height and page-advance regressions.
+//! §17.4.85 / §17.4.1 — table row height, page-advance, and the two malformed
+//! `w:vMerge` shapes.
 //!
-//! Both defects here are invisible at the `layout_table` level and only show
-//! up once the section layer places the result: a zero-height row lets the
-//! *next* block draw over the table, and an abandoned empty leading slice
-//! becomes a blank page. The unit tests in `table/mod.rs` pin the arithmetic;
-//! these pin what a reader of the PDF would actually see.
+//! These defects are invisible at the `layout_table` level and only show up
+//! once the section layer places the result: a zero-height row lets the *next*
+//! block draw over the table, an abandoned empty leading slice becomes a blank
+//! page, and an unpaired `w:vMerge` drops a cell's text out of the document
+//! altogether. The unit tests in `table/mod.rs` and `build/table.rs` pin the
+//! arithmetic; these pin what a reader of the PDF would actually see.
 
 use std::io::Write;
 
@@ -117,6 +119,120 @@ fn lone_vmerge_restart_matches_the_unmerged_layout() {
         "lone restart moved the following paragraph: {:.1} vs control {:.1}",
         y_of(&restart, "after"),
         y_of(&control, "after"),
+    );
+}
+
+/// Every string this document draws, in page order.
+fn all_text(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> Vec<String> {
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            DrawCommand::Text { text, .. } => Some(text.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A two-row, two-column table whose **first** row's left cell carries
+/// `vmerge` verbatim. `w:val="continue"` there has no `restart` above it —
+/// there is no row above it at all — which is the orphan case.
+fn orphan_continue_table(vmerge: &str) -> Vec<u8> {
+    doc(&format!(
+        r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>{vmerge}</w:tcPr>
+          <w:p><w:r><w:t>ORPHAN</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>NEXT</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>NEXT2</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p><w:r><w:t>after</w:t></w:r></w:p>"#
+    ))
+}
+
+/// §17.4.85: a `<w:vMerge w:val="continue"/>` with **no `restart` above it**
+/// must not cost the cell its content.
+///
+/// §17.4.85 describes `continue` only as continuing the merge begun by a
+/// `restart`, and says nothing about a `continue` that begins one — so the
+/// engine is free to choose what an unpaired one means. It is *not* free to
+/// choose that the text disappears: no reading of §17.4.85 deletes content,
+/// and a merged cell shows the *restart* cell's content precisely because
+/// there is one to show.
+///
+/// See `build::table::promote_orphan_vmerge_continues` for the choice made and
+/// the corroborating LibreOffice behaviour.
+#[test]
+fn orphan_vmerge_continue_keeps_its_cell_content() {
+    let pages = layout(&orphan_continue_table(r#"<w:vMerge w:val="continue"/>"#));
+    let drawn = all_text(&pages);
+
+    assert!(
+        drawn.iter().any(|t| t == "ORPHAN"),
+        "the orphaned cell's text was dropped from the document — drawn: {drawn:?}"
+    );
+}
+
+/// …and the cell is an ordinary one, not merely a visible one: it lays out
+/// exactly as the same table with no `w:vMerge` at all, which is what
+/// "promote it to an ordinary cell" has to mean if it is to mean anything
+/// measurable. Calibrated against that control rather than against a literal
+/// y, so no glyph metric has to be known.
+#[test]
+fn orphan_vmerge_continue_matches_the_unmerged_layout() {
+    let orphan = layout(&orphan_continue_table(r#"<w:vMerge w:val="continue"/>"#));
+    let control = layout(&orphan_continue_table(""));
+
+    for needle in ["ORPHAN", "PEER", "NEXT", "NEXT2", "after"] {
+        assert!(
+            (y_of(&orphan, needle) - y_of(&control, needle)).abs() < 0.01,
+            "{needle} moved: y={:.2} vs control y={:.2}",
+            y_of(&orphan, needle),
+            y_of(&control, needle),
+        );
+    }
+}
+
+/// The control that must not move: a `continue` that *does* have a `restart`
+/// above it is a real merge, and §17.4.85 makes the merged region show the
+/// restart cell's content — so the continue cell's own content stays hidden.
+/// A fix that simply stopped honouring `continue` would pass both tests above
+/// and fail this one.
+#[test]
+fn a_paired_vmerge_continue_still_hides_its_own_content() {
+    let pages = layout(&doc(r#"<w:tbl>
+      <w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>MERGED</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:vMerge w:val="continue"/></w:tcPr>
+          <w:p><w:r><w:t>HIDDEN</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER2</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"#));
+    let drawn = all_text(&pages);
+
+    assert!(drawn.iter().any(|t| t == "MERGED"), "drawn: {drawn:?}");
+    assert!(
+        !drawn.iter().any(|t| t == "HIDDEN"),
+        "a continued merge shows the restart cell's content, not the \
+         continue cell's — drawn: {drawn:?}"
     );
 }
 

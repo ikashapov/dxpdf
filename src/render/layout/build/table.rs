@@ -476,6 +476,21 @@ pub(super) fn build_table(
         })
         .collect();
 
+    // §17.4.85: an unpaired `w:vMerge w:val="continue"` is malformed input, and
+    // is repaired here — once, over the finished rows — so that measure, emit,
+    // border resolution and the paginator cannot disagree about whether a given
+    // cell is merged.
+    let mut rows = rows;
+    let orphans = promote_orphan_vmerge_continues(&mut rows);
+    if orphans > 0 && !state.warned_orphan_vmerge {
+        state.warned_orphan_vmerge = true;
+        log::warn!(
+            "§17.4.85: {orphans} <w:vMerge w:val=\"continue\"/> cell(s) have no \
+             <w:vMerge w:val=\"restart\"/> above them in the same grid column; \
+             rendering each as an ordinary cell"
+        );
+    }
+
     // §17.4.58: floating table positioning.
     //
     // Horizontal positioning is partial: only `tblpXSpec` (`x_align`, below)
@@ -542,6 +557,101 @@ pub(super) fn build_table(
         alignment,
         float_info,
     }
+}
+
+/// §17.4.85: turn every **orphaned** `w:vMerge w:val="continue"` cell — one
+/// with no `restart` above it in any grid column it covers — into an ordinary
+/// cell, and report how many were found.
+///
+/// # The defect this exists for
+///
+/// Nothing downstream sizes an orphan. `measure_table_rows` gives every
+/// `Continue` cell an empty `CellLayout` and leaves it out of the row's
+/// `max_height`, because a real merge is sized once by
+/// `expand_rows_for_vmerge` over the whole span — and *that* pass only ever
+/// starts from a `Restart`. With no `Restart` to start from, the two passes
+/// between them account for the cell nowhere: its text is dropped from the
+/// output entirely and its row collapses to zero height. That is data loss,
+/// and no reading of §17.4.85 produces it: the section describes `continue`
+/// only as continuing a merge a `restart` began, and a merged region shows the
+/// *restart* cell's content precisely because there is one to show.
+///
+/// # The choice, and why it is a choice
+///
+/// §17.4.85 does not say what an unpaired `continue` means, so "promote it to
+/// an ordinary cell" is this engine's decision, not a spec reading. The
+/// alternatives were to treat the orphan as an implicit `restart` (inventing a
+/// merge the author did not write, and one whose extent is guesswork), or to
+/// drop the cell but keep its height (which loses the text just as surely).
+///
+/// **LibreOffice does the same thing**, which is corroboration rather than
+/// proof: in `sw/source/core/unocore/unotext.cxx`, `lcl_ApplyCellProperties`
+/// looks for an open merge group at the cell's position, and when it finds
+/// none leaves `bFound` false, logs `SAL_WARN("sw.uno", "couldn't find first
+/// vertically merged cell")` and does nothing else — the cell is never added to
+/// a merge group and keeps the default RowSpan of 1, so it renders full height
+/// with its content intact. The binary filter agrees: `ww8par2.cxx` treats a
+/// null `FindMergeGroup` as "not merged". LibreOffice flags this explicitly as
+/// a malformed-input fallback, so it is evidence about what a second
+/// implementation chose, not about what Word does.
+///
+/// **A Word render would settle it** — a document with a `continue` cell that
+/// no `restart` precedes, carrying text, rendered in Word: whether that text
+/// appears, and whether its row takes its natural height, decides between this
+/// choice and the implicit-`restart` one. Until then the fix is scoped to the
+/// part every candidate reading agrees on, which is that the content survives.
+///
+/// # Why "any column it covers"
+///
+/// A merge is tracked here per **grid column**, matching `is_vmerge_continue`
+/// and `expand_rows_for_vmerge`, which ask about a column rather than a cell
+/// index — `gridBefore` and `gridSpan` make those different questions. A
+/// `Continue` is treated as paired when *any* column it spans has an open
+/// group, which is the conservative direction: every configuration those two
+/// passes already join stays joined, so this pass can only ever repair a cell
+/// that was previously rendered as nothing.
+fn promote_orphan_vmerge_continues(rows: &mut [TableRowInput]) -> usize {
+    use crate::render::layout::table::VerticalMergeState;
+
+    fn open_columns(flags: &mut Vec<bool>, cols: std::ops::Range<usize>) {
+        if flags.len() < cols.end {
+            flags.resize(cols.end, false);
+        }
+        for c in cols {
+            flags[c] = true;
+        }
+    }
+
+    // Per grid column: is a merge group open at this row?  A group opens on a
+    // `Restart` and stays open only through consecutive `Continue`s, which is
+    // exactly the run `expand_rows_for_vmerge` walks.
+    let mut open: Vec<bool> = Vec::new();
+    let mut promoted = 0;
+
+    for row in rows.iter_mut() {
+        let mut still_open: Vec<bool> = Vec::new();
+        // §17.4.17: the row's first cell starts `gridBefore` columns in.
+        let mut grid_col = row.grid_before as usize;
+        for cell in row.cells.iter_mut() {
+            let cols = grid_col..grid_col + cell.grid_span.max(1) as usize;
+            match cell.vertical_merge {
+                Some(VerticalMergeState::Restart) => open_columns(&mut still_open, cols.clone()),
+                Some(VerticalMergeState::Continue) => {
+                    if cols.clone().any(|c| open.get(c) == Some(&true)) {
+                        open_columns(&mut still_open, cols.clone());
+                    } else {
+                        cell.vertical_merge = None;
+                        promoted += 1;
+                    }
+                }
+                None => {}
+            }
+            grid_col = cols.end;
+        }
+        open = still_open;
+    }
+
+    promoted
 }
 
 /// Word/LibreOffice row layout quirk: top/bottom cell margins are normalized
@@ -988,6 +1098,116 @@ mod tests {
         let out = reserve_cell_spacing(widths, Pt::new(60.0));
         assert_eq!(out, vec![Pt::ZERO, Pt::ZERO]);
         assert!(out.iter().all(|w| *w >= Pt::ZERO));
+    }
+
+    // ── §17.4.85 promote_orphan_vmerge_continues ─────────────────────────
+    //
+    // The end-to-end consequence — an orphan's text surviving into the PDF —
+    // is pinned by `tests/table_row_height.rs`. These pin the *pairing rule*,
+    // which is by grid column rather than by cell index and is not reachable
+    // from a document whose rows all start at column 0.
+
+    use crate::render::layout::table::{TableRowInput, VerticalMergeState};
+
+    fn merge_cell(span: u32, vm: Option<VerticalMergeState>) -> TableCellInput {
+        TableCellInput {
+            grid_span: span,
+            vertical_merge: vm,
+            ..cell_with_margins(0.0, 0.0, 0.0, 0.0)
+        }
+    }
+
+    fn merge_row(cells: Vec<TableCellInput>, grid_before: u32) -> TableRowInput {
+        TableRowInput {
+            cells,
+            height_rule: None,
+            is_header: None,
+            cant_split: None,
+            grid_before,
+            border_overrides: None,
+        }
+    }
+
+    /// The defect itself, at the level the repair happens: a `Continue` with
+    /// nothing above it becomes an ordinary cell and is counted.
+    #[test]
+    fn an_unpaired_continue_is_promoted_to_an_ordinary_cell() {
+        let mut rows = vec![merge_row(
+            vec![merge_cell(1, Some(VerticalMergeState::Continue))],
+            0,
+        )];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 1);
+        assert_eq!(rows[0].cells[0].vertical_merge, None);
+    }
+
+    /// A real merge is untouched, however long its chain of `Continue`s.
+    #[test]
+    fn a_paired_continue_chain_is_left_alone() {
+        let mut rows = vec![
+            merge_row(vec![merge_cell(1, Some(VerticalMergeState::Restart))], 0),
+            merge_row(vec![merge_cell(1, Some(VerticalMergeState::Continue))], 0),
+            merge_row(vec![merge_cell(1, Some(VerticalMergeState::Continue))], 0),
+        ];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 0);
+        assert_eq!(
+            rows[2].cells[0].vertical_merge,
+            Some(VerticalMergeState::Continue)
+        );
+    }
+
+    /// A span is the run of **consecutive** rows below the restart — that is
+    /// how `expand_rows_for_vmerge` walks it, stopping at the first row whose
+    /// cell in the column is not a `Continue`. A `Continue` that resumes after
+    /// an intervening plain row therefore continues nothing, and would
+    /// otherwise be sized by nobody.
+    #[test]
+    fn a_continue_that_resumes_after_a_plain_row_is_an_orphan() {
+        let mut rows = vec![
+            merge_row(vec![merge_cell(1, Some(VerticalMergeState::Restart))], 0),
+            merge_row(vec![merge_cell(1, None)], 0),
+            merge_row(vec![merge_cell(1, Some(VerticalMergeState::Continue))], 0),
+        ];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 1);
+        assert_eq!(rows[2].cells[0].vertical_merge, None);
+    }
+
+    /// §17.4.17: the pairing is by **grid column**, not by cell index. With
+    /// `gridBefore=1` the lower row's first cell sits in column 1, so it does
+    /// not continue a merge that started in column 0 — and a fixture where
+    /// `grid_col == cell_index` cannot tell the two rules apart.
+    #[test]
+    fn pairing_follows_the_grid_column_not_the_cell_index() {
+        let mut rows = vec![
+            merge_row(
+                vec![
+                    merge_cell(1, Some(VerticalMergeState::Restart)), // column 0
+                    merge_cell(1, None),                              // column 1
+                ],
+                0,
+            ),
+            merge_row(vec![merge_cell(1, Some(VerticalMergeState::Continue))], 1),
+        ];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 1);
+        assert_eq!(rows[1].cells[0].vertical_merge, None);
+    }
+
+    /// A `gridSpan` restart opens every column it covers, so a narrower
+    /// `Continue` under either of them is paired. This is the conservative
+    /// direction the function's doc describes: it must not promote a cell the
+    /// measure/emit passes would have merged.
+    #[test]
+    fn a_narrow_continue_under_a_wide_restart_is_paired() {
+        let mut rows = vec![
+            merge_row(vec![merge_cell(2, Some(VerticalMergeState::Restart))], 0),
+            merge_row(
+                vec![
+                    merge_cell(1, None),
+                    merge_cell(1, Some(VerticalMergeState::Continue)), // column 1
+                ],
+                0,
+            ),
+        ];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 0);
     }
 
     /// §17.4.81: `hRule="auto"` ignores `val`, so the row carries **no** height
