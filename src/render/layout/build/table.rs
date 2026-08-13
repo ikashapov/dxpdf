@@ -661,25 +661,49 @@ pub(super) fn build_table(
 /// choice and the implicit-`restart` one. Until then the fix is scoped to the
 /// part every candidate reading agrees on, which is that the content survives.
 ///
-/// # Why "any column it covers"
+/// # Which grid column, and why only one
 ///
-/// A merge is tracked here per **grid column**, matching `is_vmerge_continue`
-/// and `expand_rows_for_vmerge`, which ask about a column rather than a cell
-/// index — `gridBefore` and `gridSpan` make those different questions. A
-/// `Continue` is treated as paired when *any* column it spans has an open
-/// group, which is the conservative direction: every configuration those two
-/// passes already join stays joined, so this pass can only ever repair a cell
-/// that was previously rendered as nothing.
+/// A merge is tracked here per **grid column**, because `gridBefore` and
+/// `gridSpan` make "which column" and "which cell index" different questions.
+/// *Which* column is not a free choice either: the passes this repair has to
+/// agree with anchor a merge on the restart cell's **first** column and no
+/// other. `expand_rows_for_vmerge` walks down from a restart while
+/// `is_vmerge_continue(row_below, entry.grid_col)` holds, and `entry.grid_col`
+/// is that first column; `merged_span_height` repeats the same walk when it
+/// emits. A `gridSpan="2"` restart therefore joins whatever covers its leftmost
+/// column, and nothing else — the second column it spans opens no merge.
+///
+/// So a `Restart` opens `cols.start` alone, and a paired `Continue` carries
+/// forward only the columns it covers that were **already** open, never the
+/// rest of its own span. Both halves are load-bearing, and each was its own
+/// content-losing bug while this pass paired on "any column the cell covers":
+///
+/// * a `Restart` opening its whole span made a narrower `Continue` *beside*
+///   the restart's column read as paired. The merge passes looked in the
+///   restart's column, found that row's ordinary cell there and never merged,
+///   so `measure_table_rows` left the `Continue` with an empty `CellLayout` and
+///   its text never reached the page.
+/// * a `Continue` re-opening its whole span let a **wider** continuation
+///   propagate openness into a column no `Restart` had ever begun, and an
+///   orphan below it in that column was dropped the same way.
+///
+/// Stating the rule this way makes the two passes agree exactly rather than
+/// approximately, which is what the "repair" has to mean: a cell this pass
+/// promotes is precisely one that no merge would have sized or drawn, so
+/// promoting it can only ever turn nothing into the cell the author wrote.
+///
+/// Both shapes are asserted end-to-end in `tests/table_row_height.rs` over
+/// **spanning** cells, because a rule stated in grid columns cannot be tested
+/// by a fixture whose every cell is one column wide — which is why the leak
+/// survived a suite of span-1 fixtures.
 fn promote_orphan_vmerge_continues(rows: &mut [TableRowInput]) -> usize {
     use crate::render::layout::table::VerticalMergeState;
 
-    fn open_columns(flags: &mut Vec<bool>, cols: std::ops::Range<usize>) {
-        if flags.len() < cols.end {
-            flags.resize(cols.end, false);
+    fn open_column(flags: &mut Vec<bool>, col: usize) {
+        if flags.len() <= col {
+            flags.resize(col + 1, false);
         }
-        for c in cols {
-            flags[c] = true;
-        }
+        flags[col] = true;
     }
 
     // Per grid column: is a merge group open at this row?  A group opens on a
@@ -695,11 +719,16 @@ fn promote_orphan_vmerge_continues(rows: &mut [TableRowInput]) -> usize {
         for cell in row.cells.iter_mut() {
             let cols = grid_col..grid_col + cell.grid_span.max(1) as usize;
             match cell.vertical_merge {
-                Some(VerticalMergeState::Restart) => open_columns(&mut still_open, cols.clone()),
+                Some(VerticalMergeState::Restart) => open_column(&mut still_open, cols.start),
                 Some(VerticalMergeState::Continue) => {
-                    if cols.clone().any(|c| open.get(c) == Some(&true)) {
-                        open_columns(&mut still_open, cols.clone());
-                    } else {
+                    let mut carried = false;
+                    for c in cols.clone() {
+                        if open.get(c) == Some(&true) {
+                            open_column(&mut still_open, c);
+                            carried = true;
+                        }
+                    }
+                    if !carried {
                         cell.vertical_merge = None;
                         promoted += 1;
                     }
@@ -1311,23 +1340,87 @@ mod tests {
         assert_eq!(rows[1].cells[0].vertical_merge, None);
     }
 
-    /// A `gridSpan` restart opens every column it covers, so a narrower
-    /// `Continue` under either of them is paired. This is the conservative
-    /// direction the function's doc describes: it must not promote a cell the
-    /// measure/emit passes would have merged.
+    /// A `gridSpan` restart opens its **first** column only, because that is
+    /// the column `expand_rows_for_vmerge` and `merged_span_height` anchor on.
+    /// A `Continue` beside it — covering the restart's *second* column, which
+    /// no merge pass looks in — continues nothing and must be promoted.
+    ///
+    /// This asserted 0 promotions until the end-to-end reproduction showed the
+    /// consequence: the cell was called paired here, joined by nobody
+    /// downstream, and its text was dropped from the PDF with no warning. The
+    /// two shapes that follow are the ones a span-1 fixture cannot express.
     #[test]
-    fn a_narrow_continue_under_a_wide_restart_is_paired() {
+    fn a_continue_beside_a_wide_restarts_column_is_an_orphan() {
         let mut rows = vec![
             merge_row(vec![merge_cell(2, Some(VerticalMergeState::Restart))], 0),
             merge_row(
                 vec![
-                    merge_cell(1, None),
+                    merge_cell(1, None),                               // column 0
                     merge_cell(1, Some(VerticalMergeState::Continue)), // column 1
                 ],
                 0,
             ),
         ];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 1);
+        assert_eq!(rows[1].cells[1].vertical_merge, None);
+    }
+
+    /// The other side of the same rule, and the control a blanket "promote
+    /// anything under a wide restart" would break: a `Continue` covering the
+    /// restart's *first* column is the merge those passes do join, so it stays.
+    #[test]
+    fn a_continue_under_a_wide_restarts_first_column_is_paired() {
+        let mut rows = vec![
+            merge_row(vec![merge_cell(2, Some(VerticalMergeState::Restart))], 0),
+            merge_row(
+                vec![
+                    merge_cell(1, Some(VerticalMergeState::Continue)), // column 0
+                    merge_cell(1, None),                               // column 1
+                ],
+                0,
+            ),
+        ];
         assert_eq!(promote_orphan_vmerge_continues(&mut rows), 0);
+        assert_eq!(
+            rows[1].cells[0].vertical_merge,
+            Some(VerticalMergeState::Continue)
+        );
+    }
+
+    /// A paired `Continue` carries forward only the columns that were already
+    /// open — widening the open set to its whole span would invent a merge
+    /// group in a column no `Restart` began, and orphan the cell below it into
+    /// silence. Row 2's `Continue` sits in column 1, which only the wide
+    /// `Continue` above it ever touched.
+    #[test]
+    fn a_wide_continue_does_not_open_a_column_no_restart_began() {
+        let mut rows = vec![
+            merge_row(
+                vec![
+                    merge_cell(1, Some(VerticalMergeState::Restart)), // column 0
+                    merge_cell(1, None),                              // column 1
+                ],
+                0,
+            ),
+            merge_row(
+                vec![merge_cell(2, Some(VerticalMergeState::Continue))], // columns 0–1
+                0,
+            ),
+            merge_row(
+                vec![
+                    merge_cell(1, None),                               // column 0
+                    merge_cell(1, Some(VerticalMergeState::Continue)), // column 1
+                ],
+                0,
+            ),
+        ];
+        assert_eq!(promote_orphan_vmerge_continues(&mut rows), 1);
+        assert_eq!(
+            rows[1].cells[0].vertical_merge,
+            Some(VerticalMergeState::Continue),
+            "the wide continuation covers column 0 and stays a merge"
+        );
+        assert_eq!(rows[2].cells[1].vertical_merge, None);
     }
 
     /// §17.4.81: `hRule="auto"` ignores `val`, so the row carries **no** height

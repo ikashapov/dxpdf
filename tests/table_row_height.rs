@@ -236,6 +236,234 @@ fn a_paired_vmerge_continue_still_hides_its_own_content() {
     );
 }
 
+// ── §17.4.85 × §17.4.18: the orphan rule where `gridSpan` makes a cell wider
+//    than one grid column ────────────────────────────────────────────────────
+//
+// Every orphan case above uses span-1 cells, where a cell *is* a grid column
+// and every candidate pairing rule agrees. The two below are the cases that
+// separate them, and both were silently dropping content: the promotion pass
+// paired by "any column the cell covers" while `expand_rows_for_vmerge` and
+// `merged_span_height` anchor a merge on the restart's **first** grid column
+// alone (`is_vmerge_continue(row_below, entry.grid_col)`). A `Continue` the
+// promotion pass called paired and those passes did not merge is accounted
+// for by nobody — `measure_table_rows` still hands it an empty `CellLayout`,
+// so its text never reaches the page.
+//
+// Written with the **bare** `<w:vMerge/>` spelling (§17.4.85: an absent `@val`
+// means `continue`), which is what real documents contain: all 98 `continue`
+// elements across the 52-document corpus are bare, and not one is written
+// `w:val="continue"`.
+
+/// Row 0 is a single `gridSpan="2"` `restart`; row 1 is a plain cell at grid
+/// column 0 beside a `continue` at grid column 1.
+fn wide_restart_narrow_continue_table(vmerge: &str) -> Vec<u8> {
+    doc(&format!(
+        r#"<w:tbl>
+      <w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="8000" w:type="dxa"/><w:gridSpan w:val="2"/>
+              <w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>WIDE</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PLAIN</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>{vmerge}</w:tcPr>
+          <w:p><w:r><w:t>ORPHAN</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"#
+    ))
+}
+
+/// The `continue` at column 1 is an orphan: `expand_rows_for_vmerge` anchors
+/// the wide restart on column 0, finds `PLAIN` there, and never merges — so
+/// nothing sizes or draws the `continue` cell. Its text must survive, exactly
+/// as in the span-1 case; the width of the restart above it is not a reason to
+/// delete a cell's content.
+#[test]
+fn a_continue_outside_a_wide_restarts_first_column_keeps_its_cell_content() {
+    let pages = layout(&wide_restart_narrow_continue_table("<w:vMerge/>"));
+    let drawn = all_text(&pages);
+
+    assert!(
+        drawn.iter().any(|t| t == "ORPHAN"),
+        "a `continue` that the merge passes never join had its text dropped \
+         from the document — drawn: {drawn:?}"
+    );
+}
+
+/// …and it is an ordinary cell, not merely a visible one — the same calibration
+/// the span-1 orphan uses: identical to the table with no `w:vMerge` on that
+/// cell at all.
+#[test]
+fn a_continue_outside_a_wide_restarts_first_column_matches_the_unmerged_layout() {
+    let orphan = layout(&wide_restart_narrow_continue_table("<w:vMerge/>"));
+    let control = layout(&wide_restart_narrow_continue_table(""));
+
+    for needle in ["WIDE", "PLAIN", "ORPHAN"] {
+        assert!(
+            (y_of(&orphan, needle) - y_of(&control, needle)).abs() < 0.01,
+            "{needle} moved: y={:.2} vs control y={:.2}",
+            y_of(&orphan, needle),
+            y_of(&control, needle),
+        );
+    }
+}
+
+/// The control on the other side, and the one a blanket "promote everything
+/// under a wide restart" would break: a `continue` under the restart's **first**
+/// column *is* the merge those passes join, so it keeps hiding its own content.
+#[test]
+fn a_continue_under_a_wide_restarts_first_column_is_still_a_merge() {
+    let pages = layout(&doc(r#"<w:tbl>
+      <w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="8000" w:type="dxa"/><w:gridSpan w:val="2"/>
+              <w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>WIDE</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:vMerge/></w:tcPr>
+          <w:p><w:r><w:t>HIDDEN</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"#));
+    let drawn = all_text(&pages);
+
+    assert!(drawn.iter().any(|t| t == "WIDE"), "drawn: {drawn:?}");
+    assert!(
+        !drawn.iter().any(|t| t == "HIDDEN"),
+        "the `continue` sits under the restart's own grid column, so it \
+         continues a real merge and shows the restart's content — drawn: \
+         {drawn:?}"
+    );
+}
+
+/// Row 1 is a `gridSpan="2"` `continue` over a span-1 `restart` at column 0.
+/// It is paired — column 0 is open — but it must not thereby *open* column 1,
+/// which no `restart` ever began.
+fn wide_continue_over_narrow_restart_table(vmerge: &str) -> Vec<u8> {
+    doc(&format!(
+        r#"<w:tbl>
+      <w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>RESTART</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="8000" w:type="dxa"/><w:gridSpan w:val="2"/>
+              <w:vMerge/></w:tcPr>
+          <w:p><w:r><w:t>WIDECONT</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PLAIN</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>{vmerge}</w:tcPr>
+          <w:p><w:r><w:t>ORPHAN</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"#
+    ))
+}
+
+/// Column 1 was never opened by a `restart`, so the `continue` in the last row
+/// is an orphan by every definition — including the one the merge passes use,
+/// which only ever track the restart's column 0. Widening the open set to the
+/// whole span of a paired `continue` made column 1 read as open and deleted
+/// this cell's text.
+#[test]
+fn a_continue_below_a_wider_continue_keeps_its_cell_content() {
+    let pages = layout(&wide_continue_over_narrow_restart_table("<w:vMerge/>"));
+    let drawn = all_text(&pages);
+
+    assert!(
+        drawn.iter().any(|t| t == "ORPHAN"),
+        "a `continue` in a column no `restart` ever opened had its text \
+         dropped from the document — drawn: {drawn:?}"
+    );
+    assert!(
+        !drawn.iter().any(|t| t == "WIDECONT"),
+        "the row above it *is* paired (its span covers the restart's column), \
+         so it stays a merge continuation and hides its own content — drawn: \
+         {drawn:?}"
+    );
+}
+
+/// The same calibration: promoted means ordinary, not merely drawn.
+#[test]
+fn a_continue_below_a_wider_continue_matches_the_unmerged_layout() {
+    let orphan = layout(&wide_continue_over_narrow_restart_table("<w:vMerge/>"));
+    let control = layout(&wide_continue_over_narrow_restart_table(""));
+
+    for needle in ["RESTART", "PEER", "PLAIN", "ORPHAN"] {
+        assert!(
+            (y_of(&orphan, needle) - y_of(&control, needle)).abs() < 0.01,
+            "{needle} moved: y={:.2} vs control y={:.2}",
+            y_of(&orphan, needle),
+            y_of(&control, needle),
+        );
+    }
+}
+
+/// §17.4.85: `<w:vMerge/>` with no `@val` **is** `continue`, and it is the
+/// spelling documents actually use — every one of the 98 `continue` elements in
+/// the 52-document corpus is bare. The span-1 orphan repair is asserted above
+/// against `w:val="continue"`; this pins that the bare spelling reaches the
+/// same code, so a parse-level regression that stopped reading it could not
+/// hide behind the explicit form.
+#[test]
+fn a_bare_vmerge_orphan_keeps_its_cell_content() {
+    let bare = layout(&orphan_continue_table("<w:vMerge/>"));
+    let explicit = layout(&orphan_continue_table(r#"<w:vMerge w:val="continue"/>"#));
+
+    assert!(
+        all_text(&bare).iter().any(|t| t == "ORPHAN"),
+        "drawn: {:?}",
+        all_text(&bare)
+    );
+    assert_eq!(
+        all_text(&bare),
+        all_text(&explicit),
+        "the two spellings of `continue` must render identically"
+    );
+}
+
+/// The other half of the bare spelling: a bare `continue` that *is* paired must
+/// still be a merge. Without this, "bare parses to nothing at all" would pass
+/// every orphan assertion above.
+#[test]
+fn a_bare_vmerge_that_is_paired_still_hides_its_own_content() {
+    let pages = layout(&doc(r#"<w:tbl>
+      <w:tblPr><w:tblW w:w="8000" w:type="dxa"/></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>MERGED</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:vMerge/></w:tcPr>
+          <w:p><w:r><w:t>HIDDEN</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>PEER2</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"#));
+    let drawn = all_text(&pages);
+
+    assert!(drawn.iter().any(|t| t == "MERGED"), "drawn: {drawn:?}");
+    assert!(
+        !drawn.iter().any(|t| t == "HIDDEN"),
+        "a bare `<w:vMerge/>` under a `restart` is a merge continuation — \
+         drawn: {drawn:?}"
+    );
+}
+
 /// §17.4.1: a `cantSplit` row taller than a whole page fits nowhere, so the
 /// paginator must not advance to a fresh page it cannot use. It used to
 /// abandon an empty leading slice, which the section layer turned into a
