@@ -1,4 +1,4 @@
-//! §17.4.58 — page placement for a floating table that may span pages.
+//! §17.4.57 — page placement for a floating table that may span pages.
 //!
 //! When a `<w:tbl>` with `<w:tblpPr>` (a floating-table anchor) is taller
 //! than the available height on its anchor page, Word breaks it at row
@@ -10,7 +10,7 @@
 //! upstream by [`crate::render::layout::table::layout_table_paginated`];
 //! we take its `Vec<TableSlice>` and assign each slice to a page slot.
 //!
-//! OOXML §17.4.58 specifies `tblpY` semantics for the anchor itself but
+//! OOXML §17.4.57 specifies `tblpY` semantics for the anchor itself but
 //! does not formally describe overflow behavior. The continuation-at-top
 //! rule mirrors Microsoft Word's observable behavior and is the
 //! convention every consumer that handles overflow follows.
@@ -25,8 +25,8 @@ use crate::render::dimension::Pt;
 use crate::render::layout::float::ActiveFloat;
 use crate::render::layout::table::TableSlice;
 
-/// §17.4.57 — outcome of resolving a floating table's requested
-/// anchor against prior floats on the same page.
+/// §17.4.57 `tblpPr` / §17.4.56 `tblOverlap` — outcome of resolving a floating
+/// table's requested anchor against prior floats on the same page.
 #[derive(Debug, PartialEq)]
 pub(super) enum FloatingTableAnchor {
     /// The requested y is free of prior-float collision (or overlap
@@ -45,19 +45,19 @@ pub(super) enum FloatingTableAnchor {
     Spillover,
 }
 
-/// §17.4.57 — resolve a floating table's requested anchor y against
-/// prior `ActiveFloat`s registered for the current page.
+/// §17.4.57 `tblpPr` / §17.4.56 `tblOverlap` — resolve a floating table's
+/// requested anchor y against prior `ActiveFloat`s registered for the page.
 ///
 /// - `overlap == Some(Never)`: iteratively push the anchor below any
 ///   *floating table* whose y-range intersects `[anchor, anchor +
 ///   height]`. If a shift happened *and* the shifted anchor would extend
 ///   the table past `page_bottom`, return `Spillover`.
-/// - `overlap == Some(Overlap)` or `None` (the §17.4.57 default): the
+/// - `overlap == Some(Overlap)` or `None` (the §17.4.56 default): the
 ///   anchor is returned unchanged on the current page; overlap with
 ///   prior floats is permitted.
 ///
 /// `prior` is the page's whole float list, so it also holds image and
-/// shape floats. Those are skipped: §17.4.57 is defined between floating
+/// shape floats. Those are skipped: §17.4.56 is defined between floating
 /// tables only, and a table is free to overlap a floating image
 /// ([`FloatSource::participates_in_table_overlap`]).
 ///
@@ -100,7 +100,7 @@ pub(super) fn resolve_floating_anchor(
         // are non-overlapping themselves; iterate to a fixed point.
         let mut max_blocking_end: Option<Pt> = None;
         for f in prior {
-            // §17.4.57 governs table-vs-table overlap only. `page_floats`
+            // §17.4.56 governs table-vs-table overlap only. `page_floats`
             // also carries image and shape floats, which a floating table
             // is free to overlap.
             if !f.source.participates_in_table_overlap() {
@@ -251,7 +251,7 @@ mod tests {
         }
     }
 
-    /// A prior *table* float — the only kind §17.4.57 governs.
+    /// A prior *table* float — the only kind §17.4.56 governs.
     fn float_at(y_start: f32, y_end: f32) -> ActiveFloat {
         float_at_source(y_start, y_end, FloatSource::Table { owner_block_idx: 0 })
     }
@@ -357,9 +357,9 @@ mod tests {
         assert_eq!(plan.pages[1].slice().size.height.raw(), 56.7);
     }
 
-    // ── §17.4.57 — anchor resolution against prior floats ──────────────
+    // ── §17.4.56 — anchor resolution against prior floats ──────────────
 
-    /// Default behavior (`overlap == None`, the §17.4.57 default
+    /// Default behavior (`overlap == None`, the §17.4.56 default
     /// `Overlap`): the anchor is returned unchanged even when prior
     /// floats would intersect.
     #[test]
@@ -394,7 +394,7 @@ mod tests {
     }
 
     /// `Never` + overlap with one float: shift the anchor to the
-    /// float's `y_end`. Spec §17.4.57 — two tables anchored on the
+    /// float's `y_end`. Spec §17.4.56 — two tables anchored on the
     /// same page that both forbid overlap must be repositioned to
     /// avoid drawing over each other.
     #[test]
@@ -548,7 +548,7 @@ mod tests {
         );
     }
 
-    /// §17.4.57 governs table-vs-table overlap only. Image and shape
+    /// §17.4.56 governs table-vs-table overlap only. Image and shape
     /// floats sit in the same `page_floats` list, but a floating table
     /// is free to overlap them, so they must not move the anchor.
     #[test]

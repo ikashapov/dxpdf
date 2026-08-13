@@ -9,14 +9,14 @@ pub(super) struct RowGroup {
     pub(super) start: usize,
     pub(super) end: usize, // exclusive
     pub(super) height: Pt,
-    /// §17.4.1: row content may be broken across pages. False if any row in
+    /// §17.4.6: row content may be broken across pages. False if any row in
     /// the group has `cantSplit`, if the group is a vMerge span (multiple
     /// rows stacked here), or if any cell contains a nested table or floated
     /// content that would be ambiguous to split.
     pub(super) splittable: bool,
 }
 
-/// §17.4.14: compute column widths by scaling the declared `w:tblGrid` values
+/// §17.4.48: compute column widths by scaling the declared `w:tblGrid` values
 /// to the available width.
 ///
 /// A grid that is absent *or unusable* falls back to equal distribution. Both
@@ -52,7 +52,7 @@ pub fn compute_column_widths(grid_cols: &[Pt], num_cols: usize, available_width:
 /// Build atomic row groups for pagination.
 ///
 /// Groups are formed by: vMerge groups (Restart through consecutive Continue
-/// rows), §17.4.1 cantSplit rows, and rows whose cells contain a nested
+/// rows), §17.4.6 cantSplit rows, and rows whose cells contain a nested
 /// table. Each group is an indivisible unit for page-break decisions.
 pub(super) fn build_row_groups(rows: &[TableRowInput], measured: &MeasuredTable) -> Vec<RowGroup> {
     let mut groups = Vec::new();
@@ -65,7 +65,7 @@ pub(super) fn build_row_groups(rows: &[TableRowInput], measured: &MeasuredTable)
             .map(|mr| mr.height + mr.border_gap_below)
             .sum();
 
-        // §17.4.1: a row may be split across pages unless it opts out via
+        // §17.4.6: a row may be split across pages unless it opts out via
         // `cantSplit` or lives inside a vMerge span (grouping multiple rows).
         // Nested tables inside cells aren't splittable either — the cell's
         // commands would be hard to bisect cleanly.
@@ -112,16 +112,16 @@ fn cell_has_nested_table(cell: &TableCellInput) -> bool {
         .any(|b| matches!(b, LayoutBlock::Table { .. }))
 }
 
-/// §17.4.85: grow the rows of each vertical merge group so the `Restart`
+/// §17.4.84: grow the rows of each vertical merge group so the `Restart`
 /// cell's content fits within their combined height. The shortfall goes
 /// **entirely to the last row of the span**.
 ///
 /// # Settled by a Word render, not by the spec
 ///
 /// ECMA-376 cannot settle this, and all three places a rule would have to live
-/// were checked before concluding so: §17.4.85
+/// were checked before concluding so: §17.4.84
 /// `vMerge` defines which cells merge and carries no height language at all;
-/// §17.4.81 `trHeight`/`auto` defers to "the height required by its contents"
+/// §17.4.80 `trHeight`/`auto` defers to "the height required by its contents"
 /// without ever defining "contents" for a cell that spans rows; and §17.4.21
 /// `hideMark` — the spec's only row-height *rule* — says a row's height is
 /// "determined by the height of all glyphs in all cells in that row", without
@@ -203,8 +203,8 @@ pub(super) fn expand_rows_for_vmerge(
 /// grid column — **the** grid walk; every other lookup here goes through it.
 ///
 /// Returns `None` for grid columns inside the row's `gridBefore` / `gridAfter`
-/// regions (§17.4.17 / §17.4.16) — those columns have no cell in this row.
-/// §17.4.18: a `gridSpan` of 0 is well-formed and meaningless, so a cell that
+/// regions (§17.4.15 / §17.4.14) — those columns have no cell in this row.
+/// §17.4.17: a `gridSpan` of 0 is well-formed and meaningless, so a cell that
 /// exists covers at least one column (`max(1)`, as every grid walk spells it).
 pub(super) fn cell_index_at_grid_col(row: &TableRowInput, target_grid_col: usize) -> Option<usize> {
     let mut col = row.grid_before as usize;
@@ -273,7 +273,7 @@ mod tests {
         assert!(widths.is_empty());
     }
 
-    /// §17.4.14: a grid that sums to zero carries no proportions, so it is
+    /// §17.4.48: a grid that sums to zero carries no proportions, so it is
     /// treated as absent. Scaling it instead leaves every column at zero and
     /// every cell laying out at zero width.
     #[test]
@@ -341,8 +341,8 @@ mod tests {
 
     #[test]
     fn find_cell_skips_grid_before() {
-        // §17.4.17: gridBefore=1 means cell 0 starts at grid_col 1.
-        // §17.4.16: gridAfter=1 means the row leaves grid_col 3 empty.
+        // §17.4.15: gridBefore=1 means cell 0 starts at grid_col 1.
+        // §17.4.14: gridAfter=1 means the row leaves grid_col 3 empty.
         let row = row_with_offsets(vec![empty_cell(1), empty_cell(1)], 1);
         assert!(find_cell_at_grid_col(&row, 0).is_none());
         assert!(find_cell_at_grid_col(&row, 1).is_some());
@@ -370,7 +370,7 @@ mod tests {
         assert!(find_cell_at_grid_col(&row, 4).is_none());
     }
 
-    // ── §17.4.85 row_group_end / §17.4.1 build_row_groups ────────────────
+    // ── §17.4.84 row_group_end / §17.4.6 build_row_groups ────────────────
     //
     // These three functions decide every table page break and the whole
     // vertical-merge height distribution, and had no direct tests — the hole
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(groups[0].height.raw(), 23.0);
     }
 
-    /// §17.4.85: a merge span is indivisible, so its group covers every row
+    /// §17.4.84: a merge span is indivisible, so its group covers every row
     /// and is not splittable.
     #[test]
     fn build_row_groups_marks_a_vmerge_span_unsplittable() {
@@ -483,7 +483,7 @@ mod tests {
         assert!(!groups[0].splittable);
     }
 
-    /// §17.4.1 `cantSplit` — a single row can opt out on its own.
+    /// §17.4.6 `cantSplit` — a single row can opt out on its own.
     #[test]
     fn build_row_groups_marks_a_cant_split_row_unsplittable() {
         let mut row = plain_row(vec![merged_cell(None)]);
@@ -513,7 +513,7 @@ mod tests {
         assert!(!groups[0].splittable);
     }
 
-    // ── §17.4.85 expand_rows_for_vmerge ──────────────────────────────────
+    // ── §17.4.84 expand_rows_for_vmerge ──────────────────────────────────
 
     fn layout_entry(content_height: f32, grid_col: usize) -> CellLayoutEntry {
         CellLayoutEntry {
@@ -528,7 +528,7 @@ mod tests {
         }
     }
 
-    /// The core §17.4.85 behaviour: when a `Restart` cell's content exceeds the
+    /// The core §17.4.84 behaviour: when a `Restart` cell's content exceeds the
     /// rows it spans, the shortfall goes to the span's **last** row.
     ///
     /// This test used to pin *even* distribution, and said in its own doc that
@@ -603,7 +603,7 @@ mod tests {
 
     /// The span is tracked by **grid column**, not by cell index.
     ///
-    /// §17.4.17 `gridBefore` is what makes those differ: the lower row's
+    /// §17.4.15 `gridBefore` is what makes those differ: the lower row's
     /// *first* cell is a `Continue`, but it sits in grid column 1, so it does
     /// not continue a merge that started in column 0. Indexing by cell
     /// position instead would wrongly join them — and a test where the restart

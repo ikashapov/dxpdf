@@ -28,7 +28,7 @@ use super::types::{
 pub(super) fn measure_table_rows(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    // §17.4.44 `tblCellSpacing`, already resolved to points. Zero for every
+    // §17.4.45 `tblCellSpacing`, already resolved to points. Zero for every
     // table that does not set it, which is the overwhelming majority.
     cell_spacing: Pt,
     default_line_height: Pt,
@@ -36,11 +36,11 @@ pub(super) fn measure_table_rows(
     measure_text: crate::render::layout::paragraph::MeasureTextFn<'_>,
     suppress_first_row_top: bool,
 ) -> MeasuredTable {
-    // §17.4.44: the slots were shrunk by one `cell_spacing` before they got
+    // §17.4.45: the slots were shrunk by one `cell_spacing` before they got
     // here, so adding it back recovers the table's own outer width — the
     // spacing is carved out of the table, not added to it.
     //
-    // §17.4.44 says the spacing sits "between adjacent cells and the edges of
+    // §17.4.45 says the spacing sits "between adjacent cells and the edges of
     // the table" without saying whether an edge gets the same amount as the gap
     // between two cells. **Settled** (issue #165) by a Word render of
     // `test-files/issue-165-cellspacing.docx`: the two are equal — one full
@@ -79,7 +79,7 @@ pub(super) fn measure_table_rows(
     for (row_idx, row) in rows.iter().enumerate() {
         let mut entries = Vec::new();
         let mut max_height = Pt::ZERO;
-        // §17.4.17: gridBefore — first cell offset.
+        // §17.4.15: gridBefore — first cell offset.
         let mut grid_idx = row.grid_before as usize;
 
         for (cell_ci, cell) in row.cells.iter().enumerate() {
@@ -91,7 +91,7 @@ pub(super) fn measure_table_rows(
             // would. Mirrors the same clamp in `build/table.rs`.
             let grid_start = grid_idx.min(col_widths.len());
             let grid_end = (grid_start + span).min(col_widths.len());
-            // §17.4.44: the grid slots were already shrunk so they sum to
+            // §17.4.45: the grid slots were already shrunk so they sum to
             // `table_width - cell_spacing`; offsetting every cell by one
             // spacing and taking one off its width then leaves exactly
             // `cell_spacing` between adjacent cells *and* at both table edges,
@@ -124,7 +124,7 @@ pub(super) fn measure_table_rows(
                 )
             };
 
-            // §17.4.85: a merged cell's height is normally decided by
+            // §17.4.84: a merged cell's height is normally decided by
             // `expand_rows_for_vmerge` over the whole span, not here — folding a
             // `Restart` cell's full content into its *first* row would double-count
             // it against the rows below.
@@ -159,7 +159,7 @@ pub(super) fn measure_table_rows(
             None => {}
         }
 
-        // §17.4.44: the row's box reserves its own leading gap, mirroring the
+        // §17.4.45: the row's box reserves its own leading gap, mirroring the
         // horizontal inset above — `emit_one_row` places content one spacing
         // below the cursor, so consecutive rows end up exactly `cell_spacing`
         // apart. `RowHeightRule` is applied to the *content* height first, so a
@@ -169,7 +169,7 @@ pub(super) fn measure_table_rows(
         row_cell_layouts.push(entries);
     }
 
-    // §17.4.85: distribute vMerge overflow.
+    // §17.4.84: distribute vMerge overflow.
     expand_rows_for_vmerge(rows, &row_cell_layouts, &mut row_heights);
 
     // Compute border gaps and assemble measured rows.
@@ -570,7 +570,7 @@ mod tests {
         }
     }
 
-    /// §17.4.44 geometry. The invariant that matters is a *uniform* gap: exactly
+    /// §17.4.45 geometry. The invariant that matters is a *uniform* gap: exactly
     /// one `cell_spacing` between adjacent cells **and** at both table edges,
     /// with the table's own width unchanged.
     ///

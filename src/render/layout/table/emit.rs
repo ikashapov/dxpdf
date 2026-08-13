@@ -23,7 +23,7 @@ pub(super) struct TableCommandBuffers<'a> {
     pub(super) border_commands: &'a mut Vec<DrawCommand>,
 }
 
-/// Where a row sits in its table, for the two §17.4.85 questions a row cannot
+/// Where a row sits in its table, for the two §17.4.84 questions a row cannot
 /// answer from its own `MeasuredRow`: how tall a `vMerge="restart"` cell's whole
 /// merged span is, and whether the row *below* continues one of this row's
 /// cells.
@@ -124,18 +124,18 @@ fn emit_one_row(
     // carry their own (`split_row_at` zeroes the first half's gap — a cut edge
     // has none — and passes the original's to the second).
     has_reserved_bottom_gap: bool,
-    // §17.4.85: where this row sits in its table, for the two lookups a row
+    // §17.4.84: where this row sits in its table, for the two lookups a row
     // cannot answer alone. `None` is not missing information — see
     // [`RowContext`].
     row_ctx: Option<RowContext<'_>>,
 ) {
-    // §17.4.44: the row's box starts one cell-spacing below the cursor; its
+    // §17.4.45: the row's box starts one cell-spacing below the cursor; its
     // content box is what remains. Both are zero-cost when no spacing is set.
     let leading = mr.leading_gap;
     let row_top = *cursor_y + leading;
     let row_height = mr.height - leading;
     for (cell_ci, (entry, cell_input)) in mr.entries.iter().zip(row.cells.iter()).enumerate() {
-        // §17.4.85: the merged span, used below for vAlign and here for
+        // §17.4.84: the merged span, used below for vAlign and here for
         // shading. Hoisted above the shading so both read the same height —
         // shading used `row_height` while vAlign used the span, so a shaded
         // merged cell was coloured across its first row only.
@@ -147,7 +147,7 @@ fn emit_one_row(
             row_height
         };
 
-        // §17.4.33 / §17.4.85: a merged cell's shading covers the whole span,
+        // §17.4.32 / §17.4.84: a merged cell's shading covers the whole span,
         // and the `Continue` rows do not paint their own. Word treats the
         // continuation cells as part of the `Restart` cell, so its `<w:shd>`
         // governs the merged region; letting a continuation paint over the span
@@ -181,7 +181,7 @@ fn emit_one_row(
         let dx = (border_width(b_left) - cell_input.margins.left).max(Pt::ZERO);
         let dy_border = (border_width(cell_top) - cell_input.margins.top).max(Pt::ZERO);
 
-        // §17.4.85: for vMerge=Restart cells, vAlign operates over the whole
+        // §17.4.84: for vMerge=Restart cells, vAlign operates over the whole
         // merged span (`effective_h`, computed above with the shading).
         let content_h = entry.layout.content_height + cell_input.margins.vertical();
         let dy_valign = match cell_input.vertical_align {
@@ -367,7 +367,7 @@ mod tests {
         ]
     }
 
-    /// §17.4.85 + §17.4.33: a shaded merged cell is shaded across the whole
+    /// §17.4.84 + §17.4.32: a shaded merged cell is shaded across the whole
     /// span, not just its first row.
     ///
     /// The shading rect used `row_height` while vAlign used the span height, so
@@ -450,7 +450,7 @@ mod tests {
     ///
     /// Observed through the shading rect, since that (with vAlign) is what the
     /// function feeds; it does not affect row heights. Rows 0-1 form the span
-    /// and split the restart cell's 14pt of content 7/7 (§17.4.85
+    /// and split the restart cell's 14pt of content 7/7 (§17.4.84
     /// distribution), so the span is 14pt while the table is 28pt. A walk that
     /// ran past the `Continue` would shade all 28.
     #[test]

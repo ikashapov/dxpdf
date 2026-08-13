@@ -1,6 +1,6 @@
 //! Row splitting for page pagination.
 //!
-//! §17.4.1: a row without `cantSplit` may have its content broken across
+//! §17.4.6: a row without `cantSplit` may have its content broken across
 //! page boundaries. This module derives safe cut points from a row's
 //! already-laid-out cell commands and partitions those commands into a
 //! first slice (stays on the current page) and a second slice (flows to
@@ -152,7 +152,7 @@ pub(super) fn find_row_cut(input: &RowCutInput<'_>) -> Option<SplitCut> {
 /// body across-page splitting applies. Returns the `CellCut` and the first-half
 /// height this cell needs: the retained content plus the cell's top and bottom
 /// margins, so the cut edge gets the natural padding Word preserves (variant 2
-/// of the OOXML split-edge options; §17.4.40 re-applied at the cut edge).
+/// of the OOXML split-edge options; `w:tcMar` §17.4.68 re-applied at the cut edge).
 ///
 /// Returns `None` when the cell exposes no legal cut point within `available`
 /// (empty/one-line, image/shape-only, keepLines, or every fitting cut would
@@ -338,7 +338,7 @@ pub(super) fn split_row_at(mr: &MeasuredRow, cut: &SplitCut) -> SplitRow {
         .collect();
 
     SplitRow {
-        // §17.4.44: both halves are row boxes placed against a cursor, so each
+        // §17.4.45: both halves are row boxes placed against a cursor, so each
         // keeps the original leading gap — the continuation sits one spacing
         // below the top of the table area on its page, exactly as the first
         // half sits one spacing below the row above it.
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(second, vec!["L4 ", "L5 "]);
     }
 
-    /// §17.4.40: the continuation's first line sits at the cell's natural top
+    /// §17.4.68: the continuation's first line sits at the cell's natural top
     /// margin, not at the cut offset — the tail is shifted up by exactly the
     /// content the first half retained, so the cut edge keeps its padding.
     #[test]
@@ -825,7 +825,7 @@ mod tests {
         assert_eq!(second[1].top_y, Pt::new(14.0));
     }
 
-    /// §17.4.40: both halves preserve the cell's vertical margins, which is the
+    /// §17.4.68: both halves preserve the cell's vertical margins, which is the
     /// stated reason the cut keeps `margin_top + margin_bottom` in its height
     /// budget — text must not collide with the cut-edge border.
     #[test]

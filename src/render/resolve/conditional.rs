@@ -97,10 +97,10 @@ impl ActiveRegions {
 
 /// Grid position and dimension context for a single cell.
 ///
-/// The horizontal position is a **grid column** (§17.4.14), not the cell's
+/// The horizontal position is a **grid column** (§17.4.16), not the cell's
 /// index within its row's `<w:tc>` list. The two coincide only while every row
-/// maps one cell to one column; `w:gridSpan` (§17.4.18) and `w:gridBefore`
-/// (§17.4.17) break that, and it is the grid column Word conditions on — see
+/// maps one cell to one column; `w:gridSpan` (§17.4.17) and `w:gridBefore`
+/// (§17.4.15) break that, and it is the grid column Word conditions on — see
 /// `applicable_regions` for the evidence.
 pub struct CellGridPosition {
     pub row_idx: usize,
@@ -170,7 +170,7 @@ pub fn resolve_cell_conditional(
 ///
 /// # Columns are grid columns
 ///
-/// A cell's column regions follow the **grid columns it covers** (§17.4.14),
+/// A cell's column regions follow the **grid columns it covers** (§17.4.16),
 /// not its ordinal among its row's `<w:tc>` elements: it is in `firstCol` when
 /// it starts at grid column 0, and in `lastCol` when its `w:gridSpan` reaches
 /// the last grid column. Under a row that maps one cell to one column the two
@@ -191,7 +191,7 @@ pub fn resolve_cell_conditional(
 /// `word_cnf_style_agrees_with_the_grid_column_reading` below asserts that
 /// comparison against the fixture rather than restating it.
 ///
-/// That same row settles §17.4.16 `gridAfter` at the same time, which is worth
+/// That same row settles §17.4.14 `gridAfter` at the same time, which is worth
 /// stating because it looks like a separate question and is not: row 0 does not
 /// merely stop at column 12, it declares `<w:gridAfter w:val="1"/>` — the row
 /// saying outright that its remaining grid column is deliberately empty. A
@@ -204,7 +204,7 @@ pub fn resolve_cell_conditional(
 /// # Which band a spanning cell falls in is a choice
 ///
 /// A cell covering several grid columns can be in several vertical bands at
-/// once, and neither §17.7.6 nor §17.4.67 says which one wins — the spec
+/// once, and neither §17.7.6 nor §17.7.6.5 says which one wins — the spec
 /// describes banding over columns and never contemplates a cell that is not
 /// one. **The choice taken is the cell's first grid column**, consistent with
 /// `firstCol` keying off the same edge, so a cell belongs to the band it
@@ -924,7 +924,7 @@ mod tests {
     /// The two shapes that make the fixture an oracle are asserted rather than
     /// assumed, so a fixture that ever changed could not quietly turn this into
     /// a test of nothing: row 0 must combine `gridSpan` with `gridAfter` (the
-    /// §17.4.16 half — a row deliberately short of the last grid column), and
+    /// §17.4.14 half — a row deliberately short of the last grid column), and
     /// some later row must reach the last column with a span.
     #[test]
     fn word_cnf_style_agrees_with_the_grid_column_reading() {
@@ -957,7 +957,7 @@ mod tests {
         let num_cols = table.grid.len();
         assert_eq!(num_cols, 14, "the fixture's grid, as Word wrote it");
 
-        // §17.4.16: the row Word answered the `gridAfter` question on. Its one
+        // §17.4.14: the row Word answered the `gridAfter` question on. Its one
         // cell spans 13 of 14 columns and the row declares the fourteenth
         // deliberately empty, so "the last cell in the row" and "the cell
         // reaching the last grid column" name different cells here.

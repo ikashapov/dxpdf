@@ -111,7 +111,7 @@ struct PageLayoutState<'doc> {
     abs_floats_dirty: bool,
     /// Index of the first block on the current page (for forward scanning).
     page_start_block: usize,
-    /// §17.4.58: y-start of the most recent paragraph (floating-table anchor).
+    /// §17.4.57: y-start of the most recent paragraph (floating-table anchor).
     /// Set after that paragraph's spacing collapse but before its
     /// `space_before` is added.
     last_para_start_y: Pt,
@@ -353,7 +353,9 @@ impl<'doc> PageLayoutState<'doc> {
     /// page/column: registered page floats (§20.4.2) plus forward-scanned
     /// absolute floats from upcoming blocks on this page (rebuilt once per page
     /// while `abs_floats_dirty`), advancing the cursor past any full-width float
-    /// that blocks all text (§17.4.56). Shared by the main block loop and the
+    /// that blocks all text (§ not verified: `w:tblOverlap` governs table-vs-
+    /// table overlap only, and no section states this cursor rule for a float
+    /// of any kind). Shared by the main block loop and the
     /// across-page split re-fit (§4) so a continuation wraps around whatever
     /// floats live on *its* page, not the paragraph's starting page.
     ///
@@ -450,7 +452,8 @@ impl<'doc> PageLayoutState<'doc> {
             .collect();
         effective_floats.extend(deduped);
 
-        // §17.4.56: advance past any full-width float that blocks all text.
+        // Advance past any full-width float that blocks all text — see
+        // `effective_floats_at_cursor` for why this cites no section.
         for ef in &effective_floats {
             if ef.overlaps_y(self.cursor_y) && ef.width >= col_width {
                 self.cursor_y = self.cursor_y.max(ef.page_y_end);
@@ -785,7 +788,7 @@ fn starts_keep_next_chain(blocks: &[LayoutBlock], block_idx: usize) -> bool {
 ///
 /// Returns `None` if the chain hits a `pageBreakBefore`, a paragraph that
 /// isn't itself keepNext, or a *floating* table — a floating table is
-/// positioned independently of the flow (§17.4.58 `tblpPr`) and so cannot
+/// positioned independently of the flow (§17.4.57 `tblpPr`) and so cannot
 /// anchor a chain the way an in-flow table can. `None` here means the chain
 /// either ends in an ordinary paragraph or doesn't terminate in something this
 /// function can peel around; the caller falls back to measuring the whole
@@ -1826,7 +1829,7 @@ pub(crate) fn layout_section_with_clearance(
                 // Prune expired floats.
                 float::prune_floats(&mut state.page_floats, state.cursor_y);
 
-                // §20.4.2 / §17.4.56: floats affecting text at the cursor —
+                // §20.4.2: floats affecting text at the cursor —
                 // registered page floats plus the boundary-/relocation-aware
                 // forward scan of upcoming blocks — advancing past any
                 // full-width blocker.
@@ -1850,7 +1853,7 @@ pub(crate) fn layout_section_with_clearance(
                 let page_chunks = split_at_page_breaks(fragments);
                 let mut para_start_y = state.cursor_y;
                 state.last_para_start_y = state.cursor_y;
-                // §17.4.56 (#86 relocation): true once any of this paragraph's
+                // Issue #86 (float relocation): true once any of this paragraph's
                 // content has been placed, so a later overflow relocates its
                 // absolute float instead of double-wrapping earlier text.
                 let mut paragraph_content_placed = false;
@@ -2203,13 +2206,13 @@ pub(crate) fn layout_section_with_clearance(
                 float_info,
                 style_id,
             } => {
-                // §17.4.58: floating table — render and register as a float so
+                // §17.4.57: floating table — render and register as a float so
                 // subsequent text wraps around it. Floating tables are absolutely
                 // positioned and do not participate in adjacent border collapse.
                 if let Some(fi) = float_info {
                     // Run an un-paginated layout once to get the table's
                     // width (for x positioning + alignment overrides) and
-                    // total height (for the §17.4.58 page-push heuristic).
+                    // total height (for the §17.4.57 page-push heuristic).
                     // The actual emission uses `layout_table_paginated`
                     // below so rows that overflow split across pages.
                     let table = layout_table(
@@ -2222,7 +2225,7 @@ pub(crate) fn layout_section_with_clearance(
                         false,
                     );
 
-                    // §17.4.28 / §17.4.51: compute table x position.
+                    // §17.4.28 / §17.4.50: compute table x position.
                     let table_x = table_x_offset(
                         *alignment,
                         *indent,
@@ -2230,7 +2233,7 @@ pub(crate) fn layout_section_with_clearance(
                         content_width,
                         config.margins.left,
                     );
-                    // §17.4.58: apply tblpXSpec horizontal alignment override.
+                    // §17.4.57: apply tblpXSpec horizontal alignment override.
                     let table_x = match fi.x_align {
                         Some(crate::model::TableXAlign::Center) => {
                             config.margins.left + (content_width - table.size.width) * 0.5
@@ -2241,7 +2244,7 @@ pub(crate) fn layout_section_with_clearance(
                         _ => table_x,
                     };
 
-                    // §17.4.58: anchor-page heuristic — if the cursor isn't
+                    // §17.4.57: anchor-page heuristic — if the cursor isn't
                     // already at top of page and the table won't fit below
                     // it, push the table to the next page before resolving
                     // the anchor. This matches Word's "don't anchor on a
@@ -2253,8 +2256,8 @@ pub(crate) fn layout_section_with_clearance(
                         state.prev_space_after = Pt::ZERO;
                     }
 
-                    // §17.4.58: resolve `tblpY` on the (possibly new)
-                    // current page, then §17.4.57 resolve collisions with
+                    // §17.4.57: resolve `tblpY` on the (possibly new)
+                    // current page, then §17.4.56 resolve collisions with
                     // prior floats. On `Spillover`, push to next page and
                     // re-resolve with the new (empty) float list.
                     //
@@ -2312,7 +2315,7 @@ pub(crate) fn layout_section_with_clearance(
                     // Floating table breaks the adjacent table chain.
                     state.prev_table_style_id = None;
 
-                    // §17.4.58: paginate at row boundaries when the table
+                    // §17.4.57: paginate at row boundaries when the table
                     // would overflow. First slice gets the anchor page's
                     // remaining height (`bottom - float_y_start`);
                     // continuation slices get the selected body height for
@@ -2335,7 +2338,7 @@ pub(crate) fn layout_section_with_clearance(
                         },
                     );
 
-                    // §17.4.58: anchor only the first slice; continuation
+                    // §17.4.57: anchor only the first slice; continuation
                     // slices flow at the top of subsequent pages. Encoded
                     // by the `Anchor` / `Continuation` enum variants in
                     // the placement plan.
@@ -2368,12 +2371,12 @@ pub(crate) fn layout_section_with_clearance(
                             state.current_page.commands.push(cmd);
                         }
 
-                        // §17.4.56 / §17.4.57: register every slice as a
+                        // §17.4.57 / §17.4.56: register every slice as a
                         // float on its respective page. The anchor slice
                         // drives text wrapping for body paragraphs that
                         // follow; continuation slices are registered so
                         // subsequent floating tables can see them during
-                        // collision resolution (§17.4.57 `tblOverlap`).
+                        // collision resolution (§17.4.56 `tblOverlap`).
                         log::debug!(
                             "[layout]   register table float ({}): x={:.1} y={:.1}-{:.1} w={:.1} block_idx={block_idx}",
                             if is_anchor { "anchor" } else { "continuation" },
@@ -2390,7 +2393,7 @@ pub(crate) fn layout_section_with_clearance(
                             source: float::FloatSource::Table {
                                 owner_block_idx: block_idx,
                             },
-                            // §17.4.58: floating tables default to
+                            // §17.4.57: floating tables default to
                             // bothSides; no dedicated wrapText
                             // attribute exists for tables.
                             wrap_text: float::WrapTextSide::BothSides,
@@ -2409,7 +2412,7 @@ pub(crate) fn layout_section_with_clearance(
                 let suppress_top = style_id.is_some() && *style_id == state.prev_table_style_id;
 
                 // Non-floating table: paginated row-level splitting.
-                // §17.4.49 / §17.4.1: split at row boundaries, repeat headers.
+                // §17.4.49 / §17.4.6: split at row boundaries, repeat headers.
                 let available = state.bottom - state.cursor_y;
                 let section_page_index = state.page_index;
                 let slices = layout_table_paginated_with_page_heights(
@@ -2428,10 +2431,10 @@ pub(crate) fn layout_section_with_clearance(
                     },
                 );
 
-                // §17.4.28 / §17.4.51: compute table x position.
+                // §17.4.28 / §17.4.50: compute table x position.
                 //
                 // The width to align on is the table's *outer* width, which
-                // every slice already reports — §17.4.44 spacing was carved
+                // every slice already reports — §17.4.45 spacing was carved
                 // out of the slots by `build/table.rs::reserve_cell_spacing`,
                 // so `sum(col_widths)` is the table's width *minus* one
                 // `tblCellSpacing` and centring on it lands the table half a

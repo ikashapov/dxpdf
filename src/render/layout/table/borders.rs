@@ -8,7 +8,7 @@
 //! and a `val="nil"` one paint the same nothing but inherit differently.
 //!
 //! Emission is the smaller half: [`emit_cell_borders`] for a cell's own edges
-//! and [`emit_table_outline`] for the outer rectangle a §17.4.44-spaced table
+//! and [`emit_table_outline`] for the outer rectangle a §17.4.45-spaced table
 //! needs, since its cells no longer touch the table's boundary.
 
 use crate::render::dimension::Pt;
@@ -105,7 +105,7 @@ pub(super) struct CellBorders {
 ///
 /// `num_grid_cols` is the table-wide grid column count (`col_widths.len()`),
 /// which is what makes a cell "at the table edge" rather than merely last in
-/// its row (§17.4.17 `gridBefore` separates the two).
+/// its row (§17.4.15 `gridBefore` separates the two).
 ///
 /// Returns one [`CellBorders`] per cell, in row order, indexed the same way
 /// `rows[r].cells` is.
@@ -113,7 +113,7 @@ pub(super) fn resolve_table_cell_borders(
     rows: &[TableRowInput],
     num_grid_cols: usize,
     borders: Option<&TableBorderConfig>,
-    // §17.4.44 `tblCellSpacing`, already resolved to points. Non-zero means the
+    // §17.4.45 `tblCellSpacing`, already resolved to points. Non-zero means the
     // cells share no edges, which decides both the seeding and whether the
     // collapse pass runs at all.
     cell_spacing: Pt,
@@ -126,10 +126,10 @@ pub(super) fn resolve_table_cell_borders(
     for (row_idx, row) in rows.iter().enumerate() {
         let mut row_borders = Vec::new();
         let mut row_grid = Vec::new();
-        // §17.4.17: gridBefore — the row's first cell starts at grid_col
+        // §17.4.15: gridBefore — the row's first cell starts at grid_col
         // `grid_before`, leaving the leftmost columns empty.
         let mut grid_idx = row.grid_before as usize;
-        // §17.4.61: a row may carry per-row border overrides
+        // §17.4.60: a row may carry per-row border overrides
         // (`<w:tblPrEx><w:tblBorders/></w:tblPrEx>`). When set,
         // it's the *fully merged* effective table borders for this
         // row — the build layer already overlaid the override on
@@ -315,15 +315,15 @@ pub(super) fn resolve_table_cell_borders(
 /// The five indices travel together because they answer one question between
 /// them — is this cell at the table's top, bottom, left or right edge? — and
 /// none of them answers it alone. `col` is the cell's **absolute** starting grid
-/// column, past the row's §17.4.17 `gridBefore`, which is what makes the
+/// column, past the row's §17.4.15 `gridBefore`, which is what makes the
 /// question different from "is it first or last in its row": `gridBefore` and
-/// §17.4.16 `gridAfter` can leave a row's first or last cell short of the
+/// §17.4.14 `gridAfter` can leave a row's first or last cell short of the
 /// table's edge.
 #[derive(Clone, Copy)]
 pub(super) struct GridPosition {
     pub(super) row: usize,
     pub(super) col: usize,
-    /// §17.4.18 `gridSpan`, at least 1.
+    /// §17.4.17 `gridSpan`, at least 1.
     pub(super) span: usize,
     pub(super) num_rows: usize,
     /// Grid columns in the whole table, not in this row.
@@ -337,7 +337,7 @@ pub(super) fn resolve_cell_effective_borders(
     cell: &TableCellInput,
     table_borders: Option<&TableBorderConfig>,
     at: GridPosition,
-    // §17.4.44: whether this table has a non-zero `w:tblCellSpacing`. See the
+    // §17.4.45: whether this table has a non-zero `w:tblCellSpacing`. See the
     // `outer` closure below — it is the whole reason this parameter exists.
     spaced: bool,
 ) -> CellBorders {
@@ -351,7 +351,7 @@ pub(super) fn resolve_cell_effective_borders(
     let is_first_col = at.col == 0;
     let is_last_col = at.col + at.span >= at.num_grid_cols;
 
-    // §17.4.44 / issue #168: with a non-zero cell spacing the outer edges are
+    // §17.4.45 / issue #168: with a non-zero cell spacing the outer edges are
     // **not** seeded from the table's own borders. A spaced cell is inset from
     // the table's boundary, so a table border painted on it lands in the wrong
     // place — and once `emit_table_outline` draws that border where it belongs,
@@ -539,7 +539,7 @@ fn border_precedence(b: &TableBorderLine) -> (u32, u8, u32, u32, u32) {
 /// reverses it. Equal weight means the single is three times wider — a 3pt
 /// solid line against two 0.33pt hairlines — and the spec prefers the single.
 ///
-/// Only `Single` and `Double` reach layout (the other 24 §17.4.38 styles are
+/// Only `Single` and `Double` reach layout (the other 24 §17.18.2 `ST_Border` styles are
 /// approximated as `Single` — see `convert_model_border`), so only their two
 /// positions are modelled: single is first, double is third.
 fn style_precedence_index(style: TableBorderStyle) -> u8 {
@@ -626,7 +626,7 @@ pub(super) fn emit_cell_borders(
     }
 }
 
-/// §17.4.44 / issue #168: draw the table's own outer border, for a table whose
+/// §17.4.45 / issue #168: draw the table's own outer border, for a table whose
 /// `w:tblCellSpacing` is non-zero.
 ///
 /// [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ... then all cell
@@ -914,7 +914,7 @@ mod tests {
         assert_eq!(border_rect_count, 7);
     }
 
-    /// §17.4.61 tblPrEx — when a row carries a `tblBorders` override,
+    /// §17.4.60 tblPrEx — when a row carries a `tblBorders` override,
     /// it fully replaces the table's tblBorders for *that row only*.
     /// Here row 0 sets every side to "no border", row 1 doesn't.
     /// The table-wide config has all sides set to single. Expectation:

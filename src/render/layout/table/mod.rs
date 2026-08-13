@@ -41,7 +41,7 @@ use split::{find_row_cut, split_row_at, RowCutInput};
 pub(crate) fn measure_leading_table_group_height(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // §17.4.45 `tblCellSpacing`, resolved to points (zero when unset). The grid
     // slots must already be shrunk by this amount — see
     // `build/table.rs::reserve_cell_spacing`.
     cell_spacing: Pt,
@@ -125,7 +125,7 @@ impl SliceBuilder {
     /// respectively, and both true for a table laid out whole, which is the
     /// one-slice case. Two things follow from them:
     ///
-    /// §17.4.44: each row reserves its own leading gap, so the only gap left to
+    /// §17.4.45: each row reserves its own leading gap, so the only gap left to
     /// add is the trailing one at the table's bottom edge. An intermediate slice
     /// ends at a page cut rather than at the table's edge and gets none —
     /// without that, a table that happens to paginate would lose the bottom gap
@@ -183,7 +183,7 @@ impl SliceBuilder {
 pub fn layout_table(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // §17.4.45 `tblCellSpacing`, resolved to points (zero when unset). The grid
     // slots must already be shrunk by this amount — see
     // `build/table.rs::reserve_cell_spacing`.
     cell_spacing: Pt,
@@ -244,13 +244,13 @@ pub(crate) struct TablePaginationHeights<F> {
 /// Lay out a table with page splitting at row boundaries.
 ///
 /// §17.4.49: header rows repeat on each continuation page.
-/// §17.4.1: `cantSplit` rows are kept together (moved to next page if needed).
+/// §17.4.6: `cantSplit` rows are kept together (moved to next page if needed).
 ///
 /// Returns one `TableSlice` per page.
 pub fn layout_table_paginated(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // §17.4.45 `tblCellSpacing`, resolved to points (zero when unset). The grid
     // slots must already be shrunk by this amount — see
     // `build/table.rs::reserve_cell_spacing`.
     cell_spacing: Pt,
@@ -282,7 +282,7 @@ pub fn layout_table_paginated(
 pub(crate) fn layout_table_paginated_with_page_heights(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    // §17.4.44 `tblCellSpacing`, resolved to points (zero when unset). The grid
+    // §17.4.45 `tblCellSpacing`, resolved to points (zero when unset). The grid
     // slots must already be shrunk by this amount — see
     // `build/table.rs::reserve_cell_spacing`.
     cell_spacing: Pt,
@@ -342,10 +342,10 @@ pub(crate) fn layout_table_paginated_with_page_heights(
         // §17.4.49: header rows are atomic with respect to splitting — they
         // must remain intact so the same row content can repeat verbatim on
         // continuation slices. Non-header rows fall through to the normal
-        // §17.4.1 split path.
+        // §17.4.6 split path.
         let is_header = group.start < header_count;
 
-        // Doesn't fit. Try to split (§17.4.1) before spilling the whole
+        // Doesn't fit. Try to split (§17.4.6) before spilling the whole
         // group to the next page. Only non-header single-row groups are
         // splittable — vMerge spans and cantSplit rows set `splittable=false`.
         if !is_header && group.splittable && group.end - group.start == 1 {
@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn grid_before_offsets_first_cell_x() {
-        // §17.4.17: gridBefore=1 + wBefore skips the first grid column. With
+        // §17.4.15: gridBefore=1 + wBefore skips the first grid column. With
         // a 4-column grid [10, 100, 200, 10] and a row with gridBefore=1 and
         // gridAfter=1, the two cells must occupy columns 1 and 2 — not 0 and 1.
         let rows = vec![TableRowInput {
@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(result.size.width.raw(), 320.0);
     }
 
-    /// §17.4.16: a row whose cells don't reach the last grid column leaves the
+    /// §17.4.14: a row whose cells don't reach the last grid column leaves the
     /// remainder empty — the `gridAfter` region — without stretching into it.
     ///
     /// The row declares no `gridAfter`: layout derives the right edge from
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(result.size.width.raw(), 320.0);
     }
 
-    /// §17.4.17 + §17.4.38: a row inset from **both** table edges takes
+    /// §17.4.15 + §17.4.38: a row inset from **both** table edges takes
     /// `inside_v` on both sides, never the outer `left`/`right`.
     ///
     /// `grid_before = 1` moves the first cell off the left edge; the two cells
@@ -1069,7 +1069,7 @@ mod tests {
 
     #[test]
     fn vmerge_across_rows_with_different_grid_before() {
-        // §17.4.85 + §17.4.17: a cell at grid_col 1 in row A (gridBefore=1)
+        // §17.4.84 + §17.4.15: a cell at grid_col 1 in row A (gridBefore=1)
         // can merge vertically with a Continue cell at grid_col 1 in row B
         // (gridBefore=0) — the merge is per absolute grid column. Row B's
         // cell at grid_col 0 has no above-cell (it's in row A's gridBefore
@@ -1378,7 +1378,7 @@ mod tests {
 
     #[test]
     fn valign_bottom_on_vmerge_restart_uses_span_height() {
-        // §17.4.85 + §17.4.84: vAlign on a vMerge=Restart cell should
+        // §17.4.84 + §17.4.83: vAlign on a vMerge=Restart cell should
         // apply across the whole merged span, not just the first row.
         //
         // Table: 2 rows × 2 cols.
@@ -1474,7 +1474,7 @@ mod tests {
         );
     }
 
-    // ── Row splitting (§17.4.1) ──────────────────────────────────────────
+    // ── Row splitting (§17.4.6) ──────────────────────────────────────────
 
     /// Build a single-row table with one cell whose paragraph contains
     /// `n_lines` narrow text fragments that wrap to separate lines.
@@ -1945,7 +1945,7 @@ mod tests {
         assert_eq!(row_counts, vec![1, 1, 2]);
     }
 
-    // ── §17.4.85 lone vMerge=Restart ─────────────────────────────────────
+    // ── §17.4.84 lone vMerge=Restart ─────────────────────────────────────
 
     /// A `Restart` cell with no `Continue` row under it is an ordinary cell.
     ///
@@ -2017,7 +2017,7 @@ mod tests {
         );
     }
 
-    // ── §17.4.1 page advance must gain space ─────────────────────────────
+    // ── §17.4.6 page advance must gain space ─────────────────────────────
 
     /// A row group taller than a whole page fits nowhere, so advancing to a
     /// fresh page cannot help — it only abandons an empty leading slice, which
@@ -2268,7 +2268,7 @@ mod tests {
         );
     }
 
-    /// §17.4.44: the bottom-edge gap belongs to the table, not to the page it
+    /// §17.4.45: the bottom-edge gap belongs to the table, not to the page it
     /// happens to land on. The monolithic path adds it (`cursor_y +
     /// cell_spacing`); the paginated path did not, so the *same table* kept or
     /// lost its bottom gap depending only on whether it fitted on one page.
@@ -2327,7 +2327,7 @@ mod tests {
         );
     }
 
-    /// §17.4.44: the width a table *occupies* is the slot sum **plus** one
+    /// §17.4.45: the width a table *occupies* is the slot sum **plus** one
     /// `tblCellSpacing`, because `build/table.rs::reserve_cell_spacing` already
     /// took that spacing out of the slots. Reported the same way by both paths
     /// and on every slice, so a caller placing the table never has to re-derive

@@ -26,17 +26,17 @@ pub(super) struct BuiltTable {
     pub(super) rows: Vec<TableRowInput>,
     /// Grid slots, already shrunk by `cell_spacing`.
     pub(super) col_widths: Vec<Pt>,
-    /// §17.4.44 `tblCellSpacing` in points; zero when unset.
+    /// §17.4.45 `tblCellSpacing` in points; zero when unset.
     pub(super) cell_spacing: Pt,
     pub(super) border_config: Option<crate::render::layout::table::TableBorderConfig>,
-    /// §17.4.51: table indentation from left margin.
+    /// §17.4.50: table indentation from left margin.
     pub(super) indent: Pt,
     /// §17.4.28: table horizontal alignment (left/center/right).
     pub(super) alignment: Option<model::Alignment>,
     pub(super) float_info: Option<super::super::section::TableFloatInfo>,
 }
 
-/// §17.4.81: turn a parsed `trHeight` into a layout constraint.
+/// §17.4.80: turn a parsed `trHeight` into a layout constraint.
 ///
 /// `exact` pins the height, `atLeast` is a minimum, and `auto` **ignores `val`**
 /// — the row sizes to its content and carries no constraint at all, hence the
@@ -58,7 +58,7 @@ fn row_height_rule(
     }
 }
 
-/// §17.4.44: resolve `tblCellSpacing` to the gap it actually renders, in points.
+/// §17.4.45: resolve `tblCellSpacing` to the gap it actually renders, in points.
 ///
 /// `CT_TblWidth` allows `pct` and `auto`, and the spec says both **are ignored**
 /// for this element — only `dxa` carries a usable value. `nil` and an omitted
@@ -68,7 +68,7 @@ fn row_height_rule(
 ///
 /// Word renders `test-files/issue-165-cellspacing.docx` with gaps about twice
 /// this width (issue #165), which twice prompted the obvious conclusion —
-/// double the value — and it is wrong. The spec states no factor: §17.4.44 and
+/// double the value — and it is wrong. The spec states no factor: §17.4.45 and
 /// [MS-OI29500] describe the value only as "the minimum amount of space which
 /// shall be left between all cells in the table including the width of the table
 /// borders in the calculation".
@@ -86,7 +86,7 @@ fn row_height_rule(
 /// So where does Word's doubling come from? The probe is the suspect, not the
 /// factor: `issue-165-cellspacing.docx` declares `tblCellSpacing` **twice**, 400
 /// in `tblPr` and 400 again in `trPr`. If Word sums them the effective spacing is
-/// 800 twips — exactly the doubling observed, with no factor anywhere. §17.4.44
+/// 800 twips — exactly the doubling observed, with no factor anywhere. §17.4.45
 /// says the row value *supersedes* the table one and ONLYOFFICE implements
 /// override (`RowPr.TableCellSpacing = TablePr.TablePr.TableCellSpacing`, then a
 /// merge), but the spec saying "supersede" is not evidence about what Word does
@@ -184,7 +184,7 @@ fn clamp_auto_grid_to_page(
     compute_column_widths(grid_cols, num_cols, limit)
 }
 
-/// §17.4.14 / §17.4.71: give every declared cell a grid column, appending
+/// §17.4.48 / §17.4.71: give every declared cell a grid column, appending
 /// columns to `<w:tblGrid>` when it is too short to seat one.
 ///
 /// # What the spec settles, and what it does not
@@ -232,7 +232,7 @@ fn clamp_auto_grid_to_page(
 /// the separators from the declared cell widths — and that is the reading with
 /// 13 years of third-party-producer pressure behind it. It is also the larger
 /// change: it moves rows that were already seated. Neither is derivable from
-/// §17.4.14, and a **Word reference render** of a table whose grid is one column
+/// §17.4.48, and a **Word reference render** of a table whose grid is one column
 /// short is what would choose between them.
 ///
 /// # Sizing an appended column
@@ -244,7 +244,7 @@ fn clamp_auto_grid_to_page(
 /// same appended column, and the widest claim wins: a narrower one would put
 /// some row back into less width than it declared, and taking the first or last
 /// row's claim instead would make the result depend on row order, which nothing
-/// in §17.4.14 supports.
+/// in §17.4.48 supports.
 ///
 /// Only `w:type="dxa"` counts. §17.4.71's `pct` is a fraction *of the table's
 /// own width*, and the table's width is computed from the grid this function
@@ -255,8 +255,8 @@ fn clamp_auto_grid_to_page(
 ///
 /// # Only cells count toward the demand
 ///
-/// §17.4.17 `gridBefore` is counted because it displaces real cells rightward.
-/// §17.4.16 `gridAfter` is **not**: it declares trailing columns that hold no
+/// §17.4.15 `gridBefore` is counted because it displaces real cells rightward.
+/// §17.4.14 `gridAfter` is **not**: it declares trailing columns that hold no
 /// cell, so a grid too short for them loses no content, and appending for it
 /// would narrow a cell that renders perfectly well today on nothing but
 /// speculation. A row with no cells at all asks for nothing for the same
@@ -276,7 +276,7 @@ fn seat_every_cell(
     declared: &[Dimension<Twips>],
     rows: &[model::TableRow],
 ) -> Vec<Dimension<Twips>> {
-    // §17.4.18: a `gridSpan` of 0 is well-formed and meaningless, so a cell
+    // §17.4.17: a `gridSpan` of 0 is well-formed and meaningless, so a cell
     // that exists covers at least one column — `max(1)`, as every grid walk in
     // this engine spells it.
     let span_of =
@@ -374,7 +374,7 @@ pub(super) fn build_table(
     ctx: &BuildContext,
     state: &mut BuildState,
 ) -> BuiltTable {
-    // §17.4.14: grid column widths, after `seat_every_cell` has made sure the
+    // §17.4.48: grid column widths, after `seat_every_cell` has made sure the
     // grid has a column for every cell — for all 398 corpus tables it already
     // does, and the declared list comes back untouched.
     let declared_grid: Vec<Dimension<Twips>> = t.grid.iter().map(|g| g.width).collect();
@@ -494,7 +494,7 @@ pub(super) fn build_table(
     // about which level won. Which of them consult `style_table` is decided by
     // the errata cited above it, not by the content model.
     //
-    // §17.4.28 `jc`, §17.4.51 `tblInd`, §17.7.6.5/§17.7.6.7 the band sizes:
+    // §17.4.28 `jc`, §17.4.50 `tblInd`, §17.7.6.5/§17.7.6.7 the band sizes:
     // direct, then style.
     let alignment = t
         .properties
@@ -615,7 +615,7 @@ pub(super) fn build_table(
     } else {
         compute_column_widths(&grid_cols, num_cols, target_width)
     };
-    // §17.4.44: cell spacing is carved out of the table's own width rather than
+    // §17.4.45: cell spacing is carved out of the table's own width rather than
     // added to it — the spec calls it "the minimum amount of space which shall
     // be left between all cells", not extra width. Reserving one spacing here
     // and offsetting each cell by one in `measure_table_rows` yields exactly
@@ -636,7 +636,7 @@ pub(super) fn build_table(
     // §17.4.38: resolve table borders — merge direct properties over table style.
     // Direct tblBorders may specify only a subset of edges (e.g. insideH=none);
     // unspecified edges inherit from the table style. Computed up front so
-    // per-row tblPrEx merges (§17.4.61) below have a stable basis.
+    // per-row tblPrEx merges (§17.4.60) below have a stable basis.
     let style_borders = style_table.and_then(|tp| tp.borders.get());
     let tbl_borders = match (t.properties.borders.get(), style_borders) {
         (Some(direct), Some(style)) => Some(merge_table_borders(direct, style)),
@@ -659,7 +659,7 @@ pub(super) fn build_table(
                 .iter()
                 .enumerate()
                 .map(|(col_idx, cell)| {
-                    // §17.4.17: gridBefore offsets the row's first cell to the
+                    // §17.4.15: gridBefore offsets the row's first cell to the
                     // right by that many grid columns; subsequent spans accumulate.
                     let span = grid_span(cell) as usize;
                     let mut grid_start = row.properties.grid_before as usize;
@@ -726,7 +726,7 @@ pub(super) fn build_table(
             let mut cells = cells;
             normalize_row_uniform_vertical_insets(&mut cells);
 
-            // §17.4.41 / §17.4.42: a row (or its `tblPrEx`) may override the
+            // §17.4.43 / §17.4.44: a row (or its `tblPrEx`) may override the
             // table's `tblCellSpacing`. Layout applies spacing per *table* —
             // the grid slots are shrunk once, up front — so a per-row value
             // cannot be honoured without a per-row grid. Report it rather than
@@ -741,7 +741,7 @@ pub(super) fn build_table(
                 {
                     state.warned_row_cell_spacing = true;
                     log::warn!(
-                        "§17.4.41/§17.4.42: row-level tblCellSpacing overrides are not applied; \
+                        "§17.4.43/§17.4.44: row-level tblCellSpacing overrides are not applied; \
                          using the table-level value ({cell_spacing:?})"
                     );
                 }
@@ -749,7 +749,7 @@ pub(super) fn build_table(
 
             TableRowInput {
                 cells,
-                // §17.4.81: `exact` pins the height, `atLeast` is a minimum,
+                // §17.4.80: `exact` pins the height, `atLeast` is a minimum,
                 // and `auto` **ignores `val`** — the row sizes to its content,
                 // so it carries no constraint at all. An omitted `hRule`
                 // arrives as `AtLeast` (Word's default, set at the parse seam),
@@ -761,7 +761,7 @@ pub(super) fn build_table(
                 is_header: row.properties.is_header,
                 cant_split: row.properties.cant_split,
                 grid_before: row.properties.grid_before,
-                // §17.4.61: row-level tblPrEx.tblBorders — per-side
+                // §17.4.60: row-level tblPrEx.tblBorders — per-side
                 // override of the table's effective borders. We merge
                 // *at the model layer* (Option<Border> with style=None
                 // is preserved), then convert to layout — that keeps
@@ -782,7 +782,7 @@ pub(super) fn build_table(
         })
         .collect();
 
-    // §17.4.85: an unpaired `w:vMerge w:val="continue"` is malformed input, and
+    // §17.4.84: an unpaired `w:vMerge w:val="continue"` is malformed input, and
     // is repaired here — once, over the finished rows — so that measure, emit,
     // border resolution and the paginator cannot disagree about whether a given
     // cell is merged.
@@ -791,13 +791,13 @@ pub(super) fn build_table(
     if orphans > 0 && !state.warned_orphan_vmerge {
         state.warned_orphan_vmerge = true;
         log::warn!(
-            "§17.4.85: {orphans} <w:vMerge w:val=\"continue\"/> cell(s) have no \
+            "§17.4.84: {orphans} <w:vMerge w:val=\"continue\"/> cell(s) have no \
              <w:vMerge w:val=\"restart\"/> above them in the same grid column; \
              rendering each as an ordinary cell"
         );
     }
 
-    // §17.4.58: floating table positioning.
+    // §17.4.57: floating table positioning.
     //
     // Horizontal positioning is partial: only `tblpXSpec` (`x_align`, below)
     // and `rightFromText` (`right_gap`, which only widens the wrap-reservation
@@ -811,17 +811,17 @@ pub(super) fn build_table(
             right_gap: pos.right_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             bottom_gap: pos.bottom_from_text.map(Pt::from).unwrap_or(Pt::ZERO),
             x_align: pos.x_align,
-            // §17.4.58: tblpY — absolute Y offset from the vertical anchor.
+            // §17.4.57: tblpY — absolute Y offset from the vertical anchor.
             y_offset: pos.y.map(Pt::from).unwrap_or(Pt::ZERO),
-            // §17.4.58: default vertical anchor is "text".
+            // §17.4.57: default vertical anchor is "text".
             vert_anchor: pos.vert_anchor.unwrap_or(crate::model::TableAnchor::Text),
-            // §17.4.57: tblOverlap controls collision behavior with
+            // §17.4.56: tblOverlap controls collision behavior with
             // other floats on the same page.
             overlap,
         }
     });
 
-    // §17.4.51: table indentation from left margin.
+    // §17.4.50: table indentation from left margin.
     // For full-width left-aligned tables, MS Word shifts the table left
     // by the default cell margin so cell content aligns with paragraph text.
     let is_full_width = matches!(
@@ -865,10 +865,10 @@ pub(super) fn build_table(
     }
 }
 
-/// §17.4.18: how many grid columns a `<w:tc>` covers — at least one.
+/// §17.4.17: how many grid columns a `<w:tc>` covers — at least one.
 ///
 /// `gridSpan` is a `ST_DecimalNumber`, so `w:val="0"` is well-formed and the
-/// spec gives it no meaning: §17.4.18 defines the element as "the number of
+/// spec gives it no meaning: §17.4.17 defines the element as "the number of
 /// grid columns spanned by the current cell", and a cell that exists occupies
 /// a column. Every pass that walks the grid already says exactly that with
 /// `span.max(1)` — `measure_table_rows`, `emit_table_rows`,
@@ -887,7 +887,7 @@ fn grid_span(cell: &TableCell) -> u32 {
     cell.properties.grid_span.cloned().unwrap_or(1).max(1)
 }
 
-/// §17.4.85: turn every **orphaned** `w:vMerge w:val="continue"` cell — one
+/// §17.4.84: turn every **orphaned** `w:vMerge w:val="continue"` cell — one
 /// with no `restart` above it in any grid column it covers — into an ordinary
 /// cell, and report how many were found.
 ///
@@ -900,13 +900,13 @@ fn grid_span(cell: &TableCell) -> u32 {
 /// starts from a `Restart`. With no `Restart` to start from, the two passes
 /// between them account for the cell nowhere: its text is dropped from the
 /// output entirely and its row collapses to zero height. That is data loss,
-/// and no reading of §17.4.85 produces it: the section describes `continue`
+/// and no reading of §17.4.84 produces it: the section describes `continue`
 /// only as continuing a merge a `restart` began, and a merged region shows the
 /// *restart* cell's content precisely because there is one to show.
 ///
 /// # The choice, and why it is a choice
 ///
-/// §17.4.85 does not say what an unpaired `continue` means, so "promote it to
+/// §17.4.84 does not say what an unpaired `continue` means, so "promote it to
 /// an ordinary cell" is this engine's decision, not a spec reading. The
 /// alternatives were to treat the orphan as an implicit `restart` (inventing a
 /// merge the author did not write, and one whose extent is guesswork), or to
@@ -982,7 +982,7 @@ fn promote_orphan_vmerge_continues(rows: &mut [TableRowInput]) -> usize {
 
     for row in rows.iter_mut() {
         let mut still_open: Vec<bool> = Vec::new();
-        // §17.4.17: the row's first cell starts `gridBefore` columns in.
+        // §17.4.15: the row's first cell starts `gridBefore` columns in.
         let mut grid_col = row.grid_before as usize;
         for cell in row.cells.iter_mut() {
             let cols = grid_col..grid_col + cell.grid_span.max(1) as usize;
@@ -1017,13 +1017,13 @@ fn promote_orphan_vmerge_continues(rows: &mut [TableRowInput]) -> usize {
 ///
 /// # Spec relationship
 ///
-/// ECMA-376 §17.4.42 (`tcMar`, "Single Table Cell Margins") defines the cell
-/// margin as a per-side exception over §17.4.44 (`tblCellMar`, the table-level
-/// default). Each side is a `CT_TblWidth` (§17.18.87), where `@type="dxa"
+/// ECMA-376 §17.4.68 (`tcMar`, "Single Table Cell Margins") defines the cell
+/// margin as a per-side exception over §17.4.42 (`tblCellMar`, the table-level
+/// default). Each side is a `CT_TblWidth` (§17.4.87), where `@type="dxa"
 /// @w="N"` is an explicit `N`-twip value. The spec is silent on how
 /// *neighbouring* cells in the same row interact when their per-cell margins
 /// disagree — there is no row-level "content area" concept defined in
-/// §17.4.78 (`tr`) or §17.4.79 (`trHeight`).
+/// §17.4.78 (`tr`) or §17.4.80 (`trHeight`).
 ///
 /// The de-facto behaviour of every mainstream renderer (Word and LibreOffice
 /// Writer in particular) is to compute a row-uniform content inset:
@@ -1150,7 +1150,7 @@ fn build_table_cell(
         (None, None) => None,
     };
 
-    // §17.4.84: vertical alignment — direct cell, conditional, or default top.
+    // §17.4.83: vertical alignment — direct cell, conditional, or default top.
     let valign = cell
         .properties
         .vertical_align
@@ -1299,7 +1299,7 @@ mod tests {
     use super::*;
     use crate::render::layout::table::{CellVAlign, TableCellInput};
 
-    // ── §17.4.14 seat_every_cell ─────────────────────────────────────────
+    // ── §17.4.48 seat_every_cell ─────────────────────────────────────────
     //
     // The shapes here are the ones no `.docx` can express in a way a rendered
     // page could then be measured — a four-billion-column row has no geometry
@@ -1347,7 +1347,7 @@ mod tests {
         assert_eq!(seat_every_cell(&declared, &rows), declared);
     }
 
-    /// §17.4.17 `gridBefore` is `ST_DecimalNumber`, so a file may state four
+    /// §17.4.15 `gridBefore` is `ST_DecimalNumber`, so a file may state four
     /// billion of them. The demand is capped at one appended column per cell,
     /// so the allocation is bounded by the document that was parsed rather than
     /// by a number inside it — without the cap this asks for a 32 GB `Vec`.
@@ -1363,7 +1363,7 @@ mod tests {
         );
     }
 
-    /// §17.4.18 `gridSpan` is the same type and gets the same bound. The cell
+    /// §17.4.17 `gridSpan` is the same type and gets the same bound. The cell
     /// is still seated — it has a column and will be drawn — it is merely
     /// narrower than the four billion columns it asked for.
     #[test]
@@ -1491,8 +1491,9 @@ mod tests {
         assert!(cells.is_empty());
     }
 
-    /// §17.4.44: `CT_TblWidth` permits `pct` and `auto`, and the spec says both
-    /// are **ignored** for this element — only `dxa` carries a usable value.
+    /// §17.4.87 / §17.4.45: `CT_TblWidth` permits `pct` and `auto`, and the
+    /// element's own section says both are **ignored** here — only `dxa`
+    /// carries a usable value.
     /// Honouring a percentage here would scale the gap with the table width,
     /// which is exactly what the spec rules out.
     #[test]
@@ -1512,7 +1513,7 @@ mod tests {
         }
     }
 
-    /// §17.4.44: the declared value passes through unscaled — it *is* the gap.
+    /// §17.4.45: the declared value passes through unscaled — it *is* the gap.
     ///
     /// Pinned because it was briefly changed to `2x` on the strength of a Word
     /// render, and reverted when ONLYOFFICE's renderer turned out to apply no
@@ -1620,7 +1621,7 @@ mod tests {
         assert_eq!(out, vec![Pt::new(468.0)]);
     }
 
-    // ── §17.4.85 promote_orphan_vmerge_continues ─────────────────────────
+    // ── §17.4.84 promote_orphan_vmerge_continues ─────────────────────────
     //
     // The end-to-end consequence — an orphan's text surviving into the PDF —
     // is pinned by `tests/table_row_height.rs`. These pin the *pairing rule*,
@@ -1691,7 +1692,7 @@ mod tests {
         assert_eq!(rows[2].cells[0].vertical_merge, None);
     }
 
-    /// §17.4.17: the pairing is by **grid column**, not by cell index. With
+    /// §17.4.15: the pairing is by **grid column**, not by cell index. With
     /// `gridBefore=1` the lower row's first cell sits in column 1, so it does
     /// not continue a merge that started in column 0 — and a fixture where
     /// `grid_col == cell_index` cannot tell the two rules apart.
@@ -1794,7 +1795,7 @@ mod tests {
         assert_eq!(rows[2].cells[1].vertical_merge, None);
     }
 
-    /// §17.4.81: `hRule="auto"` ignores `val`, so the row carries **no** height
+    /// §17.4.80: `hRule="auto"` ignores `val`, so the row carries **no** height
     /// constraint — it is not a zero-height minimum, and not a minimum of the
     /// stated value either.
     ///

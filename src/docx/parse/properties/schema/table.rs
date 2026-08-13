@@ -189,7 +189,7 @@ pub(crate) struct TblpPrXml {
     y: Option<crate::docx::model::dimension::Dimension<Twips>>,
 }
 
-/// §17.4.61 `<w:tblPrEx>` — table-level property exceptions scoped to
+/// §17.4.60 `<w:tblPrEx>` — table-level property exceptions scoped to
 /// a single row. Per the spec it accepts the same vocabulary as
 /// `<w:tblPr>` minus `tblStyle` and `tblpPr`. We model only the slice
 /// the layout currently honors (table borders); other fields can be
@@ -198,7 +198,7 @@ pub(crate) struct TblpPrXml {
 pub(crate) struct TblPrExXml {
     #[serde(rename = "tblBorders", default)]
     tbl_borders: Vec<TableBordersXml>,
-    /// §17.4.41: per-row override of the table's `tblCellSpacing`.
+    /// §17.4.44: per-row override of the table's `tblCellSpacing`.
     #[serde(
         rename = "tblCellSpacing",
         default,
@@ -382,7 +382,7 @@ pub(crate) struct TrPrXml {
         deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
     w_after: Vec<TableMeasureXml>,
-    /// §17.4.42: row-level override of the table's `tblCellSpacing`.
+    /// §17.4.43: row-level override of the table's `tblCellSpacing`.
     #[serde(
         rename = "tblCellSpacing",
         default,
@@ -435,7 +435,7 @@ impl From<TrHeightXml> for TableRowHeight {
     fn from(x: TrHeightXml) -> Self {
         Self {
             value: x.val.unwrap_or_default(),
-            // §17.4.81 says an omitted `hRule` means `auto`; [MS-OI29500]
+            // §17.4.80 says an omitted `hRule` means `auto`; [MS-OI29500]
             // §17.4.80(a) records that **Word assumes `atLeast`**, and Word is
             // what produced these files. Defaulting to `Auto` here would be
             // indistinguishable from an explicit `hRule="auto"`, where the
@@ -474,7 +474,7 @@ impl From<TrPrXml> for TableRowProperties {
 
 // ── tcPr ───────────────────────────────────────────────────────────────
 
-/// Table cell property bag (§17.4.70 `w:tcPr`).
+/// Table cell property bag (§17.4.69 `w:tcPr`).
 ///
 /// Child properties are deserialized as `Vec<T>` to tolerate duplicate XML elements
 /// (such as repeated `<w:tcMar>` or `<w:tcBorders>` emitted by Word/LibreOffice)
@@ -923,7 +923,7 @@ mod tests {
         assert_eq!(tc.cnf_style, Dup::from(Some(CnfStyle::FIRST_ROW)));
     }
 
-    /// §17.4.81 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
+    /// §17.4.80 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
     /// `hRule` means `auto`; Word assumes `atLeast`, and Word wrote these files.
     ///
     /// The distinction is load-bearing rather than cosmetic: with `hRule="auto"`
@@ -954,7 +954,7 @@ mod tests {
         assert_eq!(parse(r#"<trHeight val="440"/>"#).value.raw(), 440);
     }
 
-    /// §17.4.41 / §17.4.42: both cell-spacing overrides now reach the model.
+    /// §17.4.44 / §17.4.43: both cell-spacing overrides now reach the model.
     /// Layout applies spacing per table and warns rather than honouring these,
     /// but dropping them at the parser would make that gap invisible.
     #[test]
@@ -964,7 +964,7 @@ mod tests {
         )
         .unwrap()
         .into();
-        assert!(tr.cell_spacing.cloned().is_some(), "row-level §17.4.42");
+        assert!(tr.cell_spacing.cloned().is_some(), "row-level §17.4.43");
 
         let ex: crate::docx::model::TableRowPropertyExceptions =
             quick_xml::de::from_str::<TblPrExXml>(
@@ -972,7 +972,7 @@ mod tests {
             )
             .unwrap()
             .into();
-        assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.41");
+        assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.44");
     }
 
     /// A duplicated **non-toggle** child is schema-invalid and Word opens it

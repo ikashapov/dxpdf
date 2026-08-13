@@ -1,4 +1,4 @@
-//! Border sub-schemas (§17.3.4 pBdr, §17.4.39 tblBorders, §17.4.66 tcBorders).
+//! Border sub-schemas (§17.3.1.24 pBdr, §17.4.38/§17.4.39 tblBorders, §17.4.66 tcBorders).
 //!
 //! `BorderXml` matches a single `<w:top>`/`<w:bottom>`/etc. element. The
 //! container structs (paragraph / table / table-cell borders) share the same
