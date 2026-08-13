@@ -140,30 +140,27 @@ pub(super) fn resolve_table_cell_borders(
         let row_table_borders = row.border_overrides.as_ref().or(borders);
         for cell_input in row.cells.iter() {
             let span = cell_input.grid_span.max(1) as usize;
-            let (mut b_top, mut b_bottom, b_left, b_right) = resolve_cell_effective_borders(
+            let mut cell_borders = resolve_cell_effective_borders(
                 cell_input,
                 row_table_borders,
-                row_idx,
-                grid_idx,
-                span,
-                num_rows,
-                num_grid_cols,
+                GridPosition {
+                    row: row_idx,
+                    col: grid_idx,
+                    span,
+                    num_rows,
+                    num_grid_cols,
+                },
                 cell_spacing > Pt::ZERO,
             );
             if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
-                b_top = CellEdge::Absent;
+                cell_borders.top = CellEdge::Absent;
             }
             if row_idx + 1 < num_rows && is_vmerge_continue(&rows[row_idx + 1], grid_idx) {
-                b_bottom = CellEdge::Absent;
+                cell_borders.bottom = CellEdge::Absent;
             }
-            row_borders.push(CellBorders {
-                top: b_top,
-                bottom: b_bottom,
-                left: b_left,
-                right: b_right,
-            });
+            row_borders.push(cell_borders);
             row_grid.push(grid_idx);
-            grid_idx += cell_input.grid_span.max(1) as usize;
+            grid_idx += span;
         }
         resolved_borders.push(row_borders);
         grid_indices.push(row_grid);
@@ -313,38 +310,46 @@ pub(super) fn resolve_table_cell_borders(
     resolved_borders
 }
 
+/// Where one cell sits in the table's grid.
+///
+/// The five indices travel together because they answer one question between
+/// them — is this cell at the table's top, bottom, left or right edge? — and
+/// none of them answers it alone. `col` is the cell's **absolute** starting grid
+/// column, past the row's §17.4.17 `gridBefore`, which is what makes the
+/// question different from "is it first or last in its row": `gridBefore` and
+/// §17.4.16 `gridAfter` can leave a row's first or last cell short of the
+/// table's edge.
+#[derive(Clone, Copy)]
+pub(super) struct GridPosition {
+    pub(super) row: usize,
+    pub(super) col: usize,
+    /// §17.4.18 `gridSpan`, at least 1.
+    pub(super) span: usize,
+    pub(super) num_rows: usize,
+    /// Grid columns in the whole table, not in this row.
+    pub(super) num_grid_cols: usize,
+}
+
 /// §17.4.38 / §17.7.6: resolve effective borders for a cell.
 /// Per-cell borders (from conditional formatting) override table-level borders.
 /// Table-level insideH/insideV are mapped to cell edges based on position.
-///
-/// `cell_grid_col` is the cell's absolute starting grid column (accounting
-/// for the row's `gridBefore`); `cell_grid_span` is its `gridSpan` (≥1);
-/// `num_grid_cols` is the table-wide grid column count. Together these
-/// determine whether the cell is at the table's left or right edge — which
-/// matters because §17.4.17/§17.4.16 (`gridBefore`/`gridAfter`) can leave
-/// the row's first/last cell *not* at the table edge.
-#[allow(clippy::too_many_arguments)] // one cell's grid position; cohesive
 pub(super) fn resolve_cell_effective_borders(
     cell: &TableCellInput,
     table_borders: Option<&TableBorderConfig>,
-    row_idx: usize,
-    cell_grid_col: usize,
-    cell_grid_span: usize,
-    num_rows: usize,
-    num_grid_cols: usize,
+    at: GridPosition,
     // §17.4.44: whether this table has a non-zero `w:tblCellSpacing`. See the
     // `outer` closure below — it is the whole reason this parameter exists.
     spaced: bool,
-) -> (CellEdge, CellEdge, CellEdge, CellEdge) {
+) -> CellBorders {
     // Start with table-level borders mapped to cell edges.
     let tb = table_borders;
-    let is_first_row = row_idx == 0;
-    // `row_idx + 1 == num_rows`, not `row_idx == num_rows - 1`: the latter
-    // underflows on an empty table. No caller passes `num_rows == 0` today, but
-    // the parameter is free and the guard would live entirely in the callers.
-    let is_last_row = row_idx + 1 == num_rows;
-    let is_first_col = cell_grid_col == 0;
-    let is_last_col = cell_grid_col + cell_grid_span >= num_grid_cols;
+    let is_first_row = at.row == 0;
+    // `row + 1 == num_rows`, not `row == num_rows - 1`: the latter underflows on
+    // an empty table. No caller passes `num_rows == 0` today, but the field is
+    // free and the guard would live entirely in the callers.
+    let is_last_row = at.row + 1 == at.num_rows;
+    let is_first_col = at.col == 0;
+    let is_last_col = at.col + at.span >= at.num_grid_cols;
 
     // §17.4.44 / issue #168: with a non-zero cell spacing the outer edges are
     // **not** seeded from the table's own borders. A spaced cell is inset from
@@ -409,7 +414,12 @@ pub(super) fn resolve_cell_effective_borders(
         }
     }
 
-    (top, bottom, left, right)
+    CellBorders {
+        top,
+        bottom,
+        left,
+        right,
+    }
 }
 
 /// Resolve a border conflict between two competing borders on a shared edge.
@@ -1574,24 +1584,36 @@ mod edge_mapping_tests {
 
     /// `(top, bottom, left, right)` widths, so a failure reads as which edges
     /// were mis-mapped rather than as four separate assertions.
+    fn edge_widths(
+        row_idx: usize,
+        grid_col: usize,
+        num_rows: usize,
+        num_grid_cols: usize,
+        spaced: bool,
+    ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+        let b = resolve_cell_effective_borders(
+            &plain_cell(),
+            Some(&config()),
+            GridPosition {
+                row: row_idx,
+                col: grid_col,
+                span: 1,
+                num_rows,
+                num_grid_cols,
+            },
+            spaced,
+        );
+        let w = |e: CellEdge| e.line().map(|e| e.width.raw());
+        (w(b.top), w(b.bottom), w(b.left), w(b.right))
+    }
+
     fn widths(
         row_idx: usize,
         grid_col: usize,
         num_rows: usize,
         num_grid_cols: usize,
     ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
-        let (t, b, l, r) = resolve_cell_effective_borders(
-            &plain_cell(),
-            Some(&config()),
-            row_idx,
-            grid_col,
-            1,
-            num_rows,
-            num_grid_cols,
-            false,
-        );
-        let w = |e: CellEdge| e.line().map(|e| e.width.raw());
-        (w(t), w(b), w(l), w(r))
+        edge_widths(row_idx, grid_col, num_rows, num_grid_cols, false)
     }
 
     /// The same corner cell, in a table whose `w:tblCellSpacing` is non-zero.
@@ -1601,18 +1623,7 @@ mod edge_mapping_tests {
         num_rows: usize,
         num_grid_cols: usize,
     ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
-        let (t, b, l, r) = resolve_cell_effective_borders(
-            &plain_cell(),
-            Some(&config()),
-            row_idx,
-            grid_col,
-            1,
-            num_rows,
-            num_grid_cols,
-            true,
-        );
-        let w = |e: CellEdge| e.line().map(|e| e.width.raw());
-        (w(t), w(b), w(l), w(r))
+        edge_widths(row_idx, grid_col, num_rows, num_grid_cols, true)
     }
 
     /// Issue #168. A spaced cell is inset from the table's boundary, so the

@@ -199,36 +199,13 @@ pub(super) fn expand_rows_for_vmerge(
     }
 }
 
-/// Find the cell in a row that covers the given absolute grid column index.
+/// Return the index into `row.cells` of the cell covering the given absolute
+/// grid column — **the** grid walk; every other lookup here goes through it.
 ///
 /// Returns `None` for grid columns inside the row's `gridBefore` / `gridAfter`
 /// regions (§17.4.17 / §17.4.16) — those columns have no cell in this row.
-pub(super) fn find_cell_at_grid_col(
-    row: &TableRowInput,
-    target_grid_col: usize,
-) -> Option<&TableCellInput> {
-    let mut col = row.grid_before as usize;
-    if target_grid_col < col {
-        return None;
-    }
-    for cell in &row.cells {
-        let span = cell.grid_span.max(1) as usize;
-        if target_grid_col < col + span {
-            return Some(cell);
-        }
-        col += span;
-    }
-    None
-}
-
-/// Check if the cell at `grid_col` in `row` is a vMerge Continue cell.
-pub(super) fn is_vmerge_continue(row: &TableRowInput, grid_col: usize) -> bool {
-    find_cell_at_grid_col(row, grid_col)
-        .is_some_and(|c| c.vertical_merge == Some(VerticalMergeState::Continue))
-}
-
-/// Return the cell index (not grid column) for the cell covering `grid_col`.
-/// Returns `None` for grid columns inside the row's gridBefore/gridAfter regions.
+/// §17.4.18: a `gridSpan` of 0 is well-formed and meaningless, so a cell that
+/// exists covers at least one column (`max(1)`, as every grid walk spells it).
 pub(super) fn cell_index_at_grid_col(row: &TableRowInput, target_grid_col: usize) -> Option<usize> {
     let mut col = row.grid_before as usize;
     if target_grid_col < col {
@@ -242,6 +219,20 @@ pub(super) fn cell_index_at_grid_col(row: &TableRowInput, target_grid_col: usize
         col += span;
     }
     None
+}
+
+/// The cell itself, for callers that want the cell rather than its index.
+pub(super) fn find_cell_at_grid_col(
+    row: &TableRowInput,
+    target_grid_col: usize,
+) -> Option<&TableCellInput> {
+    cell_index_at_grid_col(row, target_grid_col).map(|i| &row.cells[i])
+}
+
+/// Check if the cell at `grid_col` in `row` is a vMerge Continue cell.
+pub(super) fn is_vmerge_continue(row: &TableRowInput, grid_col: usize) -> bool {
+    find_cell_at_grid_col(row, grid_col)
+        .is_some_and(|c| c.vertical_merge == Some(VerticalMergeState::Continue))
 }
 
 #[cfg(test)]

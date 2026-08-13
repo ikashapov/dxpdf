@@ -23,6 +23,23 @@ pub(super) struct TableCommandBuffers<'a> {
     pub(super) border_commands: &'a mut Vec<DrawCommand>,
 }
 
+/// Where a row sits in its table, for the two §17.4.85 questions a row cannot
+/// answer from its own `MeasuredRow`: how tall a `vMerge="restart"` cell's whole
+/// merged span is, and whether the row *below* continues one of this row's
+/// cells.
+///
+/// `emit_one_row` takes it as an `Option`, and `None` is not "the caller did not
+/// bother". A split row's half is the only caller that passes it, and
+/// `build_row_groups` flags a group non-splittable when any of its cells is
+/// merged — so a split half is never part of a merge and there is nothing for
+/// these lookups to find.
+#[derive(Clone, Copy)]
+struct RowContext<'a> {
+    measured: &'a MeasuredTable,
+    rows: &'a [TableRowInput],
+    row_idx: usize,
+}
+
 /// Emit draw commands for a range of measured rows.
 ///
 /// `top_border_override`: if `Some`, the first row in the range gets this border
@@ -59,15 +76,19 @@ pub(super) fn emit_table_rows(
                 None
             },
             has_reserved_bottom_gap,
-            Some((measured, rows, row_idx)),
+            Some(RowContext {
+                measured,
+                rows,
+                row_idx,
+            }),
         );
     }
 }
 
 /// Emit a custom `MeasuredRow` (produced by `split::split_row_at`). Unlike
 /// the range-based emit above, this takes a single already-built
-/// `MeasuredRow` and the matching `TableRowInput`. `vmerge_ctx` is always
-/// `None` here — split rows can't contain vMerge (the group is flagged
+/// `MeasuredRow` and the matching `TableRowInput`. Its [`RowContext`] is always
+/// `None` — split rows can't contain vMerge (the group is flagged
 /// not splittable if any cell is merged).
 pub(super) fn emit_split_row(
     mr: &MeasuredRow,
@@ -103,10 +124,10 @@ fn emit_one_row(
     // carry their own (`split_row_at` zeroes the first half's gap — a cut edge
     // has none — and passes the original's to the second).
     has_reserved_bottom_gap: bool,
-    // For vMerge=Restart cells, resolve the full merged span height.
-    // `None` disables the lookup (used for split rows and for standalone
-    // emission paths that don't carry a merge context).
-    vmerge_ctx: Option<(&MeasuredTable, &[TableRowInput], usize)>,
+    // §17.4.85: where this row sits in its table, for the two lookups a row
+    // cannot answer alone. `None` is not missing information — see
+    // [`RowContext`].
+    row_ctx: Option<RowContext<'_>>,
 ) {
     // §17.4.44: the row's box starts one cell-spacing below the cursor; its
     // content box is what remains. Both are zero-cost when no spacing is set.
@@ -119,8 +140,8 @@ fn emit_one_row(
         // shading used `row_height` while vAlign used the span, so a shaded
         // merged cell was coloured across its first row only.
         let effective_h = if cell_input.vertical_merge == Some(VerticalMergeState::Restart) {
-            vmerge_ctx
-                .map(|(m, rs, row_idx)| merged_span_height(m, rs, row_idx, entry.grid_col))
+            row_ctx
+                .map(|ctx| merged_span_height(ctx.measured, ctx.rows, ctx.row_idx, entry.grid_col))
                 .unwrap_or(row_height)
         } else {
             row_height
@@ -175,8 +196,9 @@ fn emit_one_row(
             bufs.content_commands.push(cmd);
         }
 
-        let continues_below = vmerge_ctx.is_some_and(|(_, rows, row_idx)| {
-            row_idx + 1 < rows.len() && is_vmerge_continue(&rows[row_idx + 1], entry.grid_col)
+        let continues_below = row_ctx.is_some_and(|ctx| {
+            ctx.row_idx + 1 < ctx.rows.len()
+                && is_vmerge_continue(&ctx.rows[ctx.row_idx + 1], entry.grid_col)
         });
         let bottom_border_gap = if has_reserved_bottom_gap {
             if continues_below {
