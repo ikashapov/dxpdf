@@ -191,6 +191,16 @@ pub fn resolve_cell_conditional(
 /// `word_cnf_style_agrees_with_the_grid_column_reading` below asserts that
 /// comparison against the fixture rather than restating it.
 ///
+/// That same row settles §17.4.16 `gridAfter` at the same time, which is worth
+/// stating because it looks like a separate question and is not: row 0 does not
+/// merely stop at column 12, it declares `<w:gridAfter w:val="1"/>` — the row
+/// saying outright that its remaining grid column is deliberately empty. A
+/// renderer could read that as "this row's last cell *is* its last column", and
+/// Word does not: the `lastCol` bit is still absent. So a row kept off the last
+/// grid column by `gridAfter` has no `lastCol` cell at all, which is exactly
+/// what a rule written on grid columns produces without a `gridAfter` clause
+/// anywhere in it.
+///
 /// # Which band a spanning cell falls in is a choice
 ///
 /// A cell covering several grid columns can be in several vertical bands at
@@ -219,9 +229,17 @@ fn applicable_regions(
         col_band_size,
     } = *pos;
     // A cell is in the last column region when its span *reaches* the last
-    // grid column. `>=` rather than `==` because a row may address more grid
-    // columns than `tblGrid` declares — real producer output does, and
-    // `build_table` clamps it for widths rather than rejecting the table.
+    // grid column — nothing else about the cell matters, and in particular not
+    // whether it is the last `<w:tc>` in its row.
+    //
+    // Both directions of that are Word's answer, from `Calendar3` in sample1
+    // (see this function's doc): a row falling *short* of the last column,
+    // there because of `w:gridSpan="13"` plus `<w:gridAfter w:val="1"/>` in a
+    // 14-column grid, has no `lastCol` cell even though its single cell is the
+    // last one it has. `>=` rather than `==` handles the other direction, a row
+    // addressing *more* grid columns than `tblGrid` declares — real producer
+    // output does, and `build_table` clamps it for widths rather than rejecting
+    // the table, so this must not silently drop the region for such a cell.
     let reaches_last_col = grid_col + grid_span.max(1) >= num_cols;
     let mut regions = Vec::new();
 
@@ -902,6 +920,12 @@ mod tests {
     /// `band*Vert`/`band*Horz` layer, so it recorded no band bits for those to
     /// be compared against — asserting on bits Word had no reason to write
     /// would be reading silence as data.
+    ///
+    /// The two shapes that make the fixture an oracle are asserted rather than
+    /// assumed, so a fixture that ever changed could not quietly turn this into
+    /// a test of nothing: row 0 must combine `gridSpan` with `gridAfter` (the
+    /// §17.4.16 half — a row deliberately short of the last grid column), and
+    /// some later row must reach the last column with a span.
     #[test]
     fn word_cnf_style_agrees_with_the_grid_column_reading() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -933,15 +957,38 @@ mod tests {
         let num_cols = table.grid.len();
         assert_eq!(num_cols, 14, "the fixture's grid, as Word wrote it");
 
+        // §17.4.16: the row Word answered the `gridAfter` question on. Its one
+        // cell spans 13 of 14 columns and the row declares the fourteenth
+        // deliberately empty, so "the last cell in the row" and "the cell
+        // reaching the last grid column" name different cells here.
+        let row0 = &table.rows[0];
+        assert_eq!(row0.properties.grid_after, 1, "the fixture's gridAfter row");
+        assert_eq!(row0.cells.len(), 1);
+        assert_eq!(row0.cells[0].properties.grid_span.cloned(), Some(13));
+        assert!(
+            !row0.cells[0]
+                .properties
+                .cnf_style
+                .cloned()
+                .unwrap_or_default()
+                .contains(CnfStyle::LAST_COLUMN),
+            "Word puts no lastCol on a row held off the last column by gridAfter"
+        );
+
         let mut spanning_cells = 0;
+        let mut reaching_cells = 0;
         for (row_idx, row) in table.rows.iter().enumerate() {
             // The same walk `build_table` does: gridBefore, then accumulate
-            // each preceding cell's gridSpan.
+            // each preceding cell's gridSpan — `max(1)` included, since a cell
+            // covers at least one column (`build::table::grid_span`).
             let mut grid_col = row.properties.grid_before as usize;
             for cell in &row.cells {
-                let grid_span = cell.properties.grid_span.cloned().unwrap_or(1) as usize;
+                let grid_span = cell.properties.grid_span.cloned().unwrap_or(1).max(1) as usize;
                 if grid_span > 1 {
                     spanning_cells += 1;
+                    if grid_col + grid_span >= num_cols {
+                        reaching_cells += 1;
+                    }
                 }
                 let regions = applicable_regions(
                     &CellGridPosition {
@@ -975,6 +1022,11 @@ mod tests {
         assert!(
             spanning_cells >= 2,
             "the comparison is only worth making over spanning cells; found {spanning_cells}"
+        );
+        assert!(
+            reaching_cells >= 1,
+            "and only discriminating while some span *reaches* the last grid \
+             column, so both answers are present; found {reaching_cells}"
         );
     }
 }
