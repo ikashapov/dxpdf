@@ -1,6 +1,6 @@
 //! Table types — table, row, cell properties, borders, positioning.
 
-use crate::model::dimension::{Dimension, ThousandthPercent, Twips};
+use crate::model::dimension::{Dimension, FiftiethPercent, Twips};
 use crate::model::geometry::{EdgeInsets, PartialEdgeInsets};
 use crate::model::Dup;
 
@@ -79,8 +79,8 @@ pub enum TableOverlap {
 pub enum TableMeasure {
     Auto,
     Twips(Dimension<Twips>),
-    /// Percentage in 50ths of a percent (OOXML `pct` type).
-    Pct(Dimension<ThousandthPercent>),
+    /// §17.18.90: percentage in 50ths of a percent (OOXML `pct` type).
+    Pct(Dimension<FiftiethPercent>),
     /// Nil — explicitly zero.
     Nil,
 }

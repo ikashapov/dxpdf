@@ -1,3 +1,4 @@
+use crate::model::dimension::Dimension;
 use crate::model::{self, Block, Table, TableCell};
 use crate::render::dimension::Pt;
 use crate::render::geometry;
@@ -342,9 +343,10 @@ pub(super) fn build_table(
     );
     let target_width = match width {
         Some(model::TableMeasure::Pct(pct)) => {
-            // §17.4.63: percentage in fiftieths of a percent. 5000 = 100%.
-            let ratio = pct.raw() as f32 / 5000.0;
-            let base = if pct.raw() >= 5000 && extends_for_alignment {
+            // §17.4.63 / §17.18.90: the `pct` scale is fiftieths of a percent,
+            // which `Dimension<FiftiethPercent>` carries and divides by.
+            let ratio = pct.to_fraction();
+            let base = if *pct >= Dimension::FULL && extends_for_alignment {
                 available_width + cell_margins_h
             } else {
                 available_width
@@ -579,7 +581,7 @@ pub(super) fn build_table(
     // by the default cell margin so cell content aligns with paragraph text.
     let is_full_width = matches!(
         width,
-        Some(model::TableMeasure::Pct(pct)) if pct.raw() >= 5000
+        Some(model::TableMeasure::Pct(pct)) if *pct >= Dimension::FULL
     );
     let is_left_aligned = !matches!(
         alignment,

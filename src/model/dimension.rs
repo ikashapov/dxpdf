@@ -146,6 +146,20 @@ impl Unit for ThousandthPercent {
     const NAME: &'static str = "‰%";
 }
 
+/// §17.18.90 ST_TblWidth `pct` — percentage in **fiftieths** of a percent, so
+/// 5000 is 100%.
+///
+/// A separate unit from [`ThousandthPercent`] because the two divisors differ
+/// by 20× and nothing but the type tells them apart: a `<w:tblW w:type="pct"
+/// w:w="5000"/>` read on the thousandth scale is 5%, not 100%, and a table
+/// meant to span the text column comes out a twentieth of it. That is exactly
+/// the mistake the unit system exists to make unrepresentable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FiftiethPercent;
+impl Unit for FiftiethPercent {
+    const NAME: &'static str = "/50%";
+}
+
 /// DrawingML angle in 60,000ths of a degree (§20.1.10.3 ST_Angle).
 /// 0 = no rotation, 5400000 = 90° clockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -214,6 +228,20 @@ impl Dimension<ThousandthPercent> {
     }
 }
 
+impl Dimension<FiftiethPercent> {
+    /// 100% on the ST_TblWidth `pct` scale — the width of a table that spans
+    /// whatever it is measured against.
+    pub const FULL: Self = Self::new(5000);
+
+    /// Returns the percentage as a fraction (e.g., 2500 → 0.5).
+    ///
+    /// The single home for the ST_TblWidth `pct` scale, as
+    /// `Dimension::<ThousandthPercent>::to_fraction` is for ST_Percentage.
+    pub fn to_fraction(self) -> f32 {
+        self.raw as f32 / 5000.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +296,20 @@ mod tests {
             1.0,
         );
         approx(Dimension::<ThousandthPercent>::new(0).to_fraction(), 0.0);
+    }
+
+    /// §17.18.90: the `pct` scale is 20× coarser than ST_Percentage's, which is
+    /// the whole reason the two are separate units. `5000` on this scale is a
+    /// full-width table; on the other it would be 5% of one.
+    #[test]
+    fn fiftieth_percent_to_fraction() {
+        approx(Dimension::<FiftiethPercent>::new(2500).to_fraction(), 0.5);
+        approx(Dimension::<FiftiethPercent>::FULL.to_fraction(), 1.0);
+        approx(Dimension::<FiftiethPercent>::new(0).to_fraction(), 0.0);
+        approx(
+            Dimension::<ThousandthPercent>::new(5000).to_fraction(),
+            0.05,
+        );
     }
 
     #[test]
