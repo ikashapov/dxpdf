@@ -1225,6 +1225,14 @@ fn build_table_cell(
         .map(|va| match va {
             model::CellVerticalAlign::Bottom => crate::render::layout::table::CellVAlign::Bottom,
             model::CellVerticalAlign::Center => crate::render::layout::table::CellVAlign::Center,
+            // `ST_VerticalJc`'s fourth value, `both`, asks for the cell's lines
+            // to be *distributed* over its height rather than placed at one end
+            // of it. That is a layout this engine does not have — `CellVAlign`
+            // offers three placements and no distribution — so it takes the
+            // same placement as `top`. A capability boundary rather than a
+            // reading of §17.4.83, and deliberately not "no request": falling
+            // through to the conditional layer instead would silently give such
+            // a cell some *other* alignment the author did not ask for.
             _ => crate::render::layout::table::CellVAlign::Top,
         })
         .unwrap_or(crate::render::layout::table::CellVAlign::Top);
@@ -1896,25 +1904,33 @@ mod tests {
         widths.iter().copied().sum()
     }
 
-    /// A document whose stylesheet holds exactly `styles`, each a table style
-    /// carrying the given `<w:tblPr>` and nothing else.
-    fn resolved_with(styles: &[(&str, model::TableProperties)]) -> ResolvedDocument {
+    /// A table style whose `<w:tblPr>` is `table` and which defines no
+    /// conditional layers.
+    fn plain_style(table: model::TableProperties) -> ResolvedStyle {
+        layered_style(table, Vec::new())
+    }
+
+    /// A table style with `<w:tblStylePr>` layers (§17.7.6.6) as well.
+    fn layered_style(
+        table: model::TableProperties,
+        overrides: Vec<model::TableStyleOverride>,
+    ) -> ResolvedStyle {
+        ResolvedStyle {
+            paragraph: model::ParagraphProperties::default(),
+            run: model::RunProperties::default(),
+            table: Some(table),
+            table_style_overrides: overrides,
+            is_toc_entry: false,
+        }
+    }
+
+    /// A document whose stylesheet holds exactly `styles`.
+    fn resolved_with(styles: &[(&str, ResolvedStyle)]) -> ResolvedDocument {
         ResolvedDocument {
             sections: Vec::new(),
             styles: styles
                 .iter()
-                .map(|(id, table)| {
-                    (
-                        model::StyleId::new(*id),
-                        ResolvedStyle {
-                            paragraph: model::ParagraphProperties::default(),
-                            run: model::RunProperties::default(),
-                            table: Some(table.clone()),
-                            table_style_overrides: Vec::new(),
-                            is_toc_entry: false,
-                        },
-                    )
-                })
+                .map(|(id, style)| (model::StyleId::new(*id), style.clone()))
                 .collect(),
             numbering: HashMap::new(),
             font_families: Vec::new(),
@@ -1933,11 +1949,14 @@ mod tests {
         }
     }
 
-    fn build_offered(
+    /// Build, and hand back the state as well — the warn-once flags are the
+    /// only record of what the build *reported*, and nothing on the page shows
+    /// them.
+    fn build_reporting_offered(
         t: &Table,
         offered: Pt,
-        styles: &[(&str, model::TableProperties)],
-    ) -> BuiltTable {
+        styles: &[(&str, ResolvedStyle)],
+    ) -> (BuiltTable, BuildState) {
         let resolved = resolved_with(styles);
         let registry = FontRegistry::new(skia_safe::FontMgr::new());
         let measurer = TextMeasurer::new(&registry);
@@ -1945,12 +1964,23 @@ mod tests {
             measurer: &measurer,
             resolved: &resolved,
         };
-        build_table(t, offered, &ctx, &mut BuildState::default())
+        let mut state = BuildState::default();
+        let built = build_table(t, offered, &ctx, &mut state);
+        (built, state)
+    }
+
+    fn build_offered(t: &Table, offered: Pt, styles: &[(&str, ResolvedStyle)]) -> BuiltTable {
+        build_reporting_offered(t, offered, styles).0
     }
 
     /// The common case: the Letter text column, and an empty stylesheet.
     fn build(t: &Table) -> BuiltTable {
         build_offered(t, OFFERED, &[])
+    }
+
+    /// [`build`], keeping the state.
+    fn build_reporting(t: &Table) -> (BuiltTable, BuildState) {
+        build_reporting_offered(t, OFFERED, &[])
     }
 
     /// A table with `grid` declared in twips and one row of `cells` empty
@@ -1993,6 +2023,73 @@ mod tests {
             Dimension::new(bottom),
             Dimension::new(left),
         )
+    }
+
+    /// One border edge: `w:sz` in eighths of a point, so 8 is 1 pt.
+    fn border(eighths: i64, style: model::BorderStyle) -> Option<model::Border> {
+        Some(model::Border {
+            style,
+            width: Dimension::new(eighths),
+            space: Dimension::ZERO,
+            color: model::Color::BLACK,
+        })
+    }
+
+    /// `<w:tblBorders>` with all six edges the same `single` line.
+    fn uniform_borders(eighths: i64) -> model::TableBorders {
+        let e = || border(eighths, model::BorderStyle::Single);
+        model::TableBorders {
+            top: e(),
+            bottom: e(),
+            left: e(),
+            right: e(),
+            inside_h: e(),
+            inside_v: e(),
+        }
+    }
+
+    /// `<w:tcBorders>` with the four outer edges the same line.
+    fn uniform_cell_borders(eighths: i64) -> model::TableCellBorders {
+        let e = || border(eighths, model::BorderStyle::Single);
+        model::TableCellBorders {
+            top: e(),
+            bottom: e(),
+            left: e(),
+            right: e(),
+            inside_h: None,
+            inside_v: None,
+            tl2br: None,
+            tr2bl: None,
+        }
+    }
+
+    /// The width of a resolved cell edge, panicking on a suppressed or absent
+    /// one — every call below expects a line.
+    #[track_caller]
+    fn override_width(o: &Option<CellBorderOverride>) -> Pt {
+        match o {
+            Some(CellBorderOverride::Border(b)) => b.width,
+            other => panic!("expected a drawn border, got {other:?}"),
+        }
+    }
+
+    fn para(content: Vec<model::Inline>) -> Block {
+        Block::Paragraph(Box::new(model::Paragraph {
+            style_id: None,
+            properties: model::ParagraphProperties::default(),
+            mark_run_properties: None,
+            content,
+            rsids: model::ParagraphRevisionIds::default(),
+        }))
+    }
+
+    fn text_run(s: &str) -> model::Inline {
+        model::Inline::TextRun(Box::new(model::TextRun {
+            style_id: None,
+            properties: model::RunProperties::default(),
+            content: vec![model::RunElement::Text(s.to_string())],
+            rsids: model::RevisionIds::default(),
+        }))
     }
 
     /// §17.4.63 / §17.18.90: a `pct` table width is that fraction of the width
@@ -2070,10 +2167,10 @@ mod tests {
     /// a cascade or a sum.
     #[test]
     fn a_direct_tbl_ind_is_its_twips_in_points_and_outranks_the_styles() {
-        let style = model::TableProperties {
+        let style = plain_style(model::TableProperties {
             indent: measure(dxa(1440)),
             ..Default::default()
-        };
+        });
         let indent_of = |direct: Option<model::TableMeasure>| {
             let props = model::TableProperties {
                 style_id: Some(model::StyleId::new("T")),
@@ -2194,32 +2291,16 @@ mod tests {
     /// level can make alone.
     #[test]
     fn direct_table_borders_merge_over_the_styles_edge_by_edge() {
-        let line = |eighths: i64, style: model::BorderStyle| {
-            Some(model::Border {
-                style,
-                width: Dimension::new(eighths),
-                space: Dimension::ZERO,
-                color: model::Color::BLACK,
-            })
-        };
-        let style_borders = model::TableBorders {
-            top: line(8, model::BorderStyle::Single),
-            bottom: line(8, model::BorderStyle::Single),
-            left: line(8, model::BorderStyle::Single),
-            right: line(8, model::BorderStyle::Single),
-            inside_h: line(8, model::BorderStyle::Single),
-            inside_v: line(8, model::BorderStyle::Single),
-        };
-        let style = model::TableProperties {
-            borders: model::Dup::from(Some(style_borders)),
+        let style = plain_style(model::TableProperties {
+            borders: model::Dup::from(Some(uniform_borders(8))),
             ..Default::default()
-        };
+        });
         let props = model::TableProperties {
             style_id: Some(model::StyleId::new("T")),
             width: measure(dxa(4000)),
             borders: model::Dup::from(Some(model::TableBorders {
-                top: line(16, model::BorderStyle::Single),
-                inside_h: line(8, model::BorderStyle::None),
+                top: border(16, model::BorderStyle::Single),
+                inside_h: border(8, model::BorderStyle::None),
                 bottom: None,
                 left: None,
                 right: None,
@@ -2229,8 +2310,8 @@ mod tests {
         };
         let mut t = table_of(props, &[2000, 2000], 2);
         t.rows[0].cells[0].properties.borders = model::Dup::from(Some(model::TableCellBorders {
-            top: line(8, model::BorderStyle::None),
-            bottom: line(8, model::BorderStyle::Nil),
+            top: border(8, model::BorderStyle::None),
+            bottom: border(8, model::BorderStyle::Nil),
             left: None,
             right: None,
             inside_h: None,
@@ -2297,10 +2378,10 @@ mod tests {
     /// left. Stated, not asserted.
     #[test]
     fn cell_margins_cascade_per_side_from_the_style_through_the_table_to_the_cell() {
-        let style = model::TableProperties {
+        let style = plain_style(model::TableProperties {
             cell_margins: model::Dup::from(Some(cell_mar(100, 200, 300, 400))),
             ..Default::default()
-        };
+        });
         let props = model::TableProperties {
             style_id: Some(model::StyleId::new("T")),
             width: measure(dxa(4000)),
@@ -2477,6 +2558,334 @@ mod tests {
             ),
             _ => panic!("the cell's first block is not the nested table"),
         }
+    }
+
+    /// §17.4.60: a row's `<w:tblPrEx><w:tblBorders>` is a per-edge exception
+    /// over the table's *effective* borders, merged **at the model layer** —
+    /// before `none` has been collapsed into "draws nothing".
+    ///
+    /// The order is the decision at the site. An `Option<Border>` whose style
+    /// is `None` is a real element that wins the merge; converting each side to
+    /// layout first would turn it into "this side was not specified" and let
+    /// the table's border through underneath it. So an exception naming one
+    /// edge leaves the other five alone, and one spelling an edge `none`
+    /// removes it.
+    ///
+    /// Nothing under `tests/` writes a `<w:tblPrEx>` — the element appears in
+    /// `table_border_conflict.rs`'s prose and in no fixture — so this path had
+    /// no coverage at any level.
+    #[test]
+    fn a_rows_tbl_pr_ex_borders_are_a_per_edge_exception_over_the_tables() {
+        let props = model::TableProperties {
+            width: measure(dxa(4000)),
+            borders: model::Dup::from(Some(uniform_borders(8))),
+            ..Default::default()
+        };
+        let mut t = table_of(props, &[2000, 2000], 2);
+        t.rows.push(model_row(0, &[1, 1]));
+        t.rows[1].property_exceptions = Some(model::TableRowPropertyExceptions {
+            borders: Some(model::TableBorders {
+                top: border(16, model::BorderStyle::Single),
+                inside_v: border(8, model::BorderStyle::None),
+                bottom: None,
+                left: None,
+                right: None,
+                inside_h: None,
+            }),
+            cell_spacing: None,
+        });
+
+        let built = build(&t);
+        assert!(
+            built.rows[0].border_overrides.is_none(),
+            "a row with no exception carries none — it inherits the table's"
+        );
+        let o = built.rows[1]
+            .border_overrides
+            .as_ref()
+            .expect("the exception must reach the row");
+        assert_pt(
+            o.top.expect("the exception's top").width,
+            2.0,
+            "16 eighths, from the exception",
+        );
+        assert_pt(
+            o.bottom.expect("the table's bottom").width,
+            1.0,
+            "8 eighths, from the table the exception never mentions",
+        );
+        assert!(
+            o.inside_v.is_none(),
+            "an exception's `none` removes the table's edge rather than reading \
+             as 'unspecified'"
+        );
+    }
+
+    /// §17.4.43 / §17.4.44: a row-level `tblCellSpacing` is **not applied** —
+    /// `resolve_cell_spacing` sets out the three answers that would be needed
+    /// first — and it is *reported* rather than dropped in silence.
+    ///
+    /// What is reported is a disagreement, not the presence of a row-level
+    /// element. A row restating the table's own spacing resolves to the same
+    /// gap, so warning about it would report a difference that is not there:
+    /// that is why `issue-165-cellspacing.docx` (400 twips at both levels) is
+    /// silent while `issue-165-cellspacing-scale.docx` (400 and 800) is not.
+    /// The two are indistinguishable on the page — the geometry is the table's
+    /// value either way, which `tests/table_cell_spacing.rs` pins — so only
+    /// `BuildState` can tell them apart.
+    ///
+    /// The `pct` case is the same rule from the other end. §17.4.45 leaves
+    /// every measure but `dxa` without a usable value here, so a `pct` row
+    /// spacing against a table that declares none resolves to the same zero and
+    /// is not a disagreement either.
+    #[test]
+    fn a_row_cell_spacing_is_reported_only_when_it_resolves_to_a_different_gap() {
+        let warned = |table: Option<model::TableMeasure>,
+                      row: Option<model::TableMeasure>,
+                      exception: Option<model::TableMeasure>| {
+            let props = model::TableProperties {
+                width: measure(dxa(4000)),
+                cell_spacing: model::Dup::from(table),
+                ..Default::default()
+            };
+            let mut t = table_of(props, &[2000, 2000], 2);
+            t.rows[0].properties.cell_spacing = model::Dup::from(row);
+            if exception.is_some() {
+                t.rows[0].property_exceptions = Some(model::TableRowPropertyExceptions {
+                    borders: None,
+                    cell_spacing: exception,
+                });
+            }
+            build_reporting(&t).1.warned_row_cell_spacing
+        };
+
+        assert!(
+            !warned(Some(dxa(240)), None, None),
+            "a row that says nothing is not a disagreement"
+        );
+        assert!(
+            !warned(Some(dxa(240)), Some(dxa(240)), None),
+            "…nor is a row restating the table's own value"
+        );
+        assert!(
+            !warned(None, Some(pct(2500)), None),
+            "…nor a row whose measure §17.4.45 leaves without a value, which \
+             resolves to the same zero the table has"
+        );
+        assert!(
+            warned(Some(dxa(240)), Some(dxa(480)), None),
+            "a row asking for a different gap must be reported"
+        );
+        assert!(
+            warned(Some(dxa(240)), None, Some(dxa(480))),
+            "and §17.4.44's `tblPrEx` is read when the `trPr` is silent"
+        );
+    }
+
+    /// §17.4.66: a table cell must end with a `<w:p>`, so a producer whose cell
+    /// ends with a table writes an empty paragraph after it purely to satisfy
+    /// the content model. Word gives that terminator no height, and it is
+    /// dropped here rather than laid out — otherwise every nested table in a
+    /// cell would be followed by a blank line the author never wrote.
+    ///
+    /// Four conjuncts decide it, and each gets a case that differs in exactly
+    /// one of them: the paragraph must be empty, must follow a **table**, must
+    /// be the cell's **last** block, and must not be its **first**. Drop any one
+    /// and a paragraph that should have been laid out disappears — or, for the
+    /// first-block guard, the index behind it goes negative.
+    #[test]
+    fn only_an_empty_last_paragraph_after_a_table_is_dropped_as_structural() {
+        let blocks = |content: Vec<Block>| {
+            let mut t = table_of(
+                model::TableProperties {
+                    width: measure(dxa(4000)),
+                    ..Default::default()
+                },
+                &[4000],
+                1,
+            );
+            t.rows[0].cells[0].content = content;
+            build(&t).rows[0].cells[0].blocks.len()
+        };
+        let nested = || {
+            Block::Table(Box::new(table_of(
+                model::TableProperties::default(),
+                &[1000],
+                1,
+            )))
+        };
+
+        assert_eq!(
+            blocks(vec![nested(), para(vec![])]),
+            1,
+            "the terminator goes"
+        );
+        assert_eq!(
+            blocks(vec![nested(), para(vec![text_run("x")])]),
+            2,
+            "a paragraph with content is not a terminator"
+        );
+        assert_eq!(
+            blocks(vec![nested(), para(vec![]), para(vec![text_run("x")])]),
+            3,
+            "…and an empty one that is not last is not one either"
+        );
+        assert_eq!(
+            blocks(vec![para(vec![]), nested()]),
+            2,
+            "the cell's first block is never a terminator — nothing precedes it"
+        );
+        assert_eq!(
+            blocks(vec![para(vec![text_run("x")]), para(vec![])]),
+            2,
+            "an empty last paragraph after a *paragraph* is the author's"
+        );
+    }
+
+    /// §17.7.6: a cell's own shading outranks the conditional layer's, and its
+    /// borders outrank them **per edge** — a `<w:tcBorders>` naming only some
+    /// sides takes the layer's for the rest rather than replacing it wholesale.
+    ///
+    /// `wholeTable` is the layer every cell gets whatever `tblLook` says, which
+    /// is what makes it the right one to state a *priority* with: no region
+    /// flag has to resolve correctly for the fixture to be about priority.
+    #[test]
+    fn a_cells_own_shading_and_borders_outrank_the_conditional_layer_per_edge() {
+        let fill = |rgb: u32| {
+            model::Dup::from(Some(model::Shading {
+                fill: model::Color::Rgb(rgb),
+                pattern: model::ShadingPattern::Clear,
+                color: model::Color::Auto,
+            }))
+        };
+        let layer = model::TableStyleOverride {
+            override_type: model::TableStyleOverrideType::WholeTable,
+            paragraph_properties: None,
+            run_properties: None,
+            table_properties: None,
+            table_row_properties: None,
+            table_cell_properties: Some(model::TableCellProperties {
+                shading: fill(0x00FF00),
+                borders: model::Dup::from(Some(uniform_cell_borders(8))),
+                ..Default::default()
+            }),
+        };
+        let props = model::TableProperties {
+            style_id: Some(model::StyleId::new("T")),
+            width: measure(dxa(4000)),
+            ..Default::default()
+        };
+        let mut t = table_of(props, &[2000, 2000], 2);
+        t.rows[0].cells[0].properties.shading = fill(0xFF0000);
+        t.rows[0].cells[0].properties.borders = model::Dup::from(Some(model::TableCellBorders {
+            top: border(16, model::BorderStyle::Single),
+            bottom: None,
+            left: None,
+            right: None,
+            inside_h: None,
+            inside_v: None,
+            tl2br: None,
+            tr2bl: None,
+        }));
+
+        let built = build_offered(
+            &t,
+            OFFERED,
+            &[(
+                "T",
+                layered_style(model::TableProperties::default(), vec![layer]),
+            )],
+        );
+        let cells = &built.rows[0].cells;
+        let rgb = |r, g, b| Some(crate::render::resolve::color::RgbColor { r, g, b });
+        assert_eq!(cells[0].shading, rgb(255, 0, 0), "the cell's own fill wins");
+        assert_eq!(
+            cells[1].shading,
+            rgb(0, 255, 0),
+            "…and a cell that declares none takes the layer's"
+        );
+
+        let edges = |i: usize| cells[i].cell_borders.as_ref().expect("borders resolved");
+        assert_pt(override_width(&edges(0).top), 2.0, "the cell's own top");
+        assert_pt(
+            override_width(&edges(0).bottom),
+            1.0,
+            "and the layer's bottom, which the cell never named",
+        );
+        assert_pt(
+            override_width(&edges(1).top),
+            1.0,
+            "a cell with no borders of its own is the layer's throughout",
+        );
+    }
+
+    /// §17.4.83: `w:vAlign` is direct, then the conditional layer, then `top` —
+    /// and `both` lands on `top` as well, which is a capability boundary rather
+    /// than a reading of the section. See the site for why.
+    ///
+    /// The third cell is what makes that observable: under a layer saying
+    /// `center`, a cell asking for `both` must come out `top`. Were `both`
+    /// treated as "no request" it would inherit the layer's `center` instead,
+    /// and were it honoured it would be neither.
+    #[test]
+    fn v_align_is_direct_then_conditional_then_top_and_both_is_top() {
+        let layer = model::TableStyleOverride {
+            override_type: model::TableStyleOverrideType::WholeTable,
+            paragraph_properties: None,
+            run_properties: None,
+            table_properties: None,
+            table_row_properties: None,
+            table_cell_properties: Some(model::TableCellProperties {
+                vertical_align: model::Dup::from(Some(model::CellVerticalAlign::Center)),
+                ..Default::default()
+            }),
+        };
+        let props = model::TableProperties {
+            style_id: Some(model::StyleId::new("T")),
+            width: measure(dxa(6000)),
+            ..Default::default()
+        };
+        let mut t = table_of(props, &[2000, 2000, 2000], 3);
+        t.rows[0].cells[0].properties.vertical_align =
+            model::Dup::from(Some(model::CellVerticalAlign::Bottom));
+        t.rows[0].cells[2].properties.vertical_align =
+            model::Dup::from(Some(model::CellVerticalAlign::Both));
+
+        let built = build_offered(
+            &t,
+            OFFERED,
+            &[(
+                "T",
+                layered_style(model::TableProperties::default(), vec![layer]),
+            )],
+        );
+        let cells = &built.rows[0].cells;
+        assert_eq!(
+            cells[0].vertical_align,
+            CellVAlign::Bottom,
+            "the cell's own"
+        );
+        assert_eq!(cells[1].vertical_align, CellVAlign::Center, "the layer's");
+        assert_eq!(
+            cells[2].vertical_align,
+            CellVAlign::Top,
+            "`both` is vertical justification, which is not implemented — it \
+             must take `top` rather than fall through to the layer"
+        );
+
+        let plain = build(&table_of(
+            model::TableProperties {
+                width: measure(dxa(4000)),
+                ..Default::default()
+            },
+            &[4000],
+            1,
+        ));
+        assert_eq!(
+            plain.rows[0].cells[0].vertical_align,
+            CellVAlign::Top,
+            "§17.4.83's default, with nothing declared anywhere"
+        );
     }
 
     /// §17.4.80: `hRule="auto"` ignores `val`, so the row carries **no** height
