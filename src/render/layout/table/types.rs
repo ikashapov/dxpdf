@@ -22,8 +22,20 @@ pub struct TableRowInput {
     /// §17.4.81: row height constraint.
     pub height_rule: Option<RowHeightRule>,
     /// §17.4.49: row repeats as header on each continuation page.
+    ///
+    /// `Option<bool>` and not `bool`, even though `Some(false)` and `None` are
+    /// indistinguishable to every reader today — both mean "not a header". The
+    /// tri-state is here for the cascade that is not wired yet: §17.7.6 lets a
+    /// `<w:tblStylePr w:type="firstRow">` carry a `<w:trPr>`, and once a style
+    /// can declare `tblHeader`, a row needs a way to say *explicitly off* and
+    /// override it. That is `Some(false)`; `None` is "this level said nothing",
+    /// which is what falls through to the style. Collapsing to `bool` now would
+    /// erase the distinction and have to be undone then.
     pub is_header: Option<bool>,
-    /// §17.4.1: if true, row cannot be split across pages.
+    /// §17.4.1: if true, row cannot be split across pages. `Option<bool>` for
+    /// the same reason as `is_header` above — `<w:cantSplit>` is a `<w:trPr>`
+    /// child, so a table style's conditional `<w:trPr>` can declare it and a row
+    /// will need `Some(false)` to turn it back off.
     pub cant_split: Option<bool>,
     /// §17.4.17: number of grid columns to skip at the row's start. The first
     /// cell's leftmost grid column is `grid_before`, not 0.
