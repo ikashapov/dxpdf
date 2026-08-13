@@ -126,16 +126,21 @@ fn one_cell_table(style: &str) -> String {
     )
 }
 
+/// One border line along its **thin** axis: where it starts, and how thick it
+/// is. That is the only axis a `double` splits on, so it is the only one these
+/// tests read.
+type Run = (f32, f32);
+
 /// The horizontal border rects (wide and thin) as `(y, height)`, sorted by y,
 /// and the verticals as `(x, width)`, sorted by x.
-fn edge_runs(pages: &[LayoutedPage]) -> (Vec<(f32, f32)>, Vec<(f32, f32)>) {
+fn edge_runs(pages: &[LayoutedPage]) -> (Vec<Run>, Vec<Run>) {
     let all = rects(pages);
-    let mut horizontal: Vec<(f32, f32)> = all
+    let mut horizontal: Vec<Run> = all
         .iter()
         .filter(|(_, _, w, h)| w > h)
         .map(|&(_, y, _, h)| (y, h))
         .collect();
-    let mut vertical: Vec<(f32, f32)> = all
+    let mut vertical: Vec<Run> = all
         .iter()
         .filter(|(_, _, w, h)| w <= h)
         .map(|&(x, _, w, _)| (x, w))
