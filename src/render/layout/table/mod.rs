@@ -2710,10 +2710,17 @@ mod tests {
     /// differ in *both* origin and length rather than just in length.
     ///
     /// One 100pt slot at a 20pt spacing: the table is 120pt wide, each row box
-    /// is one 14pt line plus its own 20pt leading gap, and only the last slice
-    /// adds the trailing gap at the table's bottom edge — 68pt against 88pt.
-    /// The cells sit at x = 20..100, so a rect touching x = 0 or x = 120 can
-    /// only belong to the table's own rectangle.
+    /// is one 14pt line plus the horizontal borders inside it plus its own 20pt
+    /// leading gap, and only the last slice adds the trailing gap at the
+    /// table's bottom edge — 71pt against 91pt. The cells sit at x = 20..100,
+    /// so a rect touching x = 0 or x = 120 can only belong to the table's own
+    /// rectangle.
+    ///
+    /// The four rows are not all the same height, and that is the spacing's
+    /// doing: the table's own top and bottom belong to the outline, so row 0
+    /// carries only its `insideH` bottom and row 3 only its `insideH` top — 35pt
+    /// each — while the two interior rows carry both and are 36pt. A slice is
+    /// therefore 35 + 36, not twice anything.
     #[test]
     fn a_paginated_spaced_tables_outline_is_exact_on_each_slice() {
         let line = TableBorderLine {
@@ -2742,7 +2749,7 @@ mod tests {
                 suppress_first_row_top: false,
             },
         );
-        assert_eq!(slices.len(), 2, "two 34pt row boxes per 90pt page");
+        assert_eq!(slices.len(), 2, "a 35pt and a 36pt row box per 90pt page");
 
         // The table's own rectangle: every rect that touches its left or right
         // bound. A cell's edges live between x = 20 and x = 100.
@@ -2765,23 +2772,23 @@ mod tests {
                 .collect()
         };
 
-        assert_eq!(slices[0].size, PtSize::new(Pt::new(120.0), Pt::new(68.0)));
+        assert_eq!(slices[0].size, PtSize::new(Pt::new(120.0), Pt::new(71.0)));
         assert_eq!(
             outline(&slices[0]),
             vec![
                 (0.0, 0.0, 120.0, 1.0), // the table's top edge, on the first slice only
-                (0.0, 1.0, 1.0, 67.0),  // left, inset under the top, running to the cut
-                (119.0, 1.0, 1.0, 67.0),
+                (0.0, 1.0, 1.0, 70.0),  // left, inset under the top, running to the cut
+                (119.0, 1.0, 1.0, 70.0),
             ],
         );
 
-        assert_eq!(slices[1].size, PtSize::new(Pt::new(120.0), Pt::new(88.0)));
+        assert_eq!(slices[1].size, PtSize::new(Pt::new(120.0), Pt::new(91.0)));
         assert_eq!(
             outline(&slices[1]),
             vec![
-                (0.0, 87.0, 120.0, 1.0), // the bottom edge, on the last slice only
-                (0.0, 0.0, 1.0, 87.0),   // left, from the cut down to that bottom
-                (119.0, 0.0, 1.0, 87.0),
+                (0.0, 90.0, 120.0, 1.0), // the bottom edge, on the last slice only
+                (0.0, 0.0, 1.0, 90.0),   // left, from the cut down to that bottom
+                (119.0, 0.0, 1.0, 90.0),
             ],
         );
     }

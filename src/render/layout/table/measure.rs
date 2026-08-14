@@ -81,6 +81,13 @@ pub(super) fn measure_table_rows(
         let mut max_height = Pt::ZERO;
         // §17.4.15: gridBefore — first cell offset.
         let mut grid_idx = row.grid_before as usize;
+        // §17.4.38: whether the strip below this row will be reserved for its
+        // bottom borders. The condition is repeated verbatim at
+        // `border_gap_below` below, and it decides which side of the cell box
+        // the bottom border is drawn on: in the strip when there is one, inset
+        // into the box's foot when there is not (`emit_cell_borders`). Only the
+        // second case takes room from the content.
+        let reserves_band_below = row_idx + 1 < num_rows && cell_spacing <= Pt::ZERO;
 
         for (cell_ci, cell) in row.cells.iter().enumerate() {
             let span = cell.grid_span.max(1) as usize;
@@ -102,9 +109,24 @@ pub(super) fn measure_table_rows(
             let cell_w: Pt = (slots - cell_spacing).max(Pt::ZERO);
             let cell_x: Pt = col_widths[..grid_start].iter().copied().sum::<Pt>() + cell_spacing;
 
+            // §17.4.39/§17.4.66 against §17.4.41/§17.4.42: a border is drawn
+            // *inside* the cell box, so the content box starts at
+            // `max(border, margin)` from each edge — the margin part is applied
+            // by `layout_cell`, and this is the rest. All four sides obey the
+            // same rule, and all four must be charged here, because `emit`
+            // charges all four when it places the content. Charging only the
+            // horizontal pair is what let a row whose top border was thicker
+            // than its top cell margin overflow its own box by the difference,
+            // straight into the strip where the bottom border paints.
             let b = &resolved_borders[row_idx][cell_ci];
             let extra_left = (border_width(b.left) - cell.margins.left).max(Pt::ZERO);
             let extra_right = (border_width(b.right) - cell.margins.right).max(Pt::ZERO);
+            let extra_top = (border_width(b.top) - cell.margins.top).max(Pt::ZERO);
+            let extra_bottom = if reserves_band_below {
+                Pt::ZERO
+            } else {
+                (border_width(b.bottom) - cell.margins.bottom).max(Pt::ZERO)
+            };
             let layout_w = (cell_w - extra_left - extra_right).max(Pt::ZERO);
 
             let is_continue = cell.vertical_merge == Some(VerticalMergeState::Continue);
@@ -141,7 +163,9 @@ pub(super) fn measure_table_rows(
             let is_lone_restart =
                 cell.vertical_merge == Some(VerticalMergeState::Restart) && !continues_below;
             if cell.vertical_merge.is_none() || is_lone_restart {
-                max_height = max_height.max(layout.content_height + cell.margins.vertical());
+                max_height = max_height.max(
+                    layout.content_height + cell.margins.vertical() + extra_top + extra_bottom,
+                );
             }
 
             entries.push(CellLayoutEntry {
@@ -745,10 +769,14 @@ mod tests {
                 "no shared edge to reserve for once cells are separated"
             );
         }
-        // These cells are empty, so the whole of each row's height is the
-        // reserved gap — added exactly once per row, not once per cell.
+        // These cells are empty, so each row's height is its reserved gap —
+        // added exactly once per row, not once per cell — plus the one
+        // horizontal border that lies inside its box. A spaced table's own top
+        // and bottom belong to the outline, so row 0 has only its `insideH`
+        // bottom and row 1 only its `insideH` top: one 0.5pt border each, not
+        // two and not none.
         for r in &m.rows {
-            assert_eq!(r.height, spacing);
+            assert_eq!(r.height, spacing + Pt::new(0.5));
         }
     }
 
@@ -1043,11 +1071,27 @@ mod tests {
 
     /// `<w:tr/>` with no `<w:tc>` is well-formed. §17.4.21 says a row's height
     /// is determined by the glyphs in its cells, so a row with none has none —
-    /// and having none it must displace nothing: its neighbours land exactly
-    /// where they land in a table that never contained it.
+    /// and having none it must displace nothing *sideways*: its neighbours' cells
+    /// land at exactly the x they land at in a table that never contained it.
     ///
     /// The populated rows carry a line of text so that "zero" is a measurement
     /// rather than the default every empty cell already produces.
+    ///
+    /// **The row below it is half a point taller, and that is not this row's
+    /// height leaking.** §17.4.66 resolves a shared horizontal edge to one of
+    /// the two cells facing across it, and an empty row leaves the row beneath
+    /// facing nothing — so where the control's second row has its top resolved
+    /// to `Absent` (the row above owns that edge and paints it in the strip
+    /// between them), the gapped table's third row keeps a top border of its own
+    /// and paints it *inside* its box. `measure_table_rows` charges a border
+    /// inside the box to the height, so the height follows the ownership.
+    ///
+    /// That ownership difference predates the height following it, and it is
+    /// visible without any of this: the gapped table paints 1pt of border at
+    /// that boundary where the control paints 0.5pt. Whether an empty row should
+    /// break the shared edge at all is the real question, and it is a
+    /// border-resolution one — asserted here as it stands so that changing it is
+    /// a deliberate act.
     #[test]
     fn a_row_with_no_cells_is_zero_height_and_moves_nothing() {
         let slots = vec![Pt::new(50.0), Pt::new(50.0)];
@@ -1071,10 +1115,6 @@ mod tests {
         assert_eq!(gapped.table_width, control.table_width);
 
         for (mine, theirs) in [(0usize, 0usize), (2, 1)] {
-            assert_eq!(
-                gapped.rows[mine].height, control.rows[theirs].height,
-                "row {mine} changed height"
-            );
             let got: Vec<_> = gapped.rows[mine]
                 .entries
                 .iter()
@@ -1087,9 +1127,24 @@ mod tests {
                 .collect();
             assert_eq!(got, want, "row {mine} moved");
         }
-        // …and the populated rows really are 14 pt, so the zero above is a
-        // difference and not the table's uniform answer.
-        assert_eq!(gapped.rows[0].height, Pt::new(14.0));
+        // The row above the gap is untouched: whatever the empty row does, it
+        // does it downward.
+        assert_eq!(gapped.rows[0].height, control.rows[0].height);
+
+        // And the row below it differs by exactly one border width — the top
+        // edge it owns and the control's does not. Asserted as the difference
+        // rather than as two heights, so it stays a statement about the border
+        // and not about the line.
+        assert_eq!(
+            gapped.rows[2].height - control.rows[1].height,
+            Pt::new(0.5),
+            "the row below an empty one keeps its own top border"
+        );
+
+        // …and the populated rows really are 14pt of line plus the table's own
+        // 0.5pt top border, which is drawn inside the first row's box, so the
+        // zero above is a difference and not the table's uniform answer.
+        assert_eq!(gapped.rows[0].height, Pt::new(14.5));
     }
 
     // ── §17.4.66: a border wider than the margin it sits behind ──────────

@@ -193,6 +193,13 @@ fn emit_one_row(
         // governs the merged region; letting a continuation paint over the span
         // would let a stale or differing `shd` on a row that has no independent
         // existence win for that row.
+        // Cells in a row abut exactly, so a run of same-coloured ones reaches
+        // the page as N rects sharing N−1 edges — a seam under any rasterizer
+        // that anti-aliases each fill on its own. They are fused once the page
+        // is finished, by
+        // [`coalesce_abutting_rects`](crate::render::layout::draw_command::coalesce_abutting_rects),
+        // which owns that rule for every producer rather than each producer
+        // half-owning it.
         if cell_input.vertical_merge != Some(VerticalMergeState::Continue) {
             if let Some(color) = cell_input.shading {
                 bufs.commands.push(DrawCommand::Rect {
@@ -220,13 +227,26 @@ fn emit_one_row(
 
         let dx = (border_width(b_left) - cell_input.margins.left).max(Pt::ZERO);
         let dy_border = (border_width(cell_top) - cell_input.margins.top).max(Pt::ZERO);
+        // The foot of the content box, mirroring `dy_border` at the head. A
+        // bottom border only takes room from the content where it is drawn
+        // *inside* the box — `emit_cell_borders` puts it there exactly when no
+        // strip was reserved below — so the branch is on `band_below` and not
+        // on the border alone. `measure_table_rows` reserved the same amount;
+        // subtracting it here is what keeps `Bottom` and `Center` from pushing
+        // content back down into the border that room was made for.
+        let dy_bottom = if band_below > Pt::ZERO {
+            Pt::ZERO
+        } else {
+            (border_width(b_bottom) - cell_input.margins.bottom).max(Pt::ZERO)
+        };
 
         // §17.4.84: for vMerge=Restart cells, vAlign operates over the whole
         // merged span (`effective_h`, computed above with the shading).
         let content_h = entry.layout.content_height + cell_input.margins.vertical();
+        let slack = (effective_h - content_h - dy_border - dy_bottom).max(Pt::ZERO);
         let dy_valign = match cell_input.vertical_align {
-            CellVAlign::Bottom => (effective_h - content_h - dy_border).max(Pt::ZERO),
-            CellVAlign::Center => ((effective_h - content_h - dy_border) * 0.5).max(Pt::ZERO),
+            CellVAlign::Bottom => slack,
+            CellVAlign::Center => slack * 0.5,
             CellVAlign::Top => Pt::ZERO,
         };
 

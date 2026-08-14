@@ -1008,12 +1008,17 @@ mod tests {
     /// [MS-OI29500] §17.4.66: the one shared vertical edge is resolved once and
     /// drawn by the left cell, which is why there are seven rects and not eight.
     /// A count alone cannot tell a correct seven from a wrong one, so every
-    /// number below is derived instead: each row is 14pt (one default line),
-    /// each column 100pt, and every border 0.5pt. Horizontals span the **full**
-    /// cell width and own the corners; the verticals fill the 13pt
-    /// (14 − 0.5 − 0.5) the horizontals leave between them, which is the
-    /// convention [`emit_cell_borders`] states. A cell's four edges are emitted
-    /// top, bottom, left, right, and the cells in row order.
+    /// number below is derived instead: each column is 100pt and every border
+    /// 0.5pt, and the row is 15pt — one 14pt default line, plus the top and
+    /// bottom borders that are drawn *inside* its own box and so cannot be
+    /// drawn over its content. It is the table's only row, so no strip is
+    /// reserved below it and its bottom border is inset into the box's foot
+    /// rather than sitting under it; `measure_table_rows` charges both to the
+    /// height for exactly that reason. Horizontals span the **full** cell width
+    /// and own the corners; the verticals fill the 14pt the horizontals leave
+    /// between them, which is the convention [`emit_cell_borders`] states. A
+    /// cell's four edges are emitted top, bottom, left, right, and the cells in
+    /// row order.
     #[test]
     fn borders_emit_lines() {
         let line = TableBorderLine {
@@ -1049,18 +1054,18 @@ mod tests {
 
         assert_eq!(
             result.size,
-            crate::render::geometry::PtSize::new(Pt::new(200.0), Pt::new(14.0))
+            crate::render::geometry::PtSize::new(Pt::new(200.0), Pt::new(15.0))
         );
         assert_eq!(
             rects(&result.commands),
             vec![
                 (0.0, 0.0, 100.0, 0.5),    // cell 0 top, full cell width
-                (0.0, 13.5, 100.0, 0.5),   // cell 0 bottom, flush with the row
-                (0.0, 0.5, 0.5, 13.0),     // cell 0 left, inset between them
-                (99.5, 0.5, 0.5, 13.0),    // cell 0 right — the shared edge
+                (0.0, 14.5, 100.0, 0.5),   // cell 0 bottom, flush with the row
+                (0.0, 0.5, 0.5, 14.0),     // cell 0 left, inset between them
+                (99.5, 0.5, 0.5, 14.0),    // cell 0 right — the shared edge
                 (100.0, 0.0, 100.0, 0.5),  // cell 1 top
-                (100.0, 13.5, 100.0, 0.5), // cell 1 bottom
-                (199.5, 0.5, 0.5, 13.0),   // cell 1 right; its left was resolved away
+                (100.0, 14.5, 100.0, 0.5), // cell 1 bottom
+                (199.5, 0.5, 0.5, 14.0),   // cell 1 right; its left was resolved away
             ],
         );
     }
@@ -1710,9 +1715,15 @@ mod tests {
     /// Two 100pt slots at a 20pt `w:tblCellSpacing`. The slots were already
     /// shrunk by `build/table.rs::reserve_cell_spacing`, so the table's own
     /// width is 200 + 20 = 220, and each cell is inset one spacing: cell 0 at
-    /// x = 20 with width 80, cell 1 at x = 120. Each row box is one 14pt line
-    /// plus its own 20pt leading gap, and the table adds one trailing gap at
-    /// its bottom edge: 34 + 34 + 20 = 88.
+    /// x = 20 with width 80, cell 1 at x = 120. Each row box is one 14pt line,
+    /// plus the 1pt horizontal border that lies inside it, plus its own 20pt
+    /// leading gap; the table adds one trailing gap at its bottom edge:
+    /// 35 + 35 + 20 = 90.
+    ///
+    /// Each row holds exactly *one* horizontal border and not two, which is why
+    /// 35 and not 36: with a spacing the table's own top and bottom belong to
+    /// the outline, so row 0 has only its `insideH` bottom and row 1 only its
+    /// `insideH` top.
     ///
     /// [MS-OI29500] §17.4.66 — *"if the cell spacing is nonzero … all cell
     /// borders and outer table borders display"* — so both appear, and neither
@@ -1723,14 +1734,19 @@ mod tests {
     /// §17.4.38: **every one of a cell's borders is inside its own box**, which
     /// with a spacing is the whole of the cell — there is no shared edge and no
     /// band reserved for one, as `measure_table_rows` says where it declines to
-    /// reserve it. Row 0's bottom therefore sits at 33..34, flush with the
+    /// reserve it. Row 0's bottom therefore sits at 34..35, flush with the
     /// inside of its box, exactly as its top sits flush with the inside of the
-    /// other end. It used to be drawn at 34..35, one width *below* the box and
-    /// so inside the 20pt spacing, because the emitter extended a cell's border
-    /// box by its own bottom border's width whenever a row followed it —
-    /// a rule meant for the band between two rows that share an edge, applied
-    /// where there is no band and no shared edge. A spacing narrower than the
-    /// border would have put a cell's bottom border inside the next row's box.
+    /// other end. It used to be drawn at 34..35 of a box that ended at 34, one
+    /// width *below* the box and so inside the 20pt spacing, because the
+    /// emitter extended a cell's border box by its own bottom border's width
+    /// whenever a row followed it — a rule meant for the band between two rows
+    /// that share an edge, applied where there is no band and no shared edge.
+    /// A spacing narrower than the border would have put a cell's bottom border
+    /// inside the next row's box.
+    ///
+    /// Being inside the box is also why the box has to be tall enough to hold
+    /// it. The row is 15pt of box for 14pt of line, and the border occupies the
+    /// last point of it rather than the last point of the content.
     #[test]
     fn a_spaced_table_paints_its_cell_edges_and_its_outline_at_exact_coordinates() {
         let result = layout_table(
@@ -1744,31 +1760,31 @@ mod tests {
         );
         assert_eq!(
             result.size,
-            crate::render::geometry::PtSize::new(Pt::new(220.0), Pt::new(88.0))
+            crate::render::geometry::PtSize::new(Pt::new(220.0), Pt::new(90.0))
         );
 
         assert_eq!(
             rects(&result.commands),
             vec![
-                // Row 0 (box 20..34, its bottom border inside it). Its top and
+                // Row 0 (box 20..35, its bottom border inside it). Its top and
                 // left are the table's own edges, which a spaced cell does not
                 // take — they belong to the outline.
-                (20.0, 33.0, 80.0, 1.0),  // cell 0 bottom (insideH)
-                (99.0, 20.0, 1.0, 13.0),  // cell 0 right  (insideV), inset above it
-                (120.0, 33.0, 80.0, 1.0), // cell 1 bottom
-                (120.0, 20.0, 1.0, 13.0), // cell 1 left
-                // Row 1 (box 54..68). Its bottom is the table's own edge.
-                (20.0, 54.0, 80.0, 1.0),  // cell 0 top (insideH)
-                (99.0, 55.0, 1.0, 13.0),  // cell 0 right, inset under its top
-                (120.0, 54.0, 80.0, 1.0), // cell 1 top
-                (120.0, 55.0, 1.0, 13.0), // cell 1 left
+                (20.0, 34.0, 80.0, 1.0),  // cell 0 bottom (insideH)
+                (99.0, 20.0, 1.0, 14.0),  // cell 0 right  (insideV), inset above it
+                (120.0, 34.0, 80.0, 1.0), // cell 1 bottom
+                (120.0, 20.0, 1.0, 14.0), // cell 1 left
+                // Row 1 (box 55..70). Its bottom is the table's own edge.
+                (20.0, 55.0, 80.0, 1.0),  // cell 0 top (insideH)
+                (99.0, 56.0, 1.0, 14.0),  // cell 0 right, inset under its top
+                (120.0, 55.0, 80.0, 1.0), // cell 1 top
+                (120.0, 56.0, 1.0, 14.0), // cell 1 left
                 // The table's own rectangle, drawn the way a cell's edges are:
                 // horizontals span the full width and own the corners, the
-                // verticals fill the 86pt between them.
+                // verticals fill the 88pt between them.
                 (0.0, 0.0, 220.0, 1.0),
-                (0.0, 87.0, 220.0, 1.0),
-                (0.0, 1.0, 1.0, 86.0),
-                (219.0, 1.0, 1.0, 86.0),
+                (0.0, 89.0, 220.0, 1.0),
+                (0.0, 1.0, 1.0, 88.0),
+                (219.0, 1.0, 1.0, 88.0),
             ],
         );
     }

@@ -459,11 +459,58 @@ fn a_table_style_cannot_set_the_tbl_look() {
 /// 0x04A0, which switches that region **on** and `lastRow` off, so the layer
 /// paints unless something says otherwise.
 fn red_cells(pages: &[LayoutedPage]) -> usize {
-    page_geometry(pages)
+    cells_shaded(pages, (0xFF, 0x00, 0x00))
+}
+
+/// How many of the table's cells carry a `color` background.
+///
+/// Counted by asking, for each cell's *own* text, whether its baseline lies
+/// inside a rect of that colour — not by counting the rects. §17.4.33 shading
+/// is a cell property and reaches the page as one rect per cell, but only until
+/// `coalesce_abutting_rects` fuses abutting same-colour neighbours into one
+/// (`tests/table_shading_seams.rs` says why it must). After that a rect count
+/// answers how many *runs* were painted rather than how many cells, and a pair
+/// of shaded neighbours counts as one.
+///
+/// Every cell of `table_document` holds a distinct one-letter label, and a
+/// label is inside its own cell by construction, so this counts cells however
+/// the fills happened to be emitted — and asserts something a rect count never
+/// did: that the shading actually covers the cell whose text it is behind.
+fn cells_shaded(pages: &[LayoutedPage], color: (u8, u8, u8)) -> usize {
+    let rects: Vec<_> = pages
         .iter()
-        .filter(|g| g.starts_with("rect") && g.ends_with("#FF0000"))
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            DrawCommand::Rect { rect, color: c } if (c.r, c.g, c.b) == color => Some((
+                rect.origin.x.raw(),
+                rect.origin.y.raw(),
+                rect.origin.x.raw() + rect.size.width.raw(),
+                rect.origin.y.raw() + rect.size.height.raw(),
+            )),
+            _ => None,
+        })
+        .collect();
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter(|c| {
+            let DrawCommand::Text { text, position, .. } = c else {
+                return false;
+            };
+            if text.trim().is_empty() {
+                return false;
+            }
+            let (x, y) = (position.x.raw(), position.y.raw());
+            rects
+                .iter()
+                .any(|&(x0, y0, x1, y1)| x >= x0 && x <= x1 && y >= y0 && y <= y1)
+        })
         .count()
 }
+
+/// The two fills every conditional-layer fixture paints with.
+const RED: (u8, u8, u8) = (0xFF, 0x00, 0x00);
+const GREEN: (u8, u8, u8) = (0x00, 0xFF, 0x00);
 
 const FIRST_ROW_RED: &str = r#"<w:tblStylePr w:type="firstRow">
              <w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="FF0000"/></w:tcPr>
@@ -546,10 +593,7 @@ fn a_table_style_can_set_the_row_band_size() {
             r#"<w:tblPr><w:tblStyleRowBandSize w:val="2"/></w:tblPr>{bands}"#
         )),
     );
-    let reds = page_geometry(&banded)
-        .iter()
-        .filter(|g| g.ends_with("#FF0000"))
-        .count();
+    let reds = cells_shaded(&banded, RED);
     assert_eq!(
         reds, 4,
         "a band size of 2 puts rows 0-1 (four cells) in band1, not rows 0 and 2"
@@ -584,17 +628,12 @@ fn a_table_style_can_set_the_column_band_size() {
             r#"<w:tblPr><w:tblStyleColBandSize w:val="2"/></w:tblPr>{bands}"#
         )),
     );
-    let geometry = page_geometry(&banded);
     assert_eq!(
-        geometry.iter().filter(|g| g.ends_with("#FF0000")).count(),
+        cells_shaded(&banded, RED),
         8,
         "a band size of 2 puts both columns in band1 — all eight cells"
     );
-    assert_eq!(
-        geometry.iter().filter(|g| g.ends_with("#00FF00")).count(),
-        0,
-        "…and none in band2"
-    );
+    assert_eq!(cells_shaded(&banded, GREEN), 0, "…and none in band2");
 }
 
 /// `tblpPr` — floating-table positioning, and on §2.1.250(a)'s list. A style
@@ -830,10 +869,7 @@ fn a_child_table_style_inherits_the_parents_conditional_layers() {
         ),
     );
     assert_eq!(
-        page_geometry(&derived)
-            .iter()
-            .filter(|g| g.ends_with("#FF0000"))
-            .count(),
+        cells_shaded(&derived, RED),
         2,
         "the parent's firstRow layer must shade both cells of the first row"
     );
@@ -862,10 +898,7 @@ fn a_child_conditional_layer_merges_with_the_parents_of_the_same_type() {
     );
     let geometry = page_geometry(&derived);
     assert_eq!(
-        geometry
-            .iter()
-            .filter(|g| g.starts_with("rect") && g.ends_with("#0000FF"))
-            .count(),
+        cells_shaded(&derived, (0x00, 0x00, 0xFF)),
         2,
         "the child's own shading wins"
     );
@@ -961,14 +994,13 @@ fn conditional_layers_the_child_alone_defines_are_added_to_the_parents() {
                </w:tblStylePr>"#,
         ),
     );
-    let geometry = page_geometry(&derived);
     assert_eq!(
-        geometry.iter().filter(|g| g.ends_with("#FF0000")).count(),
+        cells_shaded(&derived, RED),
         2,
         "the parent's firstRow survives"
     );
     assert_eq!(
-        geometry.iter().filter(|g| g.ends_with("#00FF00")).count(),
+        cells_shaded(&derived, GREEN),
         2,
         "…alongside the child's own lastRow"
     );
@@ -993,10 +1025,7 @@ fn a_child_layers_cell_properties_merge_with_the_parents() {
         ),
     );
     assert_eq!(
-        page_geometry(&derived)
-            .iter()
-            .filter(|g| g.ends_with("#FF0000"))
-            .count(),
+        cells_shaded(&derived, RED),
         2,
         "a child tcPr that states only vAlign must not drop the parent's shading"
     );

@@ -104,15 +104,50 @@ fn layout(
     dxpdf::render::resolve_and_layout(doc).1
 }
 
-fn shading_rects(pages: &[dxpdf::render::layout::draw_command::LayoutedPage]) -> Vec<(u8, u8, u8)> {
-    pages
+/// How many of the table's cells carry a `color` background.
+///
+/// Counted by asking, for each cell's own text, whether its baseline lies
+/// inside a rect of that colour — not by counting the rects. §17.4.33 shading
+/// is a cell property and reaches the page as one rect per cell, but only until
+/// `coalesce_abutting_rects` fuses abutting same-colour neighbours into one
+/// (`tests/table_shading_seams.rs` says why it must), after which a rect count
+/// answers how many *runs* were painted rather than how many cells. Every cell
+/// of the fixture holds a distinct label, so this counts cells however the
+/// fills were emitted — and asserts what a rect count never did: that the
+/// shading actually covers the cell whose text it is behind.
+fn cells_shaded(
+    pages: &[dxpdf::render::layout::draw_command::LayoutedPage],
+    color: (u8, u8, u8),
+) -> usize {
+    let rects: Vec<_> = pages
         .iter()
         .flat_map(|p| &p.commands)
         .filter_map(|c| match c {
-            DrawCommand::Rect { color, .. } => Some((color.r, color.g, color.b)),
+            DrawCommand::Rect { rect, color: c } if (c.r, c.g, c.b) == color => Some((
+                rect.origin.x.raw(),
+                rect.origin.y.raw(),
+                rect.origin.x.raw() + rect.size.width.raw(),
+                rect.origin.y.raw() + rect.size.height.raw(),
+            )),
             _ => None,
         })
-        .collect()
+        .collect();
+    pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter(|c| {
+            let DrawCommand::Text { text, position, .. } = c else {
+                return false;
+            };
+            if text.trim().is_empty() {
+                return false;
+            }
+            let (x, y) = (position.x.raw(), position.y.raw());
+            rects
+                .iter()
+                .any(|&(x0, y0, x1, y1)| x >= x0 && x <= x1 && y >= y0 && y <= y1)
+        })
+        .count()
 }
 
 /// The base layer reaches every cell. Before this, `wholeTable` was parsed and
@@ -128,11 +163,11 @@ fn whole_table_shading_reaches_every_cell() {
                </w:tblStylePr>"#,
         ),
     );
-    let reds = shading_rects(&pages)
-        .into_iter()
-        .filter(|c| *c == (0xFF, 0x00, 0x00))
-        .count();
-    assert_eq!(reds, 4, "all four cells must carry the wholeTable shading");
+    assert_eq!(
+        cells_shaded(&pages, (0xFF, 0x00, 0x00)),
+        4,
+        "all four cells must carry the wholeTable shading"
+    );
 }
 
 /// …and a positional override still wins where it applies, leaving the base
@@ -150,14 +185,13 @@ fn first_row_overrides_the_base_layer_but_only_in_the_first_row() {
                </w:tblStylePr>"#,
         ),
     );
-    let rects = shading_rects(&pages);
     assert_eq!(
-        rects.iter().filter(|c| **c == (0x00, 0xFF, 0x00)).count(),
+        cells_shaded(&pages, (0x00, 0xFF, 0x00)),
         2,
         "first row takes the positional override"
     );
     assert_eq!(
-        rects.iter().filter(|c| **c == (0xFF, 0x00, 0x00)).count(),
+        cells_shaded(&pages, (0xFF, 0x00, 0x00)),
         2,
         "the second row still shows the base layer"
     );

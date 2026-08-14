@@ -712,6 +712,15 @@ pub fn layout_document(
         all_pages.push(LayoutedPage::new(PageConfig::default().page_size));
     }
 
+    // Last, over the finished page: fuse abutting same-colour fills so no
+    // rasterizer can leave a seam where two of them meet. Here rather than at
+    // any of the places that emit a rect, because the pairs come from several
+    // of them — table cell shading, paragraph shading, borders — and the rule
+    // is a property of the command stream, not of any one producer.
+    for page in &mut all_pages {
+        layout::draw_command::coalesce_abutting_rects(&mut page.commands);
+    }
+
     all_pages
 }
 

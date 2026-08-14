@@ -393,6 +393,105 @@ impl LayoutedPage {
     }
 }
 
+/// Fuse consecutive [`DrawCommand::Rect`]s that paint exactly the region a
+/// single rect would, so nothing downstream can leave a seam between them.
+///
+/// Two fills that share a full edge have the same *ideal* geometry as the one
+/// rect covering both, but not the same raster. A rasterizer that anti-aliases
+/// each fill independently gives the shared boundary pixel partial coverage from
+/// each side and composites the two in sequence, so it never reaches full
+/// coverage and a pale hairline is left along the join. CoreGraphics does this
+/// at every zoom for a boundary at a fractional device pixel — it is what macOS
+/// Preview, Quick Look and Safari show — while poppler composites the same pair
+/// cleanly. That asymmetry is why the defect is invisible to any pixel diff
+/// taken through `pdftoppm`, and why `tests/table_shading_seams.rs` audits the
+/// corpus for the *pairs* rather than for their pixels.
+///
+/// §17.4.33 cell shading is where they mostly come from — it is a cell property,
+/// so a run of same-coloured cells is N rects sharing N−1 edges — but paragraph
+/// shading (§17.3.1.31) and the border layer produce them too, which is why this
+/// runs over the finished page instead of at any one producer.
+///
+/// **Only consecutive commands are fused**, and that is what makes it sound:
+/// with nothing painted between them their union occupies the same place in the
+/// paint order as the pair did, so nothing can be uncovered or newly hidden.
+/// Fusing non-adjacent rects would move the later one earlier and is not safe in
+/// general — the border layer paints overlapping junction squares (see
+/// `tests/table_border_corners.rs`), and a reordering there would reopen exactly
+/// the class those guard.
+///
+/// The edge test is exact equality rather than a tolerance, and so is the audit
+/// that looks for what this missed: both ask whether two rects share an edge, and
+/// a pair that only nearly does would not have seamed cleanly anyway.
+pub fn coalesce_abutting_rects(commands: &mut Vec<DrawCommand>) {
+    /// Whether `a` and `b` share a full edge, and the one rect that covers both
+    /// if so.
+    ///
+    /// Both orders of both axes, because the producers do not emit in a
+    /// consistent direction: a border junction square is claimed *after* the run
+    /// it adjoins and can sit on either side of it (`table::borders::OpenBand`).
+    fn fuse(a: &PtRect, b: &PtRect) -> Option<PtRect> {
+        // Side by side: same top and height, adjoining in x.
+        if a.origin.y == b.origin.y && a.size.height == b.size.height {
+            let joined = |left: &PtRect| {
+                PtRect::from_xywh(
+                    left.origin.x,
+                    a.origin.y,
+                    a.size.width + b.size.width,
+                    a.size.height,
+                )
+            };
+            if a.origin.x + a.size.width == b.origin.x {
+                return Some(joined(a));
+            }
+            if b.origin.x + b.size.width == a.origin.x {
+                return Some(joined(b));
+            }
+        }
+        // Stacked: same left and width, adjoining in y.
+        if a.origin.x == b.origin.x && a.size.width == b.size.width {
+            let joined = |upper: &PtRect| {
+                PtRect::from_xywh(
+                    a.origin.x,
+                    upper.origin.y,
+                    a.size.width,
+                    a.size.height + b.size.height,
+                )
+            };
+            if a.origin.y + a.size.height == b.origin.y {
+                return Some(joined(a));
+            }
+            if b.origin.y + b.size.height == a.origin.y {
+                return Some(joined(b));
+            }
+        }
+        None
+    }
+
+    let mut out: Vec<DrawCommand> = Vec::with_capacity(commands.len());
+    for cmd in commands.drain(..) {
+        if let DrawCommand::Rect { rect, color } = &cmd {
+            if let Some(DrawCommand::Rect {
+                rect: prev,
+                color: prev_color,
+            }) = out.last_mut()
+            {
+                if *prev_color == *color {
+                    // A fused pair can fuse again with the next one, which is
+                    // what turns a row of N cells into one rect rather than
+                    // N/2.
+                    if let Some(merged) = fuse(prev, rect) {
+                        *prev = merged;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(cmd);
+    }
+    *commands = out;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -153,9 +153,21 @@ fn corpus(dir: &str) -> Vec<std::path::PathBuf> {
     let mut v: Vec<_> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "docx"))
+        .filter(|p| !is_word_owner_file(p))
         .collect();
     v.sort();
     v
+}
+
+/// Word writes a `~$`-prefixed owner file beside any document it has open, with
+/// the same `.docx` extension and no ZIP inside it. Anyone comparing a fixture
+/// against Word therefore drops one into the corpus directory, and a scan that
+/// picked it up would fail the audit with a parse error that has nothing to do
+/// with borders.
+fn is_word_owner_file(p: &std::path::Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("~$"))
 }
 
 /// Run the audit over a corpus and print one line per document, so a run with
