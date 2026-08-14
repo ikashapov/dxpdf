@@ -754,6 +754,45 @@ mod tests {
 
     /// LibreOffice's tdf#167843 regression fixture, verbatim: `val="04A0"`
     /// alongside a single `firstRow="0"`. 04A0 clears lastRow (0x040) and
+    /// §17.4.1 `w:bidiVisual` is a `CT_OnOff`, so all four of its states have to
+    /// be distinguishable at this seam — and the two that are *not* "on" are the
+    /// ones the render tests cannot see.
+    ///
+    /// A render test can only tell a mirrored table from an unmirrored one, so
+    /// it reads `Some(false)` and `None` alike as "did not mirror" and would
+    /// pass with either wired to the other. Only the parse layer can say that an
+    /// explicit `w:val="0"` is a *stated* off — which matters as soon as the
+    /// value has anywhere to inherit from, and is the difference `Dup` exists to
+    /// carry.
+    #[test]
+    fn tbl_pr_bidi_visual_is_a_toggle_with_four_states() {
+        let read = |xml: &str| parse_tbl_pr(xml).0.bidi_visual.cloned();
+
+        assert_eq!(read("<tblPr/>"), None, "absent states nothing");
+        assert_eq!(
+            read("<tblPr><bidiVisual/></tblPr>"),
+            Some(true),
+            "bare is on"
+        );
+        assert_eq!(
+            read(r#"<tblPr><bidiVisual val="0"/></tblPr>"#),
+            Some(false),
+            "an explicit off is stated, not absent"
+        );
+        // §17.7.2 last-wins, which is why the field is a `Vec` and not an
+        // `Option` — the same rule every other toggle in this file follows.
+        assert_eq!(
+            read(r#"<tblPr><bidiVisual/><bidiVisual val="0"/></tblPr>"#),
+            Some(false),
+            "the last occurrence wins"
+        );
+        assert_eq!(
+            read(r#"<tblPr><bidiVisual val="0"/><bidiVisual/></tblPr>"#),
+            Some(true),
+            "…in both directions"
+        );
+    }
+
     /// lastColumn (0x100) and clears noHBand (0x200) — none of which may
     /// reach the model, because note (c) says the whole bitmask is unread.
     #[test]

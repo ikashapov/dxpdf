@@ -367,6 +367,133 @@ fn a_cells_start_border_paints_on_its_visual_right() {
     );
 }
 
+/// §17.4.41 `w:tcMar` mirrors for the same reason its borders do: `w:left` is
+/// `w:start`, so a cell's leading inset is on its visual right.
+///
+/// Read as the content's offset inside its own cell rather than as a page x, so
+/// the claim is about the inset and not about where the cell ended up. The two
+/// margins are deliberately very different (0 and 40pt), because equal ones
+/// would make swapping them a no-op and the test vacuous.
+#[test]
+fn a_cells_margins_mirror_with_it() {
+    let row = format!(
+        "<w:tr>{}</w:tr>",
+        cell(
+            "FF0000",
+            r#"<w:tcMar>
+                 <w:left w:w="0" w:type="dxa"/><w:right w:w="800" w:type="dxa"/>
+                 <w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/>
+               </w:tcMar>"#
+        )
+    );
+
+    let inset = |bidi: bool| -> f32 {
+        let pages = layout(&table(bidi, "", &row), None);
+        let (cx, _, _, _) = boxes(&pages)[&RED];
+        pages
+            .iter()
+            .flat_map(|p| &p.commands)
+            .find_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if &**text == "x" => {
+                    Some(position.x.raw() - cx)
+                }
+                _ => None,
+            })
+            .expect("the cell's own text")
+    };
+
+    // 800 twips is 40pt, and the leading margin is the one the content sits
+    // behind: 0 on the left without the flag, 40 with it.
+    assert_eq!(inset(false), 0.0, "w:left = 0 leads without the flag");
+    assert_eq!(inset(true), 40.0, "w:right = 800 twips leads with it");
+}
+
+/// §17.4.38 the *table's* own `w:left`, as opposed to a cell's — a separate
+/// field on a separate struct (`TableBorderConfig`), reached by a separate
+/// branch of the mirror, and so not covered by the cell-border case above.
+#[test]
+fn a_table_level_start_border_paints_on_the_visual_right() {
+    let row = format!("<w:tr>{}</w:tr>", cell("FF0000", ""));
+    let borders = r#"<w:tblBorders>
+      <w:left w:val="single" w:sz="24" w:space="0" w:color="0000FF"/>
+      <w:top w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/>
+      <w:insideH w:val="nil"/><w:insideV w:val="nil"/>
+    </w:tblBorders>"#;
+
+    let side = |bidi: bool| -> (f32, f32) {
+        let rects = boxes(&layout(&table(bidi, borders, &row), None));
+        let (cx, _, cw, _) = rects[&RED];
+        let (bx, _, bw, _) = rects[&BLUE];
+        (bx - cx, (cx + cw) - (bx + bw))
+    };
+
+    let (before, after) = side(false);
+    assert_eq!(before, 0.0, "the table's start edge is on the left");
+    assert!(after > 0.0);
+    assert_eq!(
+        side(true),
+        (after, before),
+        "and on the right once the columns reverse"
+    );
+}
+
+/// §17.4.60 `w:tblPrEx/w:tblBorders` — a *row's* override of those same edges,
+/// which is a third struct on a third branch of the mirror.
+///
+/// The second row carries no override and is the control: it must not move,
+/// which is what distinguishes a mirrored override from a mirrored table.
+#[test]
+fn a_row_level_border_override_mirrors_too() {
+    let rows = format!(
+        "<w:tr><w:tblPrEx><w:tblBorders>\
+           <w:left w:val=\"single\" w:sz=\"24\" w:space=\"0\" w:color=\"0000FF\"/>\
+           <w:top w:val=\"nil\"/><w:bottom w:val=\"nil\"/><w:right w:val=\"nil\"/>\
+           <w:insideH w:val=\"nil\"/><w:insideV w:val=\"nil\"/>\
+         </w:tblBorders></w:tblPrEx>{}</w:tr><w:tr>{}</w:tr>",
+        cell("FF0000", ""),
+        cell("00FF00", ""),
+    );
+
+    let side = |bidi: bool| -> (f32, f32) {
+        let rects = boxes(&layout(&table(bidi, "", &rows), None));
+        let (cx, _, cw, _) = rects[&RED];
+        let (bx, _, bw, _) = rects[&BLUE];
+        assert!(
+            bx >= cx && bx + bw <= cx + cw,
+            "the override paints inside the row that declares it"
+        );
+        (bx - cx, (cx + cw) - (bx + bw))
+    };
+
+    let (before, after) = side(false);
+    assert_eq!(before, 0.0);
+    assert!(after > 0.0);
+    assert_eq!(side(true), (after, before));
+}
+
+/// A row addressing more grid columns than the table declares is malformed
+/// input, and must not panic here — the arithmetic that renumbers `gridBefore`
+/// subtracts two counts that a bad row can push past zero.
+///
+/// `seat_every_cell` repairs the grid ahead of this and `measure_table_rows`
+/// clamps behind it, so the assertion is only that the content survives: a
+/// document Word recovers from must not take the renderer down.
+#[test]
+fn a_row_that_overruns_its_grid_does_not_panic() {
+    let rows = format!(
+        "<w:tr><w:trPr><w:gridBefore w:val=\"9\"/></w:trPr>{}</w:tr>",
+        cell("FF0000", r#"<w:gridSpan w:val="4"/>"#)
+    );
+    let pages = layout(&table(true, "", &rows), None);
+    assert!(
+        pages
+            .iter()
+            .flat_map(|p| &p.commands)
+            .any(|c| matches!(c, DrawCommand::Text { text, .. } if &**text == "x")),
+        "the overrun row's content still reaches the page"
+    );
+}
+
 // ── §17.7.6 conditional formatting stays logical ────────────────────────────
 
 /// `firstColumn` keeps meaning the **logical** first column, which under the
@@ -409,5 +536,105 @@ fn the_first_column_region_stays_the_logical_first_column() {
         rtl[&GREEN].0 > l,
         "the shaded column must move right, from {l}..{r} to {:?}",
         rtl[&GREEN]
+    );
+}
+
+// ── the committed fixture, end to end ───────────────────────────────────────
+
+/// `test-files/bidi-visual-table.docx` renders as its own control.
+///
+/// Everything above builds its document in memory, which skips the package: the
+/// `.docx` is never opened, so a defect in ZIP handling, part discovery or the
+/// `w:tblPr` seam inside a real file would not show. This is the only case that
+/// runs the whole path, and it is also what makes the fixture worth committing
+/// — a document a Word render can be compared against later has to be the same
+/// document a test reads now.
+///
+/// The fixture holds the same table twice, differing **only** in
+/// `<w:bidiVisual/>`, with a distinct fill per cell. So each colour appears
+/// once per table, the upper box is the control and the lower is the mirror,
+/// and no coordinate has to be written down here at all.
+#[test]
+fn the_committed_fixture_mirrors_its_own_control() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-files/bidi-visual-table.docx"
+    );
+    let bytes = std::fs::read(path).expect("read the fixture");
+    let doc = dxpdf::docx::parse(&bytes).expect("parse the fixture");
+    let pages = dxpdf::render::resolve_and_layout(doc).1;
+
+    // Every fill in the fixture, paired: the control's box and the mirrored
+    // one. A `vMerge` continuation paints nothing, so a colour still appears
+    // exactly twice — once per table.
+    let mut by_colour: HashMap<(u8, u8, u8), Vec<Rect>> = HashMap::new();
+    for c in pages.iter().flat_map(|p| &p.commands) {
+        if let DrawCommand::Rect { rect, color } = c {
+            by_colour
+                .entry((color.r, color.g, color.b))
+                .or_default()
+                .push((
+                    rect.origin.x.raw(),
+                    rect.origin.y.raw(),
+                    rect.size.width.raw(),
+                    rect.size.height.raw(),
+                ));
+        }
+    }
+    // The eleven cell fills the generator writes, named rather than inferred:
+    // "every colour that happens to appear twice" would also sweep in the
+    // `C00000` start border, which pairs too and is asserted on its own above.
+    const FILLS: [(u8, u8, u8); 11] = [
+        (0xF8, 0xCB, 0xAD), // A
+        (0xC6, 0xE0, 0xB4), // B
+        (0xBD, 0xD7, 0xEE), // C
+        (0xFF, 0xE6, 0x99), // D, gridSpan
+        (0xD9, 0xD2, 0xE9), // E
+        (0xF4, 0xCC, 0xCC), // F, gridBefore
+        (0xD0, 0xE0, 0xE3), // G, vMerge restart
+        (0xEA, 0xD1, 0xDC), // H
+        (0xFF, 0xF2, 0xCC), // I
+        (0xD9, 0xEA, 0xD3), // J
+        (0xCF, 0xE2, 0xF3), // K
+    ];
+    let mut cells: Vec<((u8, u8, u8), Rect, Rect)> = Vec::new();
+    for colour in FILLS {
+        let mut rects = by_colour
+            .get(&colour)
+            .unwrap_or_else(|| panic!("fixture no longer paints {colour:?}"))
+            .clone();
+        // One box per table: a `vMerge` continuation paints nothing, so even
+        // the merged column contributes exactly two.
+        assert_eq!(rects.len(), 2, "{colour:?} must appear once per table");
+        rects.sort_by(|a, b| a.1.total_cmp(&b.1));
+        cells.push((colour, rects[0], rects[1]));
+    }
+    assert_eq!(cells.len(), 11);
+
+    // The tables share a left and right edge, taken from the cells themselves.
+    let left = cells.iter().map(|c| c.1 .0).fold(f32::INFINITY, f32::min);
+    let right = cells
+        .iter()
+        .map(|c| c.1 .0 + c.1 .2)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let mut moved = 0;
+    for (colour, ctrl, mirror) in &cells {
+        assert_eq!(mirror.2, ctrl.2, "{colour:?} keeps its width");
+        assert_eq!(
+            mirror.0,
+            left + right - (ctrl.0 + ctrl.2),
+            "{colour:?}: {ctrl:?} must reflect about {left}..{right}"
+        );
+        if mirror.0 != ctrl.0 {
+            moved += 1;
+        }
+    }
+    // Non-vacuity: a symmetric table reflects onto itself, so the fixture has
+    // to contain cells that actually change place.
+    assert!(
+        moved >= 8,
+        "only {moved} of {} cells moved — the fixture stopped discriminating",
+        cells.len()
     );
 }
