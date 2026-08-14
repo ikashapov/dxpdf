@@ -483,12 +483,13 @@ pub(super) fn build_table(
     // renders without it; reading it would render a third-party document
     // differently from the Word its author checked it against.
     //
-    // Four of those seven are modelled and read here — `tblW`, `tblLook`,
-    // `tblpPr`, `tblOverlap` — so each is taken from the `<w:tbl>` alone below.
-    // `tblLayout` has no read site at all. The remaining two need no code:
-    // `TableProperties` has no `bidiVisual` field, and `tblStyle` is already
-    // excluded from `merge_table_properties` for an independent reason (it
-    // would be a second inheritance edge competing with `basedOn`).
+    // Five of those seven are modelled and read here — `tblW`, `tblLook`,
+    // `tblpPr`, `tblOverlap`, `bidiVisual` — so each is taken from the
+    // `<w:tbl>` alone below, and `merge_table_properties` omits all five from
+    // its field list. `tblLayout` has no read site at all. The last needs no
+    // code: `tblStyle` is already excluded from `merge_table_properties` for an
+    // independent reason (it would be a second inheritance edge competing with
+    // `basedOn`).
     //
     // The five that do cascade — `jc`, `tblInd`, `tblBorders`, `tblCellMar`,
     // `tblCellSpacing` — appear on neither list. So do the two band sizes,
@@ -584,13 +585,15 @@ pub(super) fn build_table(
         .unwrap_or(1);
 
     // §17.4.63 `tblW`, §17.4.55 `tblLook`, §17.4.57 `tblpPr`, §17.4.56
-    // `tblOverlap`: the `<w:tbl>`'s own `<w:tblPr>` and nothing else, per
-    // §2.1.250(a)/§2.1.249(a). Written as plain reads rather than as a cascade
-    // with the style arm deleted, so no later edit can restore one by reflex.
+    // `tblOverlap`, §17.4.1 `bidiVisual`: the `<w:tbl>`'s own `<w:tblPr>` and
+    // nothing else, per §2.1.250(a)/§2.1.249(a). Written as plain reads rather
+    // than as a cascade with the style arm deleted, so no later edit can
+    // restore one by reflex.
     let width = t.properties.width.get();
     let tbl_look = t.properties.look.get();
     let positioning = t.properties.positioning.get();
     let overlap = t.properties.overlap.cloned();
+    let bidi_visual = t.properties.bidi_visual.get().copied().unwrap_or(false);
 
     // §17.4.63: resolve table width from tblW.
     let is_auto_width = matches!(
@@ -872,6 +875,15 @@ pub(super) fn build_table(
         );
     }
 
+    // §17.4.1 `bidiVisual`, for the same reason and at the same seam: once,
+    // over the finished rows. Everything downstream then sees an ordinary
+    // left-to-right table whose columns are already in visual order.
+    let mut col_widths = col_widths;
+    let mut border_config = border_config;
+    if bidi_visual {
+        mirror_columns(&mut rows, &mut col_widths, &mut border_config);
+    }
+
     // §17.4.57: floating table positioning.
     //
     // Horizontal positioning is partial: only `tblpXSpec` (`x_align`, below)
@@ -1039,6 +1051,99 @@ fn grid_span(cell: &TableCell) -> u32 {
 /// **spanning** cells, because a rule stated in grid columns cannot be tested
 /// by a fixture whose every cell is one column wide — which is why the leak
 /// survived a suite of span-1 fixtures.
+/// §17.4.1 `w:bidiVisual` — rewrite a table's layout input from logical order
+/// into **visual** order, so that nothing downstream has to know about it.
+///
+/// The element says the first cell of a row is the rightmost one. That could be
+/// done by flipping the geometry instead — computing `cell_x` from the right in
+/// `table::measure` — and it deliberately is not. Every table subsystem is keyed
+/// on the **grid column index**: border resolution walks it to find the cell
+/// facing each shared edge, `is_vmerge_continue` looks a merge up by it,
+/// conditional regions are decided from it, and the paginator carries it across
+/// slices. Flipping geometry underneath all of that would make each of them
+/// direction-aware, and the border layer is the one where a partial answer has
+/// already cost three separate reports of unpainted junction squares
+/// (`tests/table_border_corners.rs`). Reversing the input costs one function and
+/// leaves every one of those invariants untouched.
+///
+/// # What has to move
+///
+/// * the slot widths, since a mirrored table's columns keep their widths and
+///   swap places — with an unequal grid, reversing the cells alone is visibly
+///   wrong;
+/// * each row's cells;
+/// * §17.4.15 `gridBefore`, which counts skipped columns at the row's *logical*
+///   start. After the flip that gap is at the visual right, so the new leading
+///   count is the row's old trailing one — `num_cols − gridBefore − Σ spans`,
+///   the `gridAfter` that `TableRowInput` documents as derivable rather than
+///   carried;
+/// * `left`/`right` on cell margins, cell borders, the row's `tblPrEx`
+///   override and the table's own border config.
+///
+/// `gridSpan` and `vMerge` need nothing: a span is a contiguous run of columns
+/// and stays one under reversal, and a merge is looked up by grid column, which
+/// this renumbers consistently for every row at once.
+///
+/// # Why `left` and `right` swap
+///
+/// Because they are the *logical* edges. The Transitional `w:left`/`w:right`
+/// this parser reads are Strict's `w:start`/`w:end` — which is why
+/// `docx::parse::properties::schema::border` and `::insets` already declare each
+/// pair as serde aliases of one another, and why `w:ind` has been logical in
+/// this engine since it was written (`paragraph::line_emit::physical_left_inset`).
+/// A cell's `w:left` border therefore belongs at its logical start, which under
+/// `bidiVisual` is on the right.
+///
+/// # What is deliberately not mirrored
+///
+/// §17.4.50 `tblInd` and §17.4.28 `jc` place the *table*, not its columns, and
+/// stay as declared: whether an RTL table indents from the right margin is a
+/// separate question from which order its cells run in, and no corpus document
+/// pairs them. §17.4.60 `tblPrEx` may also carry `bidiVisual` to flip a single
+/// row, which is not read — a row mirrored against its own table would break the
+/// one-grid-order-per-table assumption every subsystem above relies on, so it
+/// needs its own design rather than a flag here.
+///
+/// # Ordering
+///
+/// This must run **after** §17.7.6 conditional formatting has been resolved
+/// (`resolve_cell_conditional`, in the row loop above), which reads logical grid
+/// columns. `firstColumn` means the logical first column — the rightmost one
+/// once mirrored, as Word renders it. Moving this call earlier would silently
+/// shade the wrong column, and `tests/table_bidi_visual.rs` pins exactly that.
+fn mirror_columns(
+    rows: &mut [TableRowInput],
+    col_widths: &mut [Pt],
+    border_config: &mut Option<crate::render::layout::table::TableBorderConfig>,
+) {
+    let num_cols = col_widths.len();
+    col_widths.reverse();
+
+    for row in rows.iter_mut() {
+        let spanned: usize = row.cells.iter().map(|c| c.grid_span.max(1) as usize).sum();
+        // Saturating because a malformed row can overrun its grid — the same
+        // case `seat_every_cell` repairs and `measure_table_rows` clamps for.
+        // A row that does not fit keeps its cells and loses only the gap.
+        row.grid_before = num_cols
+            .saturating_sub(row.grid_before as usize)
+            .saturating_sub(spanned) as u32;
+        row.cells.reverse();
+        for cell in row.cells.iter_mut() {
+            std::mem::swap(&mut cell.margins.left, &mut cell.margins.right);
+            if let Some(b) = cell.cell_borders.as_mut() {
+                std::mem::swap(&mut b.left, &mut b.right);
+            }
+        }
+        if let Some(b) = row.border_overrides.as_mut() {
+            std::mem::swap(&mut b.left, &mut b.right);
+        }
+    }
+
+    if let Some(b) = border_config.as_mut() {
+        std::mem::swap(&mut b.left, &mut b.right);
+    }
+}
+
 fn promote_orphan_vmerge_continues(rows: &mut [TableRowInput]) -> usize {
     use crate::render::layout::table::VerticalMergeState;
 

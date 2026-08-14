@@ -411,7 +411,7 @@ Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 1
 | Line breaking | ✅ UAX #14 via ICU4X, per paragraph rather than per run, so a token split across `<w:r>` boundaries still breaks where the algorithm says. The four scripts UAX #14 hands to "complex context analysis" (Thai, Lao, Khmer, Burmese) get LSTM word boundaries; a token no rule may break is cut at the container edge rather than overflowing it |
 | Bidirectional text (`w:bidi`, `w:rtl`) | ✅ §17.3.1.6 / §17.3.2.30 UAX #9 levels resolved per paragraph, reordered per line, with rule L4 mirroring; `w:jc` and `w:ind` resolve against the base direction |
 | Bidirectional tab stops and numbering labels | ❌ §17.3.1.37 stop positions are not mirrored under `w:bidi`, so a line reorders within each tab-delimited segment and a label before its suffix tab stays at the left |
-| `w:bidiVisual` (mirrored table columns) | ❌ not parsed |
+| `w:bidiVisual` (mirrored table columns) | ✅ §17.4.1 columns run right to left — the layout input is rewritten into visual order once, so `w:gridSpan`, `w:gridBefore` and `w:vMerge` mirror with them, and `w:left`/`w:right` on cell margins and borders swap as the logical `start`/`end` edges they are. Read from the `<w:tbl>` alone per [MS-OI29500] §2.1.250(a); `w:tblPrEx/w:bidiVisual`, `w:tblInd` and `w:jc` are not mirrored |
 | Automatic hyphenation | ❌ |
 
 </details>

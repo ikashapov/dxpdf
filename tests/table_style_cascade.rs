@@ -663,6 +663,55 @@ fn a_table_style_cannot_forbid_float_overlap() {
     );
 }
 
+/// §17.4.1 `bidiVisual` — the last of the six, and the one with the widest
+/// blast radius if it were read from a style: reversing the column order of
+/// every table that names the style would invert the meaning of each of their
+/// rows.
+///
+/// The fixture discriminates because mirroring swaps the two cells' contents
+/// across the page, so `A` and `B` change places — a two-column grid is enough
+/// for that even though its columns are equal, since the *text* moves with them.
+///
+/// There are **two independent barriers** and this test only guards one of them,
+/// which is worth knowing before trusting it alone. `merge_table_properties`
+/// omits the field from its cascade, and `build::table` reads it from the
+/// `<w:tbl>` alone; either would hold the line by itself, so restoring the
+/// cascade leaves this test passing. `table_properties_merge_covers_every_field`
+/// in `render::resolve::properties` is what fails then. This one fails when the
+/// *read site* grows a style fallback.
+#[test]
+fn a_table_style_cannot_reverse_the_column_order() {
+    assert_style_does_not_reach_the_table(r#"<w:bidiVisual/>"#, "", "bidiVisual");
+
+    // …and the direct level really does mirror, so the parity above is between
+    // a working feature and its absence rather than between two no-ops. Keyed
+    // on the cell's own label rather than on an index into the command stream,
+    // which the mirror also reorders.
+    let x_of = |pages: &[LayoutedPage], label: &str| -> f32 {
+        pages
+            .iter()
+            .flat_map(|p| &p.commands)
+            .find_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if &**text == label => {
+                    Some(position.x.raw())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no cell {label:?} on the page"))
+    };
+    let direct = layout(
+        &table_document(r#"<w:bidiVisual/>"#),
+        &styles_with("<w:tblPr/>"),
+    );
+    let control = layout(&table_document(""), &styles_with("<w:tblPr/>"));
+    assert_eq!(
+        x_of(&direct, "A"),
+        x_of(&control, "B"),
+        "cell A takes cell B's column once the columns reverse"
+    );
+    assert_eq!(x_of(&direct, "B"), x_of(&control, "A"), "…and B takes A's");
+}
+
 // ── §17.7.4.3: `basedOn` inheritance of the style's own `<w:tblPr>` ─────────
 
 /// A `<w:tblPr>` carrying one of every table property that reaches layout

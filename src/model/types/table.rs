@@ -39,6 +39,14 @@ pub struct TableProperties {
     pub positioning: Dup<TablePositioning>,
     /// §17.4.56: whether this floating table can overlap other floating tables.
     pub overlap: Dup<TableOverlap>,
+    /// §17.4.1 `w:bidiVisual`: the table's columns run right to left, so the
+    /// first cell of a row is the rightmost one.
+    ///
+    /// Read from the `<w:tbl>`'s own `tblPr` alone and never from a table
+    /// style — [MS-OI29500] §2.1.250(a) lists it among the elements Word does
+    /// not accept there. `render::layout::build::table` states the whole rule
+    /// and holds the six-element split it belongs to.
+    pub bidi_visual: Dup<bool>,
 }
 
 /// §17.4.57: floating table positioning.

@@ -64,6 +64,11 @@ pub(crate) struct TblPrXml {
     tblp_pr: Vec<TblpPrXml>,
     #[serde(rename = "tblOverlap", default)]
     tbl_overlap: Vec<ValAttr<StTblOverlap>>,
+    /// §17.4.1 `<w:bidiVisual/>` — the table's columns run right to left, so
+    /// the first cell of a row is the rightmost one. `CT_OnOff`, and
+    /// `Vec<OnOff>` for the same last-wins reason as every other toggle here.
+    #[serde(rename = "bidiVisual", default)]
+    bidi_visual: Vec<OnOff>,
     /// Children this schema does not name — recorded so an unimplemented
     /// table property is visible under `RUST_LOG=warn` instead of vanishing.
     /// See [`UnknownChildren`].
@@ -249,6 +254,7 @@ impl TblPrXml {
             positioning: Dup::from(self.tblp_pr).map(Into::into),
             overlap: Dup::from(self.tbl_overlap)
                 .map(|v| crate::docx::model::TableOverlap::from(v.val)),
+            bidi_visual: Dup::from(self.bidi_visual).map(|OnOff(on)| on),
         };
         (props, style_id)
     }
@@ -1092,10 +1098,15 @@ mod tests {
 
     #[test]
     fn tbl_pr_records_an_unmodelled_child() {
-        let x: TblPrXml =
-            quick_xml::de::from_str(r#"<tblPr><tblStyle val="Grid"/><bidiVisual/></tblPr>"#)
-                .unwrap();
-        assert_eq!(x.unknown.names(), ["bidiVisual"]);
+        // `w:tblCaption` (§17.4.60) stands in for `w:bidiVisual`, which used to
+        // be the example here and is now modelled — the pairing this pins is
+        // "unnamed is captured, named is not", so it needs a child the schema
+        // still does not name.
+        let x: TblPrXml = quick_xml::de::from_str(
+            r#"<tblPr><tblStyle val="Grid"/><tblCaption val="c"/></tblPr>"#,
+        )
+        .unwrap();
+        assert_eq!(x.unknown.names(), ["tblCaption"]);
         // The modelled sibling is unaffected by the catch-all.
         assert_eq!(
             x.split().1.map(|s| s.as_str().to_string()),
