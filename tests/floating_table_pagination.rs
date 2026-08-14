@@ -1,4 +1,4 @@
-//! §17.4.39 / §17.4.59 — a floating table (`<w:tblpPr>`) that is taller
+//! §17.4.57 / §17.4.56 — a floating table (`<w:tblpPr>`) that is taller
 //! than the page body must paginate, not loop.
 //!
 //! The combination that used to hang the layout pass is narrow: a

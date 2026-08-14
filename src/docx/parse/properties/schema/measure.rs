@@ -3,12 +3,12 @@
 //!
 //! `@type` picks the interpretation of `@w`:
 //! - `dxa` → twips
-//! - `pct` → percentage (stored as thousandths-of-percent)
+//! - `pct` → percentage (§17.18.90, stored in fiftieths of a percent: 5000 = 100%)
 //! - `auto` / `nil` → no explicit value
 
 use serde::Deserialize;
 
-use crate::docx::model::dimension::{Dimension, ThousandthPercent};
+use crate::docx::model::dimension::{Dimension, FiftiethPercent};
 use crate::docx::model::TableMeasure;
 use crate::docx::parse::primitives::integer_measure::IntegerMeasure;
 
@@ -40,7 +40,7 @@ impl From<TableMeasureXml> for TableMeasure {
             StTblWidthType::Auto => Self::Auto,
             StTblWidthType::Nil => Self::Nil,
             StTblWidthType::Dxa => Self::Twips(Dimension::new(value)),
-            StTblWidthType::Pct => Self::Pct(Dimension::<ThousandthPercent>::new(value)),
+            StTblWidthType::Pct => Self::Pct(Dimension::<FiftiethPercent>::new(value)),
         }
     }
 }
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn pct_thousandth_percent() {
+    fn pct_fiftieth_percent() {
         match parse(r#"<tblW w="2500" type="pct"/>"#) {
             TableMeasure::Pct(d) => assert_eq!(d.raw(), 2500),
             other => panic!("expected Pct, got {other:?}"),

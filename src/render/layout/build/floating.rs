@@ -1340,6 +1340,7 @@ pub(super) fn build_shape_text_commands(
         // preferred over making `state` mutable through ten signatures.
         warned_border_styles: std::collections::HashSet::new(),
         warned_row_cell_spacing: false,
+        warned_orphan_vmerge: false,
     };
 
     let hf = super::build_header_footer_content(&wsp.txbx_content, ctx, &mut sub_state);
@@ -1682,6 +1683,7 @@ mod tests {
             field_ctx: Default::default(),
             warned_border_styles: Default::default(),
             warned_row_cell_spacing: false,
+            warned_orphan_vmerge: false,
             shape_default_text_color: None,
             shape_default_font_family: None,
         }
@@ -1990,6 +1992,7 @@ mod tests {
             doc_defaults_paragraph: ParagraphProperties::default(),
             doc_defaults_run: RunProperties::default(),
             default_paragraph_style_id: None,
+            default_table_style_id: None,
             footnotes: HashMap::new(),
             endnotes: HashMap::new(),
             even_and_odd_headers: false,

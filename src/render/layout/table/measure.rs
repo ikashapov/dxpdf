@@ -1,19 +1,23 @@
-//! Table measurement phase — cell layout and border resolution.
+//! Table measurement phase — cell layout, row heights, cell geometry.
+//!
+//! Border *resolution* is not here. `borders.rs` answers what each cell's four
+//! edges are (§17.4.66, including who owns each shared edge); this phase asks
+//! for that answer once, then spends its length on the question it is named
+//! for: how tall each row is and where each cell sits.
 
 use crate::render::dimension::Pt;
 
 use crate::render::layout::cell::{layout_cell, CellLayout};
 
-use super::borders::{
-    border_width, resolve_border_conflict, resolve_cell_effective_borders, CellBorders, CellEdge,
-};
-use super::grid::{cell_index_at_grid_col, expand_rows_for_vmerge, is_vmerge_continue};
+use super::borders::{border_width, resolve_table_cell_borders};
+use super::grid::{expand_rows_for_vmerge, is_vmerge_continue};
 use super::types::{
     CellLayoutEntry, MeasuredRow, MeasuredTable, RowHeightRule, TableBorderConfig, TableRowInput,
     VerticalMergeState,
 };
 
-/// Measure all table rows: resolve borders, lay out cell content, compute heights.
+/// Measure all table rows: lay out cell content, compute row heights and cell
+/// positions, carrying each cell's resolved borders (from `borders.rs`) along.
 /// This is the shared measurement phase used by both `layout_table` (monolithic)
 /// and `layout_table_paginated` (page-splitting).
 ///
@@ -24,7 +28,7 @@ use super::types::{
 pub(super) fn measure_table_rows(
     rows: &[TableRowInput],
     col_widths: &[Pt],
-    // §17.4.44 `tblCellSpacing`, already resolved to points. Zero for every
+    // §17.4.45 `tblCellSpacing`, already resolved to points. Zero for every
     // table that does not set it, which is the overwhelming majority.
     cell_spacing: Pt,
     default_line_height: Pt,
@@ -32,11 +36,11 @@ pub(super) fn measure_table_rows(
     measure_text: crate::render::layout::paragraph::MeasureTextFn<'_>,
     suppress_first_row_top: bool,
 ) -> MeasuredTable {
-    // §17.4.44: the slots were shrunk by one `cell_spacing` before they got
+    // §17.4.45: the slots were shrunk by one `cell_spacing` before they got
     // here, so adding it back recovers the table's own outer width — the
     // spacing is carved out of the table, not added to it.
     //
-    // §17.4.44 says the spacing sits "between adjacent cells and the edges of
+    // §17.4.45 says the spacing sits "between adjacent cells and the edges of
     // the table" without saying whether an edge gets the same amount as the gap
     // between two cells. **Settled** (issue #165) by a Word render of
     // `test-files/issue-165-cellspacing.docx`: the two are equal — one full
@@ -58,200 +62,16 @@ pub(super) fn measure_table_rows(
     let num_rows = rows.len();
     let mut row_heights = Vec::with_capacity(num_rows);
 
-    // Pass 2a: resolve borders for every cell.
-    let mut resolved_borders: Vec<Vec<CellBorders>> = Vec::new();
-    {
-        let mut grid_indices: Vec<Vec<usize>> = Vec::new();
-        for (row_idx, row) in rows.iter().enumerate() {
-            let mut row_borders = Vec::new();
-            let mut row_grid = Vec::new();
-            // §17.4.17: gridBefore — the row's first cell starts at grid_col
-            // `grid_before`, leaving the leftmost columns empty.
-            let mut grid_idx = row.grid_before as usize;
-            // §17.4.61: a row may carry per-row border overrides
-            // (`<w:tblPrEx><w:tblBorders/></w:tblPrEx>`). When set,
-            // it's the *fully merged* effective table borders for this
-            // row — the build layer already overlaid the override on
-            // the table's own borders so the model-layer
-            // "explicitly none" vs "not specified" distinction is
-            // preserved during conversion. Use it verbatim; otherwise
-            // fall back to the table-wide config.
-            let row_table_borders = row.border_overrides.as_ref().or(borders);
-            for cell_input in row.cells.iter() {
-                let span = cell_input.grid_span.max(1) as usize;
-                let (mut b_top, mut b_bottom, b_left, b_right) = resolve_cell_effective_borders(
-                    cell_input,
-                    row_table_borders,
-                    row_idx,
-                    grid_idx,
-                    span,
-                    num_rows,
-                    col_widths.len(),
-                    cell_spacing > Pt::ZERO,
-                );
-                if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
-                    b_top = CellEdge::Absent;
-                }
-                if row_idx + 1 < num_rows && is_vmerge_continue(&rows[row_idx + 1], grid_idx) {
-                    b_bottom = CellEdge::Absent;
-                }
-                row_borders.push(CellBorders {
-                    top: b_top,
-                    bottom: b_bottom,
-                    left: b_left,
-                    right: b_right,
-                });
-                row_grid.push(grid_idx);
-                grid_idx += cell_input.grid_span.max(1) as usize;
-            }
-            resolved_borders.push(row_borders);
-            grid_indices.push(row_grid);
-        }
-
-        // [MS-OI29500] §17.4.66: *"If the cell spacing is nonzero ... then all
-        // cell borders and outer table borders display."* With a gap between
-        // them, adjacent cells share no edge, so there is no conflict to
-        // resolve and every cell keeps its own four borders. Collapsing them
-        // here would delete borders that must be drawn, and drawing both sides
-        // of a collapsed edge would double every line.
-        let collapse_borders = cell_spacing <= Pt::ZERO;
-
-        // §17.4.66: conflict resolution at vertical shared edges (a cell's
-        // right vs. its right neighbour's left). Drawn once on the left cell.
-        for row_idx in 0..if collapse_borders { num_rows } else { 0 } {
-            let num_cells = rows[row_idx].cells.len();
-            for cell_ci in 0..num_cells.saturating_sub(1) {
-                let right = resolved_borders[row_idx][cell_ci].right;
-                let left = resolved_borders[row_idx][cell_ci + 1].left;
-                let winner = resolve_border_conflict(right, left);
-                resolved_borders[row_idx][cell_ci].right = winner;
-                resolved_borders[row_idx][cell_ci + 1].left = CellEdge::Absent;
-            }
-        }
-
-        // [MS-OI29500] §17.4.66: conflict resolution at horizontal shared edges (row R's
-        // bottom vs. row R+1's top). Resolved *per grid column* because a
-        // `gridSpan` cell in one row can face several cells in the other:
-        //   • wide upper cell over several lower cells — resolving only the
-        //     first lower cell (and nulling the rest) drops their borders;
-        //   • wide lower cell under several upper cells — a nil spacer among
-        //     them must not punch a gap through the lower cell's border.
-        //
-        // The whole edge is then drawn from *one* side (all upper bottoms, or
-        // all lower tops). This matters visually: an upper-row bottom sits in
-        // the inter-row gap while a lower-row top sits just below it, so
-        // splitting a single line between the two sides would offset segments
-        // by the border width. A cell paints one border across its width, so
-        // a side can own the edge only if each of its cells spans a run of
-        // columns whose resolved border is uniform; upper is preferred (it
-        // keeps the aligned-grid path and page-split top restoration valid).
-        let ncols = col_widths.len();
-        for upper in 0..if collapse_borders {
-            num_rows.saturating_sub(1)
-        } else {
-            0
-        } {
-            let lower = upper + 1;
-
-            // Per-column resolved border for this inter-row edge.
-            let resolved: Vec<CellEdge> = (0..ncols)
-                .map(|gc| {
-                    let edge = |row: usize, pick: fn(&CellBorders) -> CellEdge| {
-                        cell_index_at_grid_col(&rows[row], gc)
-                            .map(|ci| pick(&resolved_borders[row][ci]))
-                            .unwrap_or(CellEdge::Absent)
-                    };
-                    resolve_border_conflict(edge(upper, |b| b.bottom), edge(lower, |b| b.top))
-                })
-                .collect();
-
-            // A row can paint the whole edge iff (a) it has a cell over every
-            // column that carries a border — a row whose `gridSpan` leaves a
-            // bordered column uncovered (its gridAfter gap) can't draw that
-            // column, so the other row must — and (b) each of its cells spans
-            // a uniform run of resolved columns (a cell paints one border
-            // across its width). Without (a), a partly-covered cell would draw
-            // its own top *and* the covering row its bottom → a doubled line.
-            let can_own = |row_idx: usize| -> bool {
-                let covers_bordered_cols = (0..ncols).all(|gc| {
-                    resolved[gc].line().is_none()
-                        || cell_index_at_grid_col(&rows[row_idx], gc).is_some()
-                });
-                covers_bordered_cols
-                    && grid_indices[row_idx]
-                        .iter()
-                        .enumerate()
-                        .all(|(ci, &start)| {
-                            let span = rows[row_idx].cells[ci].grid_span.max(1) as usize;
-                            let end = (start + span).min(ncols);
-                            start >= end
-                                || (start..end).all(|gc| resolved[gc].paints_same(resolved[start]))
-                        })
-            };
-
-            if !can_own(upper) && can_own(lower) {
-                // Wide upper cell can't paint the mixed edge; draw it entirely
-                // from the finer lower row so the line stays at one y (e.g. a
-                // label cell right of a nil spacer under a gridSpan header).
-                for (ci, &start) in grid_indices[lower].iter().enumerate() {
-                    let span = rows[lower].cells[ci].grid_span.max(1) as usize;
-                    let end = (start + span).min(ncols);
-                    if start < end {
-                        resolved_borders[lower][ci].top = resolved[start];
-                    }
-                }
-                for b in resolved_borders[upper].iter_mut() {
-                    b.bottom = CellEdge::Absent;
-                }
-            } else {
-                // Upper row owns the edge: each upper cell paints its uniform
-                // run (a nil spacer above a gridSpan cell resolves to that
-                // cell's inherited border, so no gap), and lower tops it
-                // covers are cleared. Columns an upper cell can't paint
-                // uniformly (only reachable in the both-non-uniform fallback)
-                // fall through to the lower cell.
-                let mut covered = vec![false; ncols];
-                for (ci, &start) in grid_indices[upper].iter().enumerate() {
-                    let span = rows[upper].cells[ci].grid_span.max(1) as usize;
-                    let end = (start + span).min(ncols);
-                    if start >= end {
-                        continue;
-                    }
-                    if (start..end).all(|gc| resolved[gc].paints_same(resolved[start])) {
-                        resolved_borders[upper][ci].bottom = resolved[start];
-                        for c in covered.iter_mut().take(end).skip(start) {
-                            *c = true;
-                        }
-                    } else {
-                        resolved_borders[upper][ci].bottom = CellEdge::Absent;
-                    }
-                }
-                for (ci, &start) in grid_indices[lower].iter().enumerate() {
-                    let span = rows[lower].cells[ci].grid_span.max(1) as usize;
-                    let end = (start + span).min(ncols);
-                    if start >= end {
-                        continue;
-                    }
-                    if (start..end).any(|gc| covered[gc]) {
-                        // Any column already painted from above → defer the
-                        // whole cell so a partly-covered span can't double up.
-                        resolved_borders[lower][ci].top = CellEdge::Absent;
-                    } else if (start..end).all(|gc| resolved[gc].paints_same(resolved[start])) {
-                        resolved_borders[lower][ci].top = resolved[start];
-                    } else {
-                        resolved_borders[lower][ci].top = CellEdge::Absent;
-                    }
-                }
-            }
-        }
-
-        // §17.4.38: suppress first-row top borders for adjacent table collapse.
-        if suppress_first_row_top && !resolved_borders.is_empty() {
-            for b in &mut resolved_borders[0] {
-                b.top = CellEdge::Absent;
-            }
-        }
-    }
+    // Pass 2a: §17.4.66 border resolution — what each cell declares, then who
+    // owns each shared edge. Both live in `borders.rs`; this phase only needs
+    // the answer.
+    let resolved_borders = resolve_table_cell_borders(
+        rows,
+        col_widths.len(),
+        borders,
+        cell_spacing,
+        suppress_first_row_top,
+    );
 
     // Pass 2b: lay out each cell.
     let mut row_cell_layouts: Vec<Vec<CellLayoutEntry>> = Vec::new();
@@ -259,8 +79,15 @@ pub(super) fn measure_table_rows(
     for (row_idx, row) in rows.iter().enumerate() {
         let mut entries = Vec::new();
         let mut max_height = Pt::ZERO;
-        // §17.4.17: gridBefore — first cell offset.
+        // §17.4.15: gridBefore — first cell offset.
         let mut grid_idx = row.grid_before as usize;
+        // §17.4.38: whether the strip below this row will be reserved for its
+        // bottom borders. The condition is repeated verbatim at
+        // `border_gap_below` below, and it decides which side of the cell box
+        // the bottom border is drawn on: in the strip when there is one, inset
+        // into the box's foot when there is not (`emit_cell_borders`). Only the
+        // second case takes room from the content.
+        let reserves_band_below = row_idx + 1 < num_rows && cell_spacing <= Pt::ZERO;
 
         for (cell_ci, cell) in row.cells.iter().enumerate() {
             let span = cell.grid_span.max(1) as usize;
@@ -271,7 +98,7 @@ pub(super) fn measure_table_rows(
             // would. Mirrors the same clamp in `build/table.rs`.
             let grid_start = grid_idx.min(col_widths.len());
             let grid_end = (grid_start + span).min(col_widths.len());
-            // §17.4.44: the grid slots were already shrunk so they sum to
+            // §17.4.45: the grid slots were already shrunk so they sum to
             // `table_width - cell_spacing`; offsetting every cell by one
             // spacing and taking one off its width then leaves exactly
             // `cell_spacing` between adjacent cells *and* at both table edges,
@@ -282,9 +109,24 @@ pub(super) fn measure_table_rows(
             let cell_w: Pt = (slots - cell_spacing).max(Pt::ZERO);
             let cell_x: Pt = col_widths[..grid_start].iter().copied().sum::<Pt>() + cell_spacing;
 
+            // §17.4.39/§17.4.66 against §17.4.41/§17.4.42: a border is drawn
+            // *inside* the cell box, so the content box starts at
+            // `max(border, margin)` from each edge — the margin part is applied
+            // by `layout_cell`, and this is the rest. All four sides obey the
+            // same rule, and all four must be charged here, because `emit`
+            // charges all four when it places the content. Charging only the
+            // horizontal pair is what let a row whose top border was thicker
+            // than its top cell margin overflow its own box by the difference,
+            // straight into the strip where the bottom border paints.
             let b = &resolved_borders[row_idx][cell_ci];
             let extra_left = (border_width(b.left) - cell.margins.left).max(Pt::ZERO);
             let extra_right = (border_width(b.right) - cell.margins.right).max(Pt::ZERO);
+            let extra_top = (border_width(b.top) - cell.margins.top).max(Pt::ZERO);
+            let extra_bottom = if reserves_band_below {
+                Pt::ZERO
+            } else {
+                (border_width(b.bottom) - cell.margins.bottom).max(Pt::ZERO)
+            };
             let layout_w = (cell_w - extra_left - extra_right).max(Pt::ZERO);
 
             let is_continue = cell.vertical_merge == Some(VerticalMergeState::Continue);
@@ -304,7 +146,7 @@ pub(super) fn measure_table_rows(
                 )
             };
 
-            // §17.4.85: a merged cell's height is normally decided by
+            // §17.4.84: a merged cell's height is normally decided by
             // `expand_rows_for_vmerge` over the whole span, not here — folding a
             // `Restart` cell's full content into its *first* row would double-count
             // it against the rows below.
@@ -321,7 +163,9 @@ pub(super) fn measure_table_rows(
             let is_lone_restart =
                 cell.vertical_merge == Some(VerticalMergeState::Restart) && !continues_below;
             if cell.vertical_merge.is_none() || is_lone_restart {
-                max_height = max_height.max(layout.content_height + cell.margins.vertical());
+                max_height = max_height.max(
+                    layout.content_height + cell.margins.vertical() + extra_top + extra_bottom,
+                );
             }
 
             entries.push(CellLayoutEntry {
@@ -339,7 +183,7 @@ pub(super) fn measure_table_rows(
             None => {}
         }
 
-        // §17.4.44: the row's box reserves its own leading gap, mirroring the
+        // §17.4.45: the row's box reserves its own leading gap, mirroring the
         // horizontal inset above — `emit_one_row` places content one spacing
         // below the cursor, so consecutive rows end up exactly `cell_spacing`
         // apart. `RowHeightRule` is applied to the *content* height first, so a
@@ -349,7 +193,7 @@ pub(super) fn measure_table_rows(
         row_cell_layouts.push(entries);
     }
 
-    // §17.4.85: distribute vMerge overflow.
+    // §17.4.84: distribute vMerge overflow.
     expand_rows_for_vmerge(rows, &row_cell_layouts, &mut row_heights);
 
     // Compute border gaps and assemble measured rows.
@@ -390,8 +234,8 @@ pub(super) fn measure_table_rows(
 mod tests {
     use super::super::borders::CellEdge;
     use super::super::types::{
-        CellBorderConfig, CellBorderOverride, CellVAlign, TableBorderConfig, TableBorderLine,
-        TableBorderStyle, TableCellInput, TableRowInput,
+        CellBorderConfig, CellBorderOverride, CellVAlign, RowHeightRule, TableBorderConfig,
+        TableBorderLine, TableBorderStyle, TableCellInput, TableRowInput, VerticalMergeState,
     };
     use super::measure_table_rows;
     use crate::render::dimension::Pt;
@@ -448,6 +292,87 @@ mod tests {
             cant_split: None,
             grid_before: 0,
             border_overrides: None,
+        }
+    }
+
+    /// §17.4.80: `row`, plus a `trHeight` constraint.
+    fn row_sized(cells: Vec<TableCellInput>, rule: RowHeightRule) -> TableRowInput {
+        TableRowInput {
+            height_rule: Some(rule),
+            ..row(cells)
+        }
+    }
+
+    /// §17.4.15: `row`, starting `grid_before` grid columns in.
+    fn row_at(cells: Vec<TableCellInput>, grid_before: u32) -> TableRowInput {
+        TableRowInput {
+            grid_before,
+            ..row(cells)
+        }
+    }
+
+    /// One 14 pt line per `words` entry that does not fit beside its
+    /// predecessor. `default_line_height` is 10 pt everywhere below, but the
+    /// fragment's own 10 pt ascent + 4 pt descent wins, so each emitted line is
+    /// exactly 14 pt tall.
+    fn text_block(words: &[(&str, f32)]) -> crate::render::layout::section::LayoutBlock {
+        use crate::render::fonts::Toggle;
+        use crate::render::layout::fragment::{FontProps, Fragment, TextMetrics};
+        use std::rc::Rc;
+
+        let font = Rc::new(FontProps {
+            rtl: Toggle::Absent,
+            family: Rc::from("Test"),
+            size: Pt::new(12.0),
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
+            underline: false,
+            char_spacing: Pt::ZERO,
+            text_scale: 1.0,
+            underline_position: Pt::ZERO,
+            underline_thickness: Pt::ZERO,
+        });
+        crate::render::layout::section::LayoutBlock::Paragraph {
+            fragments: words
+                .iter()
+                .map(|&(text, width)| Fragment::Text {
+                    shaped: None,
+                    level: crate::i18n::bidi::BidiLevel::LTR,
+                    text: text.into(),
+                    break_after: crate::render::layout::fragment::fixture_break_after(text),
+                    font: font.clone(),
+                    color: RgbColor::BLACK,
+                    width: Pt::new(width),
+                    trimmed_width: Pt::new(width),
+                    metrics: TextMetrics {
+                        ascent: Pt::new(10.0),
+                        descent: Pt::new(4.0),
+                        leading: Pt::ZERO,
+                    },
+                    hyperlink_url: None,
+                    shading: None,
+                    border: None,
+                    baseline_offset: Pt::ZERO,
+                    text_offset: Pt::ZERO,
+                    is_footnote_ref: false,
+                })
+                .collect(),
+            style: crate::render::layout::paragraph::ParagraphStyle::default(),
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        }
+    }
+
+    /// A one-column cell holding `lines` lines of text — each word is 30 pt
+    /// wide and breakable, so a 30 pt content width puts one per line.
+    fn cell_of(lines: usize) -> TableCellInput {
+        TableCellInput {
+            blocks: vec![text_block(
+                &(0..lines).map(|_| ("aa ", 30.0)).collect::<Vec<_>>(),
+            )],
+            ..cell(1, None)
         }
     }
 
@@ -750,7 +675,7 @@ mod tests {
         }
     }
 
-    /// §17.4.44 geometry. The invariant that matters is a *uniform* gap: exactly
+    /// §17.4.45 geometry. The invariant that matters is a *uniform* gap: exactly
     /// one `cell_spacing` between adjacent cells **and** at both table edges,
     /// with the table's own width unchanged.
     ///
@@ -844,10 +769,14 @@ mod tests {
                 "no shared edge to reserve for once cells are separated"
             );
         }
-        // These cells are empty, so the whole of each row's height is the
-        // reserved gap — added exactly once per row, not once per cell.
+        // These cells are empty, so each row's height is its reserved gap —
+        // added exactly once per row, not once per cell — plus the one
+        // horizontal border that lies inside its box. A spaced table's own top
+        // and bottom belong to the outline, so row 0 has only its `insideH`
+        // bottom and row 1 only its `insideH` top: one 0.5pt border each, not
+        // two and not none.
         for r in &m.rows {
-            assert_eq!(r.height, spacing);
+            assert_eq!(r.height, spacing + Pt::new(0.5));
         }
     }
 
@@ -907,5 +836,393 @@ mod tests {
         assert!(spaced.rows[0].borders[0].left.line().is_none());
         assert!(spaced.rows[1].borders[1].bottom.line().is_none());
         assert!(spaced.rows[1].borders[1].right.line().is_none());
+    }
+
+    // ── §17.4.80 row height rules ────────────────────────────────────────
+    //
+    // `RowHeightRule` reached layout with no layout test of its own: `mod.rs`
+    // pins `AtLeast` in the one direction where it wins, and `Exact` had only a
+    // parse test. Both arms of the `match` below are decided here, together
+    // with the two orderings around them — the rule runs *before* the cell
+    // spacing gap is added and *before* `expand_rows_for_vmerge`.
+
+    /// A one-column table 50 pt wide, so `cell_of(n)` is exactly `n` lines.
+    fn sized_table(rows: &[TableRowInput]) -> super::MeasuredTable {
+        measure_table_rows(
+            rows,
+            &[Pt::new(50.0)],
+            Pt::ZERO,
+            Pt::new(10.0),
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// The measurement the rules are compared against: three 14 pt lines.
+    #[test]
+    fn an_unconstrained_row_is_as_tall_as_its_content() {
+        let m = sized_table(&[row(vec![cell_of(3)])]);
+        assert_eq!(m.rows[0].height, Pt::new(42.0), "three 14 pt lines");
+    }
+
+    /// §17.4.80 `hRule="exact"`: *"the height of the row shall be exactly the
+    /// value specified"*. Shorter content does not shrink it.
+    #[test]
+    fn an_exact_row_height_holds_when_the_content_is_shorter() {
+        let m = sized_table(&[row_sized(
+            vec![cell_of(1)],
+            RowHeightRule::Exact(Pt::new(40.0)),
+        )]);
+        assert_eq!(
+            m.rows[0].height,
+            Pt::new(40.0),
+            "14 pt of content, 40 pt row"
+        );
+    }
+
+    /// …and taller content does not grow it, which is the half `atLeast` does
+    /// not share: `exact` is a ceiling as well as a floor. All three rows below
+    /// hold more than the 20 pt they declare — 42, 112 and 280 pt of it, the
+    /// first calibrated by `an_unconstrained_row_is_as_tall_as_its_content` —
+    /// so the equality cannot be met by any rule that reads the content.
+    ///
+    /// What this deliberately does **not** assert is where the overflowing
+    /// content goes. dxpdf does not clip it: the lines that do not fit are
+    /// painted below the row's box and overprint whatever follows the table.
+    /// That is a known open defect rather than a decision — §17.4.80 states the
+    /// height and says nothing about the overflow, LibreOffice clips, and no
+    /// Word render is on record — so pinning the overflow here would pin a
+    /// guess. The height, which the section does state, is pinned.
+    #[test]
+    fn an_exact_row_height_holds_when_the_content_is_taller() {
+        let heights: Vec<Pt> = [3usize, 8, 20]
+            .iter()
+            .map(|&n| {
+                sized_table(&[row_sized(
+                    vec![cell_of(n)],
+                    RowHeightRule::Exact(Pt::new(20.0)),
+                )])
+                .rows[0]
+                    .height
+            })
+            .collect();
+        assert_eq!(
+            heights,
+            vec![Pt::new(20.0); 3],
+            "an exact row is its declared height whatever it holds"
+        );
+    }
+
+    /// §17.4.80 `hRule="atLeast"` is a floor and only a floor — the same two
+    /// contents that leave an `exact` row unmoved decide an `atLeast` one.
+    #[test]
+    fn an_at_least_row_height_is_a_floor_that_taller_content_overrides() {
+        let at_least = |n| {
+            sized_table(&[row_sized(
+                vec![cell_of(n)],
+                RowHeightRule::AtLeast(Pt::new(20.0)),
+            )])
+            .rows[0]
+                .height
+        };
+        assert_eq!(at_least(1), Pt::new(20.0), "14 pt of content raised to 20");
+        assert_eq!(
+            at_least(3),
+            Pt::new(42.0),
+            "42 pt of content is not cut to 20"
+        );
+    }
+
+    /// §17.4.80 × §17.4.45: the height rule sizes the row's **content**, and
+    /// the leading gap is reserved on top of it. So a row does not lose the
+    /// height its author declared to a gap the author did not — its content box
+    /// is the declared height at every spacing, and only the row's outer box
+    /// grows.
+    ///
+    /// Stated as the difference between two spacings rather than as one number,
+    /// because that is the invariant: `height - leading_gap` is the rule's own
+    /// answer, unchanged.
+    #[test]
+    fn an_exact_row_height_is_measured_before_the_cell_spacing_gap() {
+        let spacing = Pt::new(6.0);
+        let rows = [row_sized(
+            vec![cell_of(1)],
+            RowHeightRule::Exact(Pt::new(40.0)),
+        )];
+        // The slot is pre-shrunk by `reserve_cell_spacing` on the build side.
+        let spaced = measure_table_rows(
+            &rows,
+            &[Pt::new(44.0)],
+            spacing,
+            Pt::new(10.0),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(spaced.rows[0].leading_gap, spacing);
+        assert_eq!(
+            spaced.rows[0].height - spaced.rows[0].leading_gap,
+            Pt::new(40.0),
+            "the declared height is the content box, not the outer box"
+        );
+        assert_eq!(spaced.rows[0].height, Pt::new(46.0));
+    }
+
+    /// §17.4.80 × §17.4.84: the height rule runs **before**
+    /// `expand_rows_for_vmerge`, and that pass puts a span's shortfall on the
+    /// span's *last* row (issue #165). Together those two facts decide the case
+    /// neither settles alone: an `exact` restart row keeps exactly its declared
+    /// height, and every point the merged content still needs lands below it.
+    ///
+    /// The span totals the restart cell's content height exactly, which is what
+    /// makes this more than a restatement of `expand_puts_overflow_on_the_last_
+    /// row_of_the_span` — that test starts from two rows of natural height, and
+    /// here the first row's height is the rule's answer rather than its
+    /// content's.
+    #[test]
+    fn an_exact_height_on_a_vmerge_restart_row_is_kept_and_the_span_grows_below() {
+        let restart = TableCellInput {
+            vertical_merge: Some(VerticalMergeState::Restart),
+            ..cell_of(3)
+        };
+        let continued = TableCellInput {
+            vertical_merge: Some(VerticalMergeState::Continue),
+            ..cell(1, None)
+        };
+        let m = sized_table(&[
+            row_sized(vec![restart], RowHeightRule::Exact(Pt::new(10.0))),
+            row(vec![continued]),
+        ]);
+
+        assert_eq!(
+            m.rows[0].height,
+            Pt::new(10.0),
+            "the restart row keeps the height it declared"
+        );
+        assert_eq!(
+            m.rows[1].height,
+            Pt::new(32.0),
+            "the last row of the span absorbs the remaining 42 − 10"
+        );
+        assert_eq!(
+            m.rows[0].height + m.rows[1].height,
+            Pt::new(42.0),
+            "and the span totals the merged cell's content exactly"
+        );
+    }
+
+    // ── §17.4.15 × §17.4.45 ──────────────────────────────────────────────
+
+    /// `gridBefore` and `tblCellSpacing` both displace a cell rightward, and no
+    /// test crossed them: every `gridBefore` case ran at zero spacing and every
+    /// spacing case at zero `gridBefore`.
+    ///
+    /// They compose **by construction**, which is what is asserted: the columns
+    /// a `gridBefore` skips are grid columns like any other, so a cell in
+    /// column 1 must land exactly where column 1's cell lands in a row that
+    /// declares no `gridBefore`. A formula that dropped either term — or applied
+    /// the spacing twice for a displaced cell — fails that parity.
+    #[test]
+    fn grid_before_and_cell_spacing_place_a_cell_in_the_same_column() {
+        let spacing = Pt::new(10.0);
+        // Three 30 pt slots plus one spacing is a 100 pt table.
+        let slots = vec![Pt::new(30.0); 3];
+        let rows = vec![
+            row(vec![cell(1, None), cell(1, None), cell(1, None)]),
+            row_at(vec![cell(1, None), cell(1, None)], 1),
+        ];
+        let m = measure_table_rows(
+            &rows,
+            &slots,
+            spacing,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+
+        let full = &m.rows[0].entries;
+        let offset = &m.rows[1].entries;
+        for (i, e) in offset.iter().enumerate() {
+            assert_eq!(
+                (e.cell_x, e.cell_w),
+                (full[i + 1].cell_x, full[i + 1].cell_w),
+                "the displaced row's cell {i} must sit in grid column {}",
+                i + 1
+            );
+        }
+        // Absolute, so the parity above cannot be satisfied by moving both rows
+        // together: one whole slot in, then one spacing, with one gap taken out
+        // of the slot's own width.
+        assert_eq!(offset[0].cell_x, Pt::new(40.0), "30 pt of slot + one gap");
+        assert_eq!(
+            offset[0].cell_w,
+            Pt::new(20.0),
+            "the 30 pt slot less one gap"
+        );
+        // The skipped column is still part of the table, so the gap between the
+        // table's left edge and the first *drawn* cell is one column wider than
+        // in the undisplaced row — and the table's own width is untouched.
+        assert_eq!(m.table_width, Pt::new(100.0));
+    }
+
+    // ── §17.4.21 / §17.4.80: a row with no cells ─────────────────────────
+
+    /// `<w:tr/>` with no `<w:tc>` is well-formed. §17.4.21 says a row's height
+    /// is determined by the glyphs in its cells, so a row with none has none —
+    /// and having none it must displace nothing *sideways*: its neighbours' cells
+    /// land at exactly the x they land at in a table that never contained it.
+    ///
+    /// The populated rows carry a line of text so that "zero" is a measurement
+    /// rather than the default every empty cell already produces.
+    ///
+    /// **The row below it is half a point taller, and that is not this row's
+    /// height leaking.** §17.4.66 resolves a shared horizontal edge to one of
+    /// the two cells facing across it, and an empty row leaves the row beneath
+    /// facing nothing — so where the control's second row has its top resolved
+    /// to `Absent` (the row above owns that edge and paints it in the strip
+    /// between them), the gapped table's third row keeps a top border of its own
+    /// and paints it *inside* its box. `measure_table_rows` charges a border
+    /// inside the box to the height, so the height follows the ownership.
+    ///
+    /// That ownership difference predates the height following it, and it is
+    /// visible without any of this: the gapped table paints 1pt of border at
+    /// that boundary where the control paints 0.5pt. Whether an empty row should
+    /// break the shared edge at all is the real question, and it is a
+    /// border-resolution one — asserted here as it stands so that changing it is
+    /// a deliberate act.
+    #[test]
+    fn a_row_with_no_cells_is_zero_height_and_moves_nothing() {
+        let slots = vec![Pt::new(50.0), Pt::new(50.0)];
+        let populated = || row(vec![cell_of(1), cell_of(1)]);
+        let measure = |rows: &[TableRowInput]| {
+            measure_table_rows(
+                rows,
+                &slots,
+                Pt::ZERO,
+                Pt::new(10.0),
+                Some(&all_single()),
+                None,
+                false,
+            )
+        };
+        let gapped = measure(&[populated(), row(vec![]), populated()]);
+        let control = measure(&[populated(), populated()]);
+
+        assert!(gapped.rows[1].entries.is_empty(), "no cells, no entries");
+        assert_eq!(gapped.rows[1].height, Pt::ZERO, "no cells, no height");
+        assert_eq!(gapped.table_width, control.table_width);
+
+        for (mine, theirs) in [(0usize, 0usize), (2, 1)] {
+            let got: Vec<_> = gapped.rows[mine]
+                .entries
+                .iter()
+                .map(|e| (e.cell_x, e.cell_w))
+                .collect();
+            let want: Vec<_> = control.rows[theirs]
+                .entries
+                .iter()
+                .map(|e| (e.cell_x, e.cell_w))
+                .collect();
+            assert_eq!(got, want, "row {mine} moved");
+        }
+        // The row above the gap is untouched: whatever the empty row does, it
+        // does it downward.
+        assert_eq!(gapped.rows[0].height, control.rows[0].height);
+
+        // And the row below it differs by exactly one border width — the top
+        // edge it owns and the control's does not. Asserted as the difference
+        // rather than as two heights, so it stays a statement about the border
+        // and not about the line.
+        assert_eq!(
+            gapped.rows[2].height - control.rows[1].height,
+            Pt::new(0.5),
+            "the row below an empty one keeps its own top border"
+        );
+
+        // …and the populated rows really are 14pt of line plus the table's own
+        // 0.5pt top border, which is drawn inside the first row's box, so the
+        // zero above is a difference and not the table's uniform answer.
+        assert_eq!(gapped.rows[0].height, Pt::new(14.5));
+    }
+
+    // ── §17.4.66: a border wider than the margin it sits behind ──────────
+
+    /// The cell's content is laid out inside `cell_w` less however much its own
+    /// borders stick out past its margins, so text and border cannot overlap.
+    /// Nothing pinned that deflation: `cell_w` is unchanged by it, so it is
+    /// only visible in what the content does with the width it is given.
+    ///
+    /// Two words of 30 pt in a 62 pt cell: they fit on one line with no border,
+    /// and a 10 pt left border leaves 52 pt, which is one word short.
+    #[test]
+    fn a_border_wider_than_the_margin_narrows_the_content_and_can_force_a_wrap() {
+        let heavy = single(10.0);
+        let with_left_border = TableCellInput {
+            cell_borders: Some(CellBorderConfig {
+                top: None,
+                bottom: None,
+                left: Some(CellBorderOverride::Border(heavy)),
+                right: None,
+            }),
+            ..cell_of(2)
+        };
+        let measure = |c: TableCellInput| {
+            measure_table_rows(
+                &[row(vec![c])],
+                &[Pt::new(62.0)],
+                Pt::ZERO,
+                Pt::new(10.0),
+                None,
+                None,
+                false,
+            )
+        };
+
+        let plain = measure(cell_of(2));
+        let bordered = measure(with_left_border);
+        assert_eq!(
+            plain.rows[0].height,
+            Pt::new(14.0),
+            "60 pt of text fits across a 62 pt cell"
+        );
+        assert_eq!(
+            bordered.rows[0].height,
+            Pt::new(28.0),
+            "…and not across the 52 pt the 10 pt border leaves"
+        );
+        assert_eq!(
+            bordered.rows[0].entries[0].cell_w, plain.rows[0].entries[0].cell_w,
+            "the cell's own box is unchanged — only its content width narrows"
+        );
+    }
+
+    // ── §17.4.48: a `gridSpan` the grid cannot hold ──────────────────────
+
+    /// A row may address more grid columns than the grid declares. Upstream
+    /// `seat_every_cell` grows the grid so this cannot reach layout from a
+    /// document, but the clamp here is what keeps a malformed input from
+    /// panicking on the slice — and a clamp that inverted the range would panic
+    /// just as an unclamped end would.
+    ///
+    /// The cell gets every column that exists, which is the most width it could
+    /// have had: its box ends exactly at the table's right edge.
+    #[test]
+    fn a_span_past_the_end_of_the_grid_takes_every_column_there_is() {
+        let cols = vec![Pt::new(100.0), Pt::new(100.0)];
+        let m = measure_table_rows(
+            &[row(vec![cell(5, None)])],
+            &cols,
+            Pt::ZERO,
+            Pt::new(10.0),
+            Some(&all_single()),
+            None,
+            false,
+        );
+        let e = &m.rows[0].entries[0];
+        assert_eq!(e.cell_x, Pt::ZERO);
+        assert_eq!(e.cell_w, Pt::new(200.0), "both declared columns, not five");
+        assert_eq!(e.cell_x + e.cell_w, m.table_width, "flush with the table");
     }
 }

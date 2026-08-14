@@ -823,17 +823,39 @@ impl From<StPTabLeader> for PTabLeader {
 
 // ── StTblLayoutType (§17.18.87) ───────────────────────────────────────────
 
+/// §17.18.87 `ST_TblLayoutType` — `fixed` | **`autofit`**. Not `auto`.
+///
+/// # The spec says `auto` twice, and means neither time
+///
+/// §17.4.52 and §17.4.53 both close with "If this element is omitted, then the
+/// value of this element shall be assumed to be **auto**" — a value the
+/// enumeration does not contain. Annex A settles it both ways over: the XSD
+/// restriction lists `<xsd:enumeration value="fixed"/>` and
+/// `<xsd:enumeration value="autofit"/>`, the RELAX NG grammar reads
+/// `w_ST_TblLayoutType = string "fixed" | string "autofit"`, and §17.18.87's
+/// own value table names `autofit` and `fixed`. So the prose default is a
+/// typo for `autofit`; [MS-OI29500] Part 1 §2.1.158(b) reads it that way too.
+/// Nothing in the spec permits a producer to write `auto`, and this enum
+/// accepted only that — so `<w:tblLayout w:type="autofit"/>`, the sole
+/// spelling that can name the mode, failed deserialization, and because the
+/// `ST_*` catalogue is strict by design (module doc) that rejected the entire
+/// document rather than the one attribute.
+///
+/// The same subclauses say the algorithms are "discussed in the simple type
+/// referenced by the **val** attribute" while the attribute is `@type` —
+/// `docx::parse::properties::schema::table::TblLayoutXml` already carries a
+/// note about that one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StTblLayoutType {
-    Auto,
+    Autofit,
     Fixed,
 }
 
 impl From<StTblLayoutType> for TableLayout {
     fn from(s: StTblLayoutType) -> Self {
         match s {
-            StTblLayoutType::Auto => Self::Auto,
+            StTblLayoutType::Autofit => Self::Autofit,
             StTblLayoutType::Fixed => Self::Fixed,
         }
     }
@@ -1375,8 +1397,8 @@ mod tests {
     #[test]
     fn tbl_layout_type_both() {
         assert_eq!(
-            de::<StTblLayoutType>("auto").unwrap(),
-            StTblLayoutType::Auto
+            de::<StTblLayoutType>("autofit").unwrap(),
+            StTblLayoutType::Autofit
         );
         assert_eq!(
             de::<StTblLayoutType>("fixed").unwrap(),
@@ -1386,6 +1408,11 @@ mod tests {
     #[test]
     fn tbl_layout_type_strict() {
         assert_bad::<StTblLayoutType>("flex");
+        // `auto` is the word §17.4.52/§17.4.53's *prose* uses for the default,
+        // and it is not a value of the type — see `StTblLayoutType`. A parser
+        // that accepts it accepts something no producer may write, and this
+        // enum accepted it while rejecting `autofit`, which every producer may.
+        assert_bad::<StTblLayoutType>("auto");
     }
 
     // ── StTblOverlap ──

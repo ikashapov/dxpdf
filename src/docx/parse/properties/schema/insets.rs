@@ -1,4 +1,4 @@
-//! Edge insets (§17.4.42 tcMar, §17.4.44 tblCellMar) — four-sided twips
+//! Edge insets (§17.4.68 tcMar, §17.4.42 tblCellMar) — four-sided twips
 //! padding shared by table-cell margins and table default cell margins.
 //!
 //! Each side is `<w:top w:w="N" w:type="dxa"/>` etc. Only `dxa` (twips) is
@@ -34,7 +34,7 @@ struct SideXml {
 }
 
 /// Conversion used for the table-level default (`<w:tblCellMar>`). Per
-/// OOXML §17.4.44 a table default has no further inheritance, so missing
+/// OOXML §17.4.42 a table default has no further inheritance, so missing
 /// sides collapse to zero.
 impl From<EdgeInsetsTwipsXml> for EdgeInsets<Twips> {
     fn from(x: EdgeInsetsTwipsXml) -> Self {
@@ -59,15 +59,15 @@ impl From<EdgeInsetsTwipsXml> for EdgeInsets<Twips> {
     }
 }
 
-/// Conversion used for per-cell overrides (`<w:tcMar>`, §17.4.42). Each
-/// child element (`<w:top>` §17.4.81, `<w:start>` §17.4.71, `<w:bottom>`
-/// §17.4.7, `<w:end>` §17.4.13) is an *exception* that overrides the
-/// corresponding side of the parent `<w:tblCellMar>` (§17.4.44).
+/// Conversion used for per-cell overrides (`<w:tcMar>`, §17.4.68). Each
+/// child element (`<w:top>` §17.4.75, `<w:start>` §17.4.34, `<w:bottom>`
+/// §17.4.5, `<w:end>` §17.4.11) is an *exception* that overrides the
+/// corresponding side of the parent `<w:tblCellMar>` (§17.4.42).
 ///
 /// Per the spec, cascade is per-side: a side whose element is structurally
 /// absent inherits from the parent; a side whose element is present is an
 /// explicit override, including `<w:top w:w="0" w:type="dxa"/>` which is
-/// `CT_TblWidth` (§17.18.87) for "0 twips" — an explicit zero, not a
+/// `CT_TblWidth` (§17.4.87) for "0 twips" — an explicit zero, not a
 /// placeholder for "no override". The layout layer resolves the partial
 /// override against the table-level default via
 /// [`PartialEdgeInsets::resolve_against`].
@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(e.left.raw(), 0);
     }
 
-    /// Per OOXML §17.4.42, an absent child element in `<w:tcMar>` means
+    /// Per OOXML §17.4.68, an absent child element in `<w:tcMar>` means
     /// "inherit from `<w:tblCellMar>` for that side". Only the sides
     /// structurally present in the XML are an override; the rest stay `None`
     /// so the layout cascade can fall back to the table-level default.
@@ -157,9 +157,9 @@ mod tests {
         assert_eq!(resolved.right.raw(), 108, "absent side inherits");
     }
 
-    /// Per OOXML §17.18.87 (`CT_TblWidth`), `@type="dxa" @w="0"` is
+    /// Per OOXML §17.4.87 (`CT_TblWidth`), `@type="dxa" @w="0"` is
     /// "0 twentieths of a point", i.e. an explicit zero. Combined with
-    /// §17.4.42's "exception" semantics, a `<w:top w:w="0" w:type="dxa"/>`
+    /// §17.4.68's "exception" semantics, a `<w:top w:w="0" w:type="dxa"/>`
     /// inside `<w:tcMar>` is an *explicit override* to zero, structurally
     /// distinct from an absent child element. This test pins the spec-
     /// faithful interpretation: the parser must report `Some(0)`, not `None`.

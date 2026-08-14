@@ -18,6 +18,7 @@ use crate::docx::parse::primitives::st_enums::{
 };
 use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
 use crate::docx::parse::primitives::{last_toggle, OnOff};
+use crate::docx::parse::serde_xml::UnknownChildren;
 
 use super::border::{TableBordersXml, TableCellBordersXml};
 use super::cnf_style::CnfStyleXml;
@@ -63,6 +64,11 @@ pub(crate) struct TblPrXml {
     tblp_pr: Vec<TblpPrXml>,
     #[serde(rename = "tblOverlap", default)]
     tbl_overlap: Vec<ValAttr<StTblOverlap>>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 /// `<w:tblLayout w:type="fixed"/>` — note `@type` (not `@val`).
@@ -189,7 +195,7 @@ pub(crate) struct TblpPrXml {
     y: Option<crate::docx::model::dimension::Dimension<Twips>>,
 }
 
-/// §17.4.61 `<w:tblPrEx>` — table-level property exceptions scoped to
+/// §17.4.60 `<w:tblPrEx>` — table-level property exceptions scoped to
 /// a single row. Per the spec it accepts the same vocabulary as
 /// `<w:tblPr>` minus `tblStyle` and `tblpPr`. We model only the slice
 /// the layout currently honors (table borders); other fields can be
@@ -198,17 +204,23 @@ pub(crate) struct TblpPrXml {
 pub(crate) struct TblPrExXml {
     #[serde(rename = "tblBorders", default)]
     tbl_borders: Vec<TableBordersXml>,
-    /// §17.4.41: per-row override of the table's `tblCellSpacing`.
+    /// §17.4.44: per-row override of the table's `tblCellSpacing`.
     #[serde(
         rename = "tblCellSpacing",
         default,
         deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
     tbl_cell_spacing: Vec<TableMeasureXml>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
     fn from(x: TblPrExXml) -> Self {
+        x.unknown.warn_once("w:tblPrEx");
         Self {
             borders: Dup::from(x.tbl_borders).into_value().map(Into::into),
             cell_spacing: Dup::from(x.tbl_cell_spacing).into_value().map(Into::into),
@@ -218,6 +230,7 @@ impl From<TblPrExXml> for crate::docx::model::TableRowPropertyExceptions {
 
 impl TblPrXml {
     pub(crate) fn split(self) -> (TableProperties, Option<StyleId>) {
+        self.unknown.warn_once("w:tblPr");
         let style_id = Dup::from(self.tbl_style)
             .into_value()
             .map(|v| StyleId::new(v.val));
@@ -230,7 +243,7 @@ impl TblPrXml {
             borders: Dup::from(self.tbl_borders).map(Into::into),
             cell_margins: Dup::from(self.tbl_cell_mar).map(Into::into),
             cell_spacing: Dup::from(self.tbl_cell_spacing).map(Into::into),
-            look: Dup::from(self.tbl_look).map(Into::into),
+            look: Dup::from(self.tbl_look).filter_map(tbl_look),
             style_row_band_size: Dup::from(self.tbl_style_row_band_size).map(|v| v.val),
             style_col_band_size: Dup::from(self.tbl_style_col_band_size).map(|v| v.val),
             positioning: Dup::from(self.tblp_pr).map(Into::into),
@@ -241,38 +254,96 @@ impl TblPrXml {
     }
 }
 
-impl From<TblLookXml> for TableLook {
-    fn from(x: TblLookXml) -> Self {
-        // Per [MS-OI29500] §2.1.1583: explicit attribute wins per-flag,
-        // legacy `val` supplies the fallback bit when the attribute is absent.
-        let from_val = |bit: fn(TblLookHex) -> bool| x.val.map(bit);
-        Self {
-            first_row: x
-                .first_row
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::first_row)),
-            last_row: x
-                .last_row
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::last_row)),
-            first_column: x
-                .first_column
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::first_column)),
-            last_column: x
-                .last_column
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::last_column)),
-            no_h_band: x
-                .no_h_band
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::no_h_band)),
-            no_v_band: x
-                .no_v_band
-                .map(|b| b.0)
-                .or_else(|| from_val(TblLookHex::no_v_band)),
-        }
+/// §17.4.55 `<w:tblLook>` → the model, or `None` when the element states
+/// nothing at all.
+///
+/// The legacy `@val` bitmask and the six modern attributes are **not** two
+/// spellings of the same six flags to be merged flag by flag.
+///
+/// [MS-OI29500] Part 1 §17.4.55 note (c) is exact about it: "Word reads
+/// the val attribute if, and only if, none of the attributes specified in
+/// this subsection are present." So one modern attribute anywhere on the
+/// element makes the whole bitmask unread — a per-flag fallback would make
+/// that sentence say nothing, and would let `val`'s *cleared* bits switch
+/// regions off that the document never mentioned.
+///
+/// # What an unmentioned sibling then means is a choice, not a rule
+///
+/// The erratum settles only which source is read. It does not say what an
+/// attribute the element omits resolves to once `val` is out of the
+/// picture, and neither does §17.4.55: `CT_TblLook`'s attributes are
+/// optional `ST_OnOff` with no schema default.
+///
+/// **The choice taken here is `true` — every region on.** The evidence is
+/// second-implementation: LibreOffice tested Word for tdf#167843 and
+/// concluded that all unspecified attributes default to true, and its
+/// regression fixture (`<w:tblLook w:val="04A0" w:firstRow="0"/>`, which
+/// `tbl_pr_tbl_look_val_04a0_with_first_row_off` reproduces below) asserts
+/// firstColumn, lastColumn and lastRow all on. That is testimony about
+/// Word, not documentation of it.
+///
+/// It is applied to all six uniformly, including `noHBand`/`noVBand`,
+/// where `true` switches banding *off* rather than on. Splitting the rule
+/// — four flags one way, two the other — would be a second choice with no
+/// evidence behind it at all, and a uniform "unset bits read as set" is
+/// also the simplest thing an implementation holding a bitmask would do.
+///
+/// **What would settle it**: a Word render of a table whose style defines
+/// a `band1Horz` layer, carrying `<w:tblLook w:firstRow="0"/>` and nothing
+/// else. Banding paints iff Word's unspecified `noHBand` is false, which
+/// is the one flag where the uniform reading and the "regions on" reading
+/// disagree.
+///
+/// # Why an entirely silent element yields `None` rather than a silent value
+///
+/// `<w:tblLook/>` states no `@val` and no attribute, so there is nothing to
+/// read from: it carries exactly what the *absent* element carries, which is
+/// nothing. §17.4.55 note (a)'s absent-element default is the consumer's
+/// question — `render::resolve::conditional::ActiveRegions::WORD_DEFAULT`
+/// answers it — and the consumer can only answer it correctly if the two
+/// spellings of "nothing" arrive here looking alike.
+///
+/// A `TableLook` with six `None` flags *looked* alike and was not, because the
+/// carrier is a `crate::model::Dup`: any value at all reports the element as
+/// **present**, and "this level did not set the property" (§17.7.2) is
+/// precisely `Dup::is_absent`. So a silent `<w:tblLook/>` on a `<w:tbl>` beat
+/// the table style's `tblLook` and replaced it with the absent-element
+/// default, and a silent one in a child style beat its `basedOn` parent's the
+/// same way — each switching off conditional layers the surviving level had
+/// switched on. Dropping the occurrence is what makes the two spellings
+/// interchangeable at *every* level of the cascade, rather than at whichever
+/// read site remembered to ask.
+fn tbl_look(x: TblLookXml) -> Option<TableLook> {
+    let stated = [
+        x.first_row,
+        x.last_row,
+        x.first_column,
+        x.last_column,
+        x.no_h_band,
+        x.no_v_band,
+    ];
+    if stated.iter().all(Option::is_none) {
+        // Nothing modern present, so `val` is read — and if it is absent too
+        // the element states nothing at all.
+        return x.val.map(|v| TableLook {
+            first_row: Some(v.first_row()),
+            last_row: Some(v.last_row()),
+            first_column: Some(v.first_column()),
+            last_column: Some(v.last_column()),
+            no_h_band: Some(v.no_h_band()),
+            no_v_band: Some(v.no_v_band()),
+        });
     }
+    // `is_none_or` *is* the rule: an unstated attribute reads as true.
+    let attr = |a: Option<AttrBool>| Some(a.is_none_or(|b| b.0));
+    Some(TableLook {
+        first_row: attr(x.first_row),
+        last_row: attr(x.last_row),
+        first_column: attr(x.first_column),
+        last_column: attr(x.last_column),
+        no_h_band: attr(x.no_h_band),
+        no_v_band: attr(x.no_v_band),
+    })
 }
 
 impl From<TblpPrXml> for TablePositioning {
@@ -324,13 +395,46 @@ pub(crate) struct TrPrXml {
         deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
     w_after: Vec<TableMeasureXml>,
-    /// §17.4.42: row-level override of the table's `tblCellSpacing`.
+    /// §17.4.43: row-level override of the table's `tblCellSpacing`.
     #[serde(
         rename = "tblCellSpacing",
         default,
         deserialize_with = "deserialize_vec_nonnegative_table_measure"
     )]
     tbl_cell_spacing: Vec<TableMeasureXml>,
+    /// `<w:del>` — CT_TrPr's row-deletion marker, and the form **Word** writes
+    /// when a row is deleted with change tracking on. Only its presence is
+    /// read (see [`TrPrXml::marks_row_deleted`]); the `w:id`/`w:author`/
+    /// `w:date` attributes describe the edit, not the document, and this
+    /// parser renders the final view rather than the revision history.
+    ///
+    /// `Vec` for the same reason as the toggles above — a repeated child must
+    /// not fail deserialization.
+    #[serde(rename = "del", default)]
+    del: Vec<RowRevisionMarkerXml>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
+}
+
+/// CT_TrackChange as it appears in `<w:trPr>` — presence-only, so no field is
+/// modelled. Distinct from body-level `IgnoredXml` so this schema does not
+/// depend on the body schema, which depends on it.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct RowRevisionMarkerXml {}
+
+impl TrPrXml {
+    /// Whether this row is marked deleted by `<w:trPr><w:del/>`.
+    ///
+    /// Read at the parse seam rather than carried on `TableRowProperties`,
+    /// because that is where the same question is answered for runs: a
+    /// `<w:del>`-wrapped run never reaches the model either. The model
+    /// describes the document, not the edits that produced it.
+    pub(crate) fn marks_row_deleted(&self) -> bool {
+        !self.del.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -349,7 +453,7 @@ impl From<TrHeightXml> for TableRowHeight {
     fn from(x: TrHeightXml) -> Self {
         Self {
             value: x.val.unwrap_or_default(),
-            // §17.4.81 says an omitted `hRule` means `auto`; [MS-OI29500]
+            // §17.4.80 says an omitted `hRule` means `auto`; [MS-OI29500]
             // §17.4.80(a) records that **Word assumes `atLeast`**, and Word is
             // what produced these files. Defaulting to `Auto` here would be
             // indistinguishable from an explicit `hRule="auto"`, where the
@@ -365,6 +469,7 @@ impl From<TrHeightXml> for TableRowHeight {
 
 impl From<TrPrXml> for TableRowProperties {
     fn from(x: TrPrXml) -> Self {
+        x.unknown.warn_once("w:trPr");
         Self {
             height: Dup::from(x.tr_height).map(Into::into),
             is_header: last_toggle(x.tbl_header),
@@ -388,7 +493,7 @@ impl From<TrPrXml> for TableRowProperties {
 
 // ── tcPr ───────────────────────────────────────────────────────────────
 
-/// Table cell property bag (§17.4.70 `w:tcPr`).
+/// Table cell property bag (§17.4.69 `w:tcPr`).
 ///
 /// Child properties are deserialized as `Vec<T>` to tolerate duplicate XML elements
 /// (such as repeated `<w:tcMar>` or `<w:tcBorders>` emitted by Word/LibreOffice)
@@ -419,6 +524,11 @@ pub(crate) struct TcPrXml {
     no_wrap: Vec<OnOff>,
     #[serde(rename = "cnfStyle", default)]
     cnf_style: Vec<CnfStyleXml>,
+    /// Children this schema does not name — recorded so an unimplemented
+    /// table property is visible under `RUST_LOG=warn` instead of vanishing.
+    /// See [`UnknownChildren`].
+    #[serde(rename = "$value", default)]
+    unknown: UnknownChildren,
 }
 
 /// `<w:vMerge/>` — absent `@val` means "continue"; `@val="restart"` starts a
@@ -449,6 +559,7 @@ impl From<TcPrXml> for TableCellProperties {
     /// Every duplicable child is carried into the model whole; `Dup::get`
     /// applies last-wins where a consumer reads it. See `model::dup`.
     fn from(x: TcPrXml) -> Self {
+        x.unknown.warn_once("w:tcPr");
         Self {
             width: x.tc_w.into_iter().map(Into::into).collect(),
             borders: x.tc_borders.into_iter().map(Into::into).collect(),
@@ -533,6 +644,16 @@ mod tests {
         assert_eq!(tp.alignment, Dup::from(Some(Alignment::Center)));
     }
 
+    /// §17.18.87: the *other* value of `ST_TblLayoutType`, and the only one
+    /// that names the auto-fit algorithm — `<w:tblLayout w:type="fixed"/>` was
+    /// the sole spelling the corpus contained, so this half went untested and
+    /// unparseable together. See `StTblLayoutType`.
+    #[test]
+    fn tbl_pr_layout_autofit() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLayout type="autofit"/></tblPr>"#);
+        assert_eq!(tp.layout, Dup::from(Some(TableLayout::Autofit)));
+    }
+
     #[test]
     fn tbl_pr_borders_and_margins() {
         let (tp, _) = parse_tbl_pr(
@@ -555,6 +676,11 @@ mod tests {
         assert_eq!(l.first_row, Some(true));
         assert_eq!(l.last_row, Some(false));
         assert_eq!(l.no_h_band, Some(true));
+        // The three the element never mentions are still answered — see
+        // `tbl_look` for why, and on what evidence.
+        assert_eq!(l.first_column, Some(true));
+        assert_eq!(l.last_column, Some(true));
+        assert_eq!(l.no_v_band, Some(true));
     }
 
     /// [MS-OI29500] §2.1.1583: legacy `@val` hex bitfield must decode to the
@@ -598,18 +724,80 @@ mod tests {
         assert_eq!(l.no_v_band, Some(false));
     }
 
-    /// Per [MS-OI29500]: when both legacy `val` and explicit attributes are
-    /// specified, the explicit attribute wins per-flag. Sample3 has tables
-    /// shaped like `<tblLook val="04A0" firstRow="1" noHBand="0" .../>`.
+    /// [MS-OI29500] Part 1 §17.4.55 note (c): "Word reads the val attribute
+    /// if, and only if, **none** of the attributes specified in this
+    /// subsection are present." One modern attribute therefore suppresses
+    /// `val` for *every* flag, not merely for its own — which is the whole
+    /// content of the rule, since a per-flag reading would make the sentence
+    /// say nothing.
+    ///
+    /// `val="0000"` clears all six bits, so under a per-flag fallback the
+    /// four unmentioned flags would arrive as `Some(false)`.
     #[test]
-    fn tbl_pr_tbl_look_explicit_attrs_override_val() {
+    fn tbl_pr_tbl_look_one_explicit_attr_suppresses_val_for_every_flag() {
         let (tp, _) =
             parse_tbl_pr(r#"<tblPr><tblLook val="0000" firstRow="1" noVBand="1"/></tblPr>"#);
         let l = tp.look.cloned().unwrap();
-        assert_eq!(l.first_row, Some(true), "explicit firstRow=1 wins");
-        assert_eq!(l.last_row, Some(false), "from val=0000");
-        assert_eq!(l.first_column, Some(false), "from val=0000");
-        assert_eq!(l.no_v_band, Some(true), "explicit noVBand=1 wins");
+        assert_eq!(l.first_row, Some(true), "explicit firstRow=1");
+        assert_eq!(l.no_v_band, Some(true), "explicit noVBand=1");
+        assert_eq!(l.last_row, Some(true), "not from val=0000");
+        assert_eq!(l.first_column, Some(true), "not from val=0000");
+        assert_eq!(l.last_column, Some(true), "not from val=0000");
+        assert_eq!(l.no_h_band, Some(true), "not from val=0000");
+    }
+
+    /// LibreOffice's tdf#167843 regression fixture, verbatim: `val="04A0"`
+    /// alongside a single `firstRow="0"`. 04A0 clears lastRow (0x040) and
+    /// lastColumn (0x100) and clears noHBand (0x200) — none of which may
+    /// reach the model, because note (c) says the whole bitmask is unread.
+    #[test]
+    fn tbl_pr_tbl_look_val_04a0_with_first_row_off() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="04A0" firstRow="0"/></tblPr>"#);
+        let l = tp.look.cloned().unwrap();
+        assert_eq!(l.first_row, Some(false));
+        assert_eq!(l.last_row, Some(true), "04A0's cleared lastRow is not read");
+        assert_eq!(l.first_column, Some(true));
+        assert_eq!(l.last_column, Some(true), "nor its cleared lastColumn");
+        assert_eq!(l.no_h_band, Some(true), "nor its cleared noHBand");
+        assert_eq!(l.no_v_band, Some(true));
+    }
+
+    /// A `<w:tblLook/>` that states nothing at all states nothing: `val` is
+    /// absent too, so there is no bitmask to read and no attribute to fill
+    /// in from. What an entirely silent element means is §17.4.55 note (a)'s
+    /// question, and it is answered by the resolver
+    /// (`render::resolve::conditional::ActiveRegions::WORD_DEFAULT`), not here.
+    ///
+    /// "States nothing" has to mean **absent from the cascade**, not "present
+    /// with six unstated flags": `Dup::is_absent` is what §17.7.2's "this
+    /// level did not set the property" reads, so a value here — however empty
+    /// — shadows every level below. This asserted the six `None`s until that
+    /// consequence was measured; see `tbl_look`.
+    #[test]
+    fn tbl_pr_tbl_look_empty_element_states_nothing() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook/></tblPr>"#);
+        assert!(
+            tp.look.is_absent(),
+            "an element stating nothing must not occupy the cascade slot"
+        );
+    }
+
+    /// The converse, and the guard on the line the check above draws: an
+    /// element stating *one* attribute is a value, and every flag it does not
+    /// mention is answered rather than left to the level below.
+    #[test]
+    fn tbl_pr_tbl_look_one_stated_attr_is_still_a_value() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook lastRow="1"/></tblPr>"#);
+        let l = tp.look.cloned().expect("one stated attribute is a value");
+        assert_eq!(l.last_row, Some(true));
+        assert_eq!(l.first_row, Some(true), "unstated reads as true");
+    }
+
+    /// …and so is a bare `@val`, whose bitmask answers all six.
+    #[test]
+    fn tbl_pr_tbl_look_a_bare_val_is_still_a_value() {
+        let (tp, _) = parse_tbl_pr(r#"<tblPr><tblLook val="0000"/></tblPr>"#);
+        assert!(!tp.look.is_absent(), "a bitmask states all six flags");
     }
 
     #[test]
@@ -760,7 +948,7 @@ mod tests {
         assert_eq!(tc.cnf_style, Dup::from(Some(CnfStyle::FIRST_ROW)));
     }
 
-    /// §17.4.81 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
+    /// §17.4.80 vs [MS-OI29500] §17.4.80(a). The standard says an omitted
     /// `hRule` means `auto`; Word assumes `atLeast`, and Word wrote these files.
     ///
     /// The distinction is load-bearing rather than cosmetic: with `hRule="auto"`
@@ -791,7 +979,7 @@ mod tests {
         assert_eq!(parse(r#"<trHeight val="440"/>"#).value.raw(), 440);
     }
 
-    /// §17.4.41 / §17.4.42: both cell-spacing overrides now reach the model.
+    /// §17.4.44 / §17.4.43: both cell-spacing overrides now reach the model.
     /// Layout applies spacing per table and warns rather than honouring these,
     /// but dropping them at the parser would make that gap invisible.
     #[test]
@@ -801,7 +989,7 @@ mod tests {
         )
         .unwrap()
         .into();
-        assert!(tr.cell_spacing.cloned().is_some(), "row-level §17.4.42");
+        assert!(tr.cell_spacing.cloned().is_some(), "row-level §17.4.43");
 
         let ex: crate::docx::model::TableRowPropertyExceptions =
             quick_xml::de::from_str::<TblPrExXml>(
@@ -809,7 +997,7 @@ mod tests {
             )
             .unwrap()
             .into();
-        assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.41");
+        assert!(ex.cell_spacing.is_some(), "tblPrEx §17.4.44");
     }
 
     /// A duplicated **non-toggle** child is schema-invalid and Word opens it
@@ -893,5 +1081,111 @@ mod tests {
         let tc = parse_tc_pr(r#"<tcPr><tcMar><top w="100" type="dxa"/></tcMar></tcPr>"#);
         assert!(!tc.margins.is_duplicated());
         assert_eq!(tc.margins.all().len(), 1);
+    }
+
+    // ── unmodelled children are reported, not dropped ──
+    //
+    // A plain-struct property bag silently discards an element it does not
+    // name, which is why `w:hMerge` and `w:bidiVisual` were invisible at
+    // runtime rather than merely unimplemented. These pin both directions:
+    // an unnamed child is captured by name, and a named one never is.
+
+    #[test]
+    fn tbl_pr_records_an_unmodelled_child() {
+        let x: TblPrXml =
+            quick_xml::de::from_str(r#"<tblPr><tblStyle val="Grid"/><bidiVisual/></tblPr>"#)
+                .unwrap();
+        assert_eq!(x.unknown.names(), ["bidiVisual"]);
+        // The modelled sibling is unaffected by the catch-all.
+        assert_eq!(
+            x.split().1.map(|s| s.as_str().to_string()),
+            Some("Grid".into())
+        );
+    }
+
+    #[test]
+    fn tc_pr_records_an_unmodelled_child() {
+        let x: TcPrXml =
+            quick_xml::de::from_str(r#"<tcPr><gridSpan val="2"/><hMerge val="restart"/></tcPr>"#)
+                .unwrap();
+        assert_eq!(x.unknown.names(), ["hMerge"]);
+        assert_eq!(
+            TableCellProperties::from(x).grid_span.get().copied(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn tr_pr_records_an_unmodelled_child() {
+        let x: TrPrXml =
+            quick_xml::de::from_str(r#"<trPr><cantSplit/><divId val="7"/></trPr>"#).unwrap();
+        assert_eq!(x.unknown.names(), ["divId"]);
+        assert_eq!(TableRowProperties::from(x).cant_split, Some(true));
+    }
+
+    #[test]
+    fn tbl_pr_ex_records_an_unmodelled_child() {
+        let x: TblPrExXml =
+            quick_xml::de::from_str(r#"<tblPrEx><tblLayout type="fixed"/></tblPrEx>"#).unwrap();
+        assert_eq!(
+            x.unknown.names(),
+            ["tblLayout"],
+            "tblPrEx models only borders and cell spacing today, so its own \
+             tblLayout is unmodelled and must say so"
+        );
+    }
+
+    /// The trap detector for the three tests above: if a *modelled* child ever
+    /// reached the catch-all, every real document would log a warning for a
+    /// property that is in fact implemented, and the report would be noise.
+    #[test]
+    fn a_bag_of_only_modelled_children_reports_nothing() {
+        let tbl: TblPrXml = quick_xml::de::from_str(
+            r#"<tblPr><tblStyle val="G"/><tblW w="5000" type="pct"/><jc val="center"/>
+               <tblLayout type="fixed"/><tblInd w="100" type="dxa"/>
+               <tblCellSpacing w="40" type="dxa"/><tblLook val="04A0"/>
+               <tblStyleRowBandSize val="1"/><tblStyleColBandSize val="2"/>
+               <tblOverlap val="never"/></tblPr>"#,
+        )
+        .unwrap();
+        assert!(
+            tbl.unknown.names().is_empty(),
+            "tblPr: {:?}",
+            tbl.unknown.names()
+        );
+
+        let tr: TrPrXml = quick_xml::de::from_str(
+            r#"<trPr><trHeight val="300" hRule="atLeast"/><tblHeader/><cantSplit/>
+               <jc val="center"/><gridBefore val="1"/><gridAfter val="1"/>
+               <wBefore w="10" type="dxa"/><wAfter w="10" type="dxa"/>
+               <tblCellSpacing w="40" type="dxa"/></trPr>"#,
+        )
+        .unwrap();
+        assert!(
+            tr.unknown.names().is_empty(),
+            "trPr: {:?}",
+            tr.unknown.names()
+        );
+
+        let tc: TcPrXml = quick_xml::de::from_str(
+            r#"<tcPr><tcW w="100" type="dxa"/><shd fill="FF0000"/><vAlign val="center"/>
+               <vMerge val="restart"/><gridSpan val="2"/><noWrap/>
+               <textDirection val="tbRl"/><tcMar><top w="1" type="dxa"/></tcMar></tcPr>"#,
+        )
+        .unwrap();
+        assert!(
+            tc.unknown.names().is_empty(),
+            "tcPr: {:?}",
+            tc.unknown.names()
+        );
+
+        let ex: TblPrExXml =
+            quick_xml::de::from_str(r#"<tblPrEx><tblCellSpacing w="40" type="dxa"/></tblPrEx>"#)
+                .unwrap();
+        assert!(
+            ex.unknown.names().is_empty(),
+            "tblPrEx: {:?}",
+            ex.unknown.names()
+        );
     }
 }

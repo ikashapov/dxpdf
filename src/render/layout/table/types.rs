@@ -7,7 +7,7 @@ use crate::render::resolve::color::RgbColor;
 use crate::render::layout::cell::CellLayout;
 use crate::render::layout::draw_command::DrawCommand;
 
-/// §17.4.81: row height rule.
+/// §17.4.80: row height rule.
 #[derive(Clone, Copy, Debug)]
 pub enum RowHeightRule {
     /// Row height is at least this value; grows to fit content.
@@ -19,16 +19,28 @@ pub enum RowHeightRule {
 /// A table row for layout.
 pub struct TableRowInput {
     pub cells: Vec<TableCellInput>,
-    /// §17.4.81: row height constraint.
+    /// §17.4.80: row height constraint.
     pub height_rule: Option<RowHeightRule>,
     /// §17.4.49: row repeats as header on each continuation page.
+    ///
+    /// `Option<bool>` and not `bool`, even though `Some(false)` and `None` are
+    /// indistinguishable to every reader today — both mean "not a header". The
+    /// tri-state is here for the cascade that is not wired yet: §17.7.6 lets a
+    /// `<w:tblStylePr w:type="firstRow">` carry a `<w:trPr>`, and once a style
+    /// can declare `tblHeader`, a row needs a way to say *explicitly off* and
+    /// override it. That is `Some(false)`; `None` is "this level said nothing",
+    /// which is what falls through to the style. Collapsing to `bool` now would
+    /// erase the distinction and have to be undone then.
     pub is_header: Option<bool>,
-    /// §17.4.1: if true, row cannot be split across pages.
+    /// §17.4.6: if true, row cannot be split across pages. `Option<bool>` for
+    /// the same reason as `is_header` above — `<w:cantSplit>` is a `<w:trPr>`
+    /// child, so a table style's conditional `<w:trPr>` can declare it and a row
+    /// will need `Some(false)` to turn it back off.
     pub cant_split: Option<bool>,
-    /// §17.4.17: number of grid columns to skip at the row's start. The first
+    /// §17.4.15: number of grid columns to skip at the row's start. The first
     /// cell's leftmost grid column is `grid_before`, not 0.
     ///
-    /// There is deliberately no `grid_after` counterpart. §17.4.16 `gridAfter`
+    /// There is deliberately no `grid_after` counterpart. §17.4.14 `gridAfter`
     /// is *derivable* — the row's right edge is `grid_before` plus the sum of
     /// its cells' `grid_span`s — and every consumer here works from that
     /// running grid column already, including the border resolution that
@@ -36,7 +48,7 @@ pub struct TableRowInput {
     /// The model keeps `gridAfter` as parsed (`model::TableRowProperties`);
     /// carrying it into layout added a field nothing read.
     pub grid_before: u32,
-    /// §17.4.61 `<w:tblPrEx><w:tblBorders/></w:tblPrEx>` — per-row
+    /// §17.4.60 `<w:tblPrEx><w:tblBorders/></w:tblPrEx>` — per-row
     /// override of the table-level `tblBorders`. When set, each side
     /// independently replaces the corresponding side of the table's
     /// `TableBorderConfig` for this row only; sides absent from the
@@ -49,7 +61,7 @@ pub struct TableRowInput {
     pub border_overrides: Option<TableBorderConfig>,
 }
 
-/// §17.4.84: cell vertical alignment.
+/// §17.4.83: cell vertical alignment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellVAlign {
     Top,
@@ -67,13 +79,13 @@ pub struct TableCellInput {
     pub shading: Option<RgbColor>,
     /// §17.7.6: per-cell resolved borders from conditional formatting.
     pub cell_borders: Option<CellBorderConfig>,
-    /// §17.4.85: vertical merge state.
+    /// §17.4.84: vertical merge state.
     pub vertical_merge: Option<VerticalMergeState>,
-    /// §17.4.84: vertical alignment of content within the cell.
+    /// §17.4.83: vertical alignment of content within the cell.
     pub vertical_align: CellVAlign,
 }
 
-/// §17.4.85: vertical merge state for a cell.
+/// §17.4.84: vertical merge state for a cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerticalMergeState {
     /// This cell starts a new vertical merge group.
@@ -124,7 +136,7 @@ pub struct TableBorderConfig {
 pub struct TableBorderLine {
     pub width: Pt,
     pub color: RgbColor,
-    /// §17.4.38: border style (single, double, etc.)
+    /// §17.18.2: border style (single, double, etc.)
     pub style: TableBorderStyle,
 }
 
@@ -135,12 +147,17 @@ pub enum TableBorderStyle {
     Double,
 }
 
-/// Result of laying out a table.
+/// One page-slice of a table.
+///
+/// A table laid out whole (`layout_table`) is the one-slice case, so it is the
+/// same type: there is nothing a monolithic result carries that a slice does
+/// not, and two names for one shape only invited the caller to guess which one
+/// a given function returns.
 #[derive(Debug)]
-pub struct TableLayout {
-    /// Draw commands positioned relative to the table's top-left origin.
+pub struct TableSlice {
+    /// Draw commands positioned relative to this slice's top-left origin (0,0).
     pub commands: Vec<DrawCommand>,
-    /// Total size of the table.
+    /// Size of this slice.
     pub size: PtSize,
 }
 
@@ -151,7 +168,7 @@ pub(super) struct MeasuredRow {
     pub(super) borders: Vec<super::borders::CellBorders>,
     /// Total vertical space the row owns, **including** `leading_gap`.
     pub(super) height: Pt,
-    /// §17.4.44: cell spacing reserved above this row's content, so the gap to
+    /// §17.4.45: cell spacing reserved above this row's content, so the gap to
     /// the row above is exactly one `tblCellSpacing`. Zero without spacing,
     /// which is every table that does not set it.
     pub(super) leading_gap: Pt,

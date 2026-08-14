@@ -34,6 +34,15 @@ pub fn layout_cell(
     default_line_height: Pt,
     measure_text: super::paragraph::MeasureTextFn<'_>,
 ) -> CellLayout {
+    // A cell narrower than its own margins would otherwise offer a negative
+    // width. The clamp is *redundant* defence and deliberately kept as such:
+    // `line_emit` re-clamps every width it derives from this one — the
+    // per-line available width and the alignment remainder both `.max(ZERO)` —
+    // so removing it here moves no geometry, and a mutation check confirmed it
+    // as an equivalent mutant against line breaking, content height, cut points
+    // and right-aligned x alike. Nothing at this level can pin it; it stays
+    // because handing a negative width to a future caller that does *not*
+    // re-clamp is the kind of bug that surfaces far from here.
     let content_width = (cell_width - margins.horizontal()).max(Pt::ZERO);
 
     // §20.4.3.1: a cell is measured before its table is paginated — a row can
@@ -154,6 +163,24 @@ mod tests {
         assert!(!result.commands.is_empty());
     }
 
+    /// y of every `Text` command, in draw order.
+    fn text_ys(layout: &CellLayout) -> Vec<f32> {
+        layout
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.y.raw()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The margins displace the cell's content by exactly themselves, in both
+    /// axes. Asserted against a flush control rather than against absolute
+    /// coordinates: where a baseline sits within its line box is the paragraph
+    /// layer's answer and not this module's, so a *difference* is what
+    /// `layout_cell` is responsible for and the only thing that stays true if
+    /// that answer is ever refined.
     #[test]
     fn margins_offset_content() {
         let blocks = vec![simple_block("text", 30.0)];
@@ -163,15 +190,63 @@ mod tests {
             Pt::new(5.0),  // bottom
             Pt::new(10.0), // left
         );
-        let result = layout_cell(&blocks, Pt::new(200.0), &margins, Pt::new(14.0), None);
+        let flush = layout_cell(
+            &blocks,
+            Pt::new(200.0),
+            &PtEdgeInsets::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        let inset = layout_cell(&blocks, Pt::new(200.0), &margins, Pt::new(14.0), None);
 
-        // Text should be shifted right by left margin
-        if let Some(DrawCommand::Text { position, .. }) = result.commands.first() {
-            assert_eq!(position.x.raw(), 10.0, "left margin applied");
-            assert!(position.y.raw() >= 5.0, "top margin applied");
-        } else {
+        let Some(DrawCommand::Text { position, .. }) = inset.commands.first() else {
             panic!("expected Text command");
-        }
+        };
+        assert_eq!(position.x.raw(), 10.0, "left margin applied");
+        assert_eq!(
+            text_ys(&inset),
+            text_ys(&flush).iter().map(|y| y + 5.0).collect::<Vec<_>>(),
+            "every drawn line moves down by exactly the top margin"
+        );
+        assert_eq!(
+            inset.content_height, flush.content_height,
+            "…and the reported height is the content's, without the margins"
+        );
+    }
+
+    /// §17.4.1: the cut points `split.rs` partitions a row against are in
+    /// **content** coordinates — the margin shift above applies to draw
+    /// commands only, and the splitter adds `margin_top` back itself. A shift
+    /// applied in both places would double-count the margin and cut the row a
+    /// margin's worth too low.
+    ///
+    /// The same two paragraphs, laid out flush and inset, must therefore give
+    /// identical `lines` and draw commands 5 pt apart.
+    #[test]
+    fn cut_points_stay_in_content_coordinates_while_commands_shift() {
+        let blocks = vec![simple_block("first", 30.0), simple_block("second", 30.0)];
+        let margins = PtEdgeInsets::new(Pt::new(5.0), Pt::ZERO, Pt::ZERO, Pt::new(10.0));
+        let flush = layout_cell(
+            &blocks,
+            Pt::new(200.0),
+            &PtEdgeInsets::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        let inset = layout_cell(&blocks, Pt::new(200.0), &margins, Pt::new(14.0), None);
+
+        let tops = |c: &CellLayout| c.lines.iter().map(|l| l.top_y.raw()).collect::<Vec<_>>();
+        assert_eq!(
+            tops(&inset),
+            vec![0.0, 14.0],
+            "two 14 pt lines, measured from the content top"
+        );
+        assert_eq!(tops(&inset), tops(&flush), "the margin does not move them");
+        assert_eq!(
+            text_ys(&inset),
+            text_ys(&flush).iter().map(|y| y + 5.0).collect::<Vec<_>>(),
+            "…while the drawn lines do move"
+        );
     }
 
     #[test]

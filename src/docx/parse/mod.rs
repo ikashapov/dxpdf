@@ -25,6 +25,12 @@ use crate::docx::zip::{self, PackageContents};
 
 /// Parse a DOCX file from raw bytes into a `Document`.
 pub fn parse(data: &[u8]) -> Result<Document> {
+    // Unmodelled-property reporting is deduplicated per document, so the set
+    // has to be forgotten here rather than kept for the process — otherwise
+    // the second document rendered would look clean because the first already
+    // logged the same name. See `serde_xml::UnknownChildren::warn_once`.
+    serde_xml::reset_unknown_child_log();
+
     // Phase 1: Unzip
     let mut package = PackageContents::from_bytes(data)?;
 

@@ -216,6 +216,31 @@ fn table_grid_before_past_declared_columns_converts() {
     assert_eq!(&pdf[..5], b"%PDF-");
 }
 
+/// §17.18.87: `ST_TblLayoutType` enumerates exactly `fixed` and `autofit`, and
+/// `autofit` is the only spelling that names the auto-fit algorithm. The
+/// `ST_*` catalogue fails deserialization on an unknown value by design, so an
+/// enum missing this one does not silently ignore the attribute — it rejects
+/// the whole document, and every table in it goes with it.
+///
+/// The value is absent from this repo's 52-document corpus (228 `<w:tblLayout>`
+/// elements, all `fixed`), which is why nothing caught it; a table asking for
+/// the algorithm the spec names is not an exotic document.
+#[test]
+fn table_layout_autofit_converts() {
+    let docx = simple_docx(
+        r#"<w:tbl>
+          <w:tblPr><w:tblLayout w:type="autofit"/></w:tblPr>
+          <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+          <w:tr>
+            <w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+            <w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:tbl><w:p/>"#,
+    );
+    let pdf = dxpdf::convert(&docx).unwrap();
+    assert_eq!(&pdf[..5], b"%PDF-");
+}
+
 #[test]
 fn decimal_integer_measurements_convert_without_preprocessing() {
     let docx = simple_docx(

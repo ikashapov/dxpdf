@@ -94,6 +94,12 @@ pub struct BuildState {
     /// layout applies per *table*, not per row. Reported once per render for
     /// the same reason as `warned_border_styles`.
     pub warned_row_cell_spacing: bool,
+    /// §17.4.85: a `w:vMerge w:val="continue"` cell had no `restart` above it
+    /// and was rendered as an ordinary cell. Malformed input, so it is worth a
+    /// `RUST_LOG=warn` line — but once per render, not once per cell: a table
+    /// built by a producer that gets this wrong tends to get it wrong in every
+    /// row. See `build::table::promote_orphan_vmerge_continues`.
+    pub warned_orphan_vmerge: bool,
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -370,6 +376,7 @@ mod tests {
             doc_defaults_paragraph: model::ParagraphProperties::default(),
             doc_defaults_run: model::RunProperties::default(),
             default_paragraph_style_id: None,
+            default_table_style_id: None,
             footnotes: HashMap::new(),
             endnotes: HashMap::new(),
             even_and_odd_headers: false,
@@ -602,6 +609,7 @@ impl DocumentPosition {
             // `BuildState::speculatively` for why it is not rolled back.
             warned_border_styles: _,
             warned_row_cell_spacing: _,
+            warned_orphan_vmerge: _,
         } = state;
         Self {
             page_config: page_config.clone(),
