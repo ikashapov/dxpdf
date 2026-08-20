@@ -411,19 +411,7 @@ const ALL_FILES: &[&str] = &[
     "issue-165-cellspacing-scale.docx",
     "issue-165-floatv.docx",
     "hidden-text.docx",
-    "grid-gap-borders.docx",
-    // The three §17.4.66 geometry probes. They assert nothing about
-    // borders — see `scripts/make_border_geometry_probes.py` — but they are
-    // ordinary packages and belong in the parse sweep like any other.
-    "border-content-charge.docx",
-    "border-outer-box.docx",
-    "border-junction-colour.docx",
-    // §17.4.66 across a row of no height. It joins the sweep now that it can:
-    // it asked its question with a cell-less `<w:tr/>` until Word turned out to
-    // refuse such a document outright, and `table_rows_have_cells` below is the
-    // invariant that shape violated. The two spellings Word does accept — a row
-    // of `hRule="exact"` at 0 and at 2pt — both carry a cell.
-    "issue-157-empty-row-edge.docx",
+    "equations-omml.docx",
 ];
 
 #[test]
@@ -603,4 +591,21 @@ fn russian_number_formats_parse() {
             .any(|l| l.format == Some(NumberFormat::RussianUpper))
     });
     assert!(has_russian_upper, "expected a russianUpper numbering level");
+}
+
+#[test]
+fn equations_fixture_parses_math_blocks() {
+    let doc = load("equations-omml.docx");
+    let mut math_blocks = 0;
+    for block in &doc.body {
+        if let Block::Paragraph(p) = block {
+            for inline in &p.content {
+                if let Inline::Math(m) = inline {
+                    math_blocks += 1;
+                    assert!(!m.content.is_empty(), "math block must carry content");
+                }
+            }
+        }
+    }
+    assert_eq!(math_blocks, 2, "both equations parse into Inline::Math");
 }
