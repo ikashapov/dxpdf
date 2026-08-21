@@ -426,6 +426,14 @@ const ALL_FILES: &[&str] = &[
     "issue-157-empty-row-edge.docx",
     "equations-omml.docx",
     "universal-measures.docx",
+    "counting-zh-hans.docx",
+    "counting-zh-hant.docx",
+    "counting-ja.docx",
+    "counting-ko.docx",
+    "counting-vi.docx",
+    "counting-hi.docx",
+    "counting-th.docx",
+    "counting-en-dollar.docx",
 ];
 
 #[test]
