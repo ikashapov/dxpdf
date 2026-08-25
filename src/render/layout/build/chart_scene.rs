@@ -190,6 +190,7 @@ impl<'a> ChartPainter<'a> {
 
     fn font(&self, size: f32, bold: bool) -> FontProps {
         FontProps {
+            effects: Default::default(),
             family: self.family.clone(),
             size: Pt::new(size),
             bold: if bold { Toggle::On } else { Toggle::Absent },
@@ -222,6 +223,9 @@ impl<'a> ChartPainter<'a> {
             color,
             text_scale: 1.0,
             shaped: None,
+            // §17.3.2.x effects are a run property; a chart's own label text
+            // carries none.
+            outline: false,
         });
     }
 
