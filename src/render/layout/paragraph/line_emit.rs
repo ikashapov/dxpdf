@@ -1107,6 +1107,21 @@ pub(super) fn emit_line_commands(
                         }
                     }
                 }
+                Fragment::Scene {
+                    size,
+                    commands: scene,
+                    ..
+                } => {
+                    // Issue #155: a SmartArt/chart scene sits in the line
+                    // like an image — its commands are scene-local, shifted
+                    // to the pen here.
+                    for cmd in scene.iter() {
+                        let mut cmd = cmd.clone();
+                        cmd.shift(x, *cursor_y);
+                        commands.push(cmd);
+                    }
+                    x += size.width;
+                }
                 Fragment::Emoji {
                     text,
                     typeface,
