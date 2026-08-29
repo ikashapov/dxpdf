@@ -425,6 +425,7 @@ const ALL_FILES: &[&str] = &[
     // of `hRule="exact"` at 0 and at 2pt — both carry a cell.
     "issue-157-empty-row-edge.docx",
     "equations-omml.docx",
+    "devanagari.docx",
 ];
 
 #[test]
