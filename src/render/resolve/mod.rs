@@ -147,6 +147,11 @@ pub fn resolve(doc: Document) -> ResolvedDocument {
     // where map iteration is not), so a person who both edited and commented
     // keeps one color.
     let mut revision_colors = revision::collect_revision_colors(&body);
+    // Issue #154: a range marker whose id the comments part never defined
+    // must not wash anything — Word ignores such orphans. Cleared here, where
+    // both sides are in hand, so layout can trust every stamp it sees.
+    let mut body = body;
+    revision::clear_orphan_comment_stamps(&mut body, &comments);
     {
         let mut ids: Vec<_> = comments.keys().copied().collect();
         ids.sort();
@@ -230,6 +235,7 @@ mod tests {
                 comment: None,
             }))],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))
     }
 
