@@ -328,6 +328,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::Image(Box::new(image))],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))
     }
 
@@ -657,6 +658,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::Pict(pict)],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId1", "synth_vml_box");
 
@@ -693,6 +695,7 @@ mod tests {
                 content: vec![],
             })],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId7", "https://example.com");
         rewrite_part_rels_in_blocks(&mut blocks, &remap);
@@ -729,6 +732,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::AlternateContent(ac)],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId1", "header3.xml::rId1");
         rewrite_part_rels_in_blocks(&mut blocks, &remap);
@@ -776,6 +780,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::Pict(pict)],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId1", "grouped");
         rewrite_part_rels_in_blocks(&mut blocks, &remap);

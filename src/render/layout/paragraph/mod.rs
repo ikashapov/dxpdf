@@ -593,6 +593,9 @@ mod tests {
     /// a hyperlinked equation independently of the OMML→fragment path.
     fn math_fraction_frag(hyperlink_url: Option<LinkTarget>) -> Fragment {
         let font = Rc::new(FontProps {
+            strike_lines: 0,
+            strike_position: Pt::ZERO,
+            strike_thickness: Pt::ZERO,
             rtl: crate::render::fonts::Toggle::Absent,
             family: Rc::from("Cambria Math"),
             size: Pt::new(12.0),
