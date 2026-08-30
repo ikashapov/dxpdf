@@ -793,6 +793,9 @@ mod tests {
     #[test]
     fn font_props_reaches_into_a_math_fraction() {
         let font = Rc::new(FontProps {
+            strike_lines: 0,
+            strike_position: Pt::ZERO,
+            strike_thickness: Pt::ZERO,
             family: Rc::from("Cambria Math"),
             size: Pt::new(12.0),
             bold: Toggle::Absent,
