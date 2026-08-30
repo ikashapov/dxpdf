@@ -1318,7 +1318,10 @@ pub(super) fn emit_line_commands(
                 }
                 Fragment::CommentAnchor(id) => {
                     commands.push(DrawCommand::CommentAnchor {
-                        position: PtOffset::new(x, *cursor_y + line.ascent),
+                        // The pen owns the cursor now, as the bookmark arm above
+                        // already does: an anchor draws nothing and takes no
+                        // advance, so it marks the pen's current position.
+                        position: PtOffset::new(pen.position(), *cursor_y + line.ascent),
                         id: *id,
                     });
                 }

@@ -338,6 +338,8 @@ mod tests {
             measurer: None,
             auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             locale_tag: None,
+            revision_palette: None,
+            comment_marks: false,
         }
     }
 

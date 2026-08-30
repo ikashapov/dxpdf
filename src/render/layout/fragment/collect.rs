@@ -221,7 +221,11 @@ where
     // Issue #154: the pale wash behind a commented range. A run's own
     // shading (or highlight) wins — the wash is context, not formatting.
     if comment_marks && tr.comment.is_some() && text_style.shading.is_none() {
-        text_style.shading = Some(crate::render::resolve::revision::COMMENT_RANGE_SHADING);
+        // Flat, not a pattern: the wash is one pale colour behind the run,
+        // and §17.18.78's geometries belong to a `w:shd` an author wrote.
+        text_style.shading = Some(crate::render::resolve::shading::ResolvedShading::Flat(
+            crate::render::resolve::revision::COMMENT_RANGE_SHADING,
+        ));
     }
 
     if let (Some(rev), Some(palette)) = (&tr.revision, revision_palette) {
@@ -471,6 +475,11 @@ fn emit_field_substitution<F>(
 /// Not the complex-field path: a complex field's MERGEFORMAT substitution
 /// goes through [`emit_field_substitution`] instead, which prefers the
 /// field's own first result run over paragraph defaults.
+/// Known limit (issue #154): a substituted dynamic value built here wears no
+/// revision mark even when its field sits inside `<w:ins>` — the substitution
+/// takes paragraph defaults, not the stamped result run. The cached result
+/// path does wear the mark; a deleted field never reaches here at all (the
+/// parse drops it, see `drop_unstampable_deleted`).
 fn make_field_text_fragment<F>(
     text: Rc<str>,
     default_family: &str,
