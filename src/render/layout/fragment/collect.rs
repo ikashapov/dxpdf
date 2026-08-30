@@ -131,6 +131,7 @@ fn resolve_run_styling<F>(
     theme: Option<&crate::model::Theme>,
     auto_fit: crate::render::layout::ShapeAutoFit,
     revision_palette: Option<&std::collections::HashMap<String, RgbColor>>,
+    comment_marks: bool,
     measure_text: &F,
 ) -> (FontProps, TextRunStyle)
 where
@@ -217,6 +218,12 @@ where
     // insertion, strike-through for a deletion. `None` palette is the
     // `w:revisionView` final view; the *suppression* of deleted runs in that
     // view happens before styling, in `collect_fragments`' hidden filter.
+    // Issue #154: the pale wash behind a commented range. A run's own
+    // shading (or highlight) wins — the wash is context, not formatting.
+    if comment_marks && tr.comment.is_some() && text_style.shading.is_none() {
+        text_style.shading = Some(crate::render::resolve::revision::COMMENT_RANGE_SHADING);
+    }
+
     if let (Some(rev), Some(palette)) = (&tr.revision, revision_palette) {
         text_style.color = palette
             .get(&rev.author)
@@ -400,6 +407,7 @@ fn emit_field_substitution<F>(
     theme: Option<&crate::model::Theme>,
     auto_fit: crate::render::layout::ShapeAutoFit,
     revision_palette: Option<&std::collections::HashMap<String, RgbColor>>,
+    comment_marks: bool,
     hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     measurer: Option<&crate::render::layout::measurer::TextMeasurer<'_>>,
@@ -418,6 +426,7 @@ fn emit_field_substitution<F>(
             theme,
             auto_fit,
             revision_palette,
+            comment_marks,
             measure_text,
         ),
         _ => (
@@ -544,6 +553,9 @@ pub struct FragmentCtx<'a> {
     /// render plain and deleted runs are filtered out before styling.
     pub revision_palette:
         Option<&'a std::collections::HashMap<String, crate::render::resolve::color::RgbColor>>,
+    /// Issue #154: whether comment marks render (`w:revisionView`). Gates
+    /// both the range shading and the anchors the balloon pass consumes.
+    pub comment_marks: bool,
 }
 
 /// §17.3.2 `w:vanish`: whether this run is hidden text, and so contributes
@@ -684,6 +696,7 @@ where
                         theme,
                         auto_fit,
                         ctx.revision_palette,
+                        ctx.comment_marks,
                         measure_text,
                     );
                     field_sub_emitted = true;
@@ -733,6 +746,7 @@ where
                                         theme,
                                         auto_fit,
                                         ctx.revision_palette,
+                                        ctx.comment_marks,
                                         measure_text,
                                     );
                                     let (_, font, style) =
@@ -771,6 +785,7 @@ where
                                 theme,
                                 auto_fit,
                                 ctx.revision_palette,
+                                ctx.comment_marks,
                                 measure_text,
                             );
                             if let Some(measurer) = ctx.measurer {
@@ -825,6 +840,7 @@ where
                         theme,
                         auto_fit,
                         ctx.revision_palette,
+                        ctx.comment_marks,
                         measure_text,
                     );
 
@@ -1009,6 +1025,7 @@ where
                                     theme,
                                     auto_fit,
                                     ctx.revision_palette,
+                                    ctx.comment_marks,
                                     hyperlink_url,
                                     measure_text,
                                     ctx.measurer,
@@ -1113,6 +1130,14 @@ where
                 // Bookmark target — emit as zero-width named destination.
                 Inline::BookmarkStart { name, .. } => {
                     fragments.push(Fragment::Bookmark { name: name.clone() });
+                }
+                // Issue #154: the comment anchor — zero-width; the balloon
+                // pass reads its emitted position. Nothing to anchor when
+                // comment marks are hidden.
+                Inline::CommentRef(id) => {
+                    if ctx.comment_marks {
+                        fragments.push(Fragment::CommentAnchor(*id));
+                    }
                 }
                 // Non-visual inlines — skip
                 Inline::BookmarkEnd(_)
@@ -1233,6 +1258,7 @@ where
                                         paragraph_run_defaults: p.mark_run_properties.as_ref(),
                                         theme,
                                         revision_palette: ctx.revision_palette,
+                                        comment_marks: ctx.comment_marks,
                                         measurer: ctx.measurer,
                                         auto_fit: ctx.auto_fit,
                                         // A VML text box carries no language
@@ -1287,6 +1313,7 @@ mod tests {
             default_size: Pt::new(size),
             default_color: RgbColor::BLACK,
             revision_palette: None,
+            comment_marks: true,
             resolved_styles: None,
             paragraph_run_defaults: None,
             theme: None,
@@ -1328,6 +1355,7 @@ mod tests {
             content: vec![RunElement::Text(text.into())],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 
@@ -1468,6 +1496,7 @@ mod tests {
             ],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))];
         assert!(
             collect(&inlines, &default_ctx(12.0)).is_empty(),
@@ -1590,6 +1619,7 @@ mod tests {
             content: vec![RunElement::Text(text.into())],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 
@@ -1607,6 +1637,7 @@ mod tests {
             content: vec![RunElement::Text(text.into())],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 
@@ -1659,6 +1690,7 @@ mod tests {
             content: vec![RunElement::Tab],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))];
         let ctx = default_ctx(12.0);
         let frags = collect_fragments(
@@ -1688,6 +1720,7 @@ mod tests {
             })],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))];
         let ctx = default_ctx(12.0);
         let frags = collect_fragments(
@@ -1720,6 +1753,7 @@ mod tests {
             content: vec![RunElement::LineBreak(BreakKind::TextWrapping)],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))];
         let ctx = default_ctx(12.0);
         let frags = collect_fragments(
@@ -1880,6 +1914,7 @@ mod tests {
             content: vec![RunElement::Text(String::new())],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))];
         let ctx = default_ctx(12.0);
         let frags = collect_fragments(
@@ -1997,6 +2032,7 @@ mod tests {
             content: vec![RunElement::Text(text.into())],
             rsids: RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 

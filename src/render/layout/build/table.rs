@@ -2244,6 +2244,7 @@ mod tests {
             show_ins_del_marks: true,
             show_comment_marks: true,
             revision_colors: Default::default(),
+            comments: Default::default(),
         }
     }
 
@@ -2388,6 +2389,7 @@ mod tests {
             content: vec![model::RunElement::Text(s.to_string())],
             rsids: model::RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 

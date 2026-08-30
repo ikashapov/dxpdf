@@ -361,8 +361,9 @@ fn build_note_blocks(
             // the paragraph that hosts this note.
             let _ = state.footnotes.take_pending();
 
-            // Prepend display number to the first paragraph.
-            if i == 0 && !frags.is_empty() {
+            // Prepend display number to the first paragraph. A comment body
+            // reuses this builder with an empty display and no prefix.
+            if i == 0 && !display_num.is_empty() && !frags.is_empty() {
                 let num_text = format!("{}  ", display_num);
                 // §17.8.3.2 / §17.3.2.14: fall back to the document-level spec
                 // defaults rather than restating a font name here.
@@ -586,6 +587,7 @@ pub(super) fn build_fragments(
             .resolved
             .show_ins_del_marks
             .then_some(&ctx.resolved.revision_colors),
+        comment_marks: ctx.resolved.show_comment_marks,
     };
     let mut fragments = collect_fragments(
         &para.content,
@@ -633,6 +635,7 @@ mod tests {
             show_ins_del_marks: true,
             show_comment_marks: true,
             revision_colors: Default::default(),
+            comments: Default::default(),
         }
     }
 
@@ -654,6 +657,7 @@ mod tests {
             content: vec![model::RunElement::PageBreak],
             rsids: model::RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 
@@ -664,6 +668,7 @@ mod tests {
             content: vec![model::RunElement::Text(s.to_string())],
             rsids: model::RevisionIds::default(),
             revision: None,
+            comment: None,
         }))
     }
 

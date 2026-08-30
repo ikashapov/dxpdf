@@ -1055,6 +1055,12 @@ pub(super) fn emit_line_commands(
                         name: name.clone(),
                     });
                 }
+                Fragment::CommentAnchor(id) => {
+                    commands.push(DrawCommand::CommentAnchor {
+                        position: PtOffset::new(x, *cursor_y + line.ascent),
+                        id: *id,
+                    });
+                }
             }
         }
 
