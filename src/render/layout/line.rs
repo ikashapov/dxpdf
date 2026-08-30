@@ -365,6 +365,9 @@ mod tests {
         let row = |text: &str| crate::render::layout::fragment::MathRow {
             text: text.into(),
             font: Rc::new(FontProps {
+                strike_lines: 0,
+                strike_position: Pt::ZERO,
+                strike_thickness: Pt::ZERO,
                 rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),
