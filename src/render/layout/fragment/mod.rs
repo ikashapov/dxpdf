@@ -394,6 +394,9 @@ pub enum Fragment {
     Bookmark {
         name: String,
     },
+    /// Issue #154: a comment's anchor (`w:commentReference`) — zero-width
+    /// marker the balloon pass attaches the connector to.
+    CommentAnchor(crate::model::CommentId),
 }
 
 impl Fragment {
@@ -407,7 +410,8 @@ impl Fragment {
             Fragment::LineBreak { .. }
             | Fragment::ColumnBreak
             | Fragment::PageBreak { .. }
-            | Fragment::Bookmark { .. } => Pt::ZERO,
+            | Fragment::Bookmark { .. }
+            | Fragment::CommentAnchor(_) => Pt::ZERO,
         }
     }
 
@@ -430,7 +434,9 @@ impl Fragment {
             | Fragment::PTab { line_height, .. }
             | Fragment::LineBreak { line_height }
             | Fragment::PageBreak { line_height } => *line_height,
-            Fragment::ColumnBreak | Fragment::Bookmark { .. } => Pt::ZERO,
+            Fragment::ColumnBreak | Fragment::Bookmark { .. } | Fragment::CommentAnchor(_) => {
+                Pt::ZERO
+            }
         }
     }
 
@@ -476,7 +482,10 @@ impl Fragment {
     /// holding nothing but bookmarks still shows nothing.
     pub fn occupies_line(&self) -> bool {
         match self {
-            Fragment::PageBreak { .. } | Fragment::ColumnBreak | Fragment::Bookmark { .. } => false,
+            Fragment::PageBreak { .. }
+            | Fragment::ColumnBreak
+            | Fragment::Bookmark { .. }
+            | Fragment::CommentAnchor(_) => false,
             Fragment::Text { .. }
             | Fragment::Image { .. }
             | Fragment::Emoji { .. }
