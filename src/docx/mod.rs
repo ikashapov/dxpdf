@@ -15,9 +15,9 @@ pub mod model {
 }
 
 pub mod error;
-pub(crate) mod mc_ignorable;
 pub mod parse;
 pub mod relationships;
+pub(crate) mod w14_shadow_collision;
 pub(crate) mod whitespace_workaround;
 pub mod zip;
 

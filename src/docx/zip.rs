@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use crate::docx::error::{ParseError, Result};
-use crate::docx::mc_ignorable::elide_ignorable_extensions;
+use crate::docx::w14_shadow_collision::elide_w14_shadow;
 use crate::docx::whitespace_workaround::substitute_whitespace_only_runs;
 
 /// The contents of a DOCX package, extracted from the ZIP archive.
@@ -27,10 +27,10 @@ impl PackageContents {
             file.read_to_end(&mut buf)?;
             // Apply XML preprocessing workarounds only to XML parts. Binary
             // parts (images, fonts, embedded OLE) must not be touched.
-            // See `mc_ignorable` and `whitespace_workaround` module docs for
-            // the rationale behind each pass.
+            // See `w14_shadow_collision` and `whitespace_workaround` module
+            // docs for the rationale behind each pass.
             if name.ends_with(".xml") || name.ends_with(".rels") {
-                buf = elide_ignorable_extensions(&buf);
+                buf = elide_w14_shadow(&buf);
                 buf = substitute_whitespace_only_runs(&buf);
             }
             parts.insert(name, buf);

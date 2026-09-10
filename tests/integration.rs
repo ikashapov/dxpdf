@@ -792,11 +792,12 @@ fn body_shape_txbx_text_is_rendered() {
 /// local names only, so `w14:shadow` collided with `RPrXml`'s `shadow` field
 /// and was reported as a duplicate. The root's `mc:Ignorable="w14"` is the
 /// document's own declaration that a consumer may disregard the extension;
-/// `crate::docx::mc_ignorable` now honors it. Also carries an
+/// `crate::docx::w14_shadow_collision` now elides exactly this one collision
+/// (deliberately narrow — see that module's doc). Also carries an
 /// `mc:AlternateContent` guarded by the same `w14` token, which must still
 /// parse and pick its `wps`-requiring choice untouched — proof that eliding
-/// declared-ignorable extensions doesn't reach inside the separate
-/// `AlternateContent` branch-selection mechanism.
+/// the collision doesn't reach inside the separate `AlternateContent`
+/// branch-selection mechanism.
 #[test]
 fn w14_extension_sharing_rpr_field_name_does_not_break_parse() {
     let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
