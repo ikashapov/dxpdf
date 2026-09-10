@@ -222,9 +222,10 @@ pub(super) fn paragraph_outline(
 
 /// The text of a heading paragraph, as the outline should title it.
 ///
-/// Runs are joined, and hyperlinks and field *results* are walked into, because
-/// all three are ordinary text as far as a reader is concerned — a title cut at
-/// the first formatting change would be wrong far more often than not.
+/// Runs are joined, and hyperlinks, field *results* and equations are walked
+/// into, because all of them are ordinary text as far as a reader is
+/// concerned — a title cut at the first formatting change would be wrong far
+/// more often than not.
 ///
 /// The §17.9.22 list label is deliberately absent: it is injected at layout,
 /// not part of the paragraph, and both Word and LibreOffice title a numbered
@@ -246,6 +247,7 @@ fn outline_title(inlines: &[model::Inline]) -> String {
                 }
                 model::Inline::Hyperlink(link) => walk(&link.content, out),
                 model::Inline::Field(field) => walk(&field.content, out),
+                model::Inline::Math(math) => walk_math(&math.content, out),
                 _ => {}
             }
         }
@@ -253,6 +255,31 @@ fn outline_title(inlines: &[model::Inline]) -> String {
     let mut out = String::new();
     walk(inlines, &mut out);
     out.trim().to_string()
+}
+
+/// §22.1 equation content, linearized for an outline title. A superscript's
+/// base and exponent concatenate and a fraction becomes `num/den` — the same
+/// degradation `fragment::math::flatten_plain_text` gives a fraction argument
+/// that is itself a fraction or superscript, and how a reader would say the
+/// equation aloud. Not shared with that function: it also applies the italic
+/// math-alphabet substitution Word draws with, which a plain-text title has
+/// no use for, and its warnings are phrased for "inside a fraction argument",
+/// which is not where a title-level equation sits.
+fn walk_math(elements: &[model::MathElement], out: &mut String) {
+    for element in elements {
+        match element {
+            model::MathElement::Run(run) => out.push_str(&run.text),
+            model::MathElement::Superscript { base, sup } => {
+                walk_math(base, out);
+                walk_math(sup, out);
+            }
+            model::MathElement::Fraction { num, den } => {
+                walk_math(num, out);
+                out.push('/');
+                walk_math(den, out);
+            }
+        }
+    }
 }
 
 pub(super) fn doc_font_family(ctx: &BuildContext) -> String {
@@ -971,6 +998,65 @@ mod tests {
             content: Vec::new(),
             rsids: model::ParagraphRevisionIds::default(),
         }
+    }
+
+    // ── §22.1 outline titles for headings containing math ────────────────
+
+    fn text_run(text: &str) -> model::Inline {
+        model::Inline::TextRun(Box::new(model::TextRun {
+            style_id: None,
+            properties: model::RunProperties::default(),
+            content: vec![model::RunElement::Text(text.to_string())],
+            rsids: model::RevisionIds::default(),
+        }))
+    }
+
+    fn math_run(text: &str) -> model::MathElement {
+        model::MathElement::Run(model::MathRun {
+            text: text.to_string(),
+        })
+    }
+
+    fn math(elements: Vec<model::MathElement>) -> model::Inline {
+        model::Inline::Math(model::MathBlock { content: elements })
+    }
+
+    /// A heading mixing prose and an equation must not have its title cut at
+    /// the equation, for the same reason a hyperlink or field result is
+    /// walked into rather than skipped: it is ordinary text to a reader.
+    #[test]
+    fn outline_title_includes_inline_math() {
+        let inlines = vec![
+            text_run("Solving "),
+            math(vec![model::MathElement::Superscript {
+                base: vec![math_run("x")],
+                sup: vec![math_run("2")],
+            }]),
+        ];
+        assert_eq!(outline_title(&inlines), "Solving x2");
+    }
+
+    /// A heading that is *only* an equation must still get a title — before
+    /// this, `outline_title` returned an empty string for it, which
+    /// `paragraph_outline` then treats as "not a heading worth an outline
+    /// entry", silently dropping the heading from the PDF's bookmarks pane.
+    #[test]
+    fn a_heading_that_is_only_math_gets_a_title() {
+        let inlines = vec![math(vec![math_run("E")])];
+        assert_eq!(outline_title(&inlines), "E");
+    }
+
+    /// A fraction has no plain-text analogue, so it linearizes as `num/den`
+    /// — the same degradation `fragment::math::flatten_plain_text` uses for
+    /// a fraction nested inside another fraction's argument, and how a
+    /// reader would say the equation aloud.
+    #[test]
+    fn outline_title_linearizes_a_fraction_as_num_over_den() {
+        let inlines = vec![math(vec![model::MathElement::Fraction {
+            num: vec![math_run("1")],
+            den: vec![math_run("2")],
+        }])];
+        assert_eq!(outline_title(&inlines), "1/2");
     }
 
     #[test]
