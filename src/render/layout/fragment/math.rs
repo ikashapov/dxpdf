@@ -117,18 +117,8 @@ where
     let (num_width, num_metrics) = measure_text(&num_text, font);
     let (den_width, den_metrics) = measure_text(&den_text, font);
 
-    let size = font.size;
-    let axis = size * MATH_AXIS_RATIO;
-    let rule = size * FRACTION_RULE_RATIO;
-    let gap = size * FRACTION_GAP_RATIO;
-    let pad = size * FRACTION_SIDE_PAD_RATIO;
-
-    let width = num_width.max(den_width) + pad * 2.0;
-    let metrics = TextMetrics {
-        ascent: axis + rule * 0.5 + gap + num_metrics.height(),
-        descent: (rule * 0.5 + gap + den_metrics.height() - axis).max(Pt::ZERO),
-        leading: Pt::ZERO,
-    };
+    let (width, metrics) =
+        fraction_geometry(font.size, num_width, num_metrics, den_width, den_metrics);
 
     let row = |text: String, row_width: Pt, row_metrics: TextMetrics| MathRow {
         text: Rc::from(text.as_str()),
@@ -145,6 +135,34 @@ where
         baseline_offset,
         break_after: BreakAfter::Opportunity,
     }
+}
+
+/// The fraction's overall width/metrics from its two rows' own.
+///
+/// Shared between initial construction and
+/// [`super::fallback::apply_font_fallback`]'s repair of a row whose face got
+/// substituted: both must derive the stack's ascent/descent from the same
+/// `size`/`FRACTION_*` ratios, or the space line-fitting reserved for the
+/// fraction and what re-fallback leaves behind could disagree.
+pub(super) fn fraction_geometry(
+    size: Pt,
+    num_width: Pt,
+    num_metrics: TextMetrics,
+    den_width: Pt,
+    den_metrics: TextMetrics,
+) -> (Pt, TextMetrics) {
+    let axis = size * MATH_AXIS_RATIO;
+    let rule = size * FRACTION_RULE_RATIO;
+    let gap = size * FRACTION_GAP_RATIO;
+    let pad = size * FRACTION_SIDE_PAD_RATIO;
+
+    let width = num_width.max(den_width) + pad * 2.0;
+    let metrics = TextMetrics {
+        ascent: axis + rule * 0.5 + gap + num_metrics.height(),
+        descent: (rule * 0.5 + gap + den_metrics.height() - axis).max(Pt::ZERO),
+        leading: Pt::ZERO,
+    };
+    (width, metrics)
 }
 
 /// Flatten a fraction argument to plain text. The minimal scope renders

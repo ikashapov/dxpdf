@@ -62,7 +62,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::render::dimension::Pt;
 use crate::render::fonts::{FaceRequest, FontRegistry, Toggle, TypefaceId};
 
-use super::{BreakAfter, FontProps, Fragment, TextMetrics};
+use super::{BreakAfter, FontProps, Fragment, MathRow, TextMetrics};
 
 /// How this pass asks the host what it cannot answer itself.
 ///
@@ -357,6 +357,11 @@ pub fn apply_font_fallback<F>(
     // The early-out. See this module's doc for why it carries the pass.
     let needed = fragments.iter().any(|f| match f {
         Fragment::Text { text, font, .. } => !lookup.covers_all(font, text),
+        // A fraction's rows are math text too (issue #139 makes no exception
+        // for them), just packed into a `MathRow` instead of `Fragment::Text`.
+        Fragment::MathFraction { num, den, .. } => {
+            !lookup.covers_all(&num.font, &num.text) || !lookup.covers_all(&den.font, &den.text)
+        }
         _ => false,
     });
     if !needed {
@@ -378,6 +383,13 @@ fn split_at_coverage_boundaries<F>(
 ) where
     F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
 {
+    // A fraction is one pre-measured atom, not a run of words — there is no
+    // boundary to split it at, so it is repaired in place instead of split.
+    if matches!(fragment, Fragment::MathFraction { .. }) {
+        out.push(repair_math_fraction(fragment, lookup, measure_text));
+        return;
+    }
+
     let Fragment::Text {
         ref text, ref font, ..
     } = fragment
@@ -472,6 +484,101 @@ fn split_at_coverage_boundaries<F>(
             text_offset,
             is_footnote_ref,
         });
+    }
+}
+
+/// Repair a fraction's numerator/denominator against the same fallback a
+/// plain math run gets, without splitting the atom: a [`MathRow`] is one
+/// pre-measured text+font pair (line fitting has to see the whole fraction as
+/// one unit), so unlike [`Fragment::Text`] a row cannot be cut at a coverage
+/// boundary — it can only take one substitute face for its whole text,
+/// chosen from the first uncovered cluster. A row mixing two different
+/// missing scripts is not fully repaired by this; that has not been seen in
+/// practice and is not worth a `MathRow` redesign to cover.
+fn repair_math_fraction<F>(
+    fragment: Fragment,
+    lookup: &impl FallbackLookup,
+    measure_text: &F,
+) -> Fragment
+where
+    F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
+{
+    let Fragment::MathFraction {
+        num,
+        den,
+        color,
+        baseline_offset,
+        break_after,
+        width,
+        metrics,
+    } = fragment
+    else {
+        unreachable!("guarded by the caller's `matches!` check")
+    };
+
+    if lookup.covers_all(&num.font, &num.text) && lookup.covers_all(&den.font, &den.text) {
+        return Fragment::MathFraction {
+            num,
+            den,
+            color,
+            width,
+            metrics,
+            baseline_offset,
+            break_after,
+        };
+    }
+
+    let num = repair_math_row(num, lookup, measure_text);
+    let den = repair_math_row(den, lookup, measure_text);
+    // Re-derive the stack's synthesized ascent/descent from the (possibly
+    // widened, possibly re-fonted) rows — the same formula `fraction_fragment`
+    // used to build them the first time, so the space this fraction now
+    // occupies is honest about what it contains.
+    let (width, metrics) = super::math::fraction_geometry(
+        num.font.size,
+        num.width,
+        num.metrics,
+        den.width,
+        den.metrics,
+    );
+    Fragment::MathFraction {
+        num,
+        den,
+        color,
+        width,
+        metrics,
+        baseline_offset,
+        break_after,
+    }
+}
+
+/// Give one fraction row a covering face, or leave it alone if the host has
+/// nothing better — the same two outcomes [`choose_family`] documents for
+/// ordinary text.
+fn repair_math_row<F>(row: MathRow, lookup: &impl FallbackLookup, measure_text: &F) -> MathRow
+where
+    F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
+{
+    if lookup.covers_all(&row.font, &row.text) {
+        return row;
+    }
+    let Some(family) = row
+        .text
+        .graphemes(true)
+        .find_map(|cluster| choose_family(cluster, &row.font, lookup))
+    else {
+        return row;
+    };
+    let font = Rc::new(FontProps {
+        family,
+        ..(*row.font).clone()
+    });
+    let (width, metrics) = measure_text(&row.text, &font);
+    MathRow {
+        text: row.text,
+        font,
+        width,
+        metrics,
     }
 }
 
@@ -736,5 +843,138 @@ mod tests {
             })
             .collect();
         assert_eq!(before, after, "the same Rc<str> allocations, untouched");
+    }
+
+    fn math_row(text: &str, family: &str) -> MathRow {
+        let font = font(family);
+        let (width, metrics) = measure(text, &font);
+        MathRow {
+            text: Rc::from(text),
+            font,
+            width,
+            metrics,
+        }
+    }
+
+    fn math_fraction(
+        num_text: &str,
+        num_family: &str,
+        den_text: &str,
+        den_family: &str,
+    ) -> Fragment {
+        let num = math_row(num_text, num_family);
+        let den = math_row(den_text, den_family);
+        let (width, metrics) = super::super::math::fraction_geometry(
+            Pt::new(12.0),
+            num.width,
+            num.metrics,
+            den.width,
+            den.metrics,
+        );
+        Fragment::MathFraction {
+            num,
+            den,
+            color: RgbColor::BLACK,
+            width,
+            metrics,
+            baseline_offset: Pt::ZERO,
+            break_after: BreakAfter::Opportunity,
+        }
+    }
+
+    /// Issue #139 makes no exception for `Fragment::MathFraction`: a
+    /// numerator/denominator is math text too, just packed into a `MathRow`
+    /// instead of `Fragment::Text`. This is also the early-out's only path to
+    /// `true` here, since the document has no `Fragment::Text` at all.
+    #[test]
+    fn a_fraction_row_gets_a_covering_face() {
+        let lookup = FakeLookup::new("ab", &[('ア', "CJK")]);
+        let mut frags = vec![math_fraction("aア", "Base", "b", "Base")];
+        apply_font_fallback(&mut frags, &lookup, &measure);
+        match &frags[0] {
+            Fragment::MathFraction { num, den, .. } => {
+                assert_eq!(&*num.text, "aア");
+                assert_eq!(
+                    &*num.font.family, "CJK",
+                    "numerator moved to a covering face"
+                );
+                assert_eq!(&*den.text, "b");
+                assert_eq!(&*den.font.family, "Base", "denominator untouched");
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
+    }
+
+    /// A fraction whose rows are already fully covered is not rebuilt — the
+    /// same "untouched" guarantee `a_covered_fragment_is_returned_untouched`
+    /// pins for plain text.
+    #[test]
+    fn a_fully_covered_fraction_is_untouched() {
+        let lookup = FakeLookup::new("abc", &[('ア', "CJK")]);
+        let mut frags = vec![math_fraction("a", "Base", "bc", "Base")];
+        let before = match &frags[0] {
+            Fragment::MathFraction { num, .. } => num.text.as_ptr(),
+            _ => unreachable!(),
+        };
+        apply_font_fallback(&mut frags, &lookup, &measure);
+        match &frags[0] {
+            Fragment::MathFraction { num, den, .. } => {
+                assert_eq!(
+                    num.text.as_ptr(),
+                    before,
+                    "the same Rc<str> allocation, untouched"
+                );
+                assert_eq!(&*num.font.family, "Base");
+                assert_eq!(&*den.font.family, "Base");
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
+    }
+
+    /// The stated behaviour when the host offers nothing: keep the row's own
+    /// face rather than move it to a face that cannot help either.
+    #[test]
+    fn a_fraction_row_with_no_covering_face_keeps_its_own() {
+        let lookup = FakeLookup::new("ab", &[]);
+        let mut frags = vec![math_fraction("aア", "Base", "b", "Base")];
+        apply_font_fallback(&mut frags, &lookup, &measure);
+        match &frags[0] {
+            Fragment::MathFraction { num, den, .. } => {
+                assert_eq!(&*num.font.family, "Base");
+                assert_eq!(&*den.font.family, "Base");
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
+    }
+
+    /// A repaired fraction's outer width/metrics must come from the same
+    /// `fraction_geometry` formula that built it the first time, so the space
+    /// line-fitting reserves and what the repair leaves behind cannot desync.
+    #[test]
+    fn a_repaired_fraction_recomputes_its_stack_geometry() {
+        let lookup = FakeLookup::new("ab", &[('ア', "CJK")]);
+        let mut frags = vec![math_fraction("aアa", "Base", "b", "Base")];
+        apply_font_fallback(&mut frags, &lookup, &measure);
+        match &frags[0] {
+            Fragment::MathFraction {
+                num,
+                den,
+                width,
+                metrics,
+                ..
+            } => {
+                let (expected_width, expected_metrics) = super::super::math::fraction_geometry(
+                    num.font.size,
+                    num.width,
+                    num.metrics,
+                    den.width,
+                    den.metrics,
+                );
+                assert_eq!(width.raw(), expected_width.raw());
+                assert_eq!(metrics.ascent.raw(), expected_metrics.ascent.raw());
+                assert_eq!(metrics.descent.raw(), expected_metrics.descent.raw());
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
     }
 }
