@@ -4,8 +4,38 @@
 
 use serde::{Deserialize, Deserializer};
 
-use super::integer_measure::IntegerMeasure;
+use super::integer_measure::{IntegerMeasure, MeasureKind};
 use crate::model::dimension::{Dimension, Unit};
+
+/// Land a parsed measure in `U`: a native value is already in `U`, a
+/// §22.9.2.15 universal measure arrives in EMU and divides by
+/// [`Unit::EMU_PER_UNIT`], and a §22.9.2.9 percentage arrives in thousandths
+/// of a percent and divides by [`Unit::THOUSANDTHS_PER_UNIT`] — each rounded
+/// half away from zero, and each an error when `U` has no such scale, since
+/// a spelling that names a kind of quantity the attribute does not measure
+/// is a contradiction to report, not to guess through.
+pub(crate) fn dimension_from_measure<U: Unit>(
+    measure: IntegerMeasure,
+) -> Result<Dimension<U>, &'static str> {
+    let (numerator, denominator) = match measure.kind() {
+        MeasureKind::Native => return Ok(Dimension::new(measure.value())),
+        MeasureKind::Universal => {
+            U::EMU_PER_UNIT.ok_or("a universal measure cannot target this unit")?
+        }
+        MeasureKind::Percent => {
+            let scale =
+                U::THOUSANDTHS_PER_UNIT.ok_or("a percentage is not valid for this measurement")?;
+            (scale, 1)
+        }
+    };
+    let scaled = i128::from(measure.value()) * i128::from(denominator);
+    let numerator = i128::from(numerator);
+    let rounded = (2 * scaled.abs() + numerator) / (2 * numerator);
+    let signed = if scaled < 0 { -rounded } else { rounded };
+    i64::try_from(signed)
+        .map(Dimension::new)
+        .map_err(|_| "measurement is outside the supported range")
+}
 
 pub(crate) fn deserialize_nonnegative_dimension<'de, D, U>(
     deserializer: D,
@@ -20,7 +50,7 @@ where
             "negative value is not valid for this OOXML measurement",
         ));
     }
-    Ok(Dimension::new(measure.value()))
+    dimension_from_measure(measure).map_err(serde::de::Error::custom)
 }
 
 pub(crate) fn deserialize_optional_nonnegative_dimension<'de, D, U>(
@@ -36,14 +66,16 @@ where
                 "negative value is not valid for this OOXML measurement",
             ))
         } else {
-            Ok(Some(Dimension::new(measure.value())))
+            dimension_from_measure(measure)
+                .map(Some)
+                .map_err(serde::de::Error::custom)
         }
     })
 }
 
 impl<'de, U: Unit> Deserialize<'de> for Dimension<U> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(Dimension::new(IntegerMeasure::deserialize(d)?.value()))
+        dimension_from_measure(IntegerMeasure::deserialize(d)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -84,6 +116,83 @@ mod tests {
             deserialize_with = "deserialize_optional_nonnegative_dimension"
         )]
         val: Option<Dimension<Twips>>,
+    }
+
+    #[derive(Deserialize)]
+    struct EighthVal {
+        #[serde(rename = "@val")]
+        val: Dimension<crate::model::dimension::EighthPoints>,
+    }
+
+    #[derive(Deserialize)]
+    struct HalfVal {
+        #[serde(rename = "@val")]
+        val: Dimension<HalfPoints>,
+    }
+
+    /// §22.9.2.15 `ST_UniversalMeasure`: a length may carry an explicit unit
+    /// (`mm|cm|in|pt|pc|pi`), and the value converts to the attribute's own
+    /// native unit. Word writes this spelling when saving as Strict Open XML
+    /// (`<w:pgSz w:w="595.30pt"/>`), and Transitional's measurement types
+    /// admit it equally.
+    #[test]
+    fn universal_measures_convert_to_the_target_unit() {
+        for (raw, twips) in [
+            ("595.3pt", 11906), // A4 width: 595.3pt × 20 twips/pt
+            ("1in", 1440),
+            ("2.54cm", 1440), // exactly one inch
+            ("10mm", 567),    // 36000 EMU/mm × 10 ÷ 635 EMU/twip = 566.93 → 567
+            ("1pc", 240),     // 1 pica = 12pt
+            ("1pi", 240),     // `pi` is the second spelling of pica
+        ] {
+            let v: TwipsVal = quick_xml::de::from_str(&format!(r#"<x val="{raw}"/>"#)).unwrap();
+            assert_eq!(v.val.raw(), twips, "{raw} in twips");
+        }
+
+        let v: HalfVal = quick_xml::de::from_str(r#"<x val="12pt"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 24, "12pt in half-points");
+        let v: EighthVal = quick_xml::de::from_str(r#"<x val="0.5pt"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 4, "0.5pt in eighth-points");
+    }
+
+    /// The sign travels with the measure: a signed target accepts `-12pt`,
+    /// and the nonnegative deserializers reject it like any negative value.
+    #[test]
+    fn universal_measures_keep_their_sign() {
+        let v: TwipsVal = quick_xml::de::from_str(r#"<x val="-12pt"/>"#).unwrap();
+        assert_eq!(v.val.raw(), -240);
+        let r: Result<NonnegativeTwips, _> = quick_xml::de::from_str(r#"<x val="-0.5pt"/>"#);
+        assert!(r.is_err(), "nonnegative target must reject -0.5pt");
+    }
+
+    /// §22.9.2.9: a percent spelling lands on the target's own percent scale
+    /// — thousandths for DrawingML (`lumMod val="63%"` ≡ `val="63000"`) — and
+    /// stays an error where the attribute measures a length.
+    #[test]
+    fn percent_spelling_lands_on_the_thousandth_scale() {
+        #[derive(Deserialize)]
+        struct PctVal {
+            #[serde(rename = "@val")]
+            val: Dimension<crate::model::dimension::ThousandthPercent>,
+        }
+        let v: PctVal = quick_xml::de::from_str(r#"<x val="63%"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 63_000);
+        let v: PctVal = quick_xml::de::from_str(r#"<x val="63000"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 63_000, "the bare spelling is unchanged");
+        let r: Result<TwipsVal, _> = quick_xml::de::from_str(r#"<x val="63%"/>"#);
+        assert!(r.is_err(), "a percentage cannot target a length");
+    }
+
+    /// Only the six §22.9.2.15 unit spellings, lowercase, no space: anything
+    /// else stays a parse error rather than a guess.
+    #[test]
+    fn malformed_universal_measures_are_rejected() {
+        for raw in [
+            "12px", "pt", "12 pt", "12PT", "12p", "1.pt", ".5pt", "12pt5",
+        ] {
+            let r: Result<TwipsVal, _> = quick_xml::de::from_str(&format!(r#"<x val="{raw}"/>"#));
+            assert!(r.is_err(), "{raw:?} must be rejected");
+        }
     }
 
     #[test]
