@@ -24,12 +24,14 @@ fetch path happens to invoke it — confirmed broken by golang/go's own
 issue tracker (#47241, #39720), not just untested here. That would silently
 defeat the one thing committing these libraries is for.
 
-**Kept honest by `tests/capi_lib_freshness.rs`** (in the main repo, runs as
-part of `cargo test --all`): it hashes every input that can change these
-bytes — `src/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` — and
-compares against `SOURCE_HASH`, so a source change that isn't followed by a
-rebuild-and-recommit here fails CI rather than silently shipping a stale
-library.
+**Kept honest by `tests/capi_lib_freshness.rs`** (in the main repo, run by
+the `capi-lib-freshness` CI job on push to `main` — not on every pull
+request, since the hash covers all of `src/` and would otherwise fail on
+nearly every PR long before a release is near): it hashes every input that
+can change these bytes — `src/`, `Cargo.toml`, `Cargo.lock`,
+`rust-toolchain.toml` — and compares against `SOURCE_HASH`, so a source
+change that isn't followed by a rebuild-and-recommit here fails CI before
+anything is released rather than silently shipping a stale library.
 
 ## Regenerating
 

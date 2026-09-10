@@ -69,8 +69,12 @@ jobs:
       # the rest — issue #117's first windows-latest run hit exactly this,
       # stopping after the lib tests and never reaching `font_resolution.rs`.
       # A platform-specific run should surface every finding in one pass.
+      #
+      # `capi_lib_freshness`'s two tests are skipped here and checked instead
+      # by the `capi-lib-freshness` job below (push-to-main only, not every
+      # PR) — see that job's comment for why.
       - name: Run tests
-        run: cargo test --all --no-fail-fast
+        run: cargo test --all --no-fail-fast -- --skip committed_libs_match_current_source --skip every_supported_platform_has_a_committed_library
 
       # `subset-fonts` is default-on, so `cargo test --all` never compiles the
       # crate without it. AGENTS.md documents `--no-default-features` as a
@@ -81,19 +85,23 @@ jobs:
       - name: Build without default features
         run: cargo build --no-default-features
 
-  # Cheap, Linux-only check of the Go bindings' C ABI (`capi` feature,
+  # Linux-only check of the Go bindings' C ABI (`capi` feature,
   # `src/capi.rs`) and of the committed `go/internal/capi/lib/linux_amd64/
   # libdxpdf.a` itself — `go test` links against exactly the file checked
   # into the repo (no staging step: it's already there after checkout),
-  # which is the one functional proof that a committed library still works,
-  # on every PR. `tests/capi_lib_freshness.rs`, run as part of the `test`
-  # job's `cargo test --all` on every platform, is what catches the other
-  # three platforms' libraries going stale without a way to execute them
-  # here. macOS/Windows *linking* is not covered here; see AGENTS.md's
-  # Go-bindings note for why.
+  # which is the one functional proof that a committed library still works.
+  #
+  # Push-to-main only, not pull_request: this rebuilds the whole `capi`
+  # staticlib (a full Skia build, on top of what `cargo test --all` already
+  # built) and almost every PR touches `src/` without touching anything
+  # Go-bindings related. Gating to push still runs it before anything is
+  # ever released from main, without doubling the build cost of every PR.
+  # macOS/Windows *linking* is not covered here; see AGENTS.md's Go-bindings
+  # note for why.
   go-bindings:
     name: Go bindings (capi)
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
@@ -126,6 +134,36 @@ jobs:
       - name: go test (against the committed libdxpdf.a)
         working-directory: go
         run: go test ./... -race
+
+  # Provenance check for `go/internal/capi/lib/*/libdxpdf.a` — hashes
+  # `src/`, `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml` against the
+  # stamped `go/internal/capi/lib/SOURCE_HASH` (see
+  # `tests/capi_lib_freshness.rs`'s own doc comment).
+  #
+  # Push-to-main only, not pull_request, for the same reason as `go-bindings`
+  # above: the hash covers all of `src/`, so nearly every PR would fail it
+  # long before a release is anywhere near ready, even one with nothing to
+  # do with the Go bindings. The hashing itself is already
+  # platform-invariant (it normalizes line endings and path separators), so
+  # one runner is enough — this doesn't need the `test` job's OS matrix.
+  capi-lib-freshness:
+    name: Go bindings library freshness
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+
+      - name: Check libdxpdf.a provenance
+        run: cargo test --test capi_lib_freshness
 
   build:
     name: Build release
