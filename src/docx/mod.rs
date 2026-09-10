@@ -17,7 +17,6 @@ pub mod model {
 pub mod error;
 pub mod parse;
 pub mod relationships;
-pub(crate) mod whitespace_workaround;
 pub mod zip;
 
 /// Parse a DOCX file from raw bytes into a fully resolved `Document`.
