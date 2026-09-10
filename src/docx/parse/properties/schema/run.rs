@@ -4,8 +4,25 @@
 //! from sibling modules. Deserializes to `(RunProperties, Option<StyleId>)`
 //! via the `split` method — the style id is routed separately because the
 //! property cascade applies it before direct formatting.
+//!
+//! `w14_shadow` is the one field here that isn't `w:`-namespaced: a
+//! Word-2010 `<w14:shadow>` text-effect extension (blur/offset/color, not
+//! modeled at the run level) shares the local name `shadow` with §17.3.2.37's
+//! ordinary boolean toggle below. `quick_xml::de` ordinarily matches struct
+//! fields by local name only, discarding the namespace, which would collide
+//! the two into one `Vec` and fail the parse the moment they're non-adjacent
+//! — confirmed against a real document (issue reproduction
+//! `joern.hendrich@vdwbayern.de.docx`). `vendor/quick-xml-0.41.0` is a
+//! dxpdf-patched quick-xml (see that directory's `PATCH.md`) that recognizes
+//! a `#[serde(rename)]` written in Clark notation (`"{uri}local"`) and
+//! matches it against the element's *resolved* namespace instead — so this
+//! field claims only the Word-2010 extension, and the plain `shadow` field
+//! below claims only the real toggle, however either producer bound its own
+//! prefix. Every other field here is unaffected: none of their renames use
+//! that notation, so they still match by local name exactly as before.
 
 use crate::model::Dup;
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, HalfPoints, Twips, Unit};
@@ -84,6 +101,14 @@ pub(crate) struct RPrXml {
     outline: Vec<OnOff>,
     #[serde(rename = "shadow", default)]
     shadow: Vec<OnOff>,
+    /// Word-2010 `<w14:shadow>` — see the module doc. Recognized only so it
+    /// stops colliding with `shadow` above; its content (blur/offset/color)
+    /// is not modeled and is discarded.
+    #[serde(
+        rename = "{http://schemas.microsoft.com/office/word/2010/wordml}shadow",
+        default
+    )]
+    w14_shadow: Vec<IgnoredAny>,
 
     #[serde(rename = "position", default)]
     position: Vec<ValAttr<Dimension<HalfPoints>>>,
@@ -482,5 +507,35 @@ mod tests {
         // Both occurrences reach the model; only the read resolves.
         assert_eq!(rp.font_size.all().len(), 2);
         assert_eq!(rp.color.all().len(), 2);
+    }
+
+    /// The collision the module doc describes: a real `<w:shadow>` toggle
+    /// and a Word-2010 `<w14:shadow>` extension, non-adjacent, in one
+    /// `<rPr>`. Without the dxpdf-patched quick-xml's namespace-qualified
+    /// matching this is a hard parse error (`duplicate field "shadow"`);
+    /// with it, each element reaches its own field regardless of which
+    /// prefix the producer chose for either namespace.
+    #[test]
+    fn w14_shadow_extension_does_not_collide_with_the_shadow_toggle() {
+        let xml = r#"<rPr xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+            <shadow val="0"/>
+            <outline val="0"/>
+            <w14:shadow w14:blurRad="0"><w14:srgbClr w14:val="000000"/></w14:shadow>
+        </rPr>"#;
+        let (rp, _) = parse(xml);
+        assert_eq!(rp.shadow, Some(false));
+    }
+
+    /// The same collision, but with the Word-2010 namespace bound to a
+    /// producer-chosen prefix other than the conventional `w14` — matching
+    /// happens on the *resolved namespace URI*, not the literal prefix text.
+    #[test]
+    fn w14_shadow_extension_matches_by_namespace_not_by_prefix_spelling() {
+        let xml = r#"<rPr xmlns:ext="http://schemas.microsoft.com/office/word/2010/wordml">
+            <shadow val="0"/>
+            <ext:shadow ext:blurRad="0"/>
+        </rPr>"#;
+        let (rp, _) = parse(xml);
+        assert_eq!(rp.shadow, Some(false));
     }
 }
