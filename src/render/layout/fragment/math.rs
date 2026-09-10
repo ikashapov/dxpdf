@@ -10,22 +10,36 @@ use crate::render::fonts::Toggle;
 
 use super::text::{emit_text_words, TextRunStyle};
 use super::{
-    BreakAfter, FontProps, Fragment, FragmentCtx, MathRow, TextMetrics, FRACTION_GAP_RATIO,
-    FRACTION_RULE_RATIO, FRACTION_SIDE_PAD_RATIO, MATH_AXIS_RATIO, SUPERSCRIPT_ASCENT_OFFSET_RATIO,
-    SUPERSCRIPT_FONT_SIZE_RATIO,
+    BreakAfter, FontProps, Fragment, FragmentCtx, LinkTarget, MathRow, TextMetrics,
+    FRACTION_GAP_RATIO, FRACTION_RULE_RATIO, FRACTION_SIDE_PAD_RATIO, MATH_AXIS_RATIO,
+    SUPERSCRIPT_ASCENT_OFFSET_RATIO, SUPERSCRIPT_FONT_SIZE_RATIO,
 };
 
 /// Emit one `m:oMath` into the paragraph's fragment stream.
+///
+/// `hyperlink_url` is the target of the enclosing `w:hyperlink`, if any — an
+/// `m:oMath` shares `ParaChildXml`'s content model with ordinary runs, so it
+/// can legally sit inside one, and every glyph the equation draws gets the
+/// same annotation an ordinary run in the same hyperlink would.
 pub(super) fn emit_math_fragments<F>(
     math: &MathBlock,
     ctx: &FragmentCtx<'_>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     fragments: &mut Vec<Fragment>,
 ) where
     F: Fn(&str, &FontProps) -> (Pt, TextMetrics),
 {
     let font = math_font(ctx.default_size);
-    emit_elements(&math.content, &font, Pt::ZERO, ctx, measure_text, fragments);
+    emit_elements(
+        &math.content,
+        &font,
+        Pt::ZERO,
+        ctx,
+        hyperlink_url,
+        measure_text,
+        fragments,
+    );
 }
 
 /// The math face at a given size. Word renders math in Cambria Math; the
@@ -52,6 +66,7 @@ fn emit_elements<F>(
     font: &FontProps,
     baseline_offset: Pt,
     ctx: &FragmentCtx<'_>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
     fragments: &mut Vec<Fragment>,
 ) where
@@ -67,10 +82,25 @@ fn emit_elements<F>(
                     border: None,
                     baseline_offset,
                 };
-                emit_text_words(&mapped, font, &style, None, measure_text, fragments);
+                emit_text_words(
+                    &mapped,
+                    font,
+                    &style,
+                    hyperlink_url,
+                    measure_text,
+                    fragments,
+                );
             }
             MathElement::Superscript { base, sup } => {
-                emit_elements(base, font, baseline_offset, ctx, measure_text, fragments);
+                emit_elements(
+                    base,
+                    font,
+                    baseline_offset,
+                    ctx,
+                    hyperlink_url,
+                    measure_text,
+                    fragments,
+                );
                 // The exponent belongs to its base: no line break between.
                 if let Some(Fragment::Text { break_after, .. }) = fragments.last_mut() {
                     *break_after = BreakAfter::Prohibited;
@@ -80,7 +110,15 @@ fn emit_elements<F>(
                 sup_font.size = font.size * SUPERSCRIPT_FONT_SIZE_RATIO;
                 let sup_offset =
                     baseline_offset - base_metrics.ascent * SUPERSCRIPT_ASCENT_OFFSET_RATIO;
-                emit_elements(sup, &sup_font, sup_offset, ctx, measure_text, fragments);
+                emit_elements(
+                    sup,
+                    &sup_font,
+                    sup_offset,
+                    ctx,
+                    hyperlink_url,
+                    measure_text,
+                    fragments,
+                );
             }
             MathElement::Fraction { num, den } => {
                 fragments.push(fraction_fragment(
@@ -89,6 +127,7 @@ fn emit_elements<F>(
                     font,
                     baseline_offset,
                     ctx,
+                    hyperlink_url,
                     measure_text,
                 ));
             }
@@ -107,6 +146,7 @@ fn fraction_fragment<F>(
     font: &FontProps,
     baseline_offset: Pt,
     ctx: &FragmentCtx<'_>,
+    hyperlink_url: Option<&LinkTarget>,
     measure_text: &F,
 ) -> Fragment
 where
@@ -134,6 +174,7 @@ where
         metrics,
         baseline_offset,
         break_after: BreakAfter::Opportunity,
+        hyperlink_url: hyperlink_url.cloned(),
     }
 }
 
@@ -253,7 +294,7 @@ mod tests {
             }],
         };
         let mut fragments = Vec::new();
-        emit_math_fragments(&math, &ctx(), &dummy_measure, &mut fragments);
+        emit_math_fragments(&math, &ctx(), None, &dummy_measure, &mut fragments);
 
         assert_eq!(fragments.len(), 2, "base + exponent");
         match (&fragments[0], &fragments[1]) {
@@ -293,7 +334,7 @@ mod tests {
             }],
         };
         let mut fragments = Vec::new();
-        emit_math_fragments(&math, &ctx(), &dummy_measure, &mut fragments);
+        emit_math_fragments(&math, &ctx(), None, &dummy_measure, &mut fragments);
 
         assert_eq!(fragments.len(), 1);
         match &fragments[0] {
@@ -327,5 +368,103 @@ mod tests {
         assert_eq!(map_math_italic("x2"), "\u{1D465}2");
         assert_eq!(map_math_italic("h"), "\u{210E}");
         assert_eq!(map_math_italic("A + 1"), "\u{1D434} + 1");
+    }
+
+    /// An `m:oMath` sharing `ParaChildXml`'s content model with ordinary runs
+    /// means it can sit inside a `w:hyperlink` — every glyph the run
+    /// produces must carry the same annotation an ordinary run in the same
+    /// hyperlink would.
+    #[test]
+    fn a_math_run_inside_a_hyperlink_carries_its_target() {
+        let target = LinkTarget::External(Rc::from("https://example.invalid"));
+        let math = MathBlock {
+            content: vec![run("x")],
+        };
+        let mut fragments = Vec::new();
+        emit_math_fragments(&math, &ctx(), Some(&target), &dummy_measure, &mut fragments);
+
+        assert_eq!(fragments.len(), 1);
+        match &fragments[0] {
+            Fragment::Text { hyperlink_url, .. } => {
+                assert_eq!(hyperlink_url.as_ref(), Some(&target));
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    /// A superscript's base and exponent are two separate `Fragment::Text`s
+    /// (see `superscript_raises_and_shrinks_the_exponent`) — both must carry
+    /// the hyperlink, not just the base.
+    #[test]
+    fn a_math_superscript_inside_a_hyperlink_carries_its_target_on_both_parts() {
+        let target = LinkTarget::External(Rc::from("https://example.invalid"));
+        let math = MathBlock {
+            content: vec![MathElement::Superscript {
+                base: vec![run("x")],
+                sup: vec![run("2")],
+            }],
+        };
+        let mut fragments = Vec::new();
+        emit_math_fragments(&math, &ctx(), Some(&target), &dummy_measure, &mut fragments);
+
+        assert_eq!(fragments.len(), 2);
+        for fragment in &fragments {
+            match fragment {
+                Fragment::Text { hyperlink_url, .. } => {
+                    assert_eq!(hyperlink_url.as_ref(), Some(&target));
+                }
+                other => panic!("expected text, got {other:?}"),
+            }
+        }
+    }
+
+    /// A fraction is one pre-measured atom (`Fragment::MathFraction`, not
+    /// `Fragment::Text`) — it needs its own `hyperlink_url` field, carried
+    /// the same way.
+    #[test]
+    fn a_math_fraction_inside_a_hyperlink_carries_its_target() {
+        let target = LinkTarget::External(Rc::from("https://example.invalid"));
+        let math = MathBlock {
+            content: vec![MathElement::Fraction {
+                num: vec![run("1")],
+                den: vec![run("2")],
+            }],
+        };
+        let mut fragments = Vec::new();
+        emit_math_fragments(&math, &ctx(), Some(&target), &dummy_measure, &mut fragments);
+
+        assert_eq!(fragments.len(), 1);
+        match &fragments[0] {
+            Fragment::MathFraction { hyperlink_url, .. } => {
+                assert_eq!(hyperlink_url.as_ref(), Some(&target));
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
+    }
+
+    /// The stated behaviour when there is no hyperlink: unchanged from before
+    /// this field existed.
+    #[test]
+    fn math_without_a_hyperlink_carries_no_target() {
+        let math = MathBlock {
+            content: vec![
+                run("x"),
+                MathElement::Fraction {
+                    num: vec![run("1")],
+                    den: vec![run("2")],
+                },
+            ],
+        };
+        let mut fragments = Vec::new();
+        emit_math_fragments(&math, &ctx(), None, &dummy_measure, &mut fragments);
+
+        assert_eq!(fragments.len(), 2);
+        for fragment in &fragments {
+            match fragment {
+                Fragment::Text { hyperlink_url, .. } => assert_eq!(*hyperlink_url, None),
+                Fragment::MathFraction { hyperlink_url, .. } => assert_eq!(*hyperlink_url, None),
+                other => panic!("expected text or a fraction, got {other:?}"),
+            }
+        }
     }
 }

@@ -296,6 +296,11 @@ pub enum Fragment {
         metrics: TextMetrics,
         baseline_offset: Pt,
         break_after: BreakAfter,
+        /// Hyperlink target, if this `m:oMath` sits inside a `w:hyperlink` —
+        /// see `Fragment::Text`'s field of the same name. One annotation
+        /// covers the whole fraction rather than per-row, matching how a
+        /// fraction is one atom everywhere else in this pipeline.
+        hyperlink_url: Option<LinkTarget>,
     },
     /// One emoji grapheme cluster (UAX #29) classified as an emoji sequence
     /// (UTS #51), to be rasterized at paint time via Skia's raster backend

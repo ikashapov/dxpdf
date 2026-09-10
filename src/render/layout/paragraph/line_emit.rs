@@ -783,6 +783,7 @@ pub(super) fn emit_line_commands(
                     metrics: _,
                     baseline_offset,
                     break_after: _,
+                    hyperlink_url,
                 } => {
                     use crate::render::layout::fragment::{
                         FRACTION_GAP_RATIO, FRACTION_RULE_RATIO, FRACTION_SIDE_PAD_RATIO,
@@ -819,6 +820,32 @@ pub(super) fn emit_line_commands(
                         color: *color,
                         width: rule,
                     });
+
+                    // One annotation over the whole fraction — it is one atom
+                    // everywhere else in this pipeline, not one per row. See
+                    // the `Fragment::Text` arm above for the routing rationale.
+                    if let Some(link) = hyperlink_url {
+                        let rect = crate::render::geometry::PtRect::from_xywh(
+                            x,
+                            *cursor_y,
+                            *width,
+                            line_height,
+                        );
+                        match link {
+                            LinkTarget::External(url) => {
+                                commands.push(DrawCommand::LinkAnnotation {
+                                    rect,
+                                    url: url.clone(),
+                                })
+                            }
+                            LinkTarget::Internal(dest) => {
+                                commands.push(DrawCommand::InternalLink {
+                                    rect,
+                                    destination: dest.clone(),
+                                })
+                            }
+                        }
+                    }
 
                     x += *width
                         + distribution_extra
