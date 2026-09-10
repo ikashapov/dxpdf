@@ -37,8 +37,8 @@ impl From<TableMeasureXml> for TableMeasure {
     fn from(x: TableMeasureXml) -> Self {
         use crate::docx::parse::primitives::units::dimension_from_measure;
 
-        // §22.9.2.9 lets `@w` spell a length (`"297.65pt"`) or a percentage
-        // (`"50%"`) outright; `dimension_from_measure` accepts whichever of
+        // `@w` is ST_MeasurementOrPercent: a §22.9.2.15 universal measure
+        // (`"297.65pt"`) or a §22.9.2.9 percentage (`"50%"`) outright; `dimension_from_measure` accepts whichever of
         // the two the arm's own unit can hold. A spelling that contradicts
         // `@type` — a percentage under `dxa`, a length under `pct` — names no
         // width this engine can honour, so it degrades to `Auto` rather than
@@ -75,21 +75,34 @@ impl From<TableMeasureXml> for TableMeasure {
 /// though the effective width is a perfectly legal 500 — the parser would be
 /// ignoring an element for its value while honouring it for its validity.
 /// See `crate::docx::parse::primitives::duplicates` for the collapsing policy.
+///
+/// The same rule extends to a spelling that contradicts `@type`: the
+/// conversion below discards such a width (degrading to `Auto`), so its sign
+/// must not fail the document either — rejecting `w="-50%" type="dxa"` while
+/// accepting `w="50%" type="dxa"` would again honour an ignored value for
+/// its validity.
 pub(crate) fn deserialize_vec_nonnegative_table_measure<'de, D>(
     deserializer: D,
 ) -> Result<Vec<TableMeasureXml>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    use crate::docx::parse::primitives::integer_measure::MeasureKind;
+
     let measures = Vec::<TableMeasureXml>::deserialize(deserializer)?;
-    if measures
-        .last()
-        .and_then(|value| value.w.as_ref())
-        .is_some_and(IntegerMeasure::is_negative)
-    {
-        return Err(serde::de::Error::custom(
-            "negative value is not valid for this OOXML table measurement",
-        ));
+    if let Some(w) = measures.last().and_then(|value| value.w.as_ref()) {
+        let contradictory = measures.last().is_some_and(|value| {
+            matches!(
+                (value.ty, w.kind()),
+                (StTblWidthType::Dxa, MeasureKind::Percent)
+                    | (StTblWidthType::Pct, MeasureKind::Universal)
+            )
+        });
+        if w.is_negative() && !contradictory {
+            return Err(serde::de::Error::custom(
+                "negative value is not valid for this OOXML table measurement",
+            ));
+        }
     }
     Ok(measures)
 }
@@ -194,6 +207,35 @@ mod tests {
             parse(r#"<tblW w="297.65pt" type="pct"/>"#),
             TableMeasure::Auto
         ));
+    }
+
+    /// A spelling the conversion discards must not fail the document over
+    /// its sign either — while the same sign on an honoured spelling still
+    /// does.
+    #[test]
+    fn contradictory_negative_degrades_while_honoured_negative_rejects() {
+        let ok: Result<NonnegativeTableMeasure, _> =
+            quick_xml::de::from_str(r#"<x><tblW w="-50%" type="dxa"/></x>"#);
+        let value = ok.expect("a discarded spelling's sign must not be fatal");
+        assert!(matches!(
+            crate::model::Dup::from(value.value)
+                .into_value()
+                .map(TableMeasure::from),
+            Some(TableMeasure::Auto)
+        ));
+        let err: Result<NonnegativeTableMeasure, _> =
+            quick_xml::de::from_str(r#"<x><tblW w="-50%" type="pct"/></x>"#);
+        assert!(err.is_err(), "an honoured negative percent is still fatal");
+    }
+
+    /// The half-tie on the thousandths→fiftieths division rounds away from
+    /// zero: 0.01% is 10 thousandths, exactly half of one fiftieth.
+    #[test]
+    fn pct_half_tie_rounds_away_from_zero() {
+        match parse(r#"<tblW w="0.01%" type="pct"/>"#) {
+            TableMeasure::Pct(d) => assert_eq!(d.raw(), 1),
+            other => panic!("expected Pct, got {other:?}"),
+        }
     }
 
     #[test]

@@ -68,7 +68,7 @@ fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
     }
 
     if let Some(head) = raw.strip_suffix('%') {
-        let (negative, value) = parse_decimal_scaled(head, 1000)?;
+        let (negative, value) = parse_decimal_scaled(head, 1000, false)?;
         return Ok(IntegerMeasure {
             value,
             negative,
@@ -81,7 +81,7 @@ fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
             continue;
         };
         let emu_per_unit = universal_unit_emu(suffix).expect("every listed suffix has a scale");
-        let (negative, value) = parse_decimal_scaled(head, emu_per_unit)?;
+        let (negative, value) = parse_decimal_scaled(head, emu_per_unit, false)?;
         return Ok(IntegerMeasure {
             value,
             negative,
@@ -92,7 +92,7 @@ fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
     // A bare decimal that the i64 fast path could not take: either it has a
     // fraction, or it is an out-of-range integer (which the parse below
     // rejects at the i64 conversion).
-    let (negative, value) = parse_decimal_scaled(raw, 1)?;
+    let (negative, value) = parse_decimal_scaled(raw, 1, true)?;
     if !raw.contains('.') {
         return Err("expected an integer or decimal measurement");
     }
@@ -103,17 +103,26 @@ fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
     })
 }
 
-/// Parse `[-+]?[0-9]+(\.[0-9]+)?`, multiply by `scale`, and round half away
+/// Parse `-?[0-9]+(\.[0-9]+)?`, multiply by `scale`, and round half away
 /// from zero. Returns the sign separately so `-0.4` still reads as negative
 /// after rounding to zero.
+///
+/// `allow_plus` grandfathers the pre-existing `+` tolerance for **bare**
+/// numbers only: §22.9.2.15 and §22.9.2.9 both spell their sign as an
+/// optional minus, so `+595.3pt` and `+50%` stay parse errors.
 ///
 /// The fraction is truncated to its first 12 digits before scaling: with
 /// every scale ≤ 914400 the discarded tail is below 1e-6 of a unit, and the
 /// pre-universal-measure code read only the first digit.
-fn parse_decimal_scaled(raw: &str, scale: i64) -> Result<(bool, i64), &'static str> {
+fn parse_decimal_scaled(
+    raw: &str,
+    scale: i64,
+    allow_plus: bool,
+) -> Result<(bool, i64), &'static str> {
     let (negative, unsigned) = match raw.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, raw.strip_prefix('+').unwrap_or(raw)),
+        None if allow_plus => (false, raw.strip_prefix('+').unwrap_or(raw)),
+        None => (false, raw),
     };
     let (whole, fraction) = match unsigned.split_once('.') {
         Some(pair) => pair,
