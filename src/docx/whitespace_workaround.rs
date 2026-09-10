@@ -13,17 +13,23 @@
 //! single whitespace-only `<w:t xml:space="preserve"> </w:t>` between two
 //! other runs (e.g. a label followed by a value with different formatting).
 //! Without this workaround, the space disappears and rendered text reads
-//! `Label:Value` instead of `Label: Value`.
+//! `Label:Value` instead of `Label: Value`. §22.1 Office Math hits the same
+//! problem the same way: an `<m:oMath>` commonly spaces its operators with a
+//! whitespace-only `<m:t xml:space="preserve"> </m:t>` run, and without this
+//! workaround `a + b` renders as `a+b`.
 //!
 //! # The hack
 //!
-//! Before handing each XML part to quick-xml we resolve WordprocessingML text
-//! elements, then substitute each byte in a whitespace-only text node with a
-//! Private Use Area codepoint. quick-xml then sees a non-whitespace text node
-//! and preserves it. Resolving namespaces makes the workaround independent of
-//! the arbitrary prefix chosen by the DOCX producer. The body parser
-//! ([`crate::docx::parse::body`]) reverses the substitution when emitting
-//! [`RunElement::Text`].
+//! Before handing each XML part to quick-xml we resolve WordprocessingML and
+//! Office Math text elements, then substitute each byte in a whitespace-only
+//! text node with a Private Use Area codepoint. quick-xml then sees a
+//! non-whitespace text node and preserves it. Resolving namespaces makes the
+//! workaround independent of the arbitrary prefix chosen by the DOCX
+//! producer, and keeps it from also mutating some other vocabulary's `<*:t>`
+//! (DrawingML's `<a:t>`, for one) that happens to share the local name.
+//! Reversed by [`restore_whitespace_sentinels`] at each vocabulary's own
+//! parse-conversion seam — [`crate::docx::parse::body`] for
+//! [`RunElement::Text`], `crate::docx::parse::math` for `m:r` text.
 //!
 //! Sentinel mapping (BYTE → CHAR):
 //!
@@ -70,13 +76,29 @@ fn is_wordprocessingml_namespace(uri: &[u8]) -> bool {
     )
 }
 
-/// Pre-process an XML byte buffer so whitespace-only WordprocessingML text
-/// content survives quick-xml's trimmer. Returns the original buffer unchanged
-/// when no substitution is needed.
+/// §22.1 Office Math. Its `<m:t>` is the same kind of element as
+/// WordprocessingML's `<w:t>` — a literal text leaf whose whitespace-only
+/// content needs this workaround for exactly the same reason (an `m:oMath`
+/// spacer run between an operand and an operator, e.g. the gap in `a + b`).
+const TRANSITIONAL_OFFICE_MATH_NAMESPACE: &[u8] =
+    b"http://schemas.openxmlformats.org/officeDocument/2006/math";
+const STRICT_OFFICE_MATH_NAMESPACE: &[u8] = b"http://purl.oclc.org/ooxml/officeDocument/math";
+
+#[inline]
+fn is_office_math_namespace(uri: &[u8]) -> bool {
+    matches!(
+        uri,
+        TRANSITIONAL_OFFICE_MATH_NAMESPACE | STRICT_OFFICE_MATH_NAMESPACE
+    )
+}
+
+/// Pre-process an XML byte buffer so whitespace-only WordprocessingML or
+/// Office Math text content survives quick-xml's trimmer. Returns the
+/// original buffer unchanged when no substitution is needed.
 ///
 /// See module-level docs for why this is necessary.
 pub(crate) fn substitute_whitespace_only_runs(xml: &[u8]) -> Vec<u8> {
-    let spans = whitespace_only_wordprocessingml_text_spans(xml);
+    let spans = whitespace_only_preserved_text_spans(xml);
     if spans.is_empty() {
         return xml.to_vec();
     }
@@ -124,11 +146,12 @@ fn is_ws_sentinel(c: char) -> bool {
     )
 }
 
-/// Return source spans for whitespace-only text nodes directly inside
-/// WordprocessingML `<*:t>` elements. Namespace prefixes are resolved by
-/// quick-xml, so DrawingML and other XML vocabularies are not mutated.
-/// Malformed XML is left untouched.
-fn whitespace_only_wordprocessingml_text_spans(xml: &[u8]) -> Vec<(usize, usize)> {
+/// Return source spans for whitespace-only text nodes directly inside a
+/// WordprocessingML or Office Math `<*:t>` element. Namespace prefixes are
+/// resolved by quick-xml, so DrawingML and other XML vocabularies (whose `t`
+/// elements share the same local name) are not mutated. Malformed XML is
+/// left untouched.
+fn whitespace_only_preserved_text_spans(xml: &[u8]) -> Vec<(usize, usize)> {
     use quick_xml::events::Event;
     use quick_xml::name::ResolveResult;
     use quick_xml::reader::NsReader;
@@ -148,7 +171,8 @@ fn whitespace_only_wordprocessingml_text_spans(xml: &[u8]) -> Vec<(usize, usize)
         match event {
             Event::Start(start) => {
                 depth += 1;
-                if matches!(namespace, ResolveResult::Bound(uri) if is_wordprocessingml_namespace(uri.as_ref()))
+                if matches!(namespace, ResolveResult::Bound(uri)
+                    if is_wordprocessingml_namespace(uri.as_ref()) || is_office_math_namespace(uri.as_ref()))
                     && start.local_name().as_ref() == b"t"
                 {
                     text_depth = Some(depth);
@@ -206,6 +230,16 @@ mod tests {
     fn substitute_wml_fragment(fragment: &str) -> String {
         let open =
             r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#;
+        let xml = format!("{open}{fragment}</w:root>");
+        let out = s(substitute_whitespace_only_runs(xml.as_bytes()));
+        out.strip_prefix(open)
+            .and_then(|out| out.strip_suffix("</w:root>"))
+            .unwrap()
+            .to_string()
+    }
+
+    fn substitute_math_fragment(fragment: &str) -> String {
+        let open = r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">"#;
         let xml = format!("{open}{fragment}</w:root>");
         let out = s(substitute_whitespace_only_runs(xml.as_bytes()));
         out.strip_prefix(open)
@@ -350,6 +384,95 @@ mod tests {
                 WS_SENTINEL_SPACE
             )
         );
+    }
+
+    // ── §22.1 Office Math `<m:t>` ─────────────────────────────────────────
+
+    /// A whitespace-only `<m:t>` — an OMML spacer between two runs, e.g. the
+    /// gap in `a + b` — must survive quick-xml's trimmer the same way a
+    /// whitespace-only `<w:t>` does. `<m:t>` shares `<w:t>`'s local name
+    /// ("t"), so this is a namespace-recognition gap, not a new scanning
+    /// rule.
+    #[test]
+    fn m_t_whitespace_only_preserve_is_substituted() {
+        let xml = r#"<m:r><m:t xml:space="preserve"> </m:t></m:r>"#;
+        let out = substitute_math_fragment(xml);
+        assert_eq!(
+            out,
+            format!(
+                r#"<m:r><m:t xml:space="preserve">{}</m:t></m:r>"#,
+                WS_SENTINEL_SPACE
+            )
+        );
+    }
+
+    /// ISO/IEC 29500 Strict renames the math namespace too
+    /// (`purl.oclc.org/ooxml/officeDocument/math`), the same way it renames
+    /// WordprocessingML's — both must be recognized, not just Transitional's.
+    #[test]
+    fn m_t_strict_math_namespace_is_also_recognized() {
+        let open = r#"<w:root xmlns:m="http://purl.oclc.org/ooxml/officeDocument/math">"#;
+        let xml = format!(r#"{open}<m:t xml:space="preserve"> </m:t></w:root>"#);
+        let out = s(substitute_whitespace_only_runs(xml.as_bytes()));
+        assert_eq!(
+            out,
+            format!(
+                r#"{open}<m:t xml:space="preserve">{}</m:t></w:root>"#,
+                WS_SENTINEL_SPACE
+            )
+        );
+    }
+
+    /// A real `word/document.xml` slice: an inline equation sits inside
+    /// ordinary paragraph content, so both vocabularies' whitespace-only
+    /// `<*:t>` nodes appear in the same buffer and must each be substituted
+    /// independently of the other.
+    #[test]
+    fn w_t_and_m_t_are_both_substituted_in_one_buffer() {
+        let open = r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">"#;
+        let xml = format!(
+            r#"{open}<w:r><w:t xml:space="preserve"> </w:t></w:r><m:oMath><m:r><m:t xml:space="preserve"> </m:t></m:r></m:oMath></w:root>"#
+        );
+        let out = s(substitute_whitespace_only_runs(xml.as_bytes()));
+        let expected = format!(
+            r#"{open}<w:r><w:t xml:space="preserve">{0}</w:t></w:r><m:oMath><m:r><m:t xml:space="preserve">{0}</m:t></m:r></m:oMath></w:root>"#,
+            WS_SENTINEL_SPACE
+        );
+        assert_eq!(out, expected);
+    }
+
+    /// A non-whitespace-only `<m:t>` (an operand or operator) is left
+    /// untouched, the same as the WordprocessingML case.
+    #[test]
+    fn m_t_mixed_content_is_left_untouched() {
+        let xml = r#"<m:t xml:space="preserve">x</m:t>"#;
+        let out = substitute_math_fragment(xml);
+        assert_eq!(out, xml);
+    }
+
+    /// End-to-end through the real production types: the reported symptom
+    /// was `a+b` instead of `a + b` — an OMML run sequence with whitespace-
+    /// only spacer runs between the operand and the `+`. This proves the fix
+    /// at the exact seam the bug report described, not just at the scanner.
+    #[test]
+    fn round_trip_recovers_omml_operator_spacing() {
+        use crate::docx::parse::math::OMathXml;
+        use crate::model::{MathBlock, MathElement};
+
+        let original = br#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t xml:space="preserve">a</m:t></m:r><m:r><m:t xml:space="preserve"> </m:t></m:r><m:r><m:t xml:space="preserve">+</m:t></m:r><m:r><m:t xml:space="preserve"> </m:t></m:r><m:r><m:t xml:space="preserve">b</m:t></m:r></m:oMath>"#;
+        let preprocessed = substitute_whitespace_only_runs(original);
+        let parsed: OMathXml = quick_xml::de::from_str(std::str::from_utf8(&preprocessed).unwrap())
+            .expect("quick-xml parse");
+        let math: MathBlock = parsed.into();
+        let text: String = math
+            .content
+            .iter()
+            .map(|el| match el {
+                MathElement::Run(r) => r.text.as_str(),
+                other => panic!("expected only runs, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(text, "a + b", "spacer runs between operands must survive");
     }
 
     // ── restore_whitespace_sentinels ─────────────────────────────────────────
