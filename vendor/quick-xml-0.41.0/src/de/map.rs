@@ -233,12 +233,45 @@ where
     }
 
     /// Skips whitespaces when they are not preserved
+    ///
+    /// dxpdf patch (see `PATCH.md`): resolves the upstream
+    /// `TODO: respect the xml:space attribute` above — a blank `Text` event
+    /// is left alone (not eaten) when `self.start`, the element whose
+    /// children/content are being scanned, carries `xml:space="preserve"`
+    /// as its own direct attribute. This is what lets a
+    /// `<w:t xml:space="preserve"> </w:t>`-shaped struct (a `$text` field
+    /// alongside an `@xml:space` attribute field) actually see that Text
+    /// event instead of having it discarded before `next_key_seed` ever
+    /// gets to check for it.
+    ///
+    /// Checks only `self.start`'s own attribute, not inherited state from
+    /// an ancestor's `xml:space` (full XML §2.10 scoping) — every producer
+    /// this was written against (Word, LibreOffice) declares it directly on
+    /// the element whose own text must be preserved, never relies on
+    /// inheritance from an ancestor. A container element with no
+    /// `xml:space` of its own (the overwhelmingly common case) is
+    /// completely unaffected: this still eats insignificant inter-tag
+    /// whitespace for it exactly as upstream.
     #[inline]
     fn skip_whitespaces(&mut self) -> Result<(), DeError> {
-        // TODO: respect the `xml:space` attribute and probably some deserialized type sign
+        if has_xml_space_preserve(&self.start) {
+            return Ok(());
+        }
         self.de.skip_whitespaces()
     }
+}
 
+/// dxpdf patch (see `PATCH.md`): whether `start` carries a direct
+/// `xml:space="preserve"` attribute. `xml:` is a reserved prefix — bound to
+/// a fixed namespace URI that, per `key::QNameDeserializer::from_attr`'s own
+/// comment just above, "cannot be redeclared or unbound" — so this is
+/// checked as the literal attribute name, the same simplification this
+/// crate's own code already relies on for that one prefix.
+fn has_xml_space_preserve(start: &BytesStart) -> bool {
+    start
+        .attributes()
+        .flatten()
+        .any(|attr| attr.key.as_ref() == b"xml:space" && attr.value.as_ref() == b"preserve")
 }
 
 /// dxpdf patch (see `PATCH.md`): if `start`'s namespace-qualified name
