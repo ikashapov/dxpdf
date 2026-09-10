@@ -982,7 +982,13 @@ where
                 // §22.1: one m:oMath — runs, superscripts and fraction
                 // stacks in the math face.
                 Inline::Math(math) => {
-                    super::math::emit_math_fragments(math, ctx, measure_text, &mut fragments);
+                    super::math::emit_math_fragments(
+                        math,
+                        ctx,
+                        hyperlink_url,
+                        measure_text,
+                        &mut fragments,
+                    );
                 }
                 Inline::AlternateContent(ac) => {
                     use crate::render::layout::{live_mc_branch, McBranch};
@@ -1423,6 +1429,29 @@ mod tests {
             width, 12.0,
             "only the visible half of the link, got {frags:?}"
         );
+    }
+
+    /// An `m:oMath` shares `ParaChildXml`'s content model with an ordinary
+    /// run, so it can legally sit inside a `w:hyperlink` — every glyph the
+    /// equation draws must get the same annotation an ordinary run in the
+    /// same hyperlink would.
+    #[test]
+    fn a_math_equation_inside_a_hyperlink_carries_its_target() {
+        let inlines = vec![Inline::Hyperlink(crate::model::Hyperlink {
+            target: crate::model::HyperlinkTarget::ExternalUrl("https://example.com".into()),
+            content: vec![Inline::Math(MathBlock {
+                content: vec![MathElement::Run(MathRun { text: "x".into() })],
+            })],
+        })];
+        let frags = collect(&inlines, &default_ctx(12.0));
+        assert_eq!(frags.len(), 1);
+        match &frags[0] {
+            Fragment::Text { hyperlink_url, .. } => assert_eq!(
+                hyperlink_url.as_ref(),
+                Some(&LinkTarget::External(Rc::from("https://example.com"))),
+            ),
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     /// **Known limit, characterized rather than fixed.** Word hides a `w:sym`,
