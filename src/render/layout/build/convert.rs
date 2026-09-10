@@ -783,6 +783,15 @@ fn symbol_pua_to_unicode(code: u32) -> Option<char> {
         0xF0CF => '\u{2209}', // NOT AN ELEMENT OF
         0xF0D0 => '\u{2220}', // ANGLE
         0xF0D1 => '\u{2207}', // NABLA
+        // 0xD2–0xD4 (serif ®©™) are deliberately absent: Adobe's symbol.txt
+        // maps them to its own Corporate Use Subarea (U+F6D9–F6DB), never to
+        // the standard U+00AE/U+00A9/U+2122 — there is no portable target to
+        // map to. Mapping to that PUA anyway would be worse than leaving
+        // `None`: it flips `remap_legacy_font_chars`'s `unmapped_pua` false,
+        // moving the run off the Symbol family even though the real Symbol
+        // font's cmap is keyed on the *original* 0xF0xx byte, not on Adobe's
+        // separate CUS assignment — so the one host that could have drawn it
+        // no longer gets the chance to.
         0xF0D5 => '\u{220F}', // N-ARY PRODUCT
         0xF0D6 => '\u{221A}', // SQUARE ROOT
         0xF0D7 => '\u{22C5}', // DOT OPERATOR
@@ -799,6 +808,10 @@ fn symbol_pua_to_unicode(code: u32) -> Option<char> {
         0xF0DF => '\u{21D3}', // DOWNWARDS DOUBLE ARROW
         0xF0E0 => '\u{25CA}', // LOZENGE
         0xF0E1 => '\u{2329}', // LEFT-POINTING ANGLE BRACKET
+        // 0xE2–0xE4 (sans-serif ®©™) — same reasoning as 0xD2–0xD4 above:
+        // Adobe's table sends them to a different Corporate Use Subarea
+        // range (U+F8E8–F8EA), not to standard Unicode, so there is nothing
+        // safe to map to here either.
         0xF0E5 => '\u{2211}', // N-ARY SUMMATION
         0xF0F1 => '\u{232A}', // RIGHT-POINTING ANGLE BRACKET
         0xF0F2 => '\u{222B}', // INTEGRAL
@@ -1155,6 +1168,33 @@ mod tests {
                 pua & 0xFF
             );
         }
+    }
+
+    /// ®©™ (both the serif slots 0xD2–0xD4 and the sans-serif slots
+    /// 0xE2–0xE4) have no portable Unicode target in Adobe's own symbol.txt —
+    /// it sends them to two different Corporate Use Subarea ranges
+    /// (U+F6D9–F6DB and U+F8E8–F8EA respectively), never to the standard
+    /// U+00AE/U+00A9/U+2122. `None` here is the correct answer, not a gap:
+    /// mapping to either CUS range would move the run off the Symbol family
+    /// (see `unmapped_pua_keeps_the_legacy_font`) while landing on a
+    /// codepoint the real Symbol font's cmap — keyed on the *original*
+    /// 0xF0xx byte — does not recognise either, which is strictly worse than
+    /// leaving it unmapped.
+    #[test]
+    fn symbol_register_copyright_trademark_have_no_portable_target() {
+        for pua in [0xF0D2, 0xF0D3, 0xF0D4, 0xF0E2, 0xF0E3, 0xF0E4] {
+            assert_eq!(
+                symbol_pua_to_unicode(pua),
+                None,
+                "Symbol 0x{:02X} has no standard-Unicode target",
+                pua & 0xFF
+            );
+        }
+        // The caller-visible consequence: the run stays on the real Symbol
+        // font rather than moving to a text font that cannot draw it either.
+        let (text, family) = remap_legacy_font_chars("\u{F0D2}", "Symbol", "Calibri");
+        assert_eq!(text, "\u{F0D2}", "registered-sign PUA survives unchanged");
+        assert_eq!(family, "Symbol");
     }
 
     /// When every PUA character maps, the text is standard Unicode and must
