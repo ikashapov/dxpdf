@@ -790,14 +790,19 @@ fn body_shape_txbx_text_is_rendered() {
 /// `<w:rPr>`, non-adjacent to the ordinary `<w:shadow/>` boolean toggle, used
 /// to fail the whole document — quick-xml's serde matcher works off tag
 /// local names only, so `w14:shadow` collided with `RPrXml`'s `shadow` field
-/// and was reported as a duplicate. The root's `mc:Ignorable="w14"` is the
-/// document's own declaration that a consumer may disregard the extension;
-/// `crate::docx::w14_shadow_collision` now elides exactly this one collision
-/// (deliberately narrow — see that module's doc). Also carries an
-/// `mc:AlternateContent` guarded by the same `w14` token, which must still
-/// parse and pick its `wps`-requiring choice untouched — proof that eliding
-/// the collision doesn't reach inside the separate `AlternateContent`
-/// branch-selection mechanism.
+/// and was reported as a duplicate. Fixed by `vendor/quick-xml-0.41.0` (a
+/// dxpdf-patched quick-xml — see that directory's `PATCH.md`) plus
+/// `RPrXml::w14_shadow`'s namespace-qualified `#[serde(rename)]`
+/// (`src/docx/parse/properties/schema/run.rs`), which together route the two
+/// elements to separate fields by resolved namespace instead of colliding on
+/// local name. `mc:Ignorable="w14"` on the root is realistic Word output but
+/// not load-bearing for the fix — matching happens on the element's actual
+/// namespace, regardless of any `mc:Ignorable` declaration. Also carries an
+/// `mc:AlternateContent` guarded by the `w14` token (an unrelated,
+/// already-existing mechanism, `crate::docx::parse::body`'s `McRequires`),
+/// which must still parse and pick its `wps`-requiring choice correctly —
+/// proof the quick-xml patch doesn't disturb that separate branch-selection
+/// path.
 #[test]
 fn w14_extension_sharing_rpr_field_name_does_not_break_parse() {
     let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>

@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "text-processing"]
 # static libraries, tens of MB each), including it would make the published
 # crate tarball hundreds of MB — crates.io's default per-crate limit is far
 # below that. None of `go/` is needed to build or use the Rust crate anyway.
-exclude = ["test-cases/", "test-files/", "scripts/", "output/", "plans/", "go/"]
+exclude = ["test-cases/", "test-files/", "scripts/", "output/", "plans/", "go/", "vendor/"]
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
@@ -224,6 +224,18 @@ writeable = "0.6.3"
 # boundaries at all and break mid-word. CJK needs no model — UAX #14's own
 # rules handle class ID — so this is the whole of the complex-script cost.
 icu_segmenter = { version = "2.2.0", default-features = false, features = ["auto", "serde"] }
+
+# `vendor/quick-xml-0.41.0` — see that directory's `PATCH.md` for why: a
+# same-local-name collision across two different XML namespaces that
+# `quick_xml::de`'s ordinary field matching cannot distinguish
+# (`w:shadow` vs Word-2010's `w14:shadow`). Applies to every build rooted at
+# *this* Cargo.toml (CLI, tests, CI, the Python wheel, the `.deb`, the Go
+# bindings' `staticlib`) but not to `dxpdf` consumed as a Rust library
+# dependency from crates.io — `cargo publish` strips `[patch]` sections, so a
+# downstream `Cargo.toml` depending on `dxpdf` resolves the unpatched
+# upstream quick-xml. That gap is accepted, not overlooked; see `PATCH.md`.
+[patch.crates-io]
+quick-xml = { path = "vendor/quick-xml-0.41.0" }
 
 [features]
 default = ["subset-fonts"]
