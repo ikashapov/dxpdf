@@ -1,3 +1,31 @@
+dxpdf (0.7.0-1) unstable; urgency=medium
+
+  * Added OMML equation rendering (§22.1): runs, superscripts and fraction
+    bars now render in place of the blank space equations previously left
+    on the page. An equation inside a hyperlink is annotated as one unit,
+    and a heading's outline title now includes the text of any equation it
+    contains.
+  * Fixed a local-name collision between `w14:shadow` and `w:rPr`'s own
+    `shadow` field that could apply the wrong shadow setting to a run.
+  * Fixed whitespace loss on `xml:space="preserve"` text runs inside Office
+    Math and WordprocessingML, which could collapse the space in
+    expressions like "a + b" to "a+b".
+  * Added elision of elements marked ignorable via `mc:Ignorable`, instead
+    of parsing them as if they were required content.
+  * Fixed line breaking so a hyphen between a letter and a digit
+    (TOKEN-1234567890) can break after the hyphen instead of only
+    mid-digit, matching Word and Chrome.
+  * Fixed a continuous section break out of a multi-column layout drawing
+    the next section over the tail of the first column instead of below
+    the deepest column.
+  * Fixed several Symbol-font PUA mappings (the 0xC4-0xD1 set-operator
+    block, the double-arrow codes, and the summation sign) that were
+    shifted and rendered as tofu; corporate-use PUA codes with no portable
+    Unicode target are now left unmapped rather than mapped to the wrong
+    glyph.
+
+ -- Ilya Nixan <nixan@nerdy.pro>  Thu, 10 Sep 2026 09:00:00 +0000
+
 dxpdf (0.6.0-1) unstable; urgency=medium
 
   * Added Go bindings (github.com/nerdy-pro/dxpdf/go): a C ABI (`capi`
