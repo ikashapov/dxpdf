@@ -35,12 +35,33 @@ fn default_type() -> StTblWidthType {
 
 impl From<TableMeasureXml> for TableMeasure {
     fn from(x: TableMeasureXml) -> Self {
-        let value = x.w.map(IntegerMeasure::value).unwrap_or(0);
+        use crate::docx::parse::primitives::units::dimension_from_measure;
+
+        // §22.9.2.9 lets `@w` spell a length (`"297.65pt"`) or a percentage
+        // (`"50%"`) outright; `dimension_from_measure` accepts whichever of
+        // the two the arm's own unit can hold. A spelling that contradicts
+        // `@type` — a percentage under `dxa`, a length under `pct` — names no
+        // width this engine can honour, so it degrades to `Auto` rather than
+        // guessing which of the two declarations to believe.
         match x.ty {
             StTblWidthType::Auto => Self::Auto,
             StTblWidthType::Nil => Self::Nil,
-            StTblWidthType::Dxa => Self::Twips(Dimension::new(value)),
-            StTblWidthType::Pct => Self::Pct(Dimension::<FiftiethPercent>::new(value)),
+            StTblWidthType::Dxa => match x.w.map(dimension_from_measure) {
+                None => Self::Twips(Dimension::new(0)),
+                Some(Ok(twips)) => Self::Twips(twips),
+                Some(Err(reason)) => {
+                    log::warn!("[table] dropping dxa width: {reason}");
+                    Self::Auto
+                }
+            },
+            StTblWidthType::Pct => match x.w.map(dimension_from_measure::<FiftiethPercent>) {
+                None => Self::Pct(Dimension::new(0)),
+                Some(Ok(pct)) => Self::Pct(pct),
+                Some(Err(reason)) => {
+                    log::warn!("[table] dropping pct width: {reason}");
+                    Self::Auto
+                }
+            },
         }
     }
 }
@@ -135,6 +156,44 @@ mod tests {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 2501),
             other => panic!("expected Twips, got {other:?}"),
         }
+    }
+
+    /// §17.18.87's `@w` is `ST_MeasurementOrPercent`: a `dxa` width may be
+    /// spelled as a §22.9.2.15 universal measure, and a `pct` one as a
+    /// §22.9.2.9 percentage. Word's Strict output uses both spellings.
+    #[test]
+    fn universal_measure_converts_to_twips_for_dxa() {
+        match parse(r#"<tblW w="297.65pt" type="dxa"/>"#) {
+            TableMeasure::Twips(d) => assert_eq!(d.raw(), 5953),
+            other => panic!("expected Twips, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn percent_spelling_lands_in_fiftieths_for_pct() {
+        match parse(r#"<tblW w="50%" type="pct"/>"#) {
+            TableMeasure::Pct(d) => assert_eq!(d.raw(), 2500),
+            other => panic!("expected Pct, got {other:?}"),
+        }
+        match parse(r#"<tblW w="33.3%" type="pct"/>"#) {
+            TableMeasure::Pct(d) => assert_eq!(d.raw(), 1665),
+            other => panic!("expected Pct, got {other:?}"),
+        }
+    }
+
+    /// A spelling that contradicts `@type` names no width this engine can
+    /// honour; it degrades to `Auto` (with a warning) rather than guessing
+    /// which of the two declarations to believe.
+    #[test]
+    fn contradictory_spelling_and_type_degrade_to_auto() {
+        assert!(matches!(
+            parse(r#"<tblW w="50%" type="dxa"/>"#),
+            TableMeasure::Auto
+        ));
+        assert!(matches!(
+            parse(r#"<tblW w="297.65pt" type="pct"/>"#),
+            TableMeasure::Auto
+        ));
     }
 
     #[test]
