@@ -537,7 +537,9 @@ mod tests {
     use super::*;
     use crate::model::{Alignment, PTabAlignment, PTabRelativeTo};
     use crate::render::fonts::Toggle;
-    use crate::render::layout::fragment::{FontProps, LinkTarget, TextMetrics};
+    use crate::render::layout::fragment::{
+        BreakAfter, FontProps, LinkTarget, MathRow, TextMetrics,
+    };
     use crate::render::resolve::color::RgbColor;
     use std::rc::Rc;
 
@@ -582,6 +584,44 @@ mod tests {
             *hyperlink_url = Some(LinkTarget::External(std::rc::Rc::from(url)));
         }
         fragment
+    }
+
+    /// A minimal `§22.1` fraction fragment, for testing the paint side of
+    /// a hyperlinked equation independently of the OMML→fragment path.
+    fn math_fraction_frag(hyperlink_url: Option<LinkTarget>) -> Fragment {
+        let font = Rc::new(FontProps {
+            rtl: crate::render::fonts::Toggle::Absent,
+            family: Rc::from("Cambria Math"),
+            size: Pt::new(12.0),
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
+            underline: false,
+            char_spacing: Pt::ZERO,
+            text_scale: 1.0,
+            underline_position: Pt::ZERO,
+            underline_thickness: Pt::ZERO,
+        });
+        let metrics = TextMetrics {
+            ascent: Pt::new(10.0),
+            descent: Pt::new(4.0),
+            leading: Pt::ZERO,
+        };
+        let row = |text: &str, width: f32| MathRow {
+            text: Rc::from(text),
+            font: font.clone(),
+            width: Pt::new(width),
+            metrics,
+        };
+        Fragment::MathFraction {
+            num: row("1", 6.0),
+            den: row("2", 6.0),
+            color: RgbColor::BLACK,
+            width: Pt::new(10.0),
+            metrics,
+            baseline_offset: Pt::ZERO,
+            break_after: BreakAfter::Opportunity,
+            hyperlink_url,
+        }
     }
 
     fn underlined_text_frag(text: &str, width: f32) -> Fragment {
@@ -916,6 +956,49 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, DrawCommand::LinkAnnotation { .. })),
             "internal link must not be emitted as an external URI"
+        );
+    }
+
+    /// A `§22.1` fraction inside a `w:hyperlink` gets one annotation over its
+    /// whole box, the same way an ordinary run in the same hyperlink would —
+    /// see `non_http_external_link_emits_uri_annotation` for the run case.
+    #[test]
+    fn hyperlinked_math_fraction_emits_a_link_annotation() {
+        let frag = math_fraction_frag(Some(LinkTarget::External("https://example.invalid".into())));
+        let result = layout_paragraph(
+            &[frag],
+            &body_constraints(200.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+        assert!(
+            result.commands.iter().any(|c| matches!(
+                c,
+                DrawCommand::LinkAnnotation { url, .. } if &**url == "https://example.invalid"
+            )),
+            "fraction hyperlink annotation, got {:?}",
+            result.commands
+        );
+    }
+
+    /// The stated behaviour when there is no hyperlink: unchanged.
+    #[test]
+    fn a_math_fraction_without_a_hyperlink_emits_no_annotation() {
+        let frag = math_fraction_frag(None);
+        let result = layout_paragraph(
+            &[frag],
+            &body_constraints(200.0),
+            &ParagraphStyle::default(),
+            Pt::new(14.0),
+            None,
+        );
+        assert!(
+            !result
+                .commands
+                .iter()
+                .any(|c| matches!(c, DrawCommand::LinkAnnotation { .. })),
+            "no hyperlink on the fragment, no annotation"
         );
     }
 

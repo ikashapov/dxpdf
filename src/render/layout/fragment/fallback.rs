@@ -511,6 +511,7 @@ where
         break_after,
         width,
         metrics,
+        hyperlink_url,
     } = fragment
     else {
         unreachable!("guarded by the caller's `matches!` check")
@@ -525,6 +526,7 @@ where
             metrics,
             baseline_offset,
             break_after,
+            hyperlink_url,
         };
     }
 
@@ -549,6 +551,7 @@ where
         metrics,
         baseline_offset,
         break_after,
+        hyperlink_url,
     }
 }
 
@@ -879,6 +882,7 @@ mod tests {
             metrics,
             baseline_offset: Pt::ZERO,
             break_after: BreakAfter::Opportunity,
+            hyperlink_url: None,
         }
     }
 
