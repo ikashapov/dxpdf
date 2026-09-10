@@ -7,7 +7,6 @@
 use serde::Deserialize;
 
 use crate::docx::parse::body_schema::TextXml;
-use crate::docx::whitespace_workaround::restore_whitespace_sentinels;
 use crate::model::{MathBlock, MathElement, MathRun};
 
 /// `<m:oMath>` — inline math content inside a paragraph.
@@ -86,11 +85,7 @@ fn convert_children(children: Vec<MathChildXml>) -> Vec<MathElement> {
     for child in children {
         match child {
             MathChildXml::Run(r) => {
-                let text: String = r
-                    .texts
-                    .iter()
-                    .map(|t| restore_whitespace_sentinels(&t.content))
-                    .collect();
+                let text: String = r.texts.iter().map(|t| t.content.as_str()).collect();
                 if !text.is_empty() {
                     out.push(MathElement::Run(MathRun { text }));
                 }
