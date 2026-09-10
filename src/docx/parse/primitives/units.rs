@@ -45,12 +45,16 @@ where
     U: Unit,
 {
     let measure = IntegerMeasure::deserialize(deserializer)?;
+    // Convert first: "-63%" on a length attribute is wrong for being a
+    // percentage before it is wrong for being negative, and the more
+    // diagnostic error should win.
+    let dimension = dimension_from_measure(measure).map_err(serde::de::Error::custom)?;
     if measure.is_negative() {
         return Err(serde::de::Error::custom(
             "negative value is not valid for this OOXML measurement",
         ));
     }
-    dimension_from_measure(measure).map_err(serde::de::Error::custom)
+    Ok(dimension)
 }
 
 pub(crate) fn deserialize_optional_nonnegative_dimension<'de, D, U>(
@@ -61,15 +65,13 @@ where
     U: Unit,
 {
     Option::<IntegerMeasure>::deserialize(deserializer)?.map_or(Ok(None), |measure| {
+        let dimension = dimension_from_measure(measure).map_err(serde::de::Error::custom)?;
         if measure.is_negative() {
-            Err(serde::de::Error::custom(
+            return Err(serde::de::Error::custom(
                 "negative value is not valid for this OOXML measurement",
-            ))
-        } else {
-            dimension_from_measure(measure)
-                .map(Some)
-                .map_err(serde::de::Error::custom)
+            ));
         }
+        Ok(Some(dimension))
     })
 }
 
@@ -163,6 +165,64 @@ mod tests {
         assert_eq!(v.val.raw(), -240);
         let r: Result<NonnegativeTwips, _> = quick_xml::de::from_str(r#"<x val="-0.5pt"/>"#);
         assert!(r.is_err(), "nonnegative target must reject -0.5pt");
+    }
+
+    /// Every length unit's EMU ratio, exercised through a conversion that
+    /// lands on it exactly — a wrong constant fails its own line. `Emu` is
+    /// the DrawingML coordinate target (`cx="25.4mm"` in a Strict export),
+    /// `Points` the §17.3.4 border `w:space`, `FractionPoints` the §17.6.5
+    /// grid `w:charSpace`.
+    #[test]
+    fn every_length_unit_ratio_is_pinned() {
+        #[derive(Deserialize)]
+        struct EmuVal {
+            #[serde(rename = "@val")]
+            val: Dimension<Emu>,
+        }
+        #[derive(Deserialize)]
+        struct PointsVal {
+            #[serde(rename = "@val")]
+            val: Dimension<crate::model::dimension::Points>,
+        }
+        #[derive(Deserialize)]
+        struct FractionVal {
+            #[serde(rename = "@val")]
+            val: Dimension<crate::model::dimension::FractionPoints>,
+        }
+        let v: EmuVal = quick_xml::de::from_str(r#"<x val="25.4mm"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 914_400, "25.4mm is one inch of EMU");
+        let v: PointsVal = quick_xml::de::from_str(r#"<x val="0.5in"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 36, "half an inch in whole points");
+        let v: FractionVal = quick_xml::de::from_str(r#"<x val="1pt"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 4096, "one point on the 1/4096 grid");
+    }
+
+    /// An exact half lands away from zero at the EMU→unit division too:
+    /// 0.25pt is 3175 EMU, precisely half of a half-point's 6350.
+    #[test]
+    fn emu_conversion_rounds_half_away_from_zero() {
+        let v: HalfVal = quick_xml::de::from_str(r#"<x val="0.25pt"/>"#).unwrap();
+        assert_eq!(v.val.raw(), 1);
+        let v: HalfVal = quick_xml::de::from_str(r#"<x val="-0.25pt"/>"#).unwrap();
+        assert_eq!(v.val.raw(), -1);
+    }
+
+    /// A negative percentage keeps its sign on the percent scale, and the
+    /// `+` the two grammars do not allow stays rejected.
+    #[test]
+    fn percent_sign_travels_and_plus_is_rejected() {
+        #[derive(Deserialize)]
+        struct PctVal {
+            #[serde(rename = "@val")]
+            val: Dimension<crate::model::dimension::ThousandthPercent>,
+        }
+        let v: PctVal = quick_xml::de::from_str(r#"<x val="-50%"/>"#).unwrap();
+        assert_eq!(v.val.raw(), -50_000);
+        for raw in ["+595.3pt", "+50%"] {
+            let r: Result<TwipsVal, _> = quick_xml::de::from_str(&format!(r#"<x val="{raw}"/>"#));
+            let p: Result<PctVal, _> = quick_xml::de::from_str(&format!(r#"<x val="{raw}"/>"#));
+            assert!(r.is_err() && p.is_err(), "{raw:?} must be rejected");
+        }
     }
 
     /// §22.9.2.9: a percent spelling lands on the target's own percent scale

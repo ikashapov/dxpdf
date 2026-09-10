@@ -9,7 +9,8 @@ use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, Twips};
 use crate::docx::model::geometry::{EdgeInsets, PartialEdgeInsets};
-use crate::docx::parse::primitives::units::deserialize_optional_nonnegative_dimension;
+use crate::docx::parse::primitives::integer_measure::{IntegerMeasure, MeasureKind};
+use crate::docx::parse::primitives::units::dimension_from_measure;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct EdgeInsetsTwipsXml {
@@ -25,12 +26,33 @@ pub(crate) struct EdgeInsetsTwipsXml {
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct SideXml {
-    #[serde(
-        rename = "@w",
-        default,
-        deserialize_with = "deserialize_optional_nonnegative_dimension"
-    )]
+    #[serde(rename = "@w", default, deserialize_with = "deserialize_side_width")]
     w: Option<Dimension<Twips>>,
+}
+
+/// A side's `@w` is CT_TblWidth's ST_MeasurementOrPercent, but only a length
+/// is meaningful for padding (the module doc owns why). A percent spelling —
+/// legal for the type, meaningless here — drops the side with a warning
+/// instead of failing the document, mirroring `TableMeasureXml`'s policy for
+/// a spelling that contradicts its `@type`.
+fn deserialize_side_width<'de, D>(deserializer: D) -> Result<Option<Dimension<Twips>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(measure) = Option::<IntegerMeasure>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if measure.kind() == MeasureKind::Percent {
+        log::warn!("[table] dropping a cell-margin width spelled as a percentage");
+        return Ok(None);
+    }
+    let dimension = dimension_from_measure(measure).map_err(serde::de::Error::custom)?;
+    if measure.is_negative() {
+        return Err(serde::de::Error::custom(
+            "negative value is not valid for this OOXML measurement",
+        ));
+    }
+    Ok(Some(dimension))
 }
 
 /// Conversion used for the table-level default (`<w:tblCellMar>`). Per
@@ -84,6 +106,25 @@ impl From<EdgeInsetsTwipsXml> for PartialEdgeInsets<Twips> {
 
 #[cfg(test)]
 mod tests {
+    /// §22.9.2.15 / §22.9.2.9 through a margin side: a length spelling
+    /// converts, a percent one drops the side, a negative one is fatal.
+    #[test]
+    fn side_widths_take_lengths_and_drop_percents() {
+        let x: EdgeInsetsTwipsXml =
+            quick_xml::de::from_str(r#"<m><top w="0.1in" type="dxa"/></m>"#).unwrap();
+        let insets = EdgeInsets::from(x);
+        assert_eq!(insets.top.raw(), 144, "0.1in in twips");
+
+        let x: EdgeInsetsTwipsXml =
+            quick_xml::de::from_str(r#"<m><top w="5%" type="pct"/></m>"#).unwrap();
+        let insets = EdgeInsets::from(x);
+        assert_eq!(insets.top.raw(), 0, "percent side is dropped, not fatal");
+
+        let r: Result<EdgeInsetsTwipsXml, _> =
+            quick_xml::de::from_str(r#"<m><top w="-1pt" type="dxa"/></m>"#);
+        assert!(r.is_err(), "a negative length side is still rejected");
+    }
+
     use super::*;
 
     fn parse(xml: &str) -> EdgeInsets<Twips> {
