@@ -1,4 +1,4 @@
-//! Elide elements from namespaces the document itself declares ignorable.
+//! Elide the one confirmed `<w14:shadow>` / `<w:shadow>` local-name collision.
 //!
 //! # The problem
 //!
@@ -10,7 +10,14 @@
 //! ordinary case: a Rust field renamed `"rStyle"` matches `<w:rStyle>`
 //! however the producer chose to bind the `w:` prefix. But it also means two
 //! elements from **different** namespaces that happen to share a local name
-//! collide as the same field.
+//! collide as the same field — and there is no fix available inside the
+//! parse itself: a custom `Deserialize` for the colliding struct sees only a
+//! generic `D: serde::Deserializer<'de>` (it is reached through the parent's
+//! ordinary derive composition), and quick-xml's own `MapAccess`/`EnumAccess`
+//! already discard the namespace before *any* visitor — derived or
+//! hand-written — ever sees a key. The only point namespace-resolved XML text
+//! is ever in hand is before `quick_xml::de` runs at all, which is what this
+//! module does.
 //!
 //! That is exactly what a real document from issue reproduction
 //! `joern.hendrich@vdwbayern.de.docx` hits: a numbering level's `<w:rPr>`
@@ -24,45 +31,51 @@
 //! duplicate rather than folding it into the `Vec` — deserialization fails
 //! outright instead of just losing the extension data.
 //!
-//! # The fix
+//! # The fix, deliberately narrow
 //!
-//! Per Markup Compatibility and Extensibility (ECMA-376 Part 3), a producer
-//! that writes `mc:Ignorable="w14 w15 ..."` on the package part's root
-//! element is declaring exactly this: a consumer that does not understand
-//! those namespaces may disregard every element in them. This engine does
-//! not parse `w14`/`w15`/`w16*`/`wp14` content, so honoring that declaration
-//! is not a guess about the document — it is what the attribute means.
-//! Stripping the declared-ignorable elements before handing the part to
-//! `quick_xml::de` removes the colliding local name along with data this
-//! parser was never going to read anyway.
+//! This elides only that one exact collision — tag prefix `w14`, local name
+//! `shadow` — rather than every element from every namespace the document's
+//! `mc:Ignorable` declares safe to disregard. `w14:glow`, `w14:reflection`
+//! and the rest of the Word-2010 text-effect extensions already parse fine
+//! today (nothing in `RPrXml` names them, so quick-xml drops them as
+//! unmatched fields with no error); only `shadow` collides, because only
+//! `shadow` happens to also be a real `RPrXml` field name. Reopen this scope
+//! only against a second observed collision, not in anticipation of one —
+//! seeing exactly one real-world case does not justify guessing at the next.
+//!
+//! Still gated on the root's `mc:Ignorable` actually listing `w14`: per
+//! Markup Compatibility and Extensibility (ECMA-376 Part 3), that is the
+//! producer's own declaration that a `w14`-unaware consumer may disregard
+//! `w14` content, so stripping this one element is not a guess about the
+//! document even at this narrow scope.
 //!
 //! `<mc:AlternateContent>` is a *different* MCE mechanism — offering several
 //! representations of the same content for the consumer to choose between —
 //! and already has its own handling in `crate::docx::parse::body`
 //! (`McRequires`, keyed off each `mc:Choice`'s own `Requires` list). This
-//! pass leaves any `AlternateContent` subtree untouched, at any depth,
-//! regardless of what namespaces its content uses, so it never second-guesses
-//! that existing branch selection.
+//! pass leaves any `AlternateContent` subtree untouched, at any depth, so it
+//! never second-guesses that existing branch selection.
 //!
-//! Like `crate::docx::parse::body::mc_requires`, namespace prefixes here are
-//! matched as the literal tokens the producer wrote (`"w14"`, not a
-//! resolved URI) rather than through full namespace resolution — every
-//! producer this engine has seen binds these well-known Microsoft extension
-//! namespaces to their conventional prefixes, and the existing
-//! `Requires`-list handling already makes the same simplifying assumption.
+//! Like `crate::docx::parse::body::mc_requires`, the `w14` prefix is matched
+//! as the literal token the producer wrote, not a resolved URI — every
+//! producer this engine has seen binds this well-known Microsoft extension
+//! namespace to its conventional prefix, and the existing `Requires`-list
+//! handling already makes the same simplifying assumption.
 
-/// Elide every element whose tag prefix is listed in the document root's
-/// `mc:Ignorable` attribute, except inside an `AlternateContent` subtree.
+const TARGET_PREFIX: &[u8] = b"w14";
+const TARGET_LOCAL_NAME: &[u8] = b"shadow";
+
+/// Elide every `<w14:shadow>` element, except inside an `AlternateContent`
+/// subtree, but only when the document root's `mc:Ignorable` lists `w14`.
 /// Returns the original buffer unchanged when there is nothing to elide, or
 /// when the XML can't be walked (left for `quick_xml::de` to reject with a
 /// proper parse error).
-pub(crate) fn elide_ignorable_extensions(xml: &[u8]) -> Vec<u8> {
-    let ignorable = root_ignorable_prefixes(xml);
-    if ignorable.is_empty() {
+pub(crate) fn elide_w14_shadow(xml: &[u8]) -> Vec<u8> {
+    if !root_declares_w14_ignorable(xml) {
         return xml.to_vec();
     }
 
-    let spans = ignorable_element_spans(xml, &ignorable);
+    let spans = w14_shadow_spans(xml);
     if spans.is_empty() {
         return xml.to_vec();
     }
@@ -89,9 +102,14 @@ fn tag_prefix(tag: &[u8]) -> Option<&[u8]> {
     Some(&tag[..colon])
 }
 
-/// The root element's `mc:Ignorable` value, split on whitespace. Empty when
-/// absent, empty-valued, or the XML can't be read that far.
-fn root_ignorable_prefixes(xml: &[u8]) -> Vec<Vec<u8>> {
+fn is_w14_shadow(tag: &[u8]) -> bool {
+    tag_prefix(tag) == Some(TARGET_PREFIX) && local_name(tag) == TARGET_LOCAL_NAME
+}
+
+/// Whether the root element's `mc:Ignorable` attribute lists `w14`. False
+/// when absent, when `w14` is not one of its tokens, or when the XML can't
+/// be read that far.
+fn root_declares_w14_ignorable(xml: &[u8]) -> bool {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -100,7 +118,7 @@ fn root_ignorable_prefixes(xml: &[u8]) -> Vec<Vec<u8>> {
     loop {
         let event = match reader.read_event() {
             Ok(event) => event,
-            Err(_) => return Vec::new(),
+            Err(_) => return false,
         };
         match event {
             Event::Start(tag) | Event::Empty(tag) => {
@@ -109,22 +127,21 @@ fn root_ignorable_prefixes(xml: &[u8]) -> Vec<Vec<u8>> {
                         return attr
                             .value
                             .split(|&b| b == b' ')
-                            .filter(|p| !p.is_empty())
-                            .map(<[u8]>::to_vec)
-                            .collect();
+                            .any(|token| token == TARGET_PREFIX);
                     }
                 }
-                return Vec::new();
+                return false;
             }
-            Event::Eof => return Vec::new(),
+            Event::Eof => return false,
             _ => {}
         }
     }
 }
 
-/// Byte spans (start of open tag, end of matching close tag) to remove.
-/// Empty (and the caller left with nothing to do) on malformed XML.
-fn ignorable_element_spans(xml: &[u8], ignorable: &[Vec<u8>]) -> Vec<(usize, usize)> {
+/// Byte spans (start of open tag, end of matching close tag) of every
+/// `<w14:shadow>` element to remove. Empty (and the caller left with nothing
+/// to do) on malformed XML.
+fn w14_shadow_spans(xml: &[u8]) -> Vec<(usize, usize)> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -133,7 +150,7 @@ fn ignorable_element_spans(xml: &[u8], ignorable: &[Vec<u8>]) -> Vec<(usize, usi
 
     let mut spans = Vec::new();
     let mut depth: usize = 0;
-    // (depth, start offset) of the ignorable element currently being elided.
+    // (depth, start offset) of the `w14:shadow` element currently being elided.
     let mut eliding: Option<(usize, usize)> = None;
     // Depth at which an `AlternateContent` subtree was entered; suppresses
     // elision anywhere inside it.
@@ -153,8 +170,7 @@ fn ignorable_element_spans(xml: &[u8], ignorable: &[Vec<u8>]) -> Vec<(usize, usi
                     protected_since = Some(depth);
                 } else if protected_since.is_none()
                     && eliding.is_none()
-                    && tag_prefix(name.as_ref())
-                        .is_some_and(|p| ignorable.iter().any(|i| i.as_slice() == p))
+                    && is_w14_shadow(name.as_ref())
                 {
                     eliding = Some((depth, start_pos));
                 }
@@ -162,8 +178,7 @@ fn ignorable_element_spans(xml: &[u8], ignorable: &[Vec<u8>]) -> Vec<(usize, usi
             Event::Empty(tag) => {
                 if protected_since.is_none()
                     && eliding.is_none()
-                    && tag_prefix(tag.name().as_ref())
-                        .is_some_and(|p| ignorable.iter().any(|i| i.as_slice() == p))
+                    && is_w14_shadow(tag.name().as_ref())
                 {
                     spans.push((start_pos, reader.buffer_position() as usize));
                 }
@@ -209,7 +224,7 @@ mod tests {
 
     fn elide_fragment(fragment: &str) -> String {
         let xml = wrap(fragment);
-        let out = s(elide_ignorable_extensions(xml.as_bytes()));
+        let out = s(elide_w14_shadow(xml.as_bytes()));
         out.strip_prefix(ROOT_OPEN)
             .and_then(|out| out.strip_suffix("</w:document>"))
             .expect("wrapper survives")
@@ -219,17 +234,23 @@ mod tests {
     #[test]
     fn no_ignorable_attribute_is_unchanged() {
         let xml = br#"<w:document xmlns:w="x"><w:rPr><w14:shadow/></w:rPr></w:document>"#;
-        assert_eq!(elide_ignorable_extensions(xml), xml);
+        assert_eq!(elide_w14_shadow(xml), xml);
     }
 
     #[test]
-    fn self_closing_ignorable_element_is_removed() {
+    fn ignorable_without_w14_token_is_unchanged() {
+        let xml = br#"<w:document xmlns:w="x" mc:Ignorable="w15"><w:rPr><w14:shadow/></w:rPr></w:document>"#;
+        assert_eq!(elide_w14_shadow(xml), xml);
+    }
+
+    #[test]
+    fn self_closing_w14_shadow_is_removed() {
         let out = elide_fragment(r#"<w:rPr><w:shadow w:val="0"/><w14:shadow/></w:rPr>"#);
         assert_eq!(out, r#"<w:rPr><w:shadow w:val="0"/></w:rPr>"#);
     }
 
     #[test]
-    fn ignorable_element_with_children_is_removed_whole() {
+    fn w14_shadow_with_children_is_removed_whole() {
         let out = elide_fragment(
             r#"<w:rPr><w:b/><w14:shadow w14:blurRad="0"><w14:srgbClr w14:val="000000"/></w14:shadow><w:i/></w:rPr>"#,
         );
@@ -242,32 +263,42 @@ mod tests {
         assert_eq!(out, r#"<w:rPr><w:shadow w:val="0"/><m:oMath/></w:rPr>"#);
     }
 
+    /// The narrowed scope's whole point: siblings from the *same* declared-
+    /// ignorable `w14` namespace that don't collide with any `RPrXml` field
+    /// name are left alone — they already parse fine today (dropped as
+    /// unmatched fields, no error), so touching them isn't this fix's job.
     #[test]
-    fn multiple_ignorable_siblings_are_all_removed() {
+    fn other_w14_extensions_are_not_removed() {
         let out =
             elide_fragment(r#"<w:rPr><w14:glow/><w:b/><w14:shadow/><w14:reflection/></w:rPr>"#);
+        assert_eq!(out, r#"<w:rPr><w14:glow/><w:b/><w14:reflection/></w:rPr>"#);
+    }
+
+    #[test]
+    fn multiple_w14_shadow_siblings_are_all_removed() {
+        let out = elide_fragment(r#"<w:rPr><w14:shadow/><w:b/><w14:shadow/></w:rPr>"#);
         assert_eq!(out, r#"<w:rPr><w:b/></w:rPr>"#);
     }
 
     #[test]
     fn alternate_content_subtree_is_left_untouched() {
         // Covers both the self-closing (`Event::Empty`) and open/close
-        // (`Event::Start`/`Event::End`) forms of an ignorable element, since
-        // the protection check is independent in each branch.
-        let fragment = r#"<mc:AlternateContent><mc:Choice Requires="w14"><w14:shadow/><w14:glow><w14:srgbClr/></w14:glow></mc:Choice><mc:Fallback/></mc:AlternateContent>"#;
+        // (`Event::Start`/`Event::End`) forms of the element, since the
+        // protection check is independent in each branch.
+        let fragment = r#"<mc:AlternateContent><mc:Choice Requires="w14"><w14:shadow/><w14:shadow><w14:srgbClr/></w14:shadow></mc:Choice><mc:Fallback/></mc:AlternateContent>"#;
         assert_eq!(elide_fragment(fragment), fragment);
     }
 
     #[test]
     fn malformed_xml_is_returned_unchanged() {
         let xml = br#"<w:document mc:Ignorable="w14"><w:rPr><w14:shadow>"#;
-        assert_eq!(elide_ignorable_extensions(xml), xml);
+        assert_eq!(elide_w14_shadow(xml), xml);
     }
 
     #[test]
     fn empty_ignorable_value_is_a_no_op() {
         let xml =
             br#"<w:document xmlns:w="x" mc:Ignorable=""><w:rPr><w14:shadow/></w:rPr></w:document>"#;
-        assert_eq!(elide_ignorable_extensions(xml), xml);
+        assert_eq!(elide_w14_shadow(xml), xml);
     }
 }
