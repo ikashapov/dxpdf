@@ -784,3 +784,86 @@ fn body_shape_txbx_text_is_rendered() {
         "wps:txbx text-box content must render as a Text draw command"
     );
 }
+
+/// Regression (issue reproduction `joern.hendrich@vdwbayern.de.docx`): a
+/// Word-2010 `<w14:shadow>` text-effect extension living directly inside
+/// `<w:rPr>`, non-adjacent to the ordinary `<w:shadow/>` boolean toggle, used
+/// to fail the whole document — quick-xml's serde matcher works off tag
+/// local names only, so `w14:shadow` collided with `RPrXml`'s `shadow` field
+/// and was reported as a duplicate. The root's `mc:Ignorable="w14"` is the
+/// document's own declaration that a consumer may disregard the extension;
+/// `crate::docx::mc_ignorable` now honors it. Also carries an
+/// `mc:AlternateContent` guarded by the same `w14` token, which must still
+/// parse and pick its `wps`-requiring choice untouched — proof that eliding
+/// declared-ignorable extensions doesn't reach inside the separate
+/// `AlternateContent` branch-selection mechanism.
+#[test]
+fn w14_extension_sharing_rpr_field_name_does_not_break_parse() {
+    let doc_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document
+    xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+    xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="w14">
+  <w:body>
+    <w:p><w:r>
+      <w:rPr>
+        <w:b/>
+        <w:shadow w:val="0"/>
+        <w:outline w:val="0"/>
+        <w14:glow w14:rad="0"><w14:srgbClr w14:val="000000"/></w14:glow>
+        <w14:shadow w14:blurRad="0" w14:dist="0"><w14:srgbClr w14:val="000000"/></w14:shadow>
+      </w:rPr>
+      <w:t>survives</w:t>
+    </w:r></w:p>
+    <w:p><w:r>
+      <mc:AlternateContent>
+        <mc:Choice Requires="wps w14">
+          <w:drawing>
+            <wp:anchor distT="0" distB="0" distL="0" distR="0" relativeHeight="1" behindDoc="0" locked="0" allowOverlap="1">
+              <wp:simplePos x="0" y="0"/>
+              <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+              <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+              <wp:extent cx="2743200" cy="914400"/><wp:wrapNone/><wp:docPr id="1" name="tb"/>
+              <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                <wps:wsp><wps:cNvSpPr/>
+                  <wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr>
+                  <wps:txbx><w:txbxContent><w:p><w:r><w:t>SHAPETEXT</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                  <wps:bodyPr/>
+                </wps:wsp>
+              </a:graphicData></a:graphic>
+            </wp:anchor>
+          </w:drawing>
+        </mc:Choice>
+        <mc:Fallback/>
+      </mc:AlternateContent>
+    </w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    let docx = make_docx(doc_xml);
+    let doc = dxpdf::docx::parse(&docx).expect("w14:shadow must not collide with w:shadow");
+    let (_, pages) = dxpdf::render::resolve_and_layout(doc);
+    let rendered_texts: Vec<&str> = pages
+        .iter()
+        .flat_map(|p| &p.commands)
+        .filter_map(|c| match c {
+            dxpdf::render::layout::draw_command::DrawCommand::Text { text, .. } => {
+                Some(text.as_ref())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        rendered_texts.iter().any(|t| t.contains("survives")),
+        "the run carrying w:shadow next to w14:shadow must still render its text: {rendered_texts:?}"
+    );
+    assert!(
+        rendered_texts.iter().any(|t| t.contains("SHAPETEXT")),
+        "mc:Choice requiring wps+w14 must still be selected and rendered: {rendered_texts:?}"
+    );
+}

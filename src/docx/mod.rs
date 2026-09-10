@@ -15,6 +15,7 @@ pub mod model {
 }
 
 pub mod error;
+pub(crate) mod mc_ignorable;
 pub mod parse;
 pub mod relationships;
 pub(crate) mod whitespace_workaround;
