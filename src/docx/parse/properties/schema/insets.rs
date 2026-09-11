@@ -125,6 +125,22 @@ mod tests {
         assert!(r.is_err(), "a negative length side is still rejected");
     }
 
+    /// A percent side is never "honoured" here — only `dxa` is meaningful
+    /// for cell padding — so unlike a length side, its sign must not be
+    /// fatal either: the value is discarded regardless, the same rule
+    /// `measure.rs` applies to a spelling its own `@type` contradicts.
+    #[test]
+    fn negative_percent_side_drops_without_failing() {
+        let x: EdgeInsetsTwipsXml =
+            quick_xml::de::from_str(r#"<m><top w="-5%" type="pct"/></m>"#).unwrap();
+        let insets = EdgeInsets::from(x);
+        assert_eq!(
+            insets.top.raw(),
+            0,
+            "a negative percent side is dropped, not fatal"
+        );
+    }
+
     use super::*;
 
     fn parse(xml: &str) -> EdgeInsets<Twips> {
