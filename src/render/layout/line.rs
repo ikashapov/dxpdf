@@ -276,7 +276,9 @@ pub fn fit_lines_with_first(
         // sniffing the fragment's last character, against a list that had
         // already drifted from the one used to cut the fragments.
         let is_break_point = match frag {
-            Fragment::Text { break_after, .. } => *break_after == BreakAfter::Opportunity,
+            Fragment::Text { break_after, .. } | Fragment::MathFraction { break_after, .. } => {
+                *break_after == BreakAfter::Opportunity
+            }
             _ => true, // tabs, images, line breaks are always break points
         };
         if is_break_point {
@@ -353,6 +355,48 @@ mod tests {
     /// boundary, or one UAX #14 refuses to break inside.
     fn glued_frag(text: &str, width: f32) -> Fragment {
         frag(text, width, BreakAfter::Prohibited)
+    }
+
+    /// A `Fragment::MathFraction` with a caller-chosen `break_after` — e.g.
+    /// `(1/2)²`, where the fraction is a superscript's base and must glue to
+    /// the exponent that follows it (`fragment::math`'s `emit_elements` sets
+    /// `Prohibited` on exactly this fragment for that case).
+    fn math_fraction_frag(width: f32, break_after: BreakAfter) -> Fragment {
+        let row = |text: &str| crate::render::layout::fragment::MathRow {
+            text: text.into(),
+            font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            width: Pt::new(width * 0.5),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+        };
+        Fragment::MathFraction {
+            num: row("1"),
+            den: row("2"),
+            color: RgbColor::BLACK,
+            width: Pt::new(width),
+            metrics: TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+            baseline_offset: Pt::ZERO,
+            break_after,
+            hyperlink_url: None,
+        }
     }
 
     fn frag(text: &str, width: f32, break_after: BreakAfter) -> Fragment {
@@ -499,6 +543,28 @@ mod tests {
             text_frag("prefix ", 45.0),
             glued_frag("ID‑", 20.0),
             glued_frag("001", 35.0),
+        ];
+        let lines = fit_lines(&frags, Pt::new(70.0));
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].end, 1);
+        assert_eq!(lines[1].start, 1);
+        assert_eq!(lines[1].end, 3);
+    }
+
+    /// `Fragment::MathFraction` carries its own `break_after` (a fraction
+    /// used as a superscript's base, `(1/2)²`, is glued to the exponent that
+    /// follows it) — the fitter must honor that field exactly like a
+    /// `Fragment::Text`'s, not fall into the wildcard arm that used to treat
+    /// every non-text fragment as an unconditional break point regardless of
+    /// what it carried. Same shape as the test above, with the middle
+    /// fragment swapped for a glued `MathFraction`.
+    #[test]
+    fn a_prohibited_math_fraction_is_not_a_break_point() {
+        let frags = vec![
+            text_frag("prefix ", 45.0),
+            math_fraction_frag(20.0, BreakAfter::Prohibited),
+            text_frag("sup", 35.0),
         ];
         let lines = fit_lines(&frags, Pt::new(70.0));
 
