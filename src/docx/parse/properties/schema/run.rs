@@ -35,6 +35,14 @@ impl<'de> Deserialize<'de> for TextScaleXml {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let head = raw.strip_suffix('%').unwrap_or(&raw);
+        // §22.9.2.9/§17.18.81 admit no `+` sign — matches the rejection
+        // every other percent/universal-measure spelling in this codebase
+        // applies (`parse_decimal_scaled`'s `allow_plus: false`).
+        if head.starts_with('+') {
+            return Err(serde::de::Error::custom(
+                "expected a §17.18.81 text-scale percentage",
+            ));
+        }
         head.parse::<u16>()
             .map(TextScaleXml)
             .map_err(|_| serde::de::Error::custom("expected a §17.18.81 text-scale percentage"))
@@ -401,6 +409,17 @@ mod tests {
         let (rp, _) = parse(r#"<rPr><w val="80"/></rPr>"#);
         assert_eq!(rp.text_scale, Dup::from(Some(TextScale::new(80))));
         assert_eq!(rp.text_scale.cloned().unwrap().percent(), 80);
+    }
+
+    #[test]
+    fn text_scale_rejects_plus_sign() {
+        // §17.18.81/§22.9.2.9 admit no `+` sign — matches the rejection
+        // every other percent/universal-measure spelling in this codebase
+        // applies (see units.rs's `percent_sign_travels_and_plus_is_rejected`).
+        let parsed: Result<RPrXml, _> = quick_xml::de::from_str(r#"<rPr><w val="+80%"/></rPr>"#);
+        assert!(parsed.is_err(), "a leading + must be rejected");
+        let parsed: Result<RPrXml, _> = quick_xml::de::from_str(r#"<rPr><w val="+80"/></rPr>"#);
+        assert!(parsed.is_err(), "a leading + must be rejected");
     }
 
     #[test]

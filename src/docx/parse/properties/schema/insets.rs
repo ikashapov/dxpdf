@@ -5,7 +5,7 @@
 //! meaningful for cell padding; other `@type` values are ignored here.
 
 use crate::model::Dup;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::docx::model::dimension::{Dimension, Twips};
 use crate::docx::model::geometry::{EdgeInsets, PartialEdgeInsets};
@@ -24,35 +24,50 @@ pub(crate) struct EdgeInsetsTwipsXml {
     right: Vec<SideXml>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 struct SideXml {
-    #[serde(rename = "@w", default, deserialize_with = "deserialize_side_width")]
     w: Option<Dimension<Twips>>,
 }
 
-/// A side's `@w` is CT_TblWidth's ST_MeasurementOrPercent, but only a length
-/// is meaningful for padding (the module doc owns why). A percent spelling —
-/// legal for the type, meaningless here — drops the side with a warning
-/// instead of failing the document, mirroring `TableMeasureXml`'s policy for
-/// a spelling that contradicts its `@type`.
-fn deserialize_side_width<'de, D>(deserializer: D) -> Result<Option<Dimension<Twips>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let Some(measure) = Option::<IntegerMeasure>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
-    if measure.kind() == MeasureKind::Percent {
-        log::warn!("[table] dropping a cell-margin width spelled as a percentage");
-        return Ok(None);
+/// The raw shadow of `<w:top w:w="N" w:type="dxa"/>` etc.: both attributes
+/// have to be read together (`SideXml`'s own `Deserialize` below), since
+/// which spelling of "percent, not a length" `@w` used depends on `@type`.
+#[derive(Deserialize)]
+struct SideAttrsXml {
+    #[serde(rename = "@w", default)]
+    w: Option<IntegerMeasure>,
+    #[serde(rename = "@type", default)]
+    ty: Option<String>,
+}
+
+/// A side's `@w`/`@type` are CT_TblWidth's, but only a `dxa`-typed length is
+/// meaningful for padding (the module doc owns why). A percent spelling is
+/// legal for the type but meaningless here, and §17.18.91 admits two ways to
+/// write one: a literal `%` suffix on `@w` (§22.9.2.9, `MeasureKind::Percent`)
+/// or the older Transitional `w:type="pct"` alongside a bare number — a bare
+/// `w="2500"` under `type="pct"` is not 2500 twips. `auto`/`nil` name no
+/// width at all and drop the same way. Every one of those drops the side
+/// with a warning instead of failing the document, mirroring
+/// `TableMeasureXml`'s policy for a spelling that contradicts its `@type`.
+impl<'de> Deserialize<'de> for SideXml {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = SideAttrsXml::deserialize(deserializer)?;
+        let Some(measure) = raw.w else {
+            return Ok(SideXml { w: None });
+        };
+        let type_is_dxa_or_absent = matches!(raw.ty.as_deref(), None | Some("dxa"));
+        if measure.kind() == MeasureKind::Percent || !type_is_dxa_or_absent {
+            log::warn!("[table] dropping a cell-margin width that isn't a dxa length");
+            return Ok(SideXml { w: None });
+        }
+        let dimension = dimension_from_measure(measure).map_err(serde::de::Error::custom)?;
+        if measure.is_negative() {
+            return Err(serde::de::Error::custom(
+                "negative value is not valid for this OOXML measurement",
+            ));
+        }
+        Ok(SideXml { w: Some(dimension) })
     }
-    let dimension = dimension_from_measure(measure).map_err(serde::de::Error::custom)?;
-    if measure.is_negative() {
-        return Err(serde::de::Error::custom(
-            "negative value is not valid for this OOXML measurement",
-        ));
-    }
-    Ok(Some(dimension))
 }
 
 /// Conversion used for the table-level default (`<w:tblCellMar>`). Per
@@ -123,6 +138,53 @@ mod tests {
         let r: Result<EdgeInsetsTwipsXml, _> =
             quick_xml::de::from_str(r#"<m><top w="-1pt" type="dxa"/></m>"#);
         assert!(r.is_err(), "a negative length side is still rejected");
+    }
+
+    /// A percent side is never "honoured" here — only `dxa` is meaningful
+    /// for cell padding — so unlike a length side, its sign must not be
+    /// fatal either: the value is discarded regardless, the same rule
+    /// `measure.rs` applies to a spelling its own `@type` contradicts.
+    #[test]
+    fn negative_percent_side_drops_without_failing() {
+        let x: EdgeInsetsTwipsXml =
+            quick_xml::de::from_str(r#"<m><top w="-5%" type="pct"/></m>"#).unwrap();
+        let insets = EdgeInsets::from(x);
+        assert_eq!(
+            insets.top.raw(),
+            0,
+            "a negative percent side is dropped, not fatal"
+        );
+    }
+
+    /// §17.18.91 `ST_TblWidthType` has two ways to spell "percent, not a
+    /// length": a literal `%` suffix on `@w` (§22.9.2.9) or the older
+    /// Transitional `w:type="pct"` alongside a bare number. Both must drop
+    /// the side the same way — a bare `w="2500"` under `type="pct"` is not
+    /// 2500 twips of padding.
+    #[test]
+    fn side_widths_drop_the_type_pct_spelling_of_percent_too() {
+        let x: EdgeInsetsTwipsXml =
+            quick_xml::de::from_str(r#"<m><top w="2500" type="pct"/></m>"#).unwrap();
+        let insets = EdgeInsets::from(x);
+        assert_eq!(
+            insets.top.raw(),
+            0,
+            "type=\"pct\" with a bare number must drop, not read as 2500 twips"
+        );
+    }
+
+    /// `auto`/`nil` name no width at all — the same "only dxa is meaningful
+    /// here" rule that drops a percent spelling.
+    #[test]
+    fn side_widths_drop_auto_and_nil_types() {
+        let x: EdgeInsetsTwipsXml =
+            quick_xml::de::from_str(r#"<m><top w="100" type="auto"/></m>"#).unwrap();
+        let insets = EdgeInsets::from(x);
+        assert_eq!(
+            insets.top.raw(),
+            0,
+            "type=\"auto\" must drop, not read as twips"
+        );
     }
 
     use super::*;
