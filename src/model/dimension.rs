@@ -5,6 +5,26 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 /// Marker trait for dimension unit types.
 pub trait Unit: Copy + Clone + fmt::Debug + PartialEq + Eq {
     const NAME: &'static str;
+
+    /// EMU per one of this unit, as an exact rational `(numerator,
+    /// denominator)` — or `None` for units that do not measure length
+    /// (percentages, angles).
+    ///
+    /// This is what lets a §22.9.2.15 universal measure (`"595.3pt"`,
+    /// `"2.54cm"`) land in an attribute whose native unit is twips or
+    /// half-points: the parser normalizes the spelling to EMU and divides by
+    /// this ratio. A `None` unit can never be the target of such a spelling,
+    /// and the parser reports it instead of guessing a scale.
+    const EMU_PER_UNIT: Option<(i64, i64)> = None;
+
+    /// Thousandths of a percent per one of this unit — `Some` only for the
+    /// percentage units, which is what lets a §22.9.2.9 `"63%"` spelling land
+    /// in an attribute whose bare-number form is on the thousandth
+    /// ([`ThousandthPercent`], DrawingML) or fiftieth ([`FiftiethPercent`],
+    /// §17.18.90) scale: the parser normalizes the spelling to thousandths
+    /// and divides by this. `None` — a length or angle — can never be the
+    /// target of a percentage.
+    const THOUSANDTHS_PER_UNIT: Option<i64> = None;
 }
 
 /// A dimension value parameterized by its unit of measurement.
@@ -103,24 +123,28 @@ impl<U: Unit> Neg for Dimension<U> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Twips;
 impl Unit for Twips {
+    const EMU_PER_UNIT: Option<(i64, i64)> = Some((635, 1));
     const NAME: &'static str = "twip";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HalfPoints;
 impl Unit for HalfPoints {
+    const EMU_PER_UNIT: Option<(i64, i64)> = Some((6350, 1));
     const NAME: &'static str = "hp";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Emu;
 impl Unit for Emu {
+    const EMU_PER_UNIT: Option<(i64, i64)> = Some((1, 1));
     const NAME: &'static str = "emu";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EighthPoints;
 impl Unit for EighthPoints {
+    const EMU_PER_UNIT: Option<(i64, i64)> = Some((3175, 2));
     const NAME: &'static str = "ep";
 }
 
@@ -128,6 +152,7 @@ impl Unit for EighthPoints {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FractionPoints;
 impl Unit for FractionPoints {
+    const EMU_PER_UNIT: Option<(i64, i64)> = Some((3175, 1024));
     const NAME: &'static str = "fp4096";
 }
 
@@ -136,6 +161,7 @@ impl Unit for FractionPoints {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Points;
 impl Unit for Points {
+    const EMU_PER_UNIT: Option<(i64, i64)> = Some((12700, 1));
     const NAME: &'static str = "pt";
 }
 
@@ -153,6 +179,7 @@ impl Unit for CentiPoints {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ThousandthPercent;
 impl Unit for ThousandthPercent {
+    const THOUSANDTHS_PER_UNIT: Option<i64> = Some(1);
     const NAME: &'static str = "‰%";
 }
 
@@ -167,6 +194,7 @@ impl Unit for ThousandthPercent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FiftiethPercent;
 impl Unit for FiftiethPercent {
+    const THOUSANDTHS_PER_UNIT: Option<i64> = Some(20);
     const NAME: &'static str = "/50%";
 }
 

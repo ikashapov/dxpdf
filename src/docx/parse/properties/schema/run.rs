@@ -23,7 +23,23 @@
 
 use crate::model::Dup;
 use serde::de::IgnoredAny;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+/// §17.18.81 ST_TextScale: a bare percent number (`80`, the Transitional
+/// spelling) or the same number with a `%` sign (`80%`, what a Strict export
+/// writes). Both land on the one 0..=600 scale `TextScale::new` clamps.
+#[derive(Clone, Copy, Debug)]
+struct TextScaleXml(u16);
+
+impl<'de> Deserialize<'de> for TextScaleXml {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let head = raw.strip_suffix('%').unwrap_or(&raw);
+        head.parse::<u16>()
+            .map(TextScaleXml)
+            .map_err(|_| serde::de::Error::custom("expected a §17.18.81 text-scale percentage"))
+    }
+}
 
 use crate::docx::model::dimension::{Dimension, HalfPoints, Twips, Unit};
 use crate::docx::model::{RunProperties, StrikeStyle, StyleId, TextScale, UnderlineStyle};
@@ -85,7 +101,7 @@ pub(crate) struct RPrXml {
     kern: Vec<NonNegativeDimensionVal<HalfPoints>>,
     /// §17.3.2.45 — `<w:w w:val="80"/>`: horizontal character scale in percent.
     #[serde(rename = "w", default)]
-    char_scale: Vec<ValAttr<u16>>,
+    char_scale: Vec<ValAttr<TextScaleXml>>,
 
     #[serde(rename = "caps", default)]
     caps: Vec<OnOff>,
@@ -213,7 +229,7 @@ impl RPrXml {
             position: Dup::from(self.position).map(|p| p.val),
             lang: Dup::from(self.lang).map(Into::into),
             border: Dup::from(self.bdr).map(Into::into),
-            text_scale: Dup::from(self.char_scale).map(|v| TextScale::new(v.val)),
+            text_scale: Dup::from(self.char_scale).map(|v| TextScale::new(v.val.0)),
         };
         (props, style_id)
     }
@@ -393,6 +409,10 @@ mod tests {
 
     #[test]
     fn text_scale_parsed() {
+        // §17.18.81 also admits the percent spelling a Strict export writes.
+        let (rp, _) = parse(r#"<rPr><w val="80%"/></rPr>"#);
+        assert_eq!(rp.text_scale, Dup::from(Some(TextScale::new(80))));
+
         // §17.3.2.45: <w:w w:val="80"/> compresses character width to 80%.
         let (rp, _) = parse(r#"<rPr><w val="80"/></rPr>"#);
         assert_eq!(rp.text_scale, Dup::from(Some(TextScale::new(80))));

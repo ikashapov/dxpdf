@@ -488,6 +488,7 @@ const ALL_FILES: &[&str] = &[
     "charts.docx",
     "custgeom-arc.docx",
     "bidi-tabs.docx",
+    "universal-measures.docx",
 ];
 
 #[test]
