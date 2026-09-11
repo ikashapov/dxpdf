@@ -427,6 +427,8 @@ const ALL_FILES: &[&str] = &[
     "equations-omml.docx",
     "text-effects.docx",
     "shading-patterns.docx",
+    "wmf-image.docx",
+    "svg-image.docx",
 ];
 
 #[test]
