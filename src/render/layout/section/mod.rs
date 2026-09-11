@@ -397,6 +397,108 @@ mod tests {
         assert!(pages[0].commands.is_empty());
     }
 
+    /// §17.6.17 / §17.3.3.1: a paragraph whose only job is to carry the
+    /// section-ending `w:sectPr` — no runs, so it draws nothing but the
+    /// synthetic mark line `build::block` gives every empty paragraph — must
+    /// not spend a still-pending manual page break materializing a blank page
+    /// for itself when it is the *last* block of the section. The break
+    /// carries through to whatever starts the next section, which forces its
+    /// own fresh page regardless.
+    ///
+    /// Measured against `joern.hendrich@vdwbayern.de.docx`: a
+    /// `<w:br w:type="page"/>` ends the cover-page paragraph, and the very
+    /// next (and last) paragraph of that section is exactly this kind of
+    /// empty marker. Word puts the next section's content directly on the
+    /// page after the break — one page, not two.
+    #[test]
+    fn empty_section_terminal_paragraph_does_not_spend_a_pending_page_break() {
+        let blocks = vec![
+            para_block("p1", 30.0),
+            LayoutBlock::Paragraph {
+                fragments: vec![Fragment::PageBreak {
+                    line_height: Pt::new(14.0),
+                }],
+                style: ParagraphStyle::default(),
+                page_break_before: false,
+                footnotes: vec![],
+                floating_images: vec![],
+                floating_shapes: vec![],
+            },
+            // The section's last paragraph: no runs, only the mark line
+            // `build::block::build_paragraph_block` synthesizes for a
+            // paragraph that draws nothing (§17.3.1.29's `MarkLine`).
+            LayoutBlock::Paragraph {
+                fragments: vec![Fragment::LineBreak {
+                    line_height: Pt::new(14.0),
+                }],
+                style: ParagraphStyle::default(),
+                page_break_before: false,
+                footnotes: vec![],
+                floating_images: vec![],
+                floating_shapes: vec![],
+            },
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        assert_eq!(
+            pages.len(),
+            1,
+            "the marker paragraph must not force a second, blank page"
+        );
+    }
+
+    /// Control for the test above: the same empty marker paragraph, but *not*
+    /// the section's last block — real content follows it. The deferred break
+    /// must still resolve normally here, or the fix above would be masking a
+    /// break that stopped working at all rather than one that only became
+    /// conditional on trailing position.
+    #[test]
+    fn a_non_terminal_empty_paragraph_still_spends_the_pending_page_break() {
+        let blocks = vec![
+            para_block("p1", 30.0),
+            LayoutBlock::Paragraph {
+                fragments: vec![Fragment::PageBreak {
+                    line_height: Pt::new(14.0),
+                }],
+                style: ParagraphStyle::default(),
+                page_break_before: false,
+                footnotes: vec![],
+                floating_images: vec![],
+                floating_shapes: vec![],
+            },
+            LayoutBlock::Paragraph {
+                fragments: vec![Fragment::LineBreak {
+                    line_height: Pt::new(14.0),
+                }],
+                style: ParagraphStyle::default(),
+                page_break_before: false,
+                footnotes: vec![],
+                floating_images: vec![],
+                floating_shapes: vec![],
+            },
+            para_block("p3", 30.0),
+        ];
+        let pages = layout_section(
+            &blocks,
+            &small_config(),
+            None,
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+        assert_eq!(
+            pages.len(),
+            2,
+            "a non-terminal empty paragraph still resolves the deferred break"
+        );
+    }
+
     #[test]
     fn single_paragraph_on_one_page() {
         let blocks = vec![para_block("hello", 30.0)];
