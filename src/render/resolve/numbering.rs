@@ -18,7 +18,10 @@ pub struct ResolvedNumberingLevel {
     /// §17.9.3: run properties for the numbering symbol (font, color, etc.).
     pub run_properties: Option<RunProperties>,
     /// §17.9.3: paragraph indentation from the numbering level definition.
-    /// When present, overrides the paragraph style's indentation.
+    /// A fallback only: any indentation the paragraph already carries — from
+    /// its style cascade or direct formatting — overrides this field-by-field
+    /// (`build::list_label::effective_indentation`), matching Word rather
+    /// than a reading where the numbering level wins.
     pub indentation: Option<Indentation>,
     /// §17.9.7: justification of the numbering symbol (left, center, right).
     pub justification: Option<Alignment>,
