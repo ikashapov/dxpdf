@@ -104,11 +104,11 @@ pub(super) fn inject_list_label(
 
     let level_def = levels.get(level as usize);
 
-    // §17.9.23: the level's indentation with the paragraph's direct overrides
-    // applied. `None` when the level defines no indentation — the paragraph
-    // then keeps its style-cascade value, which is exactly what
-    // `merged_props.indentation` already holds.
-    let effective_ind = effective_indentation(para, level_def);
+    // §17.9.23: the level's indentation with the paragraph's cascade
+    // (style-inherited or direct) overrides applied. `None` when the level
+    // defines no indentation — the paragraph then keeps its style-cascade
+    // value, which is exactly what `merged_props.indentation` already holds.
+    let effective_ind = effective_indentation(merged_props.indentation.cloned(), level_def);
     // Label geometry — hanging width, implicit tab stop — must follow the
     // paragraph's *final* indentation wherever it came from, or the suffix tab
     // lands somewhere other than where the body text wraps. Only the §17.9.23
@@ -203,25 +203,39 @@ pub(super) fn inject_list_label(
     }
 }
 
-/// §17.9.23: the numbering level's indentation with the paragraph's *direct*
+/// §17.9.23: the numbering level's indentation with the paragraph's *cascade*
 /// `w:ind` overrides applied field-by-field. `None` when the level defines no
 /// indentation at all (the paragraph then keeps its style-cascade value).
+///
+/// The override source is `merged_props.indentation` as it stands just before
+/// numbering runs — the paragraph's direct `w:ind` merged over its style
+/// chain, exactly what `build_fragments` already resolved — not the
+/// paragraph's own *direct* `w:ind` alone. Word treats the numbering level's
+/// indentation as a fallback that any indentation already reaching the
+/// paragraph overrides, wherever it came from: a heading style commonly
+/// declares its own `w:ind` precisely so a hanging numbered heading doesn't
+/// inherit whatever indentation the numbering definition happens to specify.
+/// Using only the direct paragraph override missed that case — a heading
+/// style's own `w:ind` lost to the numbering level's, which is what put
+/// "1 Einleitung" in a squeezed column at the page's right margin instead of
+/// at the style's declared 709-twip hanging indent in
+/// `joern.hendrich@vdwbayern.de.docx`.
 fn effective_indentation(
-    para: &model::Paragraph,
+    cascade: Option<model::Indentation>,
     level_def: Option<&crate::render::resolve::numbering::ResolvedNumberingLevel>,
 ) -> Option<model::Indentation> {
     let mut ind = *level_def?.indentation.as_ref()?;
-    if let Some(direct) = para.properties.indentation.get() {
-        if let Some(start) = direct.start {
+    if let Some(cascade) = cascade {
+        if let Some(start) = cascade.start {
             ind.start = Some(start);
         }
-        if let Some(end) = direct.end {
+        if let Some(end) = cascade.end {
             ind.end = Some(end);
         }
-        if let Some(first_line) = direct.first_line {
+        if let Some(first_line) = cascade.first_line {
             ind.first_line = Some(first_line);
         }
-        if let Some(mirror) = direct.mirror {
+        if let Some(mirror) = cascade.mirror {
             ind.mirror = Some(mirror);
         }
     }
@@ -792,43 +806,82 @@ mod tests {
         }
     }
 
-    fn para_with(props: ParagraphProperties) -> model::Paragraph {
-        model::Paragraph {
-            style_id: None,
-            properties: props,
-            mark_run_properties: None,
-            content: Vec::new(),
-            rsids: model::ParagraphRevisionIds::default(),
-        }
-    }
-
-    /// §17.9.23: the paragraph's direct `w:ind` overrides the numbering
+    /// §17.9.23: the paragraph's cascade `w:ind` overrides the numbering
     /// level's — for the implicit tab stop too, not just for body-text
-    /// wrapping. With level left=2631 and direct left=567, the suffix tab
+    /// wrapping. With level left=2631 and cascade left=567, the suffix tab
     /// must land at 567, or the first line renders with a huge gap while
-    /// continuation lines wrap at the direct indent.
+    /// continuation lines wrap at the cascade indent.
     #[test]
-    fn direct_ind_overrides_level_for_the_implicit_tab_stop() {
+    fn cascade_ind_overrides_level_for_the_implicit_tab_stop() {
         let resolved = resolved_with(vec![ResolvedNumberingLevel {
             indentation: Some(ind(2631, 504)),
             ..decimal_level()
         }]);
-        let para = para_with(ParagraphProperties {
+        let props = ParagraphProperties {
             indentation: Dup::from(Some(ind(567, 567))),
-            ..Default::default()
-        });
-        let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
+            ..props_at(0)
+        };
+        let (_, props) = inject_full(
+            &resolved,
+            &mut BuildState::default(),
+            &numbered_para(),
+            props,
+        );
 
         assert_eq!(
             props.tabs.first().map(|t| t.position.raw()),
             Some(567),
-            "implicit tab stop must sit at the direct indent, not the level's"
+            "implicit tab stop must sit at the cascade indent, not the level's"
         );
         let merged = props.indentation.get().expect("indentation merged");
         assert_eq!(merged.start.map(|d| d.raw()), Some(567));
         assert_eq!(
             merged.first_line,
             Some(FirstLineIndent::Hanging(Dimension::<Twips>::new(567)))
+        );
+    }
+
+    /// §17.9.23 in practice: Word treats the numbering level's indentation as
+    /// a fallback overridden by *any* indentation already reaching the
+    /// paragraph — not only a direct `w:ind` on the `<w:p>` itself. A heading
+    /// style commonly declares its own `w:ind` specifically so a hanging
+    /// numbered heading doesn't inherit whatever indentation the numbering
+    /// definition happens to specify. Measured off
+    /// `joern.hendrich@vdwbayern.de.docx`: style `berschrift1` declares
+    /// `w:ind left="709" hanging="709"` while its numbering level (abstractNum
+    /// 5, ilvl 0) declares `w:ind left="8087" hanging="432"` — Word renders
+    /// the heading at the style's indentation, not the level's. Getting this
+    /// wrong squeezed the heading into a narrow column at the page's right
+    /// margin, wrapping one syllable per line.
+    #[test]
+    fn style_cascade_indentation_beats_the_level_even_without_a_direct_override() {
+        let resolved = resolved_with(vec![ResolvedNumberingLevel {
+            indentation: Some(ind(8087, 432)),
+            ..decimal_level()
+        }]);
+        // No direct `w:ind` on the paragraph itself — this indentation is
+        // exactly what a style cascade with no direct override hands to
+        // `inject_list_label` in the real pipeline (`build_fragments`).
+        let props = ParagraphProperties {
+            indentation: Dup::from(Some(ind(709, 709))),
+            ..props_at(0)
+        };
+        let (_, props) = inject_full(
+            &resolved,
+            &mut BuildState::default(),
+            &numbered_para(),
+            props,
+        );
+
+        let merged = props.indentation.get().expect("indentation set");
+        assert_eq!(
+            merged.start.map(|d| d.raw()),
+            Some(709),
+            "the style's indentation must win over the numbering level's"
+        );
+        assert_eq!(
+            merged.first_line,
+            Some(FirstLineIndent::Hanging(Dimension::<Twips>::new(709)))
         );
     }
 
@@ -991,22 +1044,27 @@ mod tests {
         );
     }
 
-    /// §17.9.23 direct override carries `w:mirrorIndents` too, not just the
+    /// §17.9.23 cascade override carries `w:mirrorIndents` too, not just the
     /// start/end/first-line fields.
     #[test]
-    fn direct_mirror_override_survives_the_level_merge() {
+    fn cascade_mirror_override_survives_the_level_merge() {
         let resolved = resolved_with(vec![ResolvedNumberingLevel {
             indentation: Some(ind(2631, 504)),
             ..decimal_level()
         }]);
-        let para = para_with(ParagraphProperties {
+        let props = ParagraphProperties {
             indentation: Dup::from(Some(Indentation {
                 mirror: Some(true),
                 ..ind(567, 567)
             })),
-            ..Default::default()
-        });
-        let (_, props) = inject_full(&resolved, &mut BuildState::default(), &para, props_at(0));
+            ..props_at(0)
+        };
+        let (_, props) = inject_full(
+            &resolved,
+            &mut BuildState::default(),
+            &numbered_para(),
+            props,
+        );
         assert_eq!(props.indentation.get().unwrap().mirror, Some(true));
     }
 
@@ -1341,9 +1399,9 @@ mod tests {
     }
 
     /// §17.9.23: the level's indentation replaces the paragraph's, but the
-    /// paragraph's *direct* indentation still wins field by field.
+    /// paragraph's *cascade* indentation still wins field by field.
     #[test]
-    fn direct_paragraph_indentation_beats_the_level() {
+    fn cascade_paragraph_indentation_beats_the_level() {
         let resolved = resolved_with(vec![ResolvedNumberingLevel {
             indentation: Some(Indentation {
                 start: Some(Dimension::new(720)),
@@ -1358,15 +1416,16 @@ mod tests {
             measurer: &measurer,
             resolved: &resolved,
         };
-        let mut para = numbered_para();
-        para.properties.indentation = Dup::from(Some(Indentation {
-            start: Some(Dimension::new(1440)),
-            ..Default::default()
-        }));
         let mut fragments = Vec::new();
-        let mut props = props_at(0);
+        let mut props = ParagraphProperties {
+            indentation: Dup::from(Some(Indentation {
+                start: Some(Dimension::new(1440)),
+                ..Default::default()
+            })),
+            ..props_at(0)
+        };
         inject_list_label(
-            &para,
+            &numbered_para(),
             &mut fragments,
             &mut props,
             &ctx,
