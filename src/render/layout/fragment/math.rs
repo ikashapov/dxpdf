@@ -281,8 +281,16 @@ fn flatten_plain_text(elements: &[MathElement]) -> String {
 
 /// What Word actually draws for math variables: ASCII letters mapped to the
 /// Unicode Mathematical Italic alphabet (U+1D434…, U+1D44E…), with `h` on its
-/// Letterlike exception U+210E ℎ. Digits, operators and everything else pass
-/// through upright, per §22.1 defaults (`m:sty` overrides are not consumed).
+/// Letterlike exception U+210E ℎ. Digits and operators pass through upright,
+/// matching §22.1's own default for them.
+///
+/// Every other character — non-ASCII letters included — also passes through
+/// upright here, but that is this function's own limit, not §22.1's: Word
+/// italicizes math variables in other alphabetic scripts (Greek, for
+/// instance) by default too, and `m:sty` overrides are not consumed either,
+/// so neither the real default nor an explicit override reaches a non-ASCII
+/// letter yet. Extending coverage needs each script's own Mathematical
+/// Italic sub-range, not a blanket pass-through.
 fn map_math_italic(text: &str) -> String {
     text.chars()
         .map(|c| match c {
@@ -495,6 +503,17 @@ mod tests {
         assert_eq!(map_math_italic("x2"), "\u{1D465}2");
         assert_eq!(map_math_italic("h"), "\u{210E}");
         assert_eq!(map_math_italic("A + 1"), "\u{1D434} + 1");
+    }
+
+    /// A known gap, pinned rather than left to be assumed away: Word
+    /// italicizes non-ASCII math variables by default too, but this
+    /// function only maps the ASCII alphabet, so a Greek variable passes
+    /// through upright. If this ever starts failing because someone taught
+    /// `map_math_italic` a non-ASCII range, update this test and the
+    /// function's doc comment together — don't just delete the assertion.
+    #[test]
+    fn math_italic_leaves_non_ascii_letters_upright() {
+        assert_eq!(map_math_italic("α"), "α");
     }
 
     /// An `m:oMath` sharing `ParaChildXml`'s content model with ordinary runs
