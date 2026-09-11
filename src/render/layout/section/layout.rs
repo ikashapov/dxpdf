@@ -493,6 +493,22 @@ struct ParagraphFloatCheckpoint {
     command_count: usize,
     page_floats: Vec<float::ActiveFloat>,
     cursor_y: Pt,
+    /// Same field `PageReplayCheckpoint` saves — a discarded attempt between
+    /// capture and restore can call `advance_to_next_column()`, which folds
+    /// `cursor_y` into this monotonic high-water mark *before* the attempt is
+    /// undone; without capturing it here too, that contribution survives the
+    /// restore and can understate how much of the page's columns are truly
+    /// free, corrupting the §17.6.22 continuation handoff in `finalize` that
+    /// reads it once, at the very end of the section.
+    ///
+    /// `current_col` is deliberately **not** here, unlike
+    /// `PageReplayCheckpoint`: every current restore site is followed
+    /// immediately by `advance_to_next_column()`/`push_new_page()`, whose own
+    /// branch (`current_col + 1 < num_cols`) was already computed from the
+    /// *live*, not-yet-restored `current_col` — restoring it under that
+    /// decision would roll back real column progress the decision assumed
+    /// was still current, not just this attempt's speculative placement.
+    deepest_column_bottom: Pt,
 }
 
 struct PageReplayCheckpoint<'doc> {
@@ -600,6 +616,7 @@ impl ParagraphFloatCheckpoint {
             command_count: state.current_page.commands.len(),
             page_floats: state.page_floats.clone(),
             cursor_y: state.cursor_y,
+            deepest_column_bottom: state.deepest_column_bottom,
         }
     }
 
@@ -607,6 +624,77 @@ impl ParagraphFloatCheckpoint {
         state.current_page.commands.truncate(self.command_count);
         state.page_floats.clone_from(&self.page_floats);
         state.cursor_y = self.cursor_y;
+        state.deepest_column_bottom = self.deepest_column_bottom;
+    }
+}
+
+/// A PR #177 review finding: `ParagraphFloatCheckpoint` carried `cursor_y`
+/// but not `deepest_column_bottom`, so a discarded placement attempt that
+/// called `advance_to_next_column()` before being rolled back left its
+/// contribution to that monotonic high-water mark in place — silently, since
+/// nothing reads it again until `finalize()`, at the very end of the
+/// section. These two tests pin both halves of the fix: what now *does* roll
+/// back, and — since blindly copying `PageReplayCheckpoint`'s full field set
+/// would have been wrong here — what deliberately still does not.
+#[cfg(test)]
+mod paragraph_float_checkpoint_tests {
+    use super::*;
+
+    fn state() -> PageLayoutState<'static> {
+        let config = PageConfig::default();
+        let bounds = PageBodyBounds {
+            top: Pt::ZERO,
+            bottom: Pt::new(700.0),
+        };
+        PageLayoutState::new(&config, None, bounds, 0)
+    }
+
+    #[test]
+    fn restore_rolls_back_deepest_column_bottom() {
+        let mut s = state();
+        s.deepest_column_bottom = Pt::new(100.0);
+        let checkpoint = ParagraphFloatCheckpoint::capture(&s);
+
+        // A discarded attempt: the cursor got deep into the column before
+        // the caller decided to relocate this paragraph, calling
+        // `advance_to_next_column()` along the way — exactly what every real
+        // `float_checkpoint.restore()` call site does immediately after.
+        s.cursor_y = Pt::new(650.0);
+        s.advance_to_next_column();
+        assert_eq!(
+            s.deepest_column_bottom,
+            Pt::new(650.0),
+            "sanity check: the discarded attempt did bump the high-water mark"
+        );
+
+        checkpoint.restore(&mut s);
+        assert_eq!(
+            s.deepest_column_bottom,
+            Pt::new(100.0),
+            "the discarded attempt's column-bottom contribution must not \
+             survive the restore"
+        );
+    }
+
+    /// The companion invariant `current_col` needs, for the opposite reason:
+    /// every real restore call site branches on whether `current_col` is the
+    /// last column (`starts_new_page`, or the equivalent inline comparison)
+    /// *before* calling `restore()`, then immediately acts on that decision
+    /// via `advance_to_next_column()`/`push_new_page()`. Rolling `current_col`
+    /// back would contradict the branch the caller already took, undoing
+    /// real column progress rather than just this attempt's speculative
+    /// placement — so unlike `deepest_column_bottom`, it must stay out of
+    /// this checkpoint.
+    #[test]
+    fn restore_does_not_touch_current_col() {
+        let mut s = state();
+        let checkpoint = ParagraphFloatCheckpoint::capture(&s);
+        s.current_col = 2;
+        checkpoint.restore(&mut s);
+        assert_eq!(
+            s.current_col, 2,
+            "current_col is deliberately not part of this checkpoint"
+        );
     }
 }
 
@@ -1965,13 +2053,17 @@ pub(crate) fn layout_section_with_clearance(
                             if !paragraph_content_placed && starts_new_page {
                                 float_checkpoint.restore(&mut state);
                             }
+                            // Both branches already leave `cursor_y ==
+                            // column_top` on their own (`advance_to_next_
+                            // column`'s own assignment; `push_new_page`'s
+                            // `bounds.top` for both) — no third write here,
+                            // so this stays the only place columns advance.
                             if !starts_new_page {
                                 state.advance_to_next_column();
                             } else {
                                 // All columns full — new page, reset to column 0.
                                 state.push_new_page(block_idx, &ctx);
                             }
-                            state.cursor_y = state.column_top;
                             if !paragraph_content_placed && starts_new_page {
                                 let col_width = config.columns[state.current_col].width;
                                 register_destination_paragraph_floats(
