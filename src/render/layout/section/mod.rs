@@ -287,6 +287,7 @@ mod tests {
                 x_offset: Pt::ZERO,
                 width: Pt::new(180.0),
             }],
+            line_grid: None,
         }
     }
 
@@ -466,6 +467,7 @@ mod tests {
                     width: Pt::new(85.0),
                 },
             ],
+            line_grid: None,
         }
     }
 
@@ -2810,6 +2812,7 @@ mod tests {
                 x_offset: Pt::ZERO,
                 width: Pt::new(180.0),
             }],
+            line_grid: None,
         }
     }
 
@@ -3532,6 +3535,7 @@ mod tests {
                     width: Pt::new(70.0),
                 },
             ],
+            line_grid: None,
         }
     }
 
