@@ -693,6 +693,35 @@ mod tests {
         });
     }
 
+    /// §17.11.12 / §22.1: a footnote (or endnote) body whose first paragraph
+    /// opens with an equation should have its display-number prefix take the
+    /// equation's own font, not the ECMA spec-default fallback — the fraction
+    /// carries a real font on its rows, `Fragment::font_props()` just used to
+    /// only look at `Fragment::Text`.
+    #[test]
+    fn footnote_number_prefix_takes_the_opening_equations_font() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let math = model::Inline::Math(model::MathBlock {
+                content: vec![model::MathElement::Fraction {
+                    num: vec![model::MathElement::Run(model::MathRun { text: "1".into() })],
+                    den: vec![model::MathElement::Run(model::MathRun { text: "2".into() })],
+                }],
+            });
+            let content = vec![Block::Paragraph(Box::new(para(vec![math])))];
+            let notes = build_note_content("1", &content, ctx, state);
+            let (_, frags, _) = &notes[0];
+            let Fragment::Text { font, .. } = &frags[0] else {
+                panic!("expected the display-number prefix as the first fragment");
+            };
+            assert_eq!(
+                &*font.family,
+                model::DEFAULT_MATH_FONT,
+                "prefix should read the opening equation's font, not fall back to the spec default"
+            );
+        });
+    }
+
     /// §17.3.1.29: a paragraph with no runs still occupies one line. Without an
     /// injected `LineBreak` the fragment list is empty and `layout_section`
     /// drops the paragraph, collapsing it to zero height.
