@@ -677,10 +677,10 @@ mod paragraph_float_checkpoint_tests {
     }
 
     /// The companion invariant `current_col` needs, for the opposite reason:
-    /// every real restore call site branches on `current_col` (`current_col
-    /// + 1 < num_cols`, or the equivalent `starts_new_page`) *before* calling
-    /// `restore()`, then immediately acts on that decision via
-    /// `advance_to_next_column()`/`push_new_page()`. Rolling `current_col`
+    /// every real restore call site branches on whether `current_col` is the
+    /// last column (`starts_new_page`, or the equivalent inline comparison)
+    /// *before* calling `restore()`, then immediately acts on that decision
+    /// via `advance_to_next_column()`/`push_new_page()`. Rolling `current_col`
     /// back would contradict the branch the caller already took, undoing
     /// real column progress rather than just this attempt's speculative
     /// placement — so unlike `deepest_column_bottom`, it must stay out of
