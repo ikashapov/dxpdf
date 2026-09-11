@@ -785,16 +785,25 @@ pub(super) fn emit_line_commands(
                     break_after: _,
                     hyperlink_url,
                 } => {
-                    use crate::render::layout::fragment::{
-                        FRACTION_GAP_RATIO, FRACTION_RULE_RATIO, FRACTION_SIDE_PAD_RATIO,
-                        MATH_AXIS_RATIO,
-                    };
+                    use crate::render::layout::fragment::fraction_geometry;
+                    // Re-derive rule/gap/pad/axis from the same rows rather
+                    // than trusting the fragment's own `width`/`metrics`
+                    // (ignored above): one call site for the geometry means
+                    // paint and layout cannot independently drift the way two
+                    // hand-written copies of the `MATH_*`/`FRACTION_*` ratio
+                    // math already had.
+                    let geometry = fraction_geometry(
+                        num.font.size,
+                        num.width,
+                        num.metrics,
+                        den.width,
+                        den.metrics,
+                    );
                     let baseline = *cursor_y + line.ascent + *baseline_offset;
-                    let size = num.font.size;
-                    let rule = size * FRACTION_RULE_RATIO;
-                    let gap = size * FRACTION_GAP_RATIO;
-                    let pad = size * FRACTION_SIDE_PAD_RATIO;
-                    let bar_y = baseline - size * MATH_AXIS_RATIO;
+                    let rule = geometry.rule;
+                    let gap = geometry.gap;
+                    let pad = geometry.pad;
+                    let bar_y = baseline - geometry.axis;
 
                     let num_baseline = bar_y - rule * 0.5 - gap - num.metrics.descent;
                     let den_baseline = bar_y + rule * 0.5 + gap + den.metrics.ascent;
