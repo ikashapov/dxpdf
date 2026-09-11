@@ -49,6 +49,7 @@
 //! [LB25]: https://www.unicode.org/reports/tr14/#LB25
 
 use icu_segmenter::LineSegmenter;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 thread_local! {
     /// Per-thread cache, for the same reason [`super::PROVIDER`] is one: the
@@ -121,6 +122,20 @@ pub fn break_offsets(text: &str) -> Vec<usize> {
 /// ([`LineBreakOptions`] covers strictness and word mode only), hence this
 /// post-pass; if a future ICU4X grows a numeric-tailoring option, prefer it.
 ///
+/// "Digit" on both sides of the hyphen means Unicode's `Decimal_Number` (Nd)
+/// general category, not ASCII `0`-`9`: `TOKEN-١٢٣` (Arabic-Indic digits)
+/// glues exactly like `TOKEN-123` in Word — measured against this engine's
+/// own segmenter, which does treat Arabic-Indic digits as LB25's NU class.
+/// Nd is a coarser net than NU itself (fullwidth digits U+FF10–FF19 are Nd
+/// too, but carry their own East-Asian-Wide line-break class and already
+/// split from each other with no tailoring involved at all — checked the
+/// same way rather than assumed), but every Nd digit this function can
+/// actually observe glued to a hyphen by the untailored `HY × NU` rule is by
+/// construction NU, so the coarser check changes nothing for those.
+/// `char::is_alphanumeric` already covers non-ASCII on the letter side, so an
+/// ASCII-only digit check here was the asymmetry, not a deliberate
+/// narrowing.
+///
 /// [`LineBreakOptions`]: icu_segmenter::options::LineBreakOptions
 fn tailor_hyphen_digit_breaks(text: &str, offsets: &mut Vec<usize>) {
     let mut prev: Option<char> = None;
@@ -129,7 +144,9 @@ fn tailor_hyphen_digit_breaks(text: &str, offsets: &mut Vec<usize>) {
     while let Some((i, c)) = iter.next() {
         if c == '-'
             && prev.is_some_and(|p| p.is_alphanumeric())
-            && iter.peek().is_some_and(|&(_, next)| next.is_ascii_digit())
+            && iter
+                .peek()
+                .is_some_and(|&(_, next)| next.general_category() == GeneralCategory::DecimalNumber)
         {
             // '-' is one byte; `i + 1` is the boundary right after it.
             offsets.push(i + 1);
@@ -260,6 +277,29 @@ mod tests {
         );
         // …and between words it is a break, exactly as before.
         assert_eq!(pieces("Anlagen-freigabe"), ["Anlagen-", "freigabe"]);
+    }
+
+    /// The asymmetry a review caught: the guard was Unicode-aware before the
+    /// hyphen (`is_alphanumeric`) but ASCII-only after it (`is_ascii_digit`),
+    /// so a non-ASCII digit run stayed glued to its hyphen instead of getting
+    /// the same LB21 break the ASCII case gets above. Both scripts here are
+    /// verified NU class in this engine's own segmenter (each digit run
+    /// glues to itself and splits only at the hyphen) — fullwidth digits
+    /// were tried too and dropped from this test, because they turned out to
+    /// already split from each other with no tailoring involved at all,
+    /// which is not this bug.
+    #[test]
+    fn a_hyphen_after_letters_breaks_before_non_ascii_digits() {
+        assert_eq!(
+            pieces("TOKEN-\u{0661}\u{0662}\u{0663}"),
+            ["TOKEN-", "\u{0661}\u{0662}\u{0663}"],
+            "Arabic-Indic digits (Nd) are digits too"
+        );
+        assert_eq!(
+            pieces("TOKEN-\u{0967}\u{0968}\u{0969}"),
+            ["TOKEN-", "\u{0967}\u{0968}\u{0969}"],
+            "Devanagari digits (Nd) are digits too"
+        );
     }
 
     /// The guard on the LB25 tailoring: where the hyphen can be a leading
