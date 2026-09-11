@@ -882,6 +882,54 @@ fn paragraph_keep_next(block: &LayoutBlock) -> bool {
     matches!(block, LayoutBlock::Paragraph { style, .. } if style.keep_next)
 }
 
+/// §17.6.17: the last block of a section is the paragraph whose `pPr` carries
+/// the `w:sectPr` that ends it — that is how OOXML spells "this section ends
+/// here," not a rendering convention. When that paragraph draws nothing —
+/// no text, image, tab or footnote reference, only the kind of fragment that
+/// carries no ink (§17.3.1.29's own mark line, a bookmark, a break) — it is a
+/// pure end-of-section marker with no authored content of its own.
+///
+/// `fragments` is checked here rather than the source paragraph's own content
+/// because a paragraph with genuinely zero runs and one with, say, a single
+/// `<w:br/>` and nothing else both resolve to exactly one `LineBreak`
+/// fragment by the time layout sees them — `build::block`'s `MarkLine`
+/// (§17.3.1.29) synthesizes the same line for the former that the latter
+/// already carries. Either way the paragraph occupies one blank line and
+/// nothing more, so both count as "draws nothing" here.
+///
+/// Word does not spend a still-pending manual page break materializing a
+/// blank page just to hold this marker: the break carries through to
+/// whatever starts the *next* section, which forces its own fresh page
+/// regardless (every section start but `Continuous` is a page start). Measured
+/// against `joern.hendrich@vdwbayern.de.docx`: a `<w:br w:type="page"/>`
+/// ends the cover-page paragraph, and the very next paragraph is exactly this
+/// kind of empty section-terminal marker. Word's own render puts the
+/// following section's content — the TOC — directly on the page after the
+/// break; treating the marker as needing its own page instead produced an
+/// extra blank page in between.
+fn is_empty_section_terminal_paragraph(blocks: &[LayoutBlock], block_idx: usize) -> bool {
+    block_idx + 1 == blocks.len()
+        && matches!(
+            &blocks[block_idx],
+            LayoutBlock::Paragraph {
+                fragments,
+                footnotes,
+                floating_images,
+                floating_shapes,
+                ..
+            } if footnotes.is_empty()
+                && floating_images.is_empty()
+                && floating_shapes.is_empty()
+                && fragments.iter().all(|f| matches!(
+                    f,
+                    Fragment::LineBreak { .. }
+                        | Fragment::Bookmark { .. }
+                        | Fragment::PageBreak { .. }
+                        | Fragment::ColumnBreak
+                ))
+        )
+}
+
 /// §17.3.1.15: does a keepNext run *start* at `block_idx`?
 ///
 /// True when the block itself is keepNext and either it is the first block,
@@ -1755,8 +1803,12 @@ pub(crate) fn layout_section_with_clearance(
     'blocks: while block_idx < blocks.len() {
         let block = &blocks[block_idx];
         // §17.3.3.1: a deferred inline page break from the previous block
-        // forces this block onto a new page.
-        if state.pending_page_break {
+        // forces this block onto a new page — unless this block is an empty
+        // section-terminal marker (see `is_empty_section_terminal_paragraph`),
+        // in which case the break carries through unresolved to whatever the
+        // next section's own page start does with it, rather than
+        // materializing a blank page for the marker itself.
+        if state.pending_page_break && !is_empty_section_terminal_paragraph(blocks, block_idx) {
             state.pending_page_break = false;
             if state.cursor_y > state.page_top {
                 state.push_new_page(block_idx, &ctx);
