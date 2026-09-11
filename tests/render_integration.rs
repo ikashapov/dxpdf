@@ -930,34 +930,180 @@ fn a_break_only_paragraph_that_fits_does_not_add_a_page() {
 /// §22.1: the OMML fixture must produce visible math — italicized variables
 /// in the math face, superscripts, and stacked fractions with their rules —
 /// where an earlier version dropped the whole `m:oMath` subtree silently.
+///
+/// Checks position and size, not just presence and count (a PR #177 review
+/// finding against the original version of this test, which asserted only
+/// that a glyph appeared and a rule count — so a regression desyncing the
+/// painted fraction geometry from what layout measured, the kind
+/// `fraction_geometry` now rules out by construction in `math.rs`, would
+/// have shipped with this test still green). Every geometry assertion below
+/// is a *relation* the paint arms are known to derive (an exponent from its
+/// base, a rule from its own rows), not an absolute coordinate — like
+/// `math_italic_x`'s codepoint check, that keeps the test valid across
+/// hosts/fonts rather than pinned to one render.
 #[test]
 fn equations_render_math_glyphs_and_fraction_bars() {
+    use dxpdf::render::dimension::Pt;
     use dxpdf::render::layout::draw_command::DrawCommand;
 
     let doc = parse_docx("equations-omml.docx");
     let (_, pages) = dxpdf::render::resolve_and_layout(doc);
 
+    // ── x² + y² = z² — three italic bases, each with a raised, shrunk exponent ──
+    //
+    // Bases are the Mathematical Italic letters `map_math_italic` produces
+    // for x, y, z (U+1D465..1D467) — matched by codepoint, never by face
+    // name: on a host without Cambria Math the per-glyph fallback (issue
+    // #139) legitimately substitutes the family, so the glyph is the
+    // invariant.
     let mut math_italic_x = false;
-    let mut fraction_bars = 0;
+    let mut bases: Vec<(Pt, Pt)> = Vec::new();
     for page in &pages {
         for command in &page.commands {
-            match command {
-                // 𝑥 — MATHEMATICAL ITALIC SMALL X, produced by the math
-                // italic mapping. Asserted structurally, never by face name:
-                // on a host without Cambria Math the per-glyph fallback
-                // (issue #139) legitimately substitutes the family, so the
-                // glyph itself is the invariant.
-                DrawCommand::Text { text, .. } if text.contains('\u{1D465}') => {
-                    math_italic_x = true;
-                }
-                DrawCommand::Line { .. } => fraction_bars += 1,
-                _ => {}
+            let DrawCommand::Text {
+                text,
+                font_size,
+                position,
+                ..
+            } = command
+            else {
+                continue;
+            };
+            if text.contains('\u{1D465}') {
+                math_italic_x = true;
+            }
+            if text.chars().count() == 1
+                && matches!(
+                    text.chars().next(),
+                    Some('\u{1D465}' | '\u{1D466}' | '\u{1D467}')
+                )
+            {
+                bases.push((*font_size, position.y));
             }
         }
     }
     assert!(math_italic_x, "x² must render an italic math x");
-    assert!(
-        fraction_bars >= 3,
+    assert_eq!(
+        bases.len(),
+        3,
+        "x², y², z² each draw one italic base letter"
+    );
+    let base_size = bases[0].0;
+
+    // The exponents are the only bare "2"s drawn smaller than a base's own
+    // size — 1/2's denominator below also draws "2", but at full size, so
+    // this comparison excludes it without needing to know where the
+    // fraction equation starts.
+    let mut superscripts: Vec<(Pt, Pt)> = Vec::new();
+    for page in &pages {
+        for command in &page.commands {
+            let DrawCommand::Text {
+                text,
+                font_size,
+                position,
+                ..
+            } = command
+            else {
+                continue;
+            };
+            if &**text == "2" && *font_size < base_size {
+                superscripts.push((*font_size, position.y));
+            }
+        }
+    }
+    assert_eq!(superscripts.len(), 3, "x², y², z² each draw one exponent");
+    for ((base_size, base_y), (sup_size, sup_y)) in bases.iter().zip(&superscripts) {
+        assert!(
+            sup_size < base_size,
+            "exponent size {sup_size:?} must be smaller than its base's {base_size:?}"
+        );
+        assert!(
+            sup_y < base_y,
+            "exponent at y={sup_y:?} must be raised above its base's baseline at y={base_y:?} \
+             (y grows down the page)"
+        );
+    }
+
+    // ── 1/2 + 1/3 = 5/6 — each fraction draws numerator, denominator, rule ──
+    //
+    // `line_emit.rs`'s `MathFraction` arm pushes exactly that triple, back
+    // to back, per fraction (see the `for (row, row_baseline) in [...]` loop
+    // there) — found here by walking to every `Line` command and looking
+    // two/one slots back, rather than assumed.
+    let mut fraction_bars = 0usize;
+    for page in &pages {
+        let commands = &page.commands;
+        for (idx, command) in commands.iter().enumerate() {
+            let DrawCommand::Line {
+                line,
+                width: rule_width,
+                ..
+            } = command
+            else {
+                continue;
+            };
+            let Some(num_idx) = idx.checked_sub(2) else {
+                continue;
+            };
+            let den_idx = idx - 1;
+            let Some(DrawCommand::Text {
+                font_size: num_size,
+                position: num_pos,
+                ..
+            }) = commands.get(num_idx)
+            else {
+                continue;
+            };
+            let Some(DrawCommand::Text {
+                font_size: den_size,
+                position: den_pos,
+                ..
+            }) = commands.get(den_idx)
+            else {
+                continue;
+            };
+            fraction_bars += 1;
+
+            assert_eq!(line.start.y, line.end.y, "the fraction rule is horizontal");
+            assert!(
+                num_pos.y < line.start.y,
+                "numerator at y={:?} must sit above the rule at y={:?}",
+                num_pos.y,
+                line.start.y
+            );
+            assert!(
+                line.start.y < den_pos.y,
+                "denominator at y={:?} must sit below the rule at y={:?}",
+                den_pos.y,
+                line.start.y
+            );
+            assert_eq!(
+                *num_size, *den_size,
+                "numerator and denominator keep the same, full, non-superscript size"
+            );
+            assert!(
+                *rule_width > Pt::ZERO && rule_width < num_size,
+                "rule thickness {rule_width:?} must be a small positive fraction \
+                 of the font size {num_size:?}"
+            );
+            // Rows are centered inside the padded stack the rule spans —
+            // `line_emit.rs` positions each row's x as `x + (width -
+            // row.width) * 0.5`, which by construction keeps a row's own
+            // left edge at or past the rule's left edge and at or before
+            // its right edge (see `fraction_geometry`/`fraction_fragment`).
+            for pos in [num_pos, den_pos] {
+                assert!(
+                    line.start.x <= pos.x && pos.x <= line.end.x,
+                    "row start x={:?} must fall within the rule's span [{:?}, {:?}]",
+                    pos.x,
+                    line.start.x,
+                    line.end.x
+                );
+            }
+        }
+    }
+    assert_eq!(
+        fraction_bars, 3,
         "1/2 + 1/3 = 5/6 draws three fraction rules, got {fraction_bars}"
     );
 }
