@@ -34,7 +34,11 @@ pub fn extract_image_rel_id(image: &Image) -> Option<&RelId> {
             let blip = pic.blip_fill.blip.as_ref()?;
             blip.svg_embed.as_ref().or(blip.embed.as_ref())
         }
-        GraphicContent::WordProcessingShape(_) => None,
+        // Shapes, diagrams and charts are vector content — they have no
+        // media entry; each rides its own channel through layout.
+        GraphicContent::WordProcessingShape(_)
+        | GraphicContent::Diagram(_)
+        | GraphicContent::Chart(_) => None,
     }
 }
 
