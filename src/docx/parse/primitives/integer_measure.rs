@@ -46,17 +46,18 @@ impl<'de> Deserialize<'de> for IntegerMeasure {
     }
 }
 
-/// EMU per one §22.9.2.15 unit. `pc` and `pi` are two spellings of the pica.
-fn universal_unit_emu(suffix: &str) -> Option<i64> {
-    Some(match suffix {
-        "mm" => 36_000,
-        "cm" => 360_000,
-        "in" => 914_400,
-        "pt" => 12_700,
-        "pc" | "pi" => 152_400,
-        _ => return None,
-    })
-}
+/// §22.9.2.15 unit spellings and their EMU-per-unit ratio. `pc` and `pi` are
+/// two spellings of the pica. One table drives both the suffix match below
+/// and the ratio lookup, so the unit set cannot drift out of sync with
+/// itself.
+const UNIVERSAL_UNITS: &[(&str, i64)] = &[
+    ("mm", 36_000),
+    ("cm", 360_000),
+    ("in", 914_400),
+    ("pt", 12_700),
+    ("pc", 152_400),
+    ("pi", 152_400),
+];
 
 fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
     if let Ok(value) = raw.parse::<i64>() {
@@ -76,11 +77,10 @@ fn parse_integer_measure(raw: &str) -> Result<IntegerMeasure, &'static str> {
         });
     }
 
-    for suffix in ["mm", "cm", "in", "pt", "pc", "pi"] {
+    for &(suffix, emu_per_unit) in UNIVERSAL_UNITS {
         let Some(head) = raw.strip_suffix(suffix) else {
             continue;
         };
-        let emu_per_unit = universal_unit_emu(suffix).expect("every listed suffix has a scale");
         let (negative, value) = parse_decimal_scaled(head, emu_per_unit, false)?;
         return Ok(IntegerMeasure {
             value,
