@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::docx::model::dimension::{Dimension, FiftiethPercent};
 use crate::docx::model::TableMeasure;
-use crate::docx::parse::primitives::integer_measure::IntegerMeasure;
+use crate::docx::parse::primitives::integer_measure::{IntegerMeasure, MeasureKind};
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +66,25 @@ impl From<TableMeasureXml> for TableMeasure {
     }
 }
 
+impl TableMeasureXml {
+    /// Whether `From<TableMeasureXml> for TableMeasure` (above) discards
+    /// `@w` for this element: `@type` never reads it at all (`auto`/`nil`),
+    /// or `@w`'s spelling contradicts `@type` (a percentage under `dxa`, a
+    /// length under `pct`). Shared with the negative-value guard below so
+    /// the two "which widths does this engine ignore" answers can't drift
+    /// apart — see that guard's doc comment for why a discarded width's sign
+    /// must not be allowed to fail the document either.
+    fn discards_w(&self, w: &IntegerMeasure) -> bool {
+        matches!(
+            (self.ty, w.kind()),
+            (StTblWidthType::Auto, _)
+                | (StTblWidthType::Nil, _)
+                | (StTblWidthType::Dxa, MeasureKind::Percent)
+                | (StTblWidthType::Pct, MeasureKind::Universal)
+        )
+    }
+}
+
 /// Deserialize a possibly-repeated table measurement, rejecting a negative
 /// value on the occurrence that survives.
 ///
@@ -76,32 +95,26 @@ impl From<TableMeasureXml> for TableMeasure {
 /// ignoring an element for its value while honouring it for its validity.
 /// See `crate::docx::parse::primitives::duplicates` for the collapsing policy.
 ///
-/// The same rule extends to a spelling that contradicts `@type`: the
-/// conversion below discards such a width (degrading to `Auto`), so its sign
-/// must not fail the document either — rejecting `w="-50%" type="dxa"` while
+/// The same rule extends to a width `discards_w` reports as discarded: the
+/// conversion above ignores it (degrading to `Auto`/`Nil`), so its sign must
+/// not fail the document either — rejecting `w="-50%" type="dxa"` while
 /// accepting `w="50%" type="dxa"` would again honour an ignored value for
-/// its validity.
+/// its validity, and the same goes for `auto`/`nil`, which ignore `@w`
+/// unconditionally.
 pub(crate) fn deserialize_vec_nonnegative_table_measure<'de, D>(
     deserializer: D,
 ) -> Result<Vec<TableMeasureXml>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use crate::docx::parse::primitives::integer_measure::MeasureKind;
-
     let measures = Vec::<TableMeasureXml>::deserialize(deserializer)?;
-    if let Some(w) = measures.last().and_then(|value| value.w.as_ref()) {
-        let contradictory = measures.last().is_some_and(|value| {
-            matches!(
-                (value.ty, w.kind()),
-                (StTblWidthType::Dxa, MeasureKind::Percent)
-                    | (StTblWidthType::Pct, MeasureKind::Universal)
-            )
-        });
-        if w.is_negative() && !contradictory {
-            return Err(serde::de::Error::custom(
-                "negative value is not valid for this OOXML table measurement",
-            ));
+    if let Some(last) = measures.last() {
+        if let Some(w) = last.w.as_ref() {
+            if w.is_negative() && !last.discards_w(w) {
+                return Err(serde::de::Error::custom(
+                    "negative value is not valid for this OOXML table measurement",
+                ));
+            }
         }
     }
     Ok(measures)
@@ -236,6 +249,33 @@ mod tests {
             TableMeasure::Pct(d) => assert_eq!(d.raw(), 1),
             other => panic!("expected Pct, got {other:?}"),
         }
+    }
+
+    /// `auto`/`nil` discard `@w` unconditionally — `TableMeasureXml::from`
+    /// never reads it for either type — so a negative spelling under either
+    /// must degrade rather than fail the document, the same rule that
+    /// already applies to a spelling that contradicts `@type`.
+    #[test]
+    fn auto_and_nil_negative_widths_degrade_without_failing() {
+        let ok: Result<NonnegativeTableMeasure, _> =
+            quick_xml::de::from_str(r#"<x><tblW w="-50%"/></x>"#);
+        let value = ok.expect("an auto width's sign must not be fatal");
+        assert!(matches!(
+            crate::model::Dup::from(value.value)
+                .into_value()
+                .map(TableMeasure::from),
+            Some(TableMeasure::Auto)
+        ));
+
+        let ok: Result<NonnegativeTableMeasure, _> =
+            quick_xml::de::from_str(r#"<x><tblW w="-1in" type="nil"/></x>"#);
+        let value = ok.expect("a nil width's sign must not be fatal");
+        assert!(matches!(
+            crate::model::Dup::from(value.value)
+                .into_value()
+                .map(TableMeasure::from),
+            Some(TableMeasure::Nil)
+        ));
     }
 
     #[test]
