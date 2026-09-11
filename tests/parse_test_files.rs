@@ -439,6 +439,7 @@ const ALL_FILES: &[&str] = &[
     "counting-hi.docx",
     "counting-th.docx",
     "counting-en-dollar.docx",
+    "devanagari.docx",
 ];
 
 #[test]
