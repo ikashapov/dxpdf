@@ -157,8 +157,7 @@ where
     let (num_width, num_metrics) = measure_text(&num_text, font);
     let (den_width, den_metrics) = measure_text(&den_text, font);
 
-    let (width, metrics) =
-        fraction_geometry(font.size, num_width, num_metrics, den_width, den_metrics);
+    let geometry = fraction_geometry(font.size, num_width, num_metrics, den_width, den_metrics);
 
     let row = |text: String, row_width: Pt, row_metrics: TextMetrics| MathRow {
         text: Rc::from(text.as_str()),
@@ -170,28 +169,51 @@ where
         num: row(num_text, num_width, num_metrics),
         den: row(den_text, den_width, den_metrics),
         color: ctx.default_color,
-        width,
-        metrics,
+        width: geometry.width,
+        metrics: geometry.metrics,
         baseline_offset,
         break_after: BreakAfter::Opportunity,
         hyperlink_url: hyperlink_url.cloned(),
     }
 }
 
-/// The fraction's overall width/metrics from its two rows' own.
+/// Every quantity derived from the `MATH_*`/`FRACTION_*` ratios that either
+/// the initial layout pass or the paint pass needs to place a fraction
+/// stack — the layout pass only wants `width`/`metrics`, the paint pass only
+/// wants `rule`/`gap`/`pad`/`axis`, but both must read them off the same
+/// call so the space line-fitting reserves and what paint actually draws
+/// cannot independently drift (see [`fraction_geometry`]).
+pub(crate) struct FractionGeometry {
+    /// max(row widths) plus side padding — the fragment's line-fitting width.
+    pub width: Pt,
+    /// Synthesized ascent/descent covering both rows plus the rule and gaps.
+    pub metrics: TextMetrics,
+    /// Thickness of the fraction rule.
+    pub rule: Pt,
+    /// Vertical clearance between the rule and each row.
+    pub gap: Pt,
+    /// Horizontal padding on each side of the wider row.
+    pub pad: Pt,
+    /// Distance from the row's baseline up to the math axis the rule is
+    /// centered on — paint derives the rule's y as `baseline - axis`.
+    pub axis: Pt,
+}
+
+/// The fraction's geometry from its two rows' own width/metrics.
 ///
-/// Shared between initial construction and
-/// [`super::fallback::apply_font_fallback`]'s repair of a row whose face got
-/// substituted: both must derive the stack's ascent/descent from the same
-/// `size`/`FRACTION_*` ratios, or the space line-fitting reserved for the
-/// fraction and what re-fallback leaves behind could disagree.
-pub(super) fn fraction_geometry(
+/// Shared between initial construction, [`super::fallback::apply_font_
+/// fallback`]'s repair of a row whose face got substituted, and the paint
+/// arm in `paragraph::line_emit` — all three must derive the stack's
+/// geometry from the same `size`/`FRACTION_*` ratios, or the space
+/// line-fitting reserves, what fallback repair leaves behind, and what paint
+/// actually draws could disagree with each other.
+pub(crate) fn fraction_geometry(
     size: Pt,
     num_width: Pt,
     num_metrics: TextMetrics,
     den_width: Pt,
     den_metrics: TextMetrics,
-) -> (Pt, TextMetrics) {
+) -> FractionGeometry {
     let axis = size * MATH_AXIS_RATIO;
     let rule = size * FRACTION_RULE_RATIO;
     let gap = size * FRACTION_GAP_RATIO;
@@ -203,7 +225,14 @@ pub(super) fn fraction_geometry(
         descent: (rule * 0.5 + gap + den_metrics.height() - axis).max(Pt::ZERO),
         leading: Pt::ZERO,
     };
-    (width, metrics)
+    FractionGeometry {
+        width,
+        metrics,
+        rule,
+        gap,
+        pad,
+        axis,
+    }
 }
 
 /// Flatten a fraction argument to plain text. The minimal scope renders
