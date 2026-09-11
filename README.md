@@ -447,6 +447,8 @@ Validated against ISO 29500 (Office Open XML). **76 entries fully implemented, 1
 | Bidirectional tab stops and numbering labels | ❌ §17.3.1.37 stop positions are not mirrored under `w:bidi`, so a line reorders within each tab-delimited segment and a label before its suffix tab stays at the left |
 | `w:bidiVisual` (mirrored table columns) | ✅ §17.4.1 columns run right to left — the layout input is rewritten into visual order once, so `w:gridSpan`, `w:gridBefore` and `w:vMerge` mirror with them, and `w:left`/`w:right` on cell margins and borders swap as the logical `start`/`end` edges they are. The element makes the *table* right-to-left, so it also decides which margin §17.4.28 `w:jc` and §17.4.50 `tblInd` measure from — a `bidiVisual` table with no `w:jc` sits at the right margin, as Word renders it. Read from the `<w:tbl>` alone per [MS-OI29500] §2.1.250(a); `w:tblPrEx/w:bidiVisual` is parsed but not acted on |
 | Row gaps at a table edge (§17.4.15/§17.4.14) | ✅ a row's first `<w:tc>` takes the table's `w:left` and its last takes `w:right`, wherever across the grid `gridBefore`/`gridAfter` put those edges — §17.4.66 resolves an edge against cell borders and outer table borders, and a gapped row's first cell has no cell facing it. Verified against a Word render of `test-files/grid-gap-borders.docx`. The run of a row boundary that neither adjoining row can paint is drawn in the boundary strip so the line stays at one y |
+| Bidirectional tab stops and numbering labels | ✅ §17.3.1.37 a `w:bidi` paragraph measures its stops — including `bar` rules and the numbering label's implicit stop — from the right margin and walks its tab-delimited segments right to left; ISO Strict `start`/`end` stop spellings parse |
+| `w:bidiVisual` (mirrored table columns) | ❌ not parsed |
 | Automatic hyphenation | ❌ |
 
 </details>
@@ -492,6 +494,7 @@ dxpdf supports text formatting, paragraphs, tables (including nested, merged and
 Notable gaps: mirrored tab stops under `w:bidi`, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
 Notable gaps: Indic reordering, mirrored tab stops under `w:bidi`, automatic hyphenation, and SmartArt and charts.
 Notable gaps: Indic reordering, mirrored tab stops under `w:bidi`, automatic hyphenation, and tracked changes and comments.
+Notable gaps: Indic reordering, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
 
 ### How fast is dxpdf?
 
