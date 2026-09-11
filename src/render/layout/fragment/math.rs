@@ -92,6 +92,7 @@ fn emit_elements<F>(
                 );
             }
             MathElement::Superscript { base, sup } => {
+                let base_start = fragments.len();
                 emit_elements(
                     base,
                     font,
@@ -102,8 +103,27 @@ fn emit_elements<F>(
                     fragments,
                 );
                 // The exponent belongs to its base: no line break between.
-                if let Some(Fragment::Text { break_after, .. }) = fragments.last_mut() {
-                    *break_after = BreakAfter::Prohibited;
+                // Guarded on `fragments.len() > base_start` because `base`
+                // can legally emit nothing — §22.1 defaults `SSupXml::base`
+                // to `vec![]`, and a text-less `m:r` is dropped before this
+                // point — in which case there is no base fragment to glue
+                // and `fragments.last_mut()` would otherwise reach back into
+                // whatever unrelated fragment preceded this equation.
+                //
+                // Matches both `Fragment::Text` (an ordinary base) and
+                // `Fragment::MathFraction` (a fraction as a base, e.g.
+                // `(1/2)²`) — the only two variants `emit_elements` can leave
+                // behind here. `line.rs`'s line-fitter has to honor
+                // `MathFraction`'s own `break_after` for this to matter; see
+                // its `is_break_point` match.
+                if fragments.len() > base_start {
+                    match fragments.last_mut().expect("checked non-empty above") {
+                        Fragment::Text { break_after, .. }
+                        | Fragment::MathFraction { break_after, .. } => {
+                            *break_after = BreakAfter::Prohibited;
+                        }
+                        _ => {}
+                    }
                 }
                 let (_, base_metrics) = measure_text("X", font);
                 let mut sup_font = font.clone();
@@ -349,6 +369,84 @@ mod tests {
                 assert!(sup_off.raw() < base_off.raw(), "exponent raised");
             }
             other => panic!("expected two text fragments, got {other:?}"),
+        }
+    }
+
+    /// A fraction can be a superscript's base (`(1/2)²` — `m:sSup` whose
+    /// `m:e` is `m:f`) — the exponent must still glue to it. `line.rs`'s
+    /// `is_break_point` has to honor `Fragment::MathFraction`'s own
+    /// `break_after` for this to matter; that half is covered in
+    /// `render::layout::line`'s own tests.
+    #[test]
+    fn superscript_glues_to_a_fraction_base() {
+        let math = MathBlock {
+            content: vec![MathElement::Superscript {
+                base: vec![MathElement::Fraction {
+                    num: vec![run("1")],
+                    den: vec![run("2")],
+                }],
+                sup: vec![run("2")],
+            }],
+        };
+        let mut fragments = Vec::new();
+        emit_math_fragments(&math, &ctx(), None, &dummy_measure, &mut fragments);
+
+        assert_eq!(fragments.len(), 2, "fraction base + exponent");
+        match &fragments[0] {
+            Fragment::MathFraction { break_after, .. } => {
+                assert_eq!(
+                    *break_after,
+                    BreakAfter::Prohibited,
+                    "fraction base glued to sup"
+                );
+            }
+            other => panic!("expected the fraction base, got {other:?}"),
+        }
+    }
+
+    /// §22.1 lets `SSupXml::base` be empty — dropped by `convert_children`
+    /// when its only content is a text-less `m:r`, and reachable directly
+    /// too. The glue must not then reach backward past the equation into
+    /// whatever fragment preceded it in the same paragraph.
+    #[test]
+    fn superscript_with_an_empty_base_does_not_corrupt_a_preceding_fragment() {
+        let math = MathBlock {
+            content: vec![MathElement::Superscript {
+                base: vec![],
+                sup: vec![run("2")],
+            }],
+        };
+        let mut fragments = Vec::new();
+        // Ordinary prose preceding the equation in the same paragraph, with
+        // an ordinary break opportunity after it.
+        let style = TextRunStyle {
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            shading: None,
+            border: None,
+            baseline_offset: Pt::ZERO,
+        };
+        emit_text_words(
+            "word",
+            &math_font(Pt::new(12.0)),
+            &style,
+            None,
+            &dummy_measure,
+            &mut fragments,
+        );
+        let before = fragments.len();
+
+        emit_math_fragments(&math, &ctx(), None, &dummy_measure, &mut fragments);
+
+        assert_eq!(fragments.len(), before + 1, "just the bare exponent");
+        match &fragments[0] {
+            Fragment::Text { break_after, .. } => {
+                assert_eq!(
+                    *break_after,
+                    BreakAfter::Opportunity,
+                    "an empty superscript base must not glue backward into unrelated prose"
+                );
+            }
+            other => panic!("expected the preceding word untouched, got {other:?}"),
         }
     }
 
