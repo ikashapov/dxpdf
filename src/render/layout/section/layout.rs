@@ -628,14 +628,15 @@ impl ParagraphFloatCheckpoint {
     }
 }
 
-/// A PR #177 review finding: `ParagraphFloatCheckpoint` carried `cursor_y`
-/// but not `deepest_column_bottom`, so a discarded placement attempt that
-/// called `advance_to_next_column()` before being rolled back left its
-/// contribution to that monotonic high-water mark in place — silently, since
-/// nothing reads it again until `finalize()`, at the very end of the
-/// section. These two tests pin both halves of the fix: what now *does* roll
-/// back, and — since blindly copying `PageReplayCheckpoint`'s full field set
-/// would have been wrong here — what deliberately still does not.
+/// `ParagraphFloatCheckpoint::restore` must roll back every field a
+/// discarded placement attempt could have mutated before being undone, or
+/// the mutation survives silently — `deepest_column_bottom` in particular is
+/// a monotonic high-water mark that only `advance_to_next_column()` bumps
+/// and only `finalize()` reads, at the very end of the section, so nothing
+/// downstream can ever correct a stale value. These two tests pin both
+/// halves of that requirement: what now *does* roll back, and — since
+/// blindly copying `PageReplayCheckpoint`'s full field set would have been
+/// wrong here — what deliberately still does not.
 #[cfg(test)]
 mod paragraph_float_checkpoint_tests {
     use super::*;
