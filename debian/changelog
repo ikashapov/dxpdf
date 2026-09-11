@@ -1,3 +1,31 @@
+dxpdf (0.8.0-1) unstable; urgency=medium
+
+  * Read §22.9.2.15 universal measures (explicit units on a length, e.g.
+    `w:pgSz w:w="595.30pt"`) and §22.9.2.9 percent spellings on DrawingML
+    measures — the spellings a Word "Strict Open XML" export writes — instead
+    of rejecting the whole document over the first one encountered. Hardened
+    against a follow-up adversarial review: a percent `ST_TextScale`, a `+`
+    prefix invalid under both grammars, and a percent cell-margin width now
+    each resolve or degrade correctly instead of being mishandled.
+  * Fixed §17.18.87 cell-margin (`w:tcMar`/`w:tblCellMar`) width deserialization
+    to handle every side's width type, not only the plain-twips form.
+  * Fixed line breaking so a hyphen after a letter or digit breaks before a
+    non-ASCII decimal digit (Arabic-Indic, Devanagari) the same way it already
+    did for ASCII 0-9.
+  * Fixed a numbered heading's own paragraph-style indentation losing to the
+    numbering level's indentation, which could squeeze a heading against the
+    page's trailing margin instead of at its style's declared hanging indent.
+  * Fixed a spurious blank page inserted after a manual page break whose
+    paragraph is an empty, section-terminal marker with no content of its own.
+  * Fixed an OMML (§22.1) superscript over a fraction base (e.g. `(1/2)²`) not
+    gluing to its base, and guarded a superscript with an empty base against
+    reaching into an unrelated fragment.
+  * Fixed a layout checkpoint/restore bug around floating images inside a
+    paragraph that could corrupt multi-column continuation bookkeeping at the
+    end of a section.
+
+ -- Ilya Nixan <nixan@nerdy.pro>  Fri, 11 Sep 2026 09:00:00 +0000
+
 dxpdf (0.7.0-1) unstable; urgency=medium
 
   * Added OMML equation rendering (§22.1): runs, superscripts and fraction
