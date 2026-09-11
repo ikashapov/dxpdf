@@ -35,12 +35,33 @@ fn default_type() -> StTblWidthType {
 
 impl From<TableMeasureXml> for TableMeasure {
     fn from(x: TableMeasureXml) -> Self {
-        let value = x.w.map(IntegerMeasure::value).unwrap_or(0);
+        use crate::docx::parse::primitives::units::dimension_from_measure;
+
+        // `@w` is ST_MeasurementOrPercent: a §22.9.2.15 universal measure
+        // (`"297.65pt"`) or a §22.9.2.9 percentage (`"50%"`) outright; `dimension_from_measure` accepts whichever of
+        // the two the arm's own unit can hold. A spelling that contradicts
+        // `@type` — a percentage under `dxa`, a length under `pct` — names no
+        // width this engine can honour, so it degrades to `Auto` rather than
+        // guessing which of the two declarations to believe.
         match x.ty {
             StTblWidthType::Auto => Self::Auto,
             StTblWidthType::Nil => Self::Nil,
-            StTblWidthType::Dxa => Self::Twips(Dimension::new(value)),
-            StTblWidthType::Pct => Self::Pct(Dimension::<FiftiethPercent>::new(value)),
+            StTblWidthType::Dxa => match x.w.map(dimension_from_measure) {
+                None => Self::Twips(Dimension::new(0)),
+                Some(Ok(twips)) => Self::Twips(twips),
+                Some(Err(reason)) => {
+                    log::warn!("[table] dropping dxa width: {reason}");
+                    Self::Auto
+                }
+            },
+            StTblWidthType::Pct => match x.w.map(dimension_from_measure::<FiftiethPercent>) {
+                None => Self::Pct(Dimension::new(0)),
+                Some(Ok(pct)) => Self::Pct(pct),
+                Some(Err(reason)) => {
+                    log::warn!("[table] dropping pct width: {reason}");
+                    Self::Auto
+                }
+            },
         }
     }
 }
@@ -54,21 +75,34 @@ impl From<TableMeasureXml> for TableMeasure {
 /// though the effective width is a perfectly legal 500 — the parser would be
 /// ignoring an element for its value while honouring it for its validity.
 /// See `crate::docx::parse::primitives::duplicates` for the collapsing policy.
+///
+/// The same rule extends to a spelling that contradicts `@type`: the
+/// conversion below discards such a width (degrading to `Auto`), so its sign
+/// must not fail the document either — rejecting `w="-50%" type="dxa"` while
+/// accepting `w="50%" type="dxa"` would again honour an ignored value for
+/// its validity.
 pub(crate) fn deserialize_vec_nonnegative_table_measure<'de, D>(
     deserializer: D,
 ) -> Result<Vec<TableMeasureXml>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
+    use crate::docx::parse::primitives::integer_measure::MeasureKind;
+
     let measures = Vec::<TableMeasureXml>::deserialize(deserializer)?;
-    if measures
-        .last()
-        .and_then(|value| value.w.as_ref())
-        .is_some_and(IntegerMeasure::is_negative)
-    {
-        return Err(serde::de::Error::custom(
-            "negative value is not valid for this OOXML table measurement",
-        ));
+    if let Some(w) = measures.last().and_then(|value| value.w.as_ref()) {
+        let contradictory = measures.last().is_some_and(|value| {
+            matches!(
+                (value.ty, w.kind()),
+                (StTblWidthType::Dxa, MeasureKind::Percent)
+                    | (StTblWidthType::Pct, MeasureKind::Universal)
+            )
+        });
+        if w.is_negative() && !contradictory {
+            return Err(serde::de::Error::custom(
+                "negative value is not valid for this OOXML table measurement",
+            ));
+        }
     }
     Ok(measures)
 }
@@ -134,6 +168,73 @@ mod tests {
         match parse(r#"<tblW w="2500.5" type="dxa"/>"#) {
             TableMeasure::Twips(d) => assert_eq!(d.raw(), 2501),
             other => panic!("expected Twips, got {other:?}"),
+        }
+    }
+
+    /// §17.18.87's `@w` is `ST_MeasurementOrPercent`: a `dxa` width may be
+    /// spelled as a §22.9.2.15 universal measure, and a `pct` one as a
+    /// §22.9.2.9 percentage. Word's Strict output uses both spellings.
+    #[test]
+    fn universal_measure_converts_to_twips_for_dxa() {
+        match parse(r#"<tblW w="297.65pt" type="dxa"/>"#) {
+            TableMeasure::Twips(d) => assert_eq!(d.raw(), 5953),
+            other => panic!("expected Twips, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn percent_spelling_lands_in_fiftieths_for_pct() {
+        match parse(r#"<tblW w="50%" type="pct"/>"#) {
+            TableMeasure::Pct(d) => assert_eq!(d.raw(), 2500),
+            other => panic!("expected Pct, got {other:?}"),
+        }
+        match parse(r#"<tblW w="33.3%" type="pct"/>"#) {
+            TableMeasure::Pct(d) => assert_eq!(d.raw(), 1665),
+            other => panic!("expected Pct, got {other:?}"),
+        }
+    }
+
+    /// A spelling that contradicts `@type` names no width this engine can
+    /// honour; it degrades to `Auto` (with a warning) rather than guessing
+    /// which of the two declarations to believe.
+    #[test]
+    fn contradictory_spelling_and_type_degrade_to_auto() {
+        assert!(matches!(
+            parse(r#"<tblW w="50%" type="dxa"/>"#),
+            TableMeasure::Auto
+        ));
+        assert!(matches!(
+            parse(r#"<tblW w="297.65pt" type="pct"/>"#),
+            TableMeasure::Auto
+        ));
+    }
+
+    /// A spelling the conversion discards must not fail the document over
+    /// its sign either — while the same sign on an honoured spelling still
+    /// does.
+    #[test]
+    fn contradictory_negative_degrades_while_honoured_negative_rejects() {
+        let ok: Result<NonnegativeTableMeasure, _> =
+            quick_xml::de::from_str(r#"<x><tblW w="-50%" type="dxa"/></x>"#);
+        let value = ok.expect("a discarded spelling's sign must not be fatal");
+        assert!(matches!(
+            crate::model::Dup::from(value.value)
+                .into_value()
+                .map(TableMeasure::from),
+            Some(TableMeasure::Auto)
+        ));
+        let err: Result<NonnegativeTableMeasure, _> =
+            quick_xml::de::from_str(r#"<x><tblW w="-50%" type="pct"/></x>"#);
+        assert!(err.is_err(), "an honoured negative percent is still fatal");
+    }
+
+    /// The half-tie on the thousandths→fiftieths division rounds away from
+    /// zero: 0.01% is 10 thousandths, exactly half of one fiftieth.
+    #[test]
+    fn pct_half_tie_rounds_away_from_zero() {
+        match parse(r#"<tblW w="0.01%" type="pct"/>"#) {
+            TableMeasure::Pct(d) => assert_eq!(d.raw(), 1),
+            other => panic!("expected Pct, got {other:?}"),
         }
     }
 
