@@ -30,6 +30,7 @@ pub use collect::{
     collect_fragments, FieldContext, FootnoteTracker, FragmentCtx, RecordedFootnote,
 };
 pub use fallback::{apply_font_fallback, FallbackLookup, RegistryFallback};
+pub(crate) use math::fraction_geometry;
 pub use shape::shape_complex_scripts;
 pub use split::split_oversized_fragments;
 
@@ -53,13 +54,18 @@ pub(super) const SUBSCRIPT_HEIGHT_OFFSET_RATIO: f32 = 0.08;
 // a Word reference render of `1/2 + 1/3 = 5/6` is what would refine them.
 
 /// Center of the fraction rule above the baseline.
-pub(crate) const MATH_AXIS_RATIO: f32 = 0.25;
+///
+/// Private rather than `pub(crate)`: [`fraction_geometry`] is now the only
+/// place that reads these four ratios (the paint arm in `paragraph::
+/// line_emit` used to rederive them independently and no longer does), so
+/// nothing outside this module has a reason to see them.
+const MATH_AXIS_RATIO: f32 = 0.25;
 /// Thickness of the fraction rule.
-pub(crate) const FRACTION_RULE_RATIO: f32 = 0.05;
+const FRACTION_RULE_RATIO: f32 = 0.05;
 /// Vertical clearance between the rule and each row.
-pub(crate) const FRACTION_GAP_RATIO: f32 = 0.08;
+const FRACTION_GAP_RATIO: f32 = 0.08;
 /// Horizontal padding on each side of the wider row.
-pub(crate) const FRACTION_SIDE_PAD_RATIO: f32 = 0.12;
+const FRACTION_SIDE_PAD_RATIO: f32 = 0.12;
 
 /// §17.11.12: baseline shift for a footnote/endnote reference mark, and for
 /// the matching number prefixed to the note body — as a fraction of the base

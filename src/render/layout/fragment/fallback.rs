@@ -536,7 +536,7 @@ where
     // widened, possibly re-fonted) rows — the same formula `fraction_fragment`
     // used to build them the first time, so the space this fraction now
     // occupies is honest about what it contains.
-    let (width, metrics) = super::math::fraction_geometry(
+    let geometry = super::math::fraction_geometry(
         num.font.size,
         num.width,
         num.metrics,
@@ -547,8 +547,8 @@ where
         num,
         den,
         color,
-        width,
-        metrics,
+        width: geometry.width,
+        metrics: geometry.metrics,
         baseline_offset,
         break_after,
         hyperlink_url,
@@ -867,7 +867,7 @@ mod tests {
     ) -> Fragment {
         let num = math_row(num_text, num_family);
         let den = math_row(den_text, den_family);
-        let (width, metrics) = super::super::math::fraction_geometry(
+        let geometry = super::super::math::fraction_geometry(
             Pt::new(12.0),
             num.width,
             num.metrics,
@@ -878,8 +878,8 @@ mod tests {
             num,
             den,
             color: RgbColor::BLACK,
-            width,
-            metrics,
+            width: geometry.width,
+            metrics: geometry.metrics,
             baseline_offset: Pt::ZERO,
             break_after: BreakAfter::Opportunity,
             hyperlink_url: None,
@@ -967,16 +967,16 @@ mod tests {
                 metrics,
                 ..
             } => {
-                let (expected_width, expected_metrics) = super::super::math::fraction_geometry(
+                let expected = super::super::math::fraction_geometry(
                     num.font.size,
                     num.width,
                     num.metrics,
                     den.width,
                     den.metrics,
                 );
-                assert_eq!(width.raw(), expected_width.raw());
-                assert_eq!(metrics.ascent.raw(), expected_metrics.ascent.raw());
-                assert_eq!(metrics.descent.raw(), expected_metrics.descent.raw());
+                assert_eq!(width.raw(), expected.width.raw());
+                assert_eq!(metrics.ascent.raw(), expected.metrics.ascent.raw());
+                assert_eq!(metrics.descent.raw(), expected.metrics.descent.raw());
             }
             other => panic!("expected a fraction, got {other:?}"),
         }
