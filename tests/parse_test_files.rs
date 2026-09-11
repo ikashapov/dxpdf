@@ -431,6 +431,14 @@ const ALL_FILES: &[&str] = &[
     "svg-image.docx",
     "page-borders.docx",
     "doc-grid.docx",
+    "counting-zh-hans.docx",
+    "counting-zh-hant.docx",
+    "counting-ja.docx",
+    "counting-ko.docx",
+    "counting-vi.docx",
+    "counting-hi.docx",
+    "counting-th.docx",
+    "counting-en-dollar.docx",
 ];
 
 #[test]

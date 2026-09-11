@@ -6,6 +6,7 @@ use crate::model::{
     Alignment, Indentation, LevelSuffix, NumId, NumPicBulletId, NumberFormat, NumberingDefinitions,
     NumberingLevelDefinition, RunProperties,
 };
+use crate::render::resolve::counting;
 use crate::render::resolve::locale::Locale;
 use crate::render::resolve::spellout;
 
@@ -201,6 +202,30 @@ fn format_number(n: u32, fmt: NumberFormat, locale: Locale) -> String {
         // ── §17.18.59 additive numerals ───────────────────────────────────
         NumberFormat::Hebrew1 => to_hebrew_numeral(n),
         NumberFormat::ArabicAbjad => to_additive(n, &ABJAD_NUMERALS),
+
+        // ── §17.18.59 counting systems (issue #152) ───────────────────────
+        // The number read aloud in a language's own numerals. The format
+        // names the language, so — unlike the three §17.9.27 formats above —
+        // `locale` is not consulted. All rules live in `super::counting`.
+        NumberFormat::ChineseCounting => counting::chinese_counting(n),
+        NumberFormat::ChineseCountingThousand => counting::chinese_counting_thousand(n),
+        NumberFormat::ChineseLegalSimplified => counting::chinese_legal_simplified(n),
+        NumberFormat::TaiwaneseCounting => counting::taiwanese_counting(n),
+        NumberFormat::TaiwaneseCountingThousand => counting::taiwanese_counting_thousand(n),
+        NumberFormat::TaiwaneseDigital => counting::taiwanese_digital(n),
+        NumberFormat::IdeographLegalTraditional => counting::ideograph_legal_traditional(n),
+        NumberFormat::JapaneseCounting => counting::japanese_counting(n),
+        NumberFormat::JapaneseLegal => counting::japanese_legal(n),
+        NumberFormat::JapaneseDigitalTenThousand => counting::japanese_digital_ten_thousand(n),
+        NumberFormat::KoreanCounting => counting::korean_counting(n),
+        NumberFormat::KoreanLegal => counting::korean_legal(n),
+        NumberFormat::KoreanDigital => counting::korean_digital(n),
+        NumberFormat::KoreanDigital2 => counting::korean_digital2(n),
+        NumberFormat::VietnameseCounting => counting::vietnamese_counting(n),
+        NumberFormat::HindiCounting => counting::hindi_counting(n),
+        NumberFormat::ThaiCounting => counting::thai_counting(n),
+        NumberFormat::BahtText => counting::baht_text(n),
+        NumberFormat::DollarText => counting::dollar_text(n),
 
         // §17.9.27: the three formats that are written differently in every
         // language, delegated whole to `spellout`. A language it cannot spell
