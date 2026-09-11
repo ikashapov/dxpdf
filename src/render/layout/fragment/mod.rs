@@ -476,10 +476,16 @@ impl Fragment {
         }
     }
 
-    /// Get font properties if this is a text fragment.
+    /// Get font properties for a fragment that carries its own — a text run,
+    /// or a math fraction (whose rows share one `font`, set from `fraction_
+    /// fragment`'s caller; either row answers the same). Callers that fall
+    /// back to a spec-default font on `None` (e.g. a footnote/endnote body's
+    /// display-number prefix) would otherwise discard a real font whenever
+    /// the fragment they're reading it from happens to be an equation.
     pub fn font_props(&self) -> Option<&FontProps> {
         match self {
             Fragment::Text { font, .. } => Some(font),
+            Fragment::MathFraction { num, .. } => Some(&num.font),
             _ => None,
         }
     }
@@ -742,6 +748,51 @@ mod tests {
     use crate::model::Dup;
     use crate::model::UnderlineStyle;
     use crate::render::fonts::Toggle;
+
+    /// A `Fragment::MathFraction` carries a real font on each row (see
+    /// `fraction_fragment` in `math.rs`) — `font_props()` must surface it
+    /// rather than treating the fragment as fontless the way every non-`Text`
+    /// variant used to.
+    #[test]
+    fn font_props_reaches_into_a_math_fraction() {
+        let font = Rc::new(FontProps {
+            family: Rc::from("Cambria Math"),
+            size: Pt::new(12.0),
+            bold: Toggle::Absent,
+            italic: Toggle::Absent,
+            underline: false,
+            rtl: Toggle::Absent,
+            char_spacing: Pt::ZERO,
+            text_scale: 1.0,
+            underline_position: Pt::ZERO,
+            underline_thickness: Pt::ZERO,
+        });
+        let zero_metrics = TextMetrics {
+            ascent: Pt::ZERO,
+            descent: Pt::ZERO,
+            leading: Pt::ZERO,
+        };
+        let row = MathRow {
+            text: Rc::from("1"),
+            font,
+            width: Pt::new(6.0),
+            metrics: zero_metrics,
+        };
+        let fraction = Fragment::MathFraction {
+            num: row.clone(),
+            den: row,
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            width: Pt::new(20.0),
+            metrics: zero_metrics,
+            baseline_offset: Pt::ZERO,
+            break_after: BreakAfter::Opportunity,
+            hyperlink_url: None,
+        };
+        let props = fraction
+            .font_props()
+            .expect("a fraction's rows carry a real font");
+        assert_eq!(&*props.family, "Cambria Math");
+    }
 
     #[test]
     fn font_props_default_fallback() {
