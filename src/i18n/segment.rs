@@ -279,15 +279,15 @@ mod tests {
         assert_eq!(pieces("Anlagen-freigabe"), ["Anlagen-", "freigabe"]);
     }
 
-    /// The asymmetry a review caught: the guard was Unicode-aware before the
-    /// hyphen (`is_alphanumeric`) but ASCII-only after it (`is_ascii_digit`),
-    /// so a non-ASCII digit run stayed glued to its hyphen instead of getting
-    /// the same LB21 break the ASCII case gets above. Both scripts here are
-    /// verified NU class in this engine's own segmenter (each digit run
-    /// glues to itself and splits only at the hyphen) — fullwidth digits
-    /// were tried too and dropped from this test, because they turned out to
-    /// already split from each other with no tailoring involved at all,
-    /// which is not this bug.
+    /// The guard is Unicode-aware on both sides of the hyphen now
+    /// (`is_alphanumeric` before it, `Decimal_Number` after), so a non-ASCII
+    /// digit run gets the same LB21 break the ASCII case gets above instead
+    /// of staying glued to its hyphen. Both scripts here are verified NU
+    /// class in this engine's own segmenter (each digit run glues to itself
+    /// and splits only at the hyphen) — fullwidth digits were tried too and
+    /// dropped from this test, because they turned out to already split
+    /// from each other with no tailoring involved at all, which is a
+    /// different code path from what this test guards.
     #[test]
     fn a_hyphen_after_letters_breaks_before_non_ascii_digits() {
         assert_eq!(
