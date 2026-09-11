@@ -931,16 +931,15 @@ fn a_break_only_paragraph_that_fits_does_not_add_a_page() {
 /// in the math face, superscripts, and stacked fractions with their rules —
 /// where an earlier version dropped the whole `m:oMath` subtree silently.
 ///
-/// Checks position and size, not just presence and count (a PR #177 review
-/// finding against the original version of this test, which asserted only
-/// that a glyph appeared and a rule count — so a regression desyncing the
-/// painted fraction geometry from what layout measured, the kind
-/// `fraction_geometry` now rules out by construction in `math.rs`, would
-/// have shipped with this test still green). Every geometry assertion below
-/// is a *relation* the paint arms are known to derive (an exponent from its
-/// base, a rule from its own rows), not an absolute coordinate — like
-/// `math_italic_x`'s codepoint check, that keeps the test valid across
-/// hosts/fonts rather than pinned to one render.
+/// Checks position and size, not just presence and count — asserting only
+/// that a glyph appeared and a rule count would let a regression desync the
+/// painted fraction geometry from what layout measured (the kind
+/// `fraction_geometry` now rules out by construction in `math.rs`) ship with
+/// this test still green. Every geometry assertion below is a *relation*
+/// the paint arms are known to derive (an exponent from its base, a rule
+/// from its own rows), not an absolute coordinate — like `math_italic_x`'s
+/// codepoint check, that keeps the test valid across hosts/fonts rather
+/// than pinned to one render.
 #[test]
 fn equations_render_math_glyphs_and_fraction_bars() {
     use dxpdf::render::dimension::Pt;
