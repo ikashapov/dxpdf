@@ -212,6 +212,8 @@ mod tests {
             endnotes: HashMap::new(),
             comments: Default::default(),
             media: HashMap::new(),
+            diagrams: HashMap::new(),
+            charts: HashMap::new(),
             embedded_fonts: vec![],
         }
     }
