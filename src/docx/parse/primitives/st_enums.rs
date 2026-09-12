@@ -408,6 +408,51 @@ pub enum StNumberFormat {
     /// Arabic abjad numerals — `ا`=1, `ي`=10, `ق`=100.
     ArabicAbjad,
 
+    // ── Counting systems (issue #152) ─────────────────────────────────────
+    // The number read aloud in a language's own numerals — spellout in a
+    // script that looks like digits. Rendered by
+    // `crate::render::resolve::counting`; the format names the language, so
+    // unlike §17.9.27's three formats no `w:lang` is consulted.
+    /// Simplified Chinese reading — `十二` for 12, tens only (`廿一`-free).
+    ChineseCounting,
+    /// Simplified Chinese full reading with `百`/`千`/`万` and interior `零`.
+    ChineseCountingThousand,
+    /// Simplified Chinese banker's numerals — `壹`, `贰`, `叁`.
+    ChineseLegalSimplified,
+    /// Traditional Chinese reading — `十二` for 12.
+    TaiwaneseCounting,
+    /// Traditional Chinese full reading with `百`/`千`/`萬`.
+    TaiwaneseCountingThousand,
+    /// Traditional Chinese positional digits — `一二` for 12.
+    TaiwaneseDigital,
+    /// Traditional Chinese banker's numerals — `壹`, `貳`, `參`.
+    IdeographLegalTraditional,
+    /// Japanese kanji reading — `十二` for 12, `二千二十四` for 2024.
+    JapaneseCounting,
+    /// Japanese daiji anti-fraud numerals — `壱`, `弐`, `参`.
+    JapaneseLegal,
+    /// Japanese positional digits grouped at ten thousand.
+    JapaneseDigitalTenThousand,
+    /// Sino-Korean reading in Hangul — `십이` for 12.
+    KoreanCounting,
+    /// Native Korean numerals to 99 — `열둘` for 12 — then the Sino-Korean
+    /// reading.
+    KoreanLegal,
+    /// Positional Hangul digits — `일이` for 12.
+    KoreanDigital,
+    /// Positional Hanja digits — `一二` for 12.
+    KoreanDigital2,
+    /// Vietnamese number words — `mười hai` for 12.
+    VietnameseCounting,
+    /// Hindi number words in Devanagari — `बारह` for 12.
+    HindiCounting,
+    /// Thai number words — `สิบสอง` for 12.
+    ThaiCounting,
+    /// Thai check-writing text — the amount plus `บาทถ้วน`.
+    BahtText,
+    /// English check-writing text — `Twelve and 00/100`.
+    DollarText,
+
     /// §17.18.59's remaining values, which this engine renders as decimal.
     ///
     /// This is the **exception to the strict-enum rule**: a large, extensible
@@ -419,25 +464,16 @@ pub enum StNumberFormat {
     /// # What is left here, and why
     ///
     /// Issue #132 classified all 63 §17.18.59 values by *what data* rendering
-    /// them needs. The 31 above need none — a digit set, a wrapper, an
-    /// alphabet or a value table, each of which is in the source rather than
-    /// in CLDR. These need language data this engine does not carry:
+    /// them needs; issue #152 then implemented the counting systems and the
+    /// two currency spellouts (`crate::render::resolve::counting`). One value
+    /// remains:
     ///
-    /// * **Counting systems** — `japaneseCounting`, `japaneseLegal`,
-    ///   `japaneseDigitalTenThousand`, `chineseCounting`,
-    ///   `chineseCountingThousand`, `chineseLegalSimplified`,
-    ///   `taiwaneseCounting`, `taiwaneseCountingThousand`, `taiwaneseDigital`,
-    ///   `ideographLegalTraditional`, `koreanCounting`, `koreanLegal`,
-    ///   `koreanDigital`, `koreanDigital2`, `vietnameseCounting`,
-    ///   `hindiCounting`, `thaiCounting`. These *look* like digits and are
-    ///   spellout: `chineseCounting` writes 12 as `十二`, twelve read aloud,
-    ///   not two positional digits. Each needs its own language's rules,
-    ///   which is the same data `cardinalText` needs — see
-    ///   `crate::render::resolve::spellout` for why that data is hand-written
-    ///   here and what the alternative cost.
-    /// * **Spellout with a currency** — `bahtText`, `dollarText`.
-    /// * **`custom`** — §17.9.30's picture string. Not a format at all: a
-    ///   template the consumer evaluates, and a separate feature.
+    /// * **`custom`** — §17.9.17's picture string (carried in the `numFmt`
+    ///   element's `format` attribute). Not a format at all: a template the
+    ///   consumer evaluates, and a separate feature. [MS-DOCX] documents the
+    ///   strings Word actually writes — the zero-pad family ("001, 002, …")
+    ///   being the common one — which is what an implementation would start
+    ///   with.
     #[serde(other)]
     Other,
 }
@@ -492,6 +528,25 @@ impl From<StNumberFormat> for NumberFormat {
 
             StNumberFormat::Hebrew1 => Self::Hebrew1,
             StNumberFormat::ArabicAbjad => Self::ArabicAbjad,
+            StNumberFormat::ChineseCounting => Self::ChineseCounting,
+            StNumberFormat::ChineseCountingThousand => Self::ChineseCountingThousand,
+            StNumberFormat::ChineseLegalSimplified => Self::ChineseLegalSimplified,
+            StNumberFormat::TaiwaneseCounting => Self::TaiwaneseCounting,
+            StNumberFormat::TaiwaneseCountingThousand => Self::TaiwaneseCountingThousand,
+            StNumberFormat::TaiwaneseDigital => Self::TaiwaneseDigital,
+            StNumberFormat::IdeographLegalTraditional => Self::IdeographLegalTraditional,
+            StNumberFormat::JapaneseCounting => Self::JapaneseCounting,
+            StNumberFormat::JapaneseLegal => Self::JapaneseLegal,
+            StNumberFormat::JapaneseDigitalTenThousand => Self::JapaneseDigitalTenThousand,
+            StNumberFormat::KoreanCounting => Self::KoreanCounting,
+            StNumberFormat::KoreanLegal => Self::KoreanLegal,
+            StNumberFormat::KoreanDigital => Self::KoreanDigital,
+            StNumberFormat::KoreanDigital2 => Self::KoreanDigital2,
+            StNumberFormat::VietnameseCounting => Self::VietnameseCounting,
+            StNumberFormat::HindiCounting => Self::HindiCounting,
+            StNumberFormat::ThaiCounting => Self::ThaiCounting,
+            StNumberFormat::BahtText => Self::BahtText,
+            StNumberFormat::DollarText => Self::DollarText,
 
             StNumberFormat::Other => Self::Decimal,
         }
@@ -1306,20 +1361,11 @@ mod tests {
 
     #[test]
     fn number_format_unsupported_legal_values_degrade_not_fail() {
-        // §17.18.59's remaining values must parse (→ Other) and convert to
-        // Decimal rather than failing the whole document parse. All of these
-        // are spellout — a counting system, a currency, or §17.9.30's picture
-        // string — which is what keeps them on this side of the boundary; see
+        // §17.18.59's one remaining value must parse (→ Other) and convert
+        // to Decimal rather than failing the whole document parse — plus any
+        // future spec addition, which the invented value stands in for. See
         // `StNumberFormat::Other`.
-        for v in [
-            "japaneseCounting",
-            "chineseCountingThousand",
-            "koreanDigital2",
-            "vietnameseCounting",
-            "bahtText",
-            "dollarText",
-            "custom",
-        ] {
+        for v in ["custom", "someFutureFormat"] {
             assert_eq!(
                 de::<StNumberFormat>(v).unwrap(),
                 StNumberFormat::Other,
