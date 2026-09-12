@@ -1,9 +1,14 @@
 name: CI
 
+# Two tiers, by PR source branch. Every PR gets `check` + `quick-test`: fast
+# enough to run on every incremental commit. A PR from a `release/*` branch
+# additionally gets `full-test` and everything gated on it below (Go
+# bindings, the release/deb/wheel builds) — the full battery, right before
+# something actually ships, rather than on every day-to-day change. Nothing
+# runs on push to `main`: whichever tier applied already ran on the PR that
+# landed it.
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 env:
@@ -44,8 +49,49 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  test:
-    name: Test (${{ matrix.os }})
+  # Every PR's fast lane: the Ubuntu leg of what `full-test` runs below, so an
+  # ordinary incremental commit gets quick feedback without paying for the
+  # 3-OS matrix, which matters most right before a release (see `full-test`).
+  quick-test:
+    name: Quick test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev
+
+      # `capi_lib_freshness`'s two tests are skipped here and checked instead
+      # by the `capi-lib-freshness` job below (release-branch PRs only, not
+      # every PR) — see that job's comment for why.
+      - name: Run tests
+        run: cargo test --all --no-fail-fast -- --skip committed_libs_match_current_source --skip every_supported_platform_has_a_committed_library
+
+      # `subset-fonts` is default-on, so `cargo test --all` never compiles the
+      # crate without it. AGENTS.md documents `--no-default-features` as a
+      # supported build; nothing verified it, which is how a `not(feature)`
+      # arm survived in a module that only exists *with* the feature. This
+      # catches the real failure mode: a `fontcull` reference leaking outside
+      # the gated module.
+      - name: Build without default features
+        run: cargo build --no-default-features
+
+  # The full cross-platform pass, gated to PRs from a `release/*` branch —
+  # issue #117 is why this matrix exists at all (Windows had never run a
+  # single test, leaving DirectWrite font resolution unverified), but paying
+  # for all 3 OSes on every incremental commit is the wrong cadence for that
+  # concern. `quick-test` above already covers the Ubuntu leg on every PR;
+  # this re-runs it too, since keeping this job an exact copy of the matrix
+  # is worth a redundant ~4 min Ubuntu run on the rare release-branch PR.
+  full-test:
+    name: Full test (${{ matrix.os }})
+    if: startsWith(github.head_ref, 'release/')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -71,8 +117,8 @@ jobs:
       # A platform-specific run should surface every finding in one pass.
       #
       # `capi_lib_freshness`'s two tests are skipped here and checked instead
-      # by the `capi-lib-freshness` job below (push-to-main only, not every
-      # PR) — see that job's comment for why.
+      # by the `capi-lib-freshness` job below (release-branch PRs only, not
+      # every PR) — see that job's comment for why.
       - name: Run tests
         run: cargo test --all --no-fail-fast -- --skip committed_libs_match_current_source --skip every_supported_platform_has_a_committed_library
 
@@ -91,17 +137,17 @@ jobs:
   # into the repo (no staging step: it's already there after checkout),
   # which is the one functional proof that a committed library still works.
   #
-  # Push-to-main only, not pull_request: this rebuilds the whole `capi`
+  # Release-branch PRs only, not every PR: this rebuilds the whole `capi`
   # staticlib (a full Skia build, on top of what `cargo test --all` already
   # built) and almost every PR touches `src/` without touching anything
-  # Go-bindings related. Gating to push still runs it before anything is
-  # ever released from main, without doubling the build cost of every PR.
-  # macOS/Windows *linking* is not covered here; see AGENTS.md's Go-bindings
-  # note for why.
+  # Go-bindings related. Gating to a `release/*` source branch still runs it
+  # before anything is ever released from main, without doubling the build
+  # cost of every incremental commit. macOS/Windows *linking* is not covered
+  # here; see AGENTS.md's Go-bindings note for why.
   go-bindings:
     name: Go bindings (capi)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: startsWith(github.head_ref, 'release/')
     steps:
       - uses: actions/checkout@v4
 
@@ -140,16 +186,16 @@ jobs:
   # stamped `go/internal/capi/lib/SOURCE_HASH` (see
   # `tests/capi_lib_freshness.rs`'s own doc comment).
   #
-  # Push-to-main only, not pull_request, for the same reason as `go-bindings`
-  # above: the hash covers all of `src/`, so nearly every PR would fail it
-  # long before a release is anywhere near ready, even one with nothing to
-  # do with the Go bindings. The hashing itself is already
-  # platform-invariant (it normalizes line endings and path separators), so
-  # one runner is enough — this doesn't need the `test` job's OS matrix.
+  # Release-branch PRs only, for the same reason as `go-bindings` above: the
+  # hash covers all of `src/`, so nearly every ordinary PR would fail it long
+  # before a release is anywhere near ready, even one with nothing to do with
+  # the Go bindings. The hashing itself is already platform-invariant (it
+  # normalizes line endings and path separators), so one runner is enough —
+  # this doesn't need `full-test`'s OS matrix.
   capi-lib-freshness:
     name: Go bindings library freshness
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: startsWith(github.head_ref, 'release/')
     steps:
       - uses: actions/checkout@v4
 
@@ -165,10 +211,14 @@ jobs:
       - name: Check libdxpdf.a provenance
         run: cargo test --test capi_lib_freshness
 
+  # Release-branch PRs only: a release-profile build to print binary size is
+  # a release-readiness check, not a correctness gate `quick-test` needs to
+  # run on every incremental commit.
   build:
     name: Build release
     runs-on: ubuntu-latest
-    needs: [check, test]
+    needs: [check, full-test]
+    if: success() && startsWith(github.head_ref, 'release/')
     steps:
       - uses: actions/checkout@v4
 
@@ -187,13 +237,18 @@ jobs:
       - name: Print binary size
         run: ls -lh target/release/dxpdf
 
-  # Mirrors the build matrix in `python.yml` to validate every wheel target
-  # is buildable on every PR — not only at release time. Keep the matrix in
-  # sync with `python.yml`; a divergence between the two means the publish
-  # workflow can fail on a target that CI does not exercise.
+  # Mirrors the build matrix in `python.yml` to validate every wheel target is
+  # buildable, on release-branch PRs — a pre-merge dry run of that same
+  # matrix, not the only safety net: `python.yml`'s `release: published`
+  # trigger runs it again for real at actual publish time. Uncached and slow
+  # (the linux-x86_64 leg alone runs ~16-17 min), so it isn't worth paying on
+  # every incremental commit. Keep the matrix in sync with `python.yml`; a
+  # divergence between the two means the publish workflow can fail on a
+  # target that this job does not exercise.
   build-wheels:
     name: Build wheel (${{ matrix.target.label }})
     runs-on: ${{ matrix.target.runner }}
+    if: startsWith(github.head_ref, 'release/')
     strategy:
       fail-fast: false
       matrix:
@@ -289,12 +344,14 @@ jobs:
   # amd64 only here: the release matrix in `deb.yml` builds both architectures,
   # and each one is a full Skia build. Keep the apt list, the clang version and
   # the cargo-deb invocation in sync with that workflow — this job exists to
-  # catch a packaging break on the PR that causes it, so a divergence means it
-  # is validating something other than what gets published.
+  # catch a packaging break on the release-branch PR that ships it, so a
+  # divergence means it is validating something other than what gets
+  # published.
   build-deb:
     name: Build Debian package (amd64)
     runs-on: ubuntu-latest
-    needs: [check, test]
+    needs: [check, full-test]
+    if: success() && startsWith(github.head_ref, 'release/')
     container: debian:12-slim
     steps:
       # Ahead of checkout, so the action finds git and makes a real clone
