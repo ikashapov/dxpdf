@@ -23,18 +23,42 @@ jobs:
   build:
     name: Build (${{ matrix.os_arch }})
     runs-on: ${{ matrix.runner }}
+    # A failure on the windows_amd64 leg must not fail the whole `build` job
+    # — see that entry's own note. `open-pr` below only ever looks for the
+    # four non-experimental platforms' artifacts, so a failing or
+    # not-yet-uploaded Windows artifact can't break it either.
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os_arch: darwin_arm64
             runner: macos-latest
+            lib_name: libdxpdf.a
           - os_arch: darwin_amd64
             runner: macos-15-intel
+            lib_name: libdxpdf.a
           - os_arch: linux_amd64
             runner: ubuntu-latest
+            lib_name: libdxpdf.a
           - os_arch: linux_arm64
             runner: ubuntu-24.04-arm
+            lib_name: libdxpdf.a
+          # Experimental: not yet wired into `open-pr` below, and not part
+          # of go/internal/capi/lib/SOURCE_HASH's EXPECTED_PLATFORMS. Rust's
+          # `staticlib` crate-type on `-windows-msvc` produces `dxpdf.lib`
+          # (MSVC naming), not `libdxpdf.a` — see cgo_windows_amd64.go for
+          # what is and isn't verified about this leg. `shell: bash` below
+          # is specifically for this leg (GH's windows-latest runners ship
+          # Git Bash for exactly this); the other four already ran on a
+          # POSIX shell by default.
+          - os_arch: windows_amd64
+            runner: windows-latest
+            lib_name: dxpdf.lib
+            experimental: true
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -64,11 +88,11 @@ jobs:
       # is never both at once.
       - name: Remove the previously committed library for this platform
         run: |
-          rm -f go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf.a
+          rm -f go/internal/capi/lib/${{ matrix.os_arch }}/${{ matrix.lib_name }}
           rm -f go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf_part*.a
 
       - name: Stage the rebuilt library
-        run: cp target/release/libdxpdf.a go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf.a
+        run: cp target/release/${{ matrix.lib_name }} go/internal/capi/lib/${{ matrix.os_arch }}/${{ matrix.lib_name }}
 
       # Only linux/amd64 and linux/arm64 ever exceed GitHub's 100MB
       # single-blob limit (~120-127MB unsplit) — darwin's archives are
