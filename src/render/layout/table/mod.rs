@@ -22,6 +22,7 @@ mod shading;
 mod split;
 mod types;
 
+pub(crate) use borders::emit_border_rect;
 pub use grid::compute_column_widths;
 pub use types::*;
 
