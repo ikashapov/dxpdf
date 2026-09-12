@@ -814,17 +814,6 @@ mod tests {
         }
     }
 
-    fn para_with(props: ParagraphProperties) -> model::Paragraph {
-        model::Paragraph {
-            style_id: None,
-            properties: props,
-            mark_run_properties: None,
-            content: Vec::new(),
-            rsids: model::ParagraphRevisionIds::default(),
-            mark_deleted: false,
-        }
-    }
-
     /// §17.9.23: the paragraph's cascade `w:ind` overrides the numbering
     /// level's — for the implicit tab stop too, not just for body-text
     /// wrapping. With level left=2631 and cascade left=567, the suffix tab
