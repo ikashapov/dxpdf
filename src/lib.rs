@@ -42,30 +42,44 @@ mod python {
     /// Convert DOCX bytes to PDF bytes.
     ///
     /// `image_dpi` sets the target resolution (pixels per inch) embedded raster
-    /// images are downsampled to; defaults to 220.
+    /// images are downsampled to; defaults to 220. Releases the GIL for the
+    /// duration of the conversion, so callers can run this on a background
+    /// thread rather than needing a subprocess.
     #[pyfunction]
     #[pyo3(signature = (docx_bytes, image_dpi = crate::DEFAULT_IMAGE_DPI))]
-    fn convert(docx_bytes: &[u8], image_dpi: f32) -> PyResult<Vec<u8>> {
-        let options = crate::RenderOptions::default().with_image_dpi(image_dpi);
-        crate::convert_with_options(docx_bytes, &options)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    fn convert(py: Python<'_>, docx_bytes: &[u8], image_dpi: f32) -> PyResult<Vec<u8>> {
+        // Copied out while the GIL is held: `docx_bytes` zero-copy-borrows a
+        // Python-owned buffer, and releasing the GIL below lets another thread
+        // mutate or free it (e.g. a `bytearray`) out from under a borrow.
+        let docx_bytes = docx_bytes.to_vec();
+        py.detach(|| {
+            let options = crate::RenderOptions::default().with_image_dpi(image_dpi);
+            crate::convert_with_options(&docx_bytes, &options)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        })
     }
 
     /// Convert a DOCX file to a PDF file.
     ///
     /// `image_dpi` sets the target resolution (pixels per inch) embedded raster
-    /// images are downsampled to; defaults to 220.
+    /// images are downsampled to; defaults to 220. Releases the GIL for the
+    /// duration of the read, conversion and write, so callers can run this on
+    /// a background thread rather than needing a subprocess.
     #[pyfunction]
     #[pyo3(signature = (input, output, image_dpi = crate::DEFAULT_IMAGE_DPI))]
-    fn convert_file(input: &str, output: &str, image_dpi: f32) -> PyResult<()> {
-        let docx_bytes = std::fs::read(input)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to read {input}: {e}")))?;
-        let options = crate::RenderOptions::default().with_image_dpi(image_dpi);
-        let pdf_bytes = crate::convert_with_options(&docx_bytes, &options)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        std::fs::write(output, &pdf_bytes)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write {output}: {e}")))?;
-        Ok(())
+    fn convert_file(py: Python<'_>, input: &str, output: &str, image_dpi: f32) -> PyResult<()> {
+        // Copied out while the GIL is held, same reasoning as in `convert`.
+        let input = input.to_owned();
+        let output = output.to_owned();
+        py.detach(|| {
+            let docx_bytes = std::fs::read(&input)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to read {input}: {e}")))?;
+            let options = crate::RenderOptions::default().with_image_dpi(image_dpi);
+            let pdf_bytes = crate::convert_with_options(&docx_bytes, &options)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            std::fs::write(&output, &pdf_bytes)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to write {output}: {e}")))
+        })
     }
 
     /// A fast DOCX-to-PDF converter powered by Skia.
