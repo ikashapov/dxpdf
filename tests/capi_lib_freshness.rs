@@ -1,14 +1,17 @@
-//! Guards `go/internal/capi/lib/*/libdxpdf.a` against drifting from the
-//! Rust source that produced them.
+//! Guards `go/internal/capi/lib/*/` against drifting from the Rust source
+//! that produced it.
 //!
-//! The Go bindings' prebuilt static libraries are committed (unlike
+//! The Go bindings' prebuilt libraries are committed (unlike
 //! `go/internal/capi/dxpdf.h`, they can't be *regenerated* by a test —
-//! nothing here can cross-compile all four platforms), so the only thing a
+//! nothing here can cross-compile all five platforms), so the only thing a
 //! test can check is *provenance*: a hash of every input that can change
 //! the compiled bytes, stamped into `go/internal/capi/lib/SOURCE_HASH` the
 //! last time the libraries were rebuilt. A mismatch means someone changed
 //! `src/`, `Cargo.toml`, `Cargo.lock` or the pinned toolchain without also
-//! rebuilding and recommitting `libdxpdf.a` for every platform.
+//! rebuilding and recommitting the library for every platform. Four
+//! platforms commit a single `libdxpdf.a` static archive (or split parts of
+//! one); windows_amd64 commits `dxpdf.dll` plus a `libdxpdf.a` *import*
+//! library instead — see `go/cgo_windows_amd64.go` for why.
 //!
 //! Deliberately **not** `std::collections::hash_map::DefaultHasher`: its own
 //! docs say the algorithm "is not guaranteed to be stable across different
@@ -28,7 +31,13 @@ fn repo_root() -> PathBuf {
 
 /// The platforms `.github/workflows/ci.yml`'s `go-bindings` job and
 /// AGENTS.md's Go-bindings note both name as supported.
-const EXPECTED_PLATFORMS: &[&str] = &["darwin_arm64", "darwin_amd64", "linux_amd64", "linux_arm64"];
+const EXPECTED_PLATFORMS: &[&str] = &[
+    "darwin_arm64",
+    "darwin_amd64",
+    "linux_amd64",
+    "linux_arm64",
+    "windows_amd64",
+];
 
 struct Fnv1a(u64);
 
@@ -110,7 +119,7 @@ fn hash_source_tree(root: &Path) -> u64 {
 /// Never both forms for the same platform: a leftover unsplit `libdxpdf.a`
 /// alongside parts would make `go/cgo_*.go`'s `#cgo LDFLAGS` ambiguous
 /// about which one it's actually linking.
-fn platform_library_is_present(dir: &Path) -> Result<(), String> {
+fn static_archive_is_present(dir: &Path) -> Result<(), String> {
     let whole = dir.join("libdxpdf.a");
     let mut part_count = 0usize;
     loop {
@@ -137,11 +146,37 @@ fn platform_library_is_present(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// windows_amd64's shape: `dxpdf.dll` (what actually gets loaded) plus a
+/// MinGW-native `libdxpdf.a` import library generated from
+/// `go/internal/capi/dxpdf.def` via `dlltool` — never split, since the DLL
+/// is a fraction of the other platforms' static-archive size (see
+/// `go/internal/capi/lib/README.md`).
+fn windows_dll_and_import_lib_are_present(dir: &Path) -> Result<(), String> {
+    let dll_missing = !dir.join("dxpdf.dll").is_file();
+    let import_lib_missing = !dir.join("libdxpdf.a").is_file();
+    match (dll_missing, import_lib_missing) {
+        (false, false) => Ok(()),
+        _ => Err(format!(
+            "{} must have both dxpdf.dll and libdxpdf.a committed (see \
+             go/internal/capi/lib/README.md's windows_amd64 section)",
+            dir.display()
+        )),
+    }
+}
+
+fn platform_library_is_present(platform: &str, dir: &Path) -> Result<(), String> {
+    if platform == "windows_amd64" {
+        windows_dll_and_import_lib_are_present(dir)
+    } else {
+        static_archive_is_present(dir)
+    }
+}
+
 #[test]
 fn every_supported_platform_has_a_committed_library() {
     let lib_dir = repo_root().join("go/internal/capi/lib");
     for platform in EXPECTED_PLATFORMS {
-        if let Err(message) = platform_library_is_present(&lib_dir.join(platform)) {
+        if let Err(message) = platform_library_is_present(platform, &lib_dir.join(platform)) {
             panic!("{message}");
         }
     }
