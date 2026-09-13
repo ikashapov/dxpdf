@@ -2,37 +2,54 @@
 
 package dxpdf
 
-// UNVERIFIED FIRST ATTEMPT — see AGENTS.md's Go-bindings note: static-linking
-// a Skia-containing archive through cgo on MSVC is a combination this repo
-// has not exercised anywhere else (the existing Windows Python wheel links
-// dynamically — a cdylib, not this staticlib path). Nothing here has been
-// linked or run on a real Windows host yet; it exists to have something
-// concrete to iterate against in CI, not because the flag list below is
-// known-good the way every other platform's is.
+// The one platform where this package links a DLL, not a static archive.
+// The first attempt tried to statically link `dxpdf.lib` built for
+// `x86_64-pc-windows-msvc`, and failed exactly where the comment that used
+// to live here predicted: cgo on Windows links via MinGW-w64's `gcc`/`ld`
+// by default, and GNU ld cannot resolve the MSVC-mangled C++ runtime
+// symbols (operator new/delete, std::vector, ...) that Skia's object code
+// pulls into a static archive — undefined references like `??2@YAPEAX_K@Z`
+// at `go test` link time, not at build time.
 //
-// Two things are open, not just this flag list:
+// The two ways around that were both dead ends, checked rather than
+// assumed:
 //
-//   - Toolchain match: the committed windows_amd64 library is built with the
-//     `x86_64-pc-windows-msvc` target (matching the only proven Windows Rust
-//     build in this repo — `build-wheels`' wheel leg), which produces an
-//     MSVC-format `dxpdf.lib`. cgo on Windows defaults to a MinGW-w64/gcc C
-//     toolchain, not MSVC's cl.exe/link.exe — whether GNU ld can resolve an
-//     MSVC-toolchain-produced archive containing MSVC-ABI C++ object code
-//     (Skia itself) is unverified. If linking fails on toolchain/ABI grounds
-//     rather than a missing-library grounds, the likely fix is rebuilding
-//     with `x86_64-pc-windows-gnu` instead, not a flag change here.
-//   - This system-library list is a best-effort guess at Skia's Windows
-//     dependencies for a CPU/PDF-only backend (DirectWrite-backed font
-//     matching, WIC for image codecs, the COM libraries both need) — not
-//     derived from an actual build log the way every other platform's list
-//     was (see cgo_linux_amd64.go's comment for what that looked like).
-//     Expect this to need correcting against real linker errors.
+//   - Rebuilding with `x86_64-pc-windows-gnu` (MinGW ABI) instead of
+//     `-msvc`, so the archive's object code would match GNU ld's
+//     expectations: `skia-bindings` has no prebuilt binaries for that
+//     target, and Skia's own Windows build only targets MSVC/clang-cl —
+//     https://github.com/rust-skia/rust-skia/issues/345 and /769.
+//   - Pointing cgo at MSVC's own `link.exe` (`CC=cl` plus an MSVC dev
+//     environment) so the linker matches the archive's ABI: Go's linker
+//     has no MSVC object-file support at all, on either side of the link —
+//     https://github.com/golang/go/issues/20982 is still open, and a Go
+//     team member states plainly in that thread that there is currently
+//     none.
 //
-// `-l:dxpdf.lib`, not `-ldxpdf`: the MSVC toolchain names the archive
-// without the Unix `lib`-prefix convention `-l` otherwise assumes; `-l:name`
-// is GNU ld's syntax for linking a file by its exact name.
+// Dynamic linking sidesteps both: only the plain `extern "C"` export
+// boundary has to resolve at link time, and the Windows x64 calling
+// convention is one ABI shared by MSVC and MinGW-w64 alike — the system
+// DLLs below already prove this, since they're MSVC-built and have linked
+// clean via MinGW since the first attempt. It's also precedented in this
+// repo: the Windows Python wheel already links dynamically for the same
+// underlying reason (a `cdylib`, not the `staticlib` the other three
+// platforms use).
+//
+// What that costs: `dxpdf.dll` has to be *loaded*, not just linked against,
+// so it has to be next to the consuming binary or on `PATH` at runtime —
+// unlike every other platform, where `libdxpdf.a` is fully absorbed into
+// the output binary and there is nothing left to ship separately. See
+// `go/internal/capi/lib/README.md` for where the DLL comes from and how a
+// consumer is expected to deploy it.
+//
+// `go/internal/capi/dxpdf.def` names every exported symbol; `dlltool`
+// turns it into `libdxpdf.a`, a MinGW-native import library, without ever
+// touching the MSVC-produced `dxpdf.dll.lib` import stub — so this doesn't
+// depend on GNU ld being able to read an MSVC import library either.
+// That's what makes `-ldxpdf` below the ordinary GNU convention rather
+// than another MSVC-naming special case.
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/internal/capi/lib/windows_amd64 -l:dxpdf.lib -ldwrite -lwindowscodecs -lole32 -loleaut32 -lgdi32 -luser32 -ladvapi32 -lshell32
+#cgo LDFLAGS: -L${SRCDIR}/internal/capi/lib/windows_amd64 -ldxpdf -ldwrite -lwindowscodecs -lole32 -loleaut32 -lgdi32 -luser32 -ladvapi32 -lshell32
 */
 import "C"

@@ -45,16 +45,19 @@ jobs:
             runner: ubuntu-24.04-arm
             lib_name: libdxpdf.a
           # Experimental: not yet wired into `open-pr` below, and not part
-          # of go/internal/capi/lib/SOURCE_HASH's EXPECTED_PLATFORMS. Rust's
-          # `staticlib` crate-type on `-windows-msvc` produces `dxpdf.lib`
-          # (MSVC naming), not `libdxpdf.a` — see cgo_windows_amd64.go for
-          # what is and isn't verified about this leg. `shell: bash` below
-          # is specifically for this leg (GH's windows-latest runners ship
-          # Git Bash for exactly this); the other four already ran on a
-          # POSIX shell by default.
+          # of go/internal/capi/lib/SOURCE_HASH's EXPECTED_PLATFORMS. Unlike
+          # every other platform, this one links a `dxpdf.dll` rather than
+          # a static archive — see cgo_windows_amd64.go's module doc for
+          # why static linking is a dead end here (both the obvious
+          # workarounds, `-windows-gnu` and `CC=cl`, are ruled out upstream,
+          # not just untried). `lib_name` is unused for this entry; its own
+          # steps below build the DLL and turn `go/internal/capi/dxpdf.def`
+          # into a MinGW-native `libdxpdf.a` import library via `dlltool`.
+          # `shell: bash` below is specifically for this leg (GH's
+          # windows-latest runners ship Git Bash for exactly this); the
+          # other four already ran on a POSIX shell by default.
           - os_arch: windows_amd64
             runner: windows-latest
-            lib_name: dxpdf.lib
             experimental: true
     defaults:
       run:
@@ -76,7 +79,7 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Build the capi staticlib
+      - name: Build the capi library
         run: cargo build --release --features capi
 
       # A platform can flip between whole-file and split-parts between
@@ -85,14 +88,17 @@ jobs:
       # committed before staging the new build, so nothing stale rides
       # along. tests/capi_lib_freshness.rs's
       # every_supported_platform_has_a_committed_library asserts a platform
-      # is never both at once.
+      # is never both at once. Not windows_amd64: it's not part of that
+      # test's EXPECTED_PLATFORMS yet, and has its own staging step below.
       - name: Remove the previously committed library for this platform
+        if: matrix.os_arch != 'windows_amd64'
         run: |
           mkdir -p go/internal/capi/lib/${{ matrix.os_arch }}
           rm -f go/internal/capi/lib/${{ matrix.os_arch }}/${{ matrix.lib_name }}
           rm -f go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf_part*.a
 
       - name: Stage the rebuilt library
+        if: matrix.os_arch != 'windows_amd64'
         run: cp target/release/${{ matrix.lib_name }} go/internal/capi/lib/${{ matrix.os_arch }}/${{ matrix.lib_name }}
 
       # Only linux/amd64 and linux/arm64 ever exceed GitHub's 100MB
@@ -103,9 +109,40 @@ jobs:
         if: startsWith(matrix.os_arch, 'linux')
         run: python3 scripts/split_capi_lib.py go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf.a
 
+      # windows_amd64 only: stage `dxpdf.dll` itself (what gets *loaded* at
+      # runtime) plus a MinGW-native import library generated straight from
+      # `go/internal/capi/dxpdf.def` — deliberately not from the
+      # MSVC-produced `dxpdf.dll.lib` import stub cargo also emits, so this
+      # never depends on GNU ld being able to read an MSVC import library.
+      # `dlltool` ships alongside the mingw64 `gcc` that cgo already found
+      # to fail the old static link (see cgo_windows_amd64.go), so no extra
+      # tool install is needed; the fallback handles it being triple-prefixed
+      # instead of bare on some images.
+      - name: Stage the rebuilt library (Windows only)
+        if: matrix.os_arch == 'windows_amd64'
+        run: |
+          mkdir -p go/internal/capi/lib/windows_amd64
+          rm -f go/internal/capi/lib/windows_amd64/dxpdf.dll
+          rm -f go/internal/capi/lib/windows_amd64/libdxpdf.a
+          cp target/release/dxpdf.dll go/internal/capi/lib/windows_amd64/dxpdf.dll
+          DLLTOOL="$(command -v dlltool || command -v x86_64-w64-mingw32-dlltool)"
+          "$DLLTOOL" \
+            -d go/internal/capi/dxpdf.def \
+            -D dxpdf.dll \
+            -l go/internal/capi/lib/windows_amd64/libdxpdf.a
+
       - name: go vet
         working-directory: go
         run: go vet ./...
+
+      # windows_amd64 only: `dxpdf.dll` is loaded at runtime, not just
+      # linked against, so its directory has to be on PATH for the test
+      # binary to find it — the same requirement a real consumer's own
+      # binary has, documented in go/internal/capi/lib/README.md.
+      - name: Add the DLL directory to PATH (Windows only)
+        if: matrix.os_arch == 'windows_amd64'
+        run: echo "$PWD/internal/capi/lib/windows_amd64" >> "$GITHUB_PATH"
+        working-directory: go
 
       - name: go test (against the freshly rebuilt library)
         working-directory: go

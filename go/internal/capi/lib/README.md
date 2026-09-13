@@ -83,3 +83,40 @@ module doc for why splitting works at all, and why the matching
 in one left-to-right pass each by default, and splitting one archive
 scatters mutually-referencing object files across the pieces). Verified
 end-to-end before being written up here — see AGENTS.md's Go-bindings note.
+
+## windows_amd64 (experimental, not yet committed here)
+
+Not one of the four platforms above, and not part of `EXPECTED_PLATFORMS`
+or `SOURCE_HASH` yet — `.github/workflows/build-capi-libs.yml`'s
+`windows_amd64` leg builds and tests it on every run but doesn't commit or
+open a PR with the result, until a real green run has actually proven this
+out.
+
+It's a different shape, not just a different triple: everywhere else,
+`libdxpdf.a` is a static archive that cgo absorbs entirely into the output
+binary. On Windows that fails — Skia's object code carries MSVC-mangled
+C++ runtime symbols that MinGW's `ld` (cgo's default Windows linker)
+cannot resolve — and neither obvious fix exists upstream: `skia-bindings`
+has no `x86_64-pc-windows-gnu` support to match MinGW's ABI
+([rust-skia#345](https://github.com/rust-skia/rust-skia/issues/345)), and
+Go's linker has no MSVC object-file support to match `-msvc`'s ABI instead
+([golang/go#20982](https://github.com/golang/go/issues/20982)). See
+`go/cgo_windows_amd64.go`'s module doc for the full account.
+
+So this platform links `dxpdf.dll` dynamically instead — the same
+approach the Windows Python wheel already uses for the same reason. Only
+the plain `extern "C"` boundary has to resolve at link time, which MSVC
+and MinGW-w64 agree on for Windows x64. `go/internal/capi/dxpdf.def` lists
+every exported symbol by hand (kept honest by `tests/capi_def.rs`), and
+`dlltool` turns it into a MinGW-native `libdxpdf.a` import library —
+deliberately not the MSVC-produced `dxpdf.dll.lib` import stub cargo also
+emits, so nothing here depends on GNU ld being able to read an MSVC import
+library.
+
+The real cost, if and when this is promoted to a committed platform: a
+consumer's Windows binary would need `dxpdf.dll` next to it (or on `PATH`)
+at runtime, since a DLL is *loaded*, not absorbed — unlike every other
+platform, where `go get` alone is the whole story. That caveat, and how a
+consumer would actually get the DLL, has to be spelled out in
+`go/README.md`'s Install section before this platform is treated as
+supported, not just working in CI.
