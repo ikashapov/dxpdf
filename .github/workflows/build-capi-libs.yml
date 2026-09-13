@@ -136,12 +136,20 @@ jobs:
         run: go vet ./...
 
       # windows_amd64 only: `dxpdf.dll` is loaded at runtime, not just
-      # linked against, so its directory has to be on PATH for the test
-      # binary to find it — the same requirement a real consumer's own
-      # binary has, documented in go/internal/capi/lib/README.md.
-      - name: Add the DLL directory to PATH (Windows only)
+      # linked against, so it has to be findable when the test binary
+      # actually runs. `go test` executes it with the package directory
+      # (`go/`) as its current directory, which Windows searches for DLLs
+      # before PATH — simpler and less failure-prone here than getting a
+      # Git-Bash `$PWD` (POSIX-style, e.g. `/d/a/dxpdf/...`) translated into
+      # something Windows' loader accepts via `$GITHUB_PATH`, which is the
+      # form of this that first failed. A real consumer's binary needs the
+      # same thing, documented in go/internal/capi/lib/README.md — next to
+      # the executable, since that directory is Windows' first DLL search
+      # location and "current directory" isn't guaranteed for them the way
+      # it is for `go test` here.
+      - name: Copy the DLL next to the test binary's working directory (Windows only)
         if: matrix.os_arch == 'windows_amd64'
-        run: echo "$PWD/internal/capi/lib/windows_amd64" >> "$GITHUB_PATH"
+        run: cp internal/capi/lib/windows_amd64/dxpdf.dll dxpdf.dll
         working-directory: go
 
       - name: go test (against the freshly rebuilt library)
