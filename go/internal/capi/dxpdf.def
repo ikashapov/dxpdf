@@ -1,0 +1,7 @@
+LIBRARY dxpdf.dll
+EXPORTS
+    dxpdf_convert
+    dxpdf_free_buffer
+    dxpdf_free_error
+    dxpdf_default_image_dpi
+    dxpdf_min_image_dpi

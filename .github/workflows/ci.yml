@@ -142,8 +142,11 @@ jobs:
   # built) and almost every PR touches `src/` without touching anything
   # Go-bindings related. Gating to a `release/*` source branch still runs it
   # before anything is ever released from main, without doubling the build
-  # cost of every incremental commit. macOS/Windows *linking* is not covered
-  # here; see AGENTS.md's Go-bindings note for why.
+  # cost of every incremental commit. macOS/Windows *linking* isn't covered
+  # by this job — it's Linux-only by design — but both are still verified:
+  # `.github/workflows/build-capi-libs.yml`'s manual `workflow_dispatch` runs
+  # a real `go vet`/`go test -race` natively on every supported platform,
+  # Windows included; see AGENTS.md's Go-bindings note.
   go-bindings:
     name: Go bindings (capi)
     runs-on: ubuntu-latest

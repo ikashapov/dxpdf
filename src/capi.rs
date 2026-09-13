@@ -2,7 +2,9 @@
 //!
 //! This is the only non-Rust, non-Python entry point into the crate: Go
 //! cannot call Rust directly, so `go/dxpdf.go` reaches this module through
-//! cgo against the `staticlib` artifact `crate-type` produces. The surface
+//! cgo against the `staticlib` artifact `crate-type` produces — except on
+//! Windows, where it's the `cdylib` artifact instead; see
+//! `go/cgo_windows_amd64.go` for why. The surface
 //! is deliberately narrow — one conversion entry point, two matching
 //! `free` calls, and two constant getters — because every function here is
 //! `unsafe` at the boundary in a way the Python bindings (via PyO3) are not:

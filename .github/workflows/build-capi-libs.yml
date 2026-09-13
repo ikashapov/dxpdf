@@ -1,10 +1,13 @@
 name: Rebuild Go-bindings static libraries
 
-# Manual only. Rebuilds go/internal/capi/lib/*/libdxpdf.a for every supported
-# platform in one run and opens a PR with the result — never all four
-# individually, since tests/capi_lib_freshness.rs's SOURCE_HASH covers the
-# whole source tree at once: restamping after refreshing only some of them
-# would silently vouch for the rest being current when they aren't.
+# Manual only. Rebuilds go/internal/capi/lib/<os_arch>/ for every supported
+# platform in one run and opens a PR with the result — never individually,
+# since tests/capi_lib_freshness.rs's SOURCE_HASH covers the whole source
+# tree at once: restamping after refreshing only some of them would
+# silently vouch for the rest being current when they aren't. Four
+# platforms produce a single `libdxpdf.a` static archive; windows_amd64
+# produces `dxpdf.dll` plus a `libdxpdf.a` import library instead — see
+# that matrix entry's own comment for why.
 on:
   workflow_dispatch:
 
@@ -23,11 +26,6 @@ jobs:
   build:
     name: Build (${{ matrix.os_arch }})
     runs-on: ${{ matrix.runner }}
-    # A failure on the windows_amd64 leg must not fail the whole `build` job
-    # — see that entry's own note. `open-pr` below only ever looks for the
-    # four non-experimental platforms' artifacts, so a failing or
-    # not-yet-uploaded Windows artifact can't break it either.
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,18 +42,20 @@ jobs:
           - os_arch: linux_arm64
             runner: ubuntu-24.04-arm
             lib_name: libdxpdf.a
-          # Experimental: not yet wired into `open-pr` below, and not part
-          # of go/internal/capi/lib/SOURCE_HASH's EXPECTED_PLATFORMS. Rust's
-          # `staticlib` crate-type on `-windows-msvc` produces `dxpdf.lib`
-          # (MSVC naming), not `libdxpdf.a` — see cgo_windows_amd64.go for
-          # what is and isn't verified about this leg. `shell: bash` below
+          # Unlike every other platform, this one links a `dxpdf.dll` rather
+          # than a static archive — see cgo_windows_amd64.go's module doc
+          # for why static linking is a dead end here (both the obvious
+          # workarounds, `-windows-gnu` and `CC=cl`, are ruled out upstream,
+          # not just untried, and verified via a real `go vet`/`go test
+          # -race` run before this platform was added here). `lib_name` is
+          # unused for this entry; its own steps below build the DLL and
+          # turn `go/internal/capi/dxpdf.def` into a MinGW-native
+          # `libdxpdf.a` import library via `dlltool`. `shell: bash` below
           # is specifically for this leg (GH's windows-latest runners ship
           # Git Bash for exactly this); the other four already ran on a
           # POSIX shell by default.
           - os_arch: windows_amd64
             runner: windows-latest
-            lib_name: dxpdf.lib
-            experimental: true
     defaults:
       run:
         shell: bash
@@ -76,7 +76,7 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Build the capi staticlib
+      - name: Build the capi library
         run: cargo build --release --features capi
 
       # A platform can flip between whole-file and split-parts between
@@ -85,14 +85,18 @@ jobs:
       # committed before staging the new build, so nothing stale rides
       # along. tests/capi_lib_freshness.rs's
       # every_supported_platform_has_a_committed_library asserts a platform
-      # is never both at once.
+      # is never both at once. Not windows_amd64: its committed shape
+      # (dxpdf.dll plus an import library) doesn't fit matrix.lib_name, so
+      # it has its own staging step below instead.
       - name: Remove the previously committed library for this platform
+        if: matrix.os_arch != 'windows_amd64'
         run: |
           mkdir -p go/internal/capi/lib/${{ matrix.os_arch }}
           rm -f go/internal/capi/lib/${{ matrix.os_arch }}/${{ matrix.lib_name }}
           rm -f go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf_part*.a
 
       - name: Stage the rebuilt library
+        if: matrix.os_arch != 'windows_amd64'
         run: cp target/release/${{ matrix.lib_name }} go/internal/capi/lib/${{ matrix.os_arch }}/${{ matrix.lib_name }}
 
       # Only linux/amd64 and linux/arm64 ever exceed GitHub's 100MB
@@ -103,9 +107,48 @@ jobs:
         if: startsWith(matrix.os_arch, 'linux')
         run: python3 scripts/split_capi_lib.py go/internal/capi/lib/${{ matrix.os_arch }}/libdxpdf.a
 
+      # windows_amd64 only: stage `dxpdf.dll` itself (what gets *loaded* at
+      # runtime) plus a MinGW-native import library generated straight from
+      # `go/internal/capi/dxpdf.def` — deliberately not from the
+      # MSVC-produced `dxpdf.dll.lib` import stub cargo also emits, so this
+      # never depends on GNU ld being able to read an MSVC import library.
+      # `dlltool` ships alongside the mingw64 `gcc` that cgo already found
+      # to fail the old static link (see cgo_windows_amd64.go), so no extra
+      # tool install is needed; the fallback handles it being triple-prefixed
+      # instead of bare on some images.
+      - name: Stage the rebuilt library (Windows only)
+        if: matrix.os_arch == 'windows_amd64'
+        run: |
+          mkdir -p go/internal/capi/lib/windows_amd64
+          rm -f go/internal/capi/lib/windows_amd64/dxpdf.dll
+          rm -f go/internal/capi/lib/windows_amd64/libdxpdf.a
+          cp target/release/dxpdf.dll go/internal/capi/lib/windows_amd64/dxpdf.dll
+          DLLTOOL="$(command -v dlltool || command -v x86_64-w64-mingw32-dlltool)"
+          "$DLLTOOL" \
+            -d go/internal/capi/dxpdf.def \
+            -D dxpdf.dll \
+            -l go/internal/capi/lib/windows_amd64/libdxpdf.a
+
       - name: go vet
         working-directory: go
         run: go vet ./...
+
+      # windows_amd64 only: `dxpdf.dll` is loaded at runtime, not just
+      # linked against, so it has to be findable when the test binary
+      # actually runs. `go test` executes it with the package directory
+      # (`go/`) as its current directory, which Windows searches for DLLs
+      # before PATH — simpler and less failure-prone here than getting a
+      # Git-Bash `$PWD` (POSIX-style, e.g. `/d/a/dxpdf/...`) translated into
+      # something Windows' loader accepts via `$GITHUB_PATH`, which is the
+      # form of this that first failed. A real consumer's binary needs the
+      # same thing, documented in go/internal/capi/lib/README.md — next to
+      # the executable, since that directory is Windows' first DLL search
+      # location and "current directory" isn't guaranteed for them the way
+      # it is for `go test` here.
+      - name: Copy the DLL next to the test binary's working directory (Windows only)
+        if: matrix.os_arch == 'windows_amd64'
+        run: cp internal/capi/lib/windows_amd64/dxpdf.dll dxpdf.dll
+        working-directory: go
 
       - name: go test (against the freshly rebuilt library)
         working-directory: go
@@ -165,16 +208,19 @@ jobs:
           sudo apt-get install -y libfontconfig1-dev libfreetype-dev
 
       # Same stale-file concern as each build leg, but here against whatever
-      # was already committed before this run.
+      # was already committed before this run. windows_amd64's dxpdf.dll
+      # isn't named libdxpdf.a, so it needs its own line; its libdxpdf.a
+      # (the import library) is already covered by the glob above.
       - name: Remove previously committed libraries
         run: |
           rm -f go/internal/capi/lib/*/libdxpdf.a
           rm -f go/internal/capi/lib/*/libdxpdf_part*.a
+          rm -f go/internal/capi/lib/windows_amd64/dxpdf.dll
 
-      # Four explicit downloads rather than one pattern-based download:
+      # Five explicit downloads rather than one pattern-based download:
       # download-artifact's pattern mode nests each artifact under a
       # directory named after the artifact, not the platform — explicit is
-      # clearer than reshuffling paths afterward for a fixed set of four.
+      # clearer than reshuffling paths afterward for a fixed set of five.
       - uses: actions/download-artifact@v4
         with:
           name: capi-lib-darwin_arm64
@@ -197,6 +243,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          name: capi-lib-windows_amd64
+          path: go/internal/capi/lib/windows_amd64
+
+      - uses: actions/download-artifact@v4
+        with:
           name: capi-header
           path: go/internal/capi
 
@@ -216,13 +267,14 @@ jobs:
       - name: Open PR
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore: refresh committed libdxpdf.a binaries and SOURCE_HASH"
+          commit-message: "chore: refresh committed capi libraries and SOURCE_HASH"
           title: "Refresh Go-bindings static libraries"
           body: |
-            Rebuilds `go/internal/capi/lib/*/libdxpdf.a` for all four
+            Rebuilds `go/internal/capi/lib/<os_arch>/` for all five
             supported platforms (darwin/arm64, darwin/amd64, linux/amd64,
-            linux/arm64), regenerates `go/internal/capi/dxpdf.h`, and
-            restamps `go/internal/capi/lib/SOURCE_HASH`.
+            linux/arm64, windows/amd64), regenerates
+            `go/internal/capi/dxpdf.h`, and restamps
+            `go/internal/capi/lib/SOURCE_HASH`.
 
             Triggered manually via `workflow_dispatch`
             (run ${{ github.run_id }}).
@@ -230,6 +282,8 @@ jobs:
             Every platform was verified with a real `go vet`/`go test -race`
             run against its freshly rebuilt library, including darwin/amd64
             — previously only cross-compiled and symbol-checked, now built
-            and tested natively on `macos-15-intel`.
+            and tested natively on `macos-15-intel` — and windows/amd64,
+            which links `dxpdf.dll` dynamically rather than a static
+            archive (see `go/cgo_windows_amd64.go`).
           branch: capi-libs-refresh
           delete-branch: true
