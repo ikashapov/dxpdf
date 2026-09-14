@@ -35,18 +35,17 @@ use super::spellout;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Each decimal digit replaced by a character, most significant first.
+/// Every caller here already has its nine digits separate from its
+/// format-specific zero glyph, so this just reshapes them into the single
+/// 10-element table [`super::numbering::to_digit_set`] — the general
+/// digit-set substitution every positional format in this crate shares —
+/// runs the actual substitution over.
 fn positional(n: u32, zero: char, digits: [char; 9]) -> String {
-    if n == 0 {
-        return zero.to_string();
-    }
-    let mut out = String::new();
-    for b in n.to_string().bytes() {
-        match b {
-            b'0' => out.push(zero),
-            d => out.push(digits[(d - b'1') as usize]),
-        }
-    }
-    out
+    let full = [
+        zero, digits[0], digits[1], digits[2], digits[3], digits[4], digits[5], digits[6],
+        digits[7], digits[8],
+    ];
+    super::numbering::to_digit_set(n, &full)
 }
 
 const CJK_DIGITS: [char; 9] = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
@@ -153,6 +152,44 @@ enum OnePolicy {
     Never,
 }
 
+/// An interior-zero connector, and whether it survives right after a
+/// myriad character. Word suppresses it there for `chineseCountingThousand`
+/// ([MS-OI29500] note e: 10005 = 一万五, not 一万零五) but keeps it for its
+/// Traditional sibling (一萬零五) — a difference that only makes sense for a
+/// reading that has a connector in the first place, which folding it into
+/// one enum (rather than a separate `Option<char>` and `bool`) makes the
+/// type system say: a reading with no connector at all has no "after
+/// myriad" case to get right or wrong.
+#[derive(Clone, Copy)]
+enum ZeroConnector {
+    /// No interior-zero connector at all — the Japanese and Korean
+    /// readings.
+    None,
+    Kept(char),
+    OmittedAfterMyriad(char),
+}
+
+impl ZeroConnector {
+    /// The connector character for an interior zero run inside a single
+    /// 10⁴ group — always used when present, regardless of the
+    /// after-myriad rule below.
+    fn char(self) -> Option<char> {
+        match self {
+            ZeroConnector::None => None,
+            ZeroConnector::Kept(z) | ZeroConnector::OmittedAfterMyriad(z) => Some(z),
+        }
+    }
+
+    /// The connector character for a zero run that straddles a myriad
+    /// boundary — `None` when this reading omits it there.
+    fn kept_after_myriad(self) -> Option<char> {
+        match self {
+            ZeroConnector::Kept(z) => Some(z),
+            ZeroConnector::None | ZeroConnector::OmittedAfterMyriad(_) => None,
+        }
+    }
+}
+
 /// One CJK place-value reading. `myriads` are the 10⁴ⁿ group characters in
 /// ascending order (万, 億); groups render most significant first.
 struct CjkReading {
@@ -161,16 +198,10 @@ struct CjkReading {
     hundred: char,
     thousand: char,
     myriads: [char; 2],
-    /// Interior-zero connector (零 or 〇); `None` omits interior zeros
-    /// entirely — the Japanese and Korean readings.
-    zero: Option<char>,
+    zero: ZeroConnector,
     /// What a value of exactly 0 renders as (a list may start at 0).
     zero_label: &'static str,
     one_policy: OnePolicy,
-    /// Whether the connector is suppressed right after a myriad character —
-    /// Word's documented deviation for `chineseCountingThousand`
-    /// ([MS-OI29500] note e: 10005 = 一万五, not 一万零五).
-    zero_after_myriad_omitted: bool,
     /// Values from here up render as an **empty** label ([MS-OI29500] note j
     /// documents the 10⁶ cap for the counting-thousand and legal formats).
     cap: Option<u32>,
@@ -206,7 +237,7 @@ impl CjkReading {
                 continue;
             }
             if pending_zero {
-                if let Some(z) = self.zero {
+                if let Some(z) = self.zero.char() {
                     out.push(z);
                 }
                 pending_zero = false;
@@ -255,8 +286,8 @@ impl CjkReading {
                 // §: an interior zero run straddling the myriad (10005 →
                 // 一萬零五) takes one connector — unless this reading omits
                 // it there ([MS-OI29500] note e) or has no connector at all.
-                if rest != 0 && rest < 1000 && !self.zero_after_myriad_omitted {
-                    if let Some(z) = self.zero {
+                if rest != 0 && rest < 1000 {
+                    if let Some(z) = self.zero.kept_after_myriad() {
                         out.push(z);
                     }
                 }
@@ -280,10 +311,9 @@ pub fn chinese_counting_thousand(n: u32) -> String {
         hundred: '百',
         thousand: '千',
         myriads: ['万', '亿'],
-        zero: Some('〇'),
+        zero: ZeroConnector::OmittedAfterMyriad('〇'),
         zero_label: "〇",
         one_policy: OnePolicy::ElideTeensOnly,
-        zero_after_myriad_omitted: true,
         cap: Some(1_000_000),
     }
     .read(n)
@@ -301,10 +331,9 @@ pub fn taiwanese_counting_thousand(n: u32) -> String {
         hundred: '百',
         thousand: '千',
         myriads: ['萬', '億'],
-        zero: Some('零'),
+        zero: ZeroConnector::Kept('零'),
         zero_label: "零",
         one_policy: OnePolicy::ElideTeensOnly,
-        zero_after_myriad_omitted: false,
         cap: Some(1_000_000),
     }
     .read(n)
@@ -321,10 +350,9 @@ pub fn chinese_legal_simplified(n: u32) -> String {
         hundred: '佰',
         thousand: '仟',
         myriads: ['萬', '億'],
-        zero: Some('零'),
+        zero: ZeroConnector::Kept('零'),
         zero_label: "零",
         one_policy: OnePolicy::Never,
-        zero_after_myriad_omitted: false,
         cap: Some(1_000_000),
     }
     .read(n)
@@ -341,10 +369,9 @@ pub fn ideograph_legal_traditional(n: u32) -> String {
         hundred: '佰',
         thousand: '仟',
         myriads: ['萬', '億'],
-        zero: Some('零'),
+        zero: ZeroConnector::Kept('零'),
         zero_label: "零",
         one_policy: OnePolicy::Never,
-        zero_after_myriad_omitted: false,
         cap: Some(1_000_000),
     }
     .read(n)
@@ -362,10 +389,9 @@ pub fn japanese_counting(n: u32) -> String {
         hundred: '百',
         thousand: '千',
         myriads: ['万', '億'],
-        zero: None,
+        zero: ZeroConnector::None,
         zero_label: "〇",
         one_policy: OnePolicy::ElideBeforeSubMyriad,
-        zero_after_myriad_omitted: true,
         cap: Some(1_000_000),
     }
     .read(n)
@@ -374,7 +400,8 @@ pub fn japanese_counting(n: u32) -> String {
 /// `japaneseLegal` — the daiji anti-fraud reading: 壱弐参 (only 1, 2, 3, 5
 /// take daiji forms; 4, 6–9 stay ordinary) with 拾, plain 百, daiji 阡 and
 /// 萬/億. Every coefficient is written (10 = 壱拾, 1000 = 壱阡); no interior
-/// connector; no documented cap below the general display limit.
+/// connector; no documented cap below the general display limit — **Word
+/// reference render**.
 pub fn japanese_legal(n: u32) -> String {
     CjkReading {
         digits: ['壱', '弐', '参', '四', '伍', '六', '七', '八', '九'],
@@ -382,10 +409,9 @@ pub fn japanese_legal(n: u32) -> String {
         hundred: '百',
         thousand: '阡',
         myriads: ['萬', '億'],
-        zero: None,
+        zero: ZeroConnector::None,
         zero_label: "〇",
         one_policy: OnePolicy::Never,
-        zero_after_myriad_omitted: true,
         cap: None,
     }
     .read(n)
@@ -393,9 +419,10 @@ pub fn japanese_legal(n: u32) -> String {
 
 /// `koreanCounting` — the informal Sino-Korean reading in Hangul: 일 is
 /// elided before every unit including 만 (12 = 십이, 10000 = 만), no interior
-/// connector, no spaces. Validated against Word 2019 through LibreOffice's
-/// tdf#143526 test set; the bare 만 at exactly 10000 rests on the
-/// LibreOffice + ONLYOFFICE consensus — **Word reference render**.
+/// connector, no spaces, no documented cap below the general display limit.
+/// Validated against Word 2019 through LibreOffice's tdf#143526 test set;
+/// the bare 만 at exactly 10000 rests on the LibreOffice + ONLYOFFICE
+/// consensus — **Word reference render**.
 pub fn korean_counting(n: u32) -> String {
     CjkReading {
         digits: ['일', '이', '삼', '사', '오', '육', '칠', '팔', '구'],
@@ -403,10 +430,9 @@ pub fn korean_counting(n: u32) -> String {
         hundred: '백',
         thousand: '천',
         myriads: ['만', '억'],
-        zero: None,
+        zero: ZeroConnector::None,
         zero_label: "영",
         one_policy: OnePolicy::ElideAll,
-        zero_after_myriad_omitted: true,
         cap: None,
     }
     .read(n)
@@ -584,14 +610,15 @@ pub fn baht_text(n: u32) -> String {
 /// *choices* (lẻ over linh, ngàn over nghìn) are kept as the closest thing
 /// to Word evidence; its grammar is not — **Word reference render**.
 pub fn vietnamese_counting(n: u32) -> String {
+    const DIGITS: [&str; 9] = [
+        "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín",
+    ];
+
     if n == 0 {
         return "không".to_string();
     }
 
     fn under_hundred(n: u32, out: &mut Vec<&'static str>) {
-        const DIGITS: [&str; 9] = [
-            "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín",
-        ];
         debug_assert!((1..100).contains(&n));
         if n < 10 {
             out.push(DIGITS[(n - 1) as usize]);
@@ -617,9 +644,6 @@ pub fn vietnamese_counting(n: u32) -> String {
     }
 
     fn under_thousand(n: u32, out: &mut Vec<&'static str>) {
-        const DIGITS: [&str; 9] = [
-            "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín",
-        ];
         debug_assert!((1..1000).contains(&n));
         if n < 100 {
             under_hundred(n, out);

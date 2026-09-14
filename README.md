@@ -288,7 +288,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 12 partial, 11 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **79 entries fully implemented, 12 partial, 9 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -402,7 +402,7 @@ Validated against ISO 29500 (Office Open XML). **75 entries fully implemented, 1
 | Bullet, decimal, letter, roman | ✅ |
 | Ordinal, cardinalText, ordinalText | ✅ §17.9.27 spelled out in English, German, French and Spanish (`Eins`, `Vingt et un`, `Veintiuno`, `Erste`, `1er`, `1.º`); other languages fall back to digits |
 | Non-Latin sequences | ✅ §17.18.59 — Cyrillic, full-width/Devanagari/Thai/ideographic digits, circled and parenthesised decimals, kana (`aiueo`, `iroha`, both widths), hangul (`ganada`, `chosung`), Hebrew/Arabic/Devanagari/Thai alphabets, Chicago footnote symbols, heavenly stems, earthly branches and the sexagenary cycle, Hebrew and abjad numerals. A level whose §17.9.3 `w:rPr` names a covering font, as Word writes, uses it; one that does not now falls back per glyph to a host face that covers the sequence (see below) |
-| Counting-system formats | ✅ §17.18.59 counting systems render in their own scripts — the Chinese readings and banker's numerals (`chineseCounting`/`-Thousand`/`-LegalSimplified`, `taiwaneseCounting`/`-Thousand`/`-Digital`, `ideographLegalTraditional`), Japanese (`japaneseCounting`, `japaneseLegal`, `japaneseDigitalTenThousand`), Korean (`koreanCounting`, `koreanLegal`, `koreanDigital`, `koreanDigital2`), `vietnameseCounting`, `hindiCounting`, `thaiCounting`, and the currency spellouts `bahtText`/`dollarText` |
+| Counting-system formats | ✅ §17.18.59 counting systems render in their own scripts — the Chinese readings and banker's numerals (`chineseCounting`/`-Thousand`/`-LegalSimplified`, `taiwaneseCounting`/`-Thousand`/`-Digital`, `ideographLegalTraditional`), Japanese (`japaneseCounting`, `japaneseLegal`, `japaneseDigitalTenThousand`), Korean (`koreanCounting`, `koreanLegal`, `koreanDigital`, `koreanDigital2`), `vietnameseCounting`, `hindiCounting`, `thaiCounting`, and the currency spellouts `bahtText`/`dollarText`; the latter two deliberately diverge from Word itself, which renders them as plain decimal in list labels ([MS-OI29500] §2.1.545(d)/(t)) and reserves the spellout for field switches and Excel |
 | Picture bullets | ✅ §17.9.21 |
 | Multi-level lists | ✅ `%1`–`%9` templates, per-level counters and resets, §17.9.8 `isLgl` |
 
