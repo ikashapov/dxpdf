@@ -80,6 +80,31 @@ pub enum NumberFormat {
     // Additive numerals over a fixed value table.
     Hebrew1,
     ArabicAbjad,
+
+    // §17.18.59 counting systems — the number read aloud in a language's own
+    // numeral orthography (issue #152). Rendered by
+    // `crate::render::resolve::counting`.
+    ChineseCounting,
+    ChineseCountingThousand,
+    ChineseLegalSimplified,
+    TaiwaneseCounting,
+    TaiwaneseCountingThousand,
+    TaiwaneseDigital,
+    IdeographLegalTraditional,
+    JapaneseCounting,
+    JapaneseLegal,
+    JapaneseDigitalTenThousand,
+    KoreanCounting,
+    KoreanLegal,
+    KoreanDigital,
+    KoreanDigital2,
+    VietnameseCounting,
+    HindiCounting,
+    ThaiCounting,
+
+    // Spellout with a currency wrapper.
+    BahtText,
+    DollarText,
 }
 
 // ── Height Rule ──────────────────────────────────────────────────────────────

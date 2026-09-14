@@ -695,7 +695,14 @@ fn language_independent_number_formats_are_unchanged_by_locale() {
 /// classification draws.
 #[test]
 fn an_unsupported_number_format_still_degrades_to_decimal() {
-    for format in ["japaneseCounting", "bahtText", "custom"] {
-        assert_eq!(labels(format, "en-US"), ["1", "2", "3"], "{format}");
-    }
+    // `custom` (§17.9.17's picture string) is the one §17.18.59 value that
+    // still degrades; the counting systems it used to share this test with
+    // render their own scripts since issue #152 — and, being named formats,
+    // they ignore the document language entirely.
+    assert_eq!(labels("custom", "en-US"), ["1", "2", "3"]);
+    assert_eq!(labels("japaneseCounting", "en-US"), ["一", "二", "三"]);
+    assert_eq!(
+        labels("bahtText", "en-US"),
+        ["หนึ่งบาทถ้วน", "สองบาทถ้วน", "สามบาทถ้วน"]
+    );
 }
