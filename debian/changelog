@@ -1,3 +1,17 @@
+dxpdf (0.8.1-1) unstable; urgency=medium
+
+  * Fixed the Python bindings holding the GIL for the whole DOCX-to-PDF
+    conversion; `convert`/`convert_file` now release it for the duration of
+    the call, so a caller can run a conversion on a background thread instead
+    of needing a subprocess to keep other Python threads responsive.
+  * Promoted windows/amd64 to a supported Go-bindings platform, alongside the
+    existing linux/amd64, linux/arm64, darwin/amd64 and darwin/arm64 — see
+    `go/README.md`'s Install section for the one difference on Windows:
+    `dxpdf.dll` is loaded at runtime rather than statically linked, so it
+    needs to ship alongside the consumer's binary.
+
+ -- Ilya Nixan <nixan@nerdy.pro>  Sun, 13 Sep 2026 09:00:00 +0000
+
 dxpdf (0.8.0-1) unstable; urgency=medium
 
   * Read §22.9.2.15 universal measures (explicit units on a length, e.g.
