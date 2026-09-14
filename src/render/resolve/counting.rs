@@ -757,8 +757,11 @@ const HINDI_WORDS: [&str; 99] = [
 ];
 
 /// `hindiCounting` — Hindi number words in Devanagari over the standard
-/// Indian 2-2-3 grouping: करोड़ (10⁷), लाख (10⁵), हज़ार (10³), सौ (10²),
-/// then the 1–99 table; zero groups are silent (2024 = दो हज़ार चौबीस).
+/// Indian 2-2-3 grouping: अरब (10⁹), करोड़ (10⁷), लाख (10⁵), हज़ार (10³),
+/// सौ (10²), then the 1–99 table; zero groups are silent (2024 = दो हज़ार
+/// चौबीस). Every group above सौ is a 2-digit Indian place and wraps into
+/// the next one — `u32::MAX` reaches only 4 अरब, so अरब itself never needs
+/// to wrap further.
 ///
 /// The Word-proxy wraps the sequence modulo 9999, which no orthography or
 /// Microsoft document corroborates; the wrap is not reproduced — **Word
@@ -777,7 +780,8 @@ pub fn hindi_counting(n: u32) -> String {
             words.push(s.to_string());
         }
     };
-    push(n / 10_000_000, Some("करोड़"));
+    push(n / 1_000_000_000, Some("अरब"));
+    push(n / 10_000_000 % 100, Some("करोड़"));
     push(n / 100_000 % 100, Some("लाख"));
     push(n / 1000 % 100, Some("हज़ार"));
     push(n / 100 % 10, Some("सौ"));
@@ -1420,6 +1424,31 @@ mod tests {
         assert_eq!(
             dollar_text(1234),
             "One Thousand Two Hundred Thirty-Four and 00/100"
+        );
+    }
+
+    /// The crore group (10⁷) is only a 2-digit Indian place — the next one
+    /// up is अरब (10⁹) — so it must wrap the same way लाख/हज़ार already do.
+    /// Before the wrap existed, `n / 10_000_000` grew unbounded past 99 and
+    /// indexed `HINDI_WORDS` out of bounds for any `n >= 1_000_000_000`.
+    #[test]
+    fn hindi_counting_wraps_crore_into_arab_past_a_billion() {
+        // Just below the wrap: crore is still a bare two-digit group.
+        assert_eq!(
+            hindi_counting(999_999_999),
+            "निन्यानवे करोड़ निन्यानवे लाख निन्यानवे हज़ार नौ सौ निन्यानवे"
+        );
+        // At the wrap: used to panic (`HINDI_WORDS[99]`, len 99).
+        assert_eq!(hindi_counting(1_000_000_000), "एक अरब");
+        // Every group populated at once.
+        assert_eq!(
+            hindi_counting(1_234_567_890),
+            "एक अरब तेइस करोड़ पैंतालीस लाख सड़सठ हज़ार आठ सौ नब्बे"
+        );
+        // u32::MAX: exercises the largest अरब/करोड़ digits reachable at all.
+        assert_eq!(
+            hindi_counting(u32::MAX),
+            "चार अरब उनतीस करोड़ उनचास लाख सड़सठ हज़ार दो सौ पचानवे"
         );
     }
 
