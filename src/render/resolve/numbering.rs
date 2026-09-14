@@ -356,7 +356,7 @@ fn to_roman_upper(n: u32) -> String {
 // than a numbering one.
 
 /// Positional decimal in another set of ten digits.
-fn to_digit_set(n: u32, digits: &[char; 10]) -> String {
+pub(super) fn to_digit_set(n: u32, digits: &[char; 10]) -> String {
     // `n.to_string()` is ASCII, so a byte is a digit.
     n.to_string()
         .bytes()
