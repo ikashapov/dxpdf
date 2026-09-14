@@ -450,6 +450,15 @@ const THAI_DIGITS: [&str; 9] = ["หนึ่ง", "สอง", "สาม", "�
 /// (101 = หนึ่งร้อยเอ็ด), while the BAHTTEXT engine requires a non-zero tens
 /// digit (101 = หนึ่งร้อยหนึ่ง) — the two documented behaviors diverge at
 /// exactly this point, so it is a parameter rather than a fork.
+///
+/// Each of the (at most two) 10⁶ blocks decides its own เอ็ด independently:
+/// the ล้าน coefficient is a complete number in its own right
+/// (11,000,000 = สิบเอ็ดล้าน, not สิบหนึ่งล้าน), so it cannot be settled by
+/// looking only at the final rendered character. The one place a block
+/// needs to know about the *other* block is `thaiCounting`'s loose rule
+/// applied to a lone "1" after a ล้าน group — that group already counts as
+/// "something precedes" the same way a preceding ร้อย does for 101, even
+/// though the low block's own digits look exactly like a standalone 1.
 fn thai_reading(n: u32, ed_needs_tens: bool) -> String {
     if n == 0 {
         return "ศูนย์".to_string();
@@ -459,18 +468,44 @@ fn thai_reading(n: u32, ed_needs_tens: bool) -> String {
     let millions = n / 1_000_000;
     let rest = n % 1_000_000;
     if millions > 0 {
-        thai_block(&mut out, millions);
+        thai_block(
+            &mut out,
+            millions,
+            thai_needs_ed(millions, ed_needs_tens, false),
+        );
         out.push_str("ล้าน");
     }
     if rest > 0 {
-        thai_block(&mut out, rest);
+        thai_block(
+            &mut out,
+            rest,
+            thai_needs_ed(rest, ed_needs_tens, millions > 0),
+        );
     }
-    thai_apply_ed(n, out, ed_needs_tens)
+    out
+}
+
+/// Whether a block's own trailing 1 takes เอ็ด instead of หนึ่ง.
+/// `preceded_by_larger_group` is true only for the low block when a ล้าน
+/// coefficient stands before it — it satisfies `thaiCounting`'s loose
+/// "anything precedes" rule on its own, but never the BAHTTEXT engine's
+/// stricter one, which is a property of the block's own two low digits and
+/// cares nothing for what scale word came before it.
+fn thai_needs_ed(value: u32, ed_needs_tens: bool, preceded_by_larger_group: bool) -> bool {
+    if value % 10 != 1 {
+        return false;
+    }
+    if ed_needs_tens {
+        !(value / 10).is_multiple_of(10)
+    } else {
+        value >= 11 || preceded_by_larger_group
+    }
 }
 
 /// One block below 10⁶: scale digits each spelled (including 1: หนึ่งร้อย),
-/// bare สิบ for a tens digit of 1, ยี่ for 2, interior zeros silent.
-fn thai_block(out: &mut String, block: u32) {
+/// bare สิบ for a tens digit of 1, ยี่ for 2, interior zeros silent. `use_ed`
+/// (from [`thai_needs_ed`]) picks เอ็ด over หนึ่ง for a trailing 1.
+fn thai_block(out: &mut String, block: u32, use_ed: bool) {
     let scales: [(u32, &str); 3] = [(100_000, "แสน"), (10_000, "หมื่น"), (1_000, "พัน")];
     let mut rest = block;
     for (value, word) in scales {
@@ -498,28 +533,14 @@ fn thai_block(out: &mut String, block: u32) {
             out.push_str("สิบ");
         }
     }
-    if !rest.is_multiple_of(10) {
-        out.push_str(THAI_DIGITS[(rest % 10 - 1) as usize]);
+    let ones = rest % 10;
+    if ones == 0 {
+        return;
     }
-}
-
-/// Rewrite the final unit "หนึ่ง" as "เอ็ด" where the selected rule calls
-/// for it.
-fn thai_apply_ed(n: u32, rendered: String, ed_needs_tens: bool) -> String {
-    if n % 10 != 1 || n < 11 {
-        return rendered;
-    }
-    let use_ed = if ed_needs_tens {
-        !(n / 10).is_multiple_of(10)
+    if ones == 1 && use_ed {
+        out.push_str("เอ็ด");
     } else {
-        true
-    };
-    if !use_ed {
-        return rendered;
-    }
-    match rendered.strip_suffix("หนึ่ง") {
-        Some(head) if !head.is_empty() => format!("{head}เอ็ด"),
-        _ => rendered,
+        out.push_str(THAI_DIGITS[(ones - 1) as usize]);
     }
 }
 
@@ -1401,6 +1422,31 @@ mod tests {
                 "หนึ่งหมื่นสองพันสามร้อยสี่สิบห้า",
             ],
         );
+    }
+
+    /// The เอ็ด rule is per-block, not per-string-suffix: the ล้าน
+    /// coefficient is itself a complete number and takes เอ็ด on its own
+    /// trailing 1 (11,000,000 = สิบเอ็ดล้าน) even when nothing follows it,
+    /// and a lone "1" after a ล้าน group still counts as *something
+    /// precedes* for `thaiCounting`'s loose rule (1,000,001 = หนึ่งล้านเอ็ด)
+    /// the same way a preceding ร้อย already does for 101.
+    #[test]
+    fn thai_counting_applies_ed_within_the_millions_block_too() {
+        assert_eq!(thai_counting(1_000_000), "หนึ่งล้าน");
+        assert_eq!(thai_counting(11_000_000), "สิบเอ็ดล้าน");
+        assert_eq!(thai_counting(21_000_000), "ยี่สิบเอ็ดล้าน");
+        assert_eq!(thai_counting(1_000_001), "หนึ่งล้านเอ็ด");
+        assert_eq!(thai_counting(11_000_001), "สิบเอ็ดล้านเอ็ด");
+    }
+
+    /// BAHTTEXT's stricter rule (a non-zero *tens digit*, not just anything
+    /// preceding) is a property of the block's own two low digits, so a
+    /// preceding ล้าน group does not manufacture one — matching how a
+    /// preceding ร้อย already fails to for 101.
+    #[test]
+    fn baht_text_ed_rule_is_unaffected_by_a_preceding_million_group() {
+        assert_eq!(baht_text(1_000_001), "หนึ่งล้านหนึ่งบาทถ้วน");
+        assert_eq!(baht_text(11_000_000), "สิบเอ็ดล้านบาทถ้วน");
     }
 
     /// The BAHTTEXT engine's trailing-one rule needs a non-zero tens digit,
