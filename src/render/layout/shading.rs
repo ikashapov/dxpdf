@@ -158,28 +158,39 @@ fn push(out: &mut Vec<(PtLineSegment, Pt)>, x0: f32, y0: f32, x1: f32, y1: f32, 
     ));
 }
 
-/// Horizontal stripes: spines every [`TILE`] down from the top edge, the
-/// first flush against it (its spine half a stripe in).
+/// Horizontal stripes: spines every [`TILE`], on a lattice anchored at
+/// global `y = 0` rather than at this box's own top — `y = width/2 + k·TILE`
+/// for integer `k`, so two boxes at different `y` still land their spines on
+/// the same grid instead of each restarting flush with its own top edge (PR
+/// #180 review finding #4: two adjacent same-pattern cells otherwise tile
+/// independently and visibly mismatch at the shared edge — confirmed against
+/// a Word render, see `test-files/shading-phase-probe.docx`).
 fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
-    let mut y = width / 2.0;
+    let bottom = top + h;
+    let half = width / 2.0;
+    // Smallest lattice spine at or after `top`.
+    let mut y = half + TILE * ((top - half) / TILE).ceil();
     let mut n = 0;
-    while y + width / 2.0 <= h && n < MAX_STRIPES {
-        push(out, left, top + y, left + w, top + y, width);
+    while y + half <= bottom && n < MAX_STRIPES {
+        push(out, left, y, left + w, y, width);
         y += TILE;
         n += 1;
     }
 }
 
-/// Vertical stripes: [`horizontal`] with the axes swapped.
+/// Vertical stripes: [`horizontal`] with the axes swapped, lattice anchored
+/// at global `x = 0`.
 fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
-    let mut x = width / 2.0;
+    let right = left + w;
+    let half = width / 2.0;
+    let mut x = half + TILE * ((left - half) / TILE).ceil();
     let mut n = 0;
-    while x + width / 2.0 <= w && n < MAX_STRIPES {
-        push(out, left + x, top, left + x, top + h, width);
+    while x + half <= right && n < MAX_STRIPES {
+        push(out, x, top, x, top + h, width);
         x += TILE;
         n += 1;
     }
@@ -190,14 +201,35 @@ fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
 /// the stripes rise to the right — `diagStripe`'s `/`, emitted as runs from
 /// the upper right toward the lower left. See [`PatternFamily`] for how
 /// the two names map onto the slopes.
+///
+/// The spine walks the family of lines `y_local = ±x_local + c` (c stepping
+/// one tile), same as [`horizontal`]/[`vertical`]: which `c` values are
+/// visited is anchored to a lattice fixed in *global* coordinates
+/// (`c ≡ phase (mod TILE)`, `phase = top - left` for falling, `top + left`
+/// for rising — see the test module for the derivation) rather than
+/// restarting fresh at this box's own top-left, so two boxes at different
+/// positions land the bulk of their spines on one shared grid.
+///
+/// "The bulk of" rather than "every": the `.max(inset)` clamps below keep a
+/// spine's drawn segment inside the box by sliding its start point along
+/// whichever edge it would otherwise cross, and exactly at the one point
+/// where a box's own diagonal crosses its corner (`c` near zero) that slide
+/// can drift the drawn segment by up to one `width` short of where the
+/// lattice would otherwise place it. That is a limit of this per-box clamp
+/// algorithm, not something the lattice anchoring can close — it is also far
+/// smaller than the multi-point misalignment this anchoring fixes, and
+/// occurs at most once per box.
 fn diagonal(rect: PtRect, width: f32, falling: bool, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
     // Inset so a stripe's stroked width stays inside the box (a 45° stroke
-    // reaches width/(2√2) into each axis; width/2 is the safe bound). The
-    // spine walks the family of lines y = ±x + c with c stepping one tile.
+    // reaches width/(2√2) into each axis; width/2 is the safe bound).
     let inset = width / 2.0;
-    let mut c = -(((h - inset) / TILE).floor()) * TILE;
+    let phase = if falling { top - left } else { top + left };
+    // Smallest lattice-aligned c (c ≡ phase mod TILE) at or above the same
+    // lower bound the box-local form used.
+    let c_floor = -(h - inset);
+    let mut c = phase + TILE * ((c_floor - phase) / TILE).ceil();
     let mut n = 0;
     while c < w - inset && n < MAX_STRIPES {
         let x0 = c.max(inset);
@@ -290,16 +322,23 @@ mod tests {
         }
     }
 
-    /// Horizontal spines sit one [`TILE`] apart, the first flush with the
-    /// top edge: thick (1.5 pt) spines in a 13 pt box at 0.75 + n·3 while
-    /// the stripe still fits — four of them — and the 0.75 pt thin stripe
-    /// fits a fifth, which is the thick/thin distinction doing observable
-    /// work beyond the widths themselves.
+    /// Horizontal spines sit one [`TILE`] apart, on a lattice anchored at
+    /// global `y = 0` rather than flush with this box's own top — for a box
+    /// at `y = 50`, thick (1.5 pt) spines land at the smallest
+    /// `0.75 + k·3 >= 50`, i.e. 51.75, then step by 3 while the stripe still
+    /// fits within the box's 14 pt height — four of them — and the 0.75 pt
+    /// thin stripe's smaller half-width lets a fifth fit, which is the
+    /// thick/thin distinction doing observable work beyond the widths
+    /// themselves.
     #[test]
     fn horizontal_stripes_step_one_tile() {
-        let thick = stripe_lines(rect(40.0, 13.0), geometry(PatternFamily::Horz, false));
+        let thick = stripe_lines(rect(40.0, 14.0), geometry(PatternFamily::Horz, false));
         let ys: Vec<f32> = thick.iter().map(|(l, _)| l.start.y.raw()).collect();
-        assert_eq!(ys, [50.75, 53.75, 56.75, 59.75], "top + width/2 + n·TILE");
+        assert_eq!(
+            ys,
+            [51.75, 54.75, 57.75, 60.75],
+            "smallest lattice y >= top, then + n·TILE"
+        );
         assert!(thick.iter().all(|(l, _)| l.start.y == l.end.y));
         assert!(
             thick
@@ -309,16 +348,159 @@ mod tests {
         );
         assert!(thick.iter().all(|(_, w)| w.raw() == 1.5), "2 px stripes");
 
-        let thin = stripe_lines(rect(40.0, 13.0), geometry(PatternFamily::Horz, true));
+        let thin = stripe_lines(rect(40.0, 14.0), geometry(PatternFamily::Horz, true));
         assert_eq!(thin.len(), 5, "a thinner stripe fits once more");
         assert!(thin.iter().all(|(_, w)| w.raw() == 0.75), "1 px stripes");
     }
 
-    /// The two diagonal families mirror each other — same spine count, 45°
-    /// both, opposite slopes: `diagStripe` rises to the right (emitted
+    /// The property [`horizontal_stripes_step_one_tile`] pins with one box:
+    /// two boxes offset from each other by a **non-multiple** of [`TILE`]
+    /// still land their spines on one shared lattice, rather than each
+    /// restarting flush with its own top edge — PR #180 review finding #4,
+    /// confirmed against a Word render (`test-files/shading-phase-probe.docx`:
+    /// four identically-shaded cells in one row show one continuous grid,
+    /// not four independently-phased patches).
+    #[test]
+    fn two_boxes_offset_by_a_non_multiple_of_tile_share_one_lattice() {
+        let a = rect(40.0, 40.0);
+        // Offset by 5pt — not a multiple of TILE (3pt) — the way two real
+        // adjacent cells' heights or a page's own margins generically are.
+        let b = PtRect {
+            origin: PtOffset {
+                x: a.origin.x,
+                y: a.origin.y + Pt::new(5.0),
+            },
+            size: a.size,
+        };
+        let geo = geometry(PatternFamily::Horz, false);
+        let ys_a: Vec<f32> = stripe_lines(a, geo)
+            .iter()
+            .map(|(l, _)| l.start.y.raw())
+            .collect();
+        let ys_b: Vec<f32> = stripe_lines(b, geo)
+            .iter()
+            .map(|(l, _)| l.start.y.raw())
+            .collect();
+        // Every spine of `b` is a spine `a`'s own (unbounded) lattice would
+        // also produce — i.e. congruent to `a`'s spines modulo TILE — which
+        // is what "one shared grid" means and what box-local phase (always
+        // restarting at `width/2` from its own top) would not satisfy.
+        for y in ys_b {
+            let nearest_multiple = ((y - ys_a[0]) / TILE).round() * TILE + ys_a[0];
+            assert!(
+                (y - nearest_multiple).abs() < 1e-3,
+                "box b's spine at {y} is not on box a's lattice {ys_a:?}"
+            );
+        }
+    }
+
+    /// The literal shape of the confirmed case, `vertStripe`: two side-by-side
+    /// table cells, `b` starting exactly where `a` ends, at a width that is
+    /// not a multiple of [`TILE`] — the way real column widths generically
+    /// aren't. Real Word render: `test-files/shading-phase-probe.docx`'s
+    /// Table A, four identically-shaded cells in one row showing one
+    /// continuous vertical grid, not four independently-phased patches.
+    #[test]
+    fn adjacent_cells_share_one_vertical_lattice() {
+        let a = rect(37.0, 20.0);
+        let b = PtRect {
+            origin: PtOffset {
+                x: a.origin.x + a.size.width,
+                y: a.origin.y,
+            },
+            size: a.size,
+        };
+        let geo = geometry(PatternFamily::Vert, false);
+        let xs_a: Vec<f32> = stripe_lines(a, geo)
+            .iter()
+            .map(|(l, _)| l.start.x.raw())
+            .collect();
+        let xs_b: Vec<f32> = stripe_lines(b, geo)
+            .iter()
+            .map(|(l, _)| l.start.x.raw())
+            .collect();
+        assert!(!xs_a.is_empty() && !xs_b.is_empty());
+        for x in xs_b {
+            let nearest_multiple = ((x - xs_a[0]) / TILE).round() * TILE + xs_a[0];
+            assert!(
+                (x - nearest_multiple).abs() < 1e-3,
+                "cell b's spine at {x} is not on cell a's lattice {xs_a:?}"
+            );
+        }
+    }
+
+    /// The diagonal-family analogue, both directions — Table B of the same
+    /// probe (`diagCross`). A falling (`\`) spine's global invariant is
+    /// `y - x`, a rising (`/`) spine's is `y + x`; held constant between the
+    /// two cells' same-index spines is what "one continuous lattice" means
+    /// for a 45° family.
+    ///
+    /// Compared index-for-index rather than against a single extrapolated
+    /// reference, and tolerating **one** mismatch: [`diagonal`]'s own doc
+    /// explains why its corner clamp can drift a single spine, at the one
+    /// point where a box's own diagonal crosses its corner, by up to one
+    /// stroke `width` — both cells hit that at the same index here, since
+    /// they share a height, and it is the only pair this test allows to
+    /// disagree.
+    #[test]
+    fn adjacent_cells_share_one_diagonal_lattice() {
+        let a = rect(37.0, 20.0);
+        let b = PtRect {
+            origin: PtOffset {
+                x: a.origin.x + a.size.width,
+                y: a.origin.y,
+            },
+            size: a.size,
+        };
+        for family in [PatternFamily::Diag, PatternFamily::ReverseDiag] {
+            let geo = geometry(family, false);
+            let invariant = |l: &PtLineSegment| match family {
+                PatternFamily::Diag => l.start.y.raw() + l.start.x.raw(),
+                PatternFamily::ReverseDiag => l.start.y.raw() - l.start.x.raw(),
+                _ => unreachable!(),
+            };
+            let a_vals: Vec<f32> = stripe_lines(a, geo)
+                .iter()
+                .map(|(l, _)| invariant(l))
+                .collect();
+            let b_vals: Vec<f32> = stripe_lines(b, geo)
+                .iter()
+                .map(|(l, _)| invariant(l))
+                .collect();
+            assert!(
+                !a_vals.is_empty() && !b_vals.is_empty(),
+                "{family:?}: expected spines in both cells"
+            );
+            let mismatches: Vec<(usize, f32, f32)> = a_vals
+                .iter()
+                .zip(b_vals.iter())
+                .enumerate()
+                .filter_map(|(i, (&av, &bv))| {
+                    let diff_mod_tile = (av - bv).rem_euclid(TILE);
+                    let on_lattice = diff_mod_tile < 1e-3 || TILE - diff_mod_tile < 1e-3;
+                    (!on_lattice).then_some((i, av, bv))
+                })
+                .collect();
+            assert!(
+                mismatches.len() <= 1,
+                "{family:?}: more than the one corner-clamp mismatch this test \
+                 tolerates: {mismatches:?}"
+            );
+        }
+    }
+
+    /// The two diagonal families mirror each other — comparable spine count,
+    /// 45° both, opposite slopes: `diagStripe` rises to the right (emitted
     /// upper-right → lower-left, so Δx < 0 with Δy > 0),
     /// `reverseDiagStripe` falls (Δx and Δy both positive). Their stroke is
     /// the orthogonal width over √2, the tile's 2 px measured along a row.
+    ///
+    /// Not an exact count match: each family is now phase-locked to its own
+    /// global lattice (`c + top - left` for falling, `c + top + left` for
+    /// rising — see [`diagonal`]'s doc), so at a box whose position makes the
+    /// two lattices land differently relative to the box edges, one family
+    /// can fit one more spine than the other. `rect`'s box (100, 50) is
+    /// exactly such a case.
     #[test]
     fn diagonals_mirror() {
         let diag = stripe_lines(rect(40.0, 13.0), geometry(PatternFamily::Diag, false));
@@ -326,7 +508,13 @@ mod tests {
             rect(40.0, 13.0),
             geometry(PatternFamily::ReverseDiag, false),
         );
-        assert_eq!(diag.len(), reverse.len());
+        assert!(
+            diag.len().abs_diff(reverse.len()) <= 1,
+            "independently phase-locked families may differ by at most one \
+             boundary spine: diag={} reverse={}",
+            diag.len(),
+            reverse.len()
+        );
         assert!(!diag.is_empty());
         for (l, w) in &diag {
             let (dx, dy) = ((l.end.x - l.start.x).raw(), (l.end.y - l.start.y).raw());
@@ -355,9 +543,14 @@ mod tests {
         let vert = stripe_lines(r, geometry(PatternFamily::Vert, false));
         assert_eq!(cross.len(), horz.len() + vert.len());
 
+        // `diag`/`reverse` rather than `2 * diag.len()`: the two diagonal
+        // families are independently phase-locked ([`diagonals_mirror`]) and
+        // need not have equal counts, but `DiagCross` is still exactly their
+        // union — it calls the same two `diagonal()` invocations these do.
         let dcross = stripe_lines(r, geometry(PatternFamily::DiagCross, false));
         let diag = stripe_lines(r, geometry(PatternFamily::Diag, false));
-        assert_eq!(dcross.len(), 2 * diag.len());
+        let reverse = stripe_lines(r, geometry(PatternFamily::ReverseDiag, false));
+        assert_eq!(dcross.len(), diag.len() + reverse.len());
     }
 
     /// Calling `emit_shading_background` then `emit_shading_stripes` — what
