@@ -541,6 +541,7 @@ mod tests {
         BreakAfter, FontProps, LinkTarget, MathRow, TextMetrics,
     };
     use crate::render::resolve::color::RgbColor;
+    use crate::render::resolve::shading::ResolvedShading;
     use std::rc::Rc;
 
     fn text_frag(text: &str, width: f32) -> Fragment {
@@ -1726,7 +1727,7 @@ mod tests {
                 left: Some(border(1.0)),
                 right: Some(border(1.0)),
             }),
-            shading: Some(RgbColor::BLACK),
+            shading: Some(ResolvedShading::Flat(RgbColor::BLACK)),
             ..Default::default()
         };
         // Box wider than a word (with room for the 2pt side border spaces) so

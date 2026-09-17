@@ -8,6 +8,7 @@ use super::super::fragment::Fragment;
 use crate::render::dimension::Pt;
 use crate::render::geometry::PtSize;
 use crate::render::resolve::color::RgbColor;
+use crate::render::resolve::shading::ResolvedShading;
 
 /// §17.3.1.38: a resolved tab stop for layout.
 #[derive(Clone, Debug)]
@@ -89,8 +90,10 @@ pub struct ParagraphStyle {
     pub drop_cap: Option<DropCapInfo>,
     /// §17.3.1.24: paragraph borders.
     pub borders: Option<ParagraphBorderStyle>,
-    /// §17.3.1.31: paragraph shading (background fill).
-    pub shading: Option<RgbColor>,
+    /// §17.3.1.31: paragraph shading — a flat colour or a §17.18.78
+    /// geometric pattern, resolved by `resolve_shading` the same way a table
+    /// cell's is.
+    pub shading: Option<ResolvedShading>,
     /// §17.3.1.15: keep this paragraph on the same page as the next.
     pub keep_next: bool,
     /// §17.3.1.14: keep all lines of this paragraph on one page where possible

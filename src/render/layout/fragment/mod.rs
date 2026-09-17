@@ -14,6 +14,7 @@ use crate::render::geometry::{PtRect, PtSize};
 use crate::render::resolve::color::RgbColor;
 use crate::render::resolve::fonts::effective_font;
 use crate::render::resolve::images::MediaEntry;
+use crate::render::resolve::shading::ResolvedShading;
 use crate::render::shape::RunDirection;
 
 mod bidi;
@@ -223,8 +224,11 @@ pub enum Fragment {
         /// refcount bump.
         font: Rc<FontProps>,
         color: RgbColor,
-        /// §17.3.2.32: run-level shading (background color behind text).
-        shading: Option<RgbColor>,
+        /// §17.3.2.32: run-level shading — a flat colour or a §17.18.78
+        /// geometric pattern, resolved by `resolve_shading` the same way a
+        /// table cell's is (or folded from §17.3.2.15 highlight, which has
+        /// no pattern of its own — see `resolve_run_styling`).
+        shading: Option<ResolvedShading>,
         /// §17.3.2.4: run-level border (box around text).
         border: Option<FragmentBorder>,
         /// UAX #14: whether a line may break after this fragment. See
