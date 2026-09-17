@@ -10,7 +10,8 @@ use super::borders::{
 };
 use super::grid::is_vmerge_continue;
 use super::types::{
-    CellVAlign, MeasuredRow, MeasuredTable, TableBorderLine, TableRowInput, VerticalMergeState,
+    CellLayoutEntry, CellVAlign, MeasuredRow, MeasuredTable, TableBorderLine, TableCellInput,
+    TableRowInput, VerticalMergeState,
 };
 
 /// Layered command buffers for table rendering: shading, content, borders.
@@ -208,41 +209,54 @@ fn emit_one_row(
         top_source,
     });
 
-    for (cell_ci, (entry, cell_input)) in mr.entries.iter().zip(row.cells.iter()).enumerate() {
-        // §17.4.84: the merged span, used below for vAlign and here for
-        // shading. Hoisted above the shading so both read the same height —
-        // shading used `row_height` while vAlign used the span, so a shaded
-        // merged cell was coloured across its first row only.
-        let effective_h = if cell_input.vertical_merge == Some(VerticalMergeState::Restart) {
-            row_ctx
-                .map(|ctx| merged_span_height(ctx.measured, ctx.rows, ctx.row_idx, entry.grid_col))
-                .unwrap_or(row_height)
-        } else {
-            row_height
-        };
-
-        // §17.4.32 / §17.4.84: a merged cell's shading covers the whole span,
-        // and the `Continue` rows do not paint their own. Word treats the
-        // continuation cells as part of the `Restart` cell, so its `<w:shd>`
-        // governs the merged region; letting a continuation paint over the span
-        // would let a stale or differing `shd` on a row that has no independent
-        // existence win for that row.
-        // Cells in a row abut exactly, so a run of same-coloured ones reaches
-        // the page as N rects sharing N−1 edges — a seam under any rasterizer
-        // that anti-aliases each fill on its own. They are fused once the page
-        // is finished, by
-        // [`coalesce_abutting_rects`](crate::render::layout::draw_command::coalesce_abutting_rects),
-        // which owns that rule for every producer rather than each producer
-        // half-owning it.
-        if cell_input.vertical_merge != Some(VerticalMergeState::Continue) {
-            if let Some(shading) = &cell_input.shading {
-                super::shading::emit_cell_shading(
-                    bufs.commands,
-                    PtRect::from_xywh(entry.cell_x, row_top, entry.cell_w, effective_h),
-                    shading,
-                );
-            }
+    // §17.4.32 / §17.4.84: every cell's *background* first, in one pass over
+    // the whole row, and only then a second pass for stripes. Cells in a row
+    // abut exactly, so a run of same-coloured ones reaches the page as N
+    // rects sharing N−1 edges — a seam under any rasterizer that
+    // anti-aliases each fill on its own, fused once the page is finished by
+    // [`coalesce_abutting_rects`](crate::render::layout::draw_command::coalesce_abutting_rects).
+    // That only fuses *consecutive* rects, and a patterned cell interleaves
+    // its background with stripe `Line`s — emitting a row cell-by-cell (each
+    // cell's whole shading, then the next cell's) would put a patterned
+    // cell's stripes between its own background and its same-coloured
+    // neighbour's, breaking the adjacency for both. Grouping every
+    // background ahead of every stripe keeps that adjacency regardless of
+    // which cells in between are patterned. `Continue` rows do not paint
+    // their own: Word treats them as part of the `Restart` cell, so its
+    // `<w:shd>` governs the merged region and a continuation must not paint a
+    // stale or differing one over it.
+    for (entry, cell_input) in mr.entries.iter().zip(row.cells.iter()) {
+        if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
+            continue;
         }
+        if let Some(shading) = &cell_input.shading {
+            let effective_h = effective_cell_height(row_ctx, entry, cell_input, row_height);
+            super::shading::emit_cell_background(
+                bufs.commands,
+                PtRect::from_xywh(entry.cell_x, row_top, entry.cell_w, effective_h),
+                shading,
+            );
+        }
+    }
+    for (entry, cell_input) in mr.entries.iter().zip(row.cells.iter()) {
+        if cell_input.vertical_merge == Some(VerticalMergeState::Continue) {
+            continue;
+        }
+        if let Some(shading) = &cell_input.shading {
+            let effective_h = effective_cell_height(row_ctx, entry, cell_input, row_height);
+            super::shading::emit_cell_stripes(
+                bufs.commands,
+                PtRect::from_xywh(entry.cell_x, row_top, entry.cell_w, effective_h),
+                shading,
+            );
+        }
+    }
+
+    for (cell_ci, (entry, cell_input)) in mr.entries.iter().zip(row.cells.iter()).enumerate() {
+        // §17.4.84: the merged span, used below for vAlign — the same height
+        // the shading pass above computed, so a shaded merged cell is
+        // coloured across the whole span its content is aligned within.
+        let effective_h = effective_cell_height(row_ctx, entry, cell_input, row_height);
 
         // §17.4.38: restore the top border when this row starts a slice and the
         // resolved top was removed by conflict resolution or adjacent-table
@@ -319,6 +333,27 @@ fn emit_one_row(
     }
 
     cursor.y += mr.height + mr.border_gap_below;
+}
+
+/// §17.4.84: the height a cell's own box effectively spans — a
+/// `vMerge="restart"` cell's whole merged span, or the row's own height for
+/// everything else. Shared by the shading and vAlign passes over a row so
+/// both read the same height; they used to disagree (shading took
+/// `row_height`, vAlign took the span), which coloured a shaded merged cell
+/// across its first row only.
+fn effective_cell_height(
+    row_ctx: Option<RowContext<'_>>,
+    entry: &CellLayoutEntry,
+    cell_input: &TableCellInput,
+    row_height: Pt,
+) -> Pt {
+    if cell_input.vertical_merge == Some(VerticalMergeState::Restart) {
+        row_ctx
+            .map(|ctx| merged_span_height(ctx.measured, ctx.rows, ctx.row_idx, entry.grid_col))
+            .unwrap_or(row_height)
+    } else {
+        row_height
+    }
 }
 
 /// Total vertical space owned by a vMerge=Restart cell at `grid_col`.

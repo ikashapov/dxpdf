@@ -199,6 +199,56 @@ fn a_row_of_identically_shaded_cells_is_painted_as_one_rect() {
     assert_eq!(shaded[0].2, 240.0, "the survivor spans the whole row");
 }
 
+/// A §17.18.78 patterned cell sits **between** two flat cells sharing its own
+/// background colour — all three white, the outer two `clear` and the middle
+/// one `horzStripe`. `coalesce_abutting_rects` only fuses *consecutive*
+/// `Rect`s, and `emit_cell_shading` used to emit a cell's whole shading
+/// (background rect, then its stripe `Line`s) before moving to the next
+/// cell, so the middle cell's stripes sat between its own background and
+/// each flat neighbour's — the exact seam this reduces from the reported
+/// case: two adjacent same-fill cells where at least one uses a pattern.
+/// `emit_table_rows` (`emit.rs`) now emits a whole row's backgrounds in one
+/// pass before any cell's stripes, so the three backgrounds land consecutive
+/// in the stream regardless of the pattern sitting between them.
+#[test]
+fn a_patterned_cell_between_two_same_colour_flat_cells_still_fuses() {
+    let cells = r#"
+      <w:tc><w:tcPr><w:tcW w:w="1200" w:type="dxa"/>
+        <w:shd w:val="clear" w:color="auto" w:fill="FFFFFF"/></w:tcPr>
+        <w:p><w:r><w:t>X</w:t></w:r></w:p></w:tc>
+      <w:tc><w:tcPr><w:tcW w:w="1200" w:type="dxa"/>
+        <w:shd w:val="horzStripe" w:color="000000" w:fill="FFFFFF"/></w:tcPr>
+        <w:p><w:r><w:t>X</w:t></w:r></w:p></w:tc>
+      <w:tc><w:tcPr><w:tcW w:w="1200" w:type="dxa"/>
+        <w:shd w:val="clear" w:color="auto" w:fill="FFFFFF"/></w:tcPr>
+        <w:p><w:r><w:t>X</w:t></w:r></w:p></w:tc>
+    "#;
+    let table = format!(
+        r#"<w:tbl>
+  <w:tblPr>
+    <w:tblW w:w="3600" w:type="dxa"/>
+    <w:tblLayout w:type="fixed"/>
+  </w:tblPr>
+  <w:tblGrid><w:gridCol w:w="1200"/><w:gridCol w:w="1200"/><w:gridCol w:w="1200"/></w:tblGrid>
+  <w:tr>{cells}</w:tr>
+</w:tbl>"#
+    );
+    let pages = layout(&table);
+    let white: Vec<_> = fills(&pages[0])
+        .into_iter()
+        .filter(|(_, _, _, _, c)| *c == (0xFF, 0xFF, 0xFF))
+        .collect();
+
+    assert_eq!(
+        white.len(),
+        1,
+        "three white backgrounds — flat, pattern, flat — one rect spanning the row: {white:?}"
+    );
+    // 3 × 1200 twips is 180pt.
+    assert_eq!(white[0].2, 180.0, "the survivor spans the whole row");
+    assert!(seams(&pages).is_empty(), "no seam left over the pattern");
+}
+
 /// A `double` border's two rules reach the page **whole** — one rect each, the
 /// length of the grid line — not as a chain of segments and crossings that a
 /// rasterizer has to butt together itself.
