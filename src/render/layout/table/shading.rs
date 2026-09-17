@@ -57,9 +57,22 @@ const SQRT2: f32 = std::f32::consts::SQRT_2;
 /// document's stripes are truncated by it.
 const MAX_STRIPES: u32 = 100_000;
 
-/// Emit one cell's shading: a flat colour is one rect; a pattern is its
-/// background rect (absent for an `auto` fill) plus its stripes.
-pub(super) fn emit_cell_shading(
+/// The background half of a cell's shading: a flat colour's whole rect, or a
+/// pattern's background rect (absent for an `auto` fill, which shades like
+/// `clear` — stripes over nothing).
+///
+/// Split from the stripes deliberately: [`coalesce_abutting_rects`]
+/// (`draw_command.rs`) only fuses *consecutive* same-colour `Rect`s, which is
+/// what keeps a row of same-coloured cells from leaving a
+/// CoreGraphics-visible seam at each shared edge (`tests/table_shading_seams.rs`).
+/// A patterned cell's stripe `Line`s sit between its own background and the
+/// next cell's, which would block that fusion for every neighbour of a
+/// patterned cell — so `emit.rs` emits a whole row's backgrounds in one pass
+/// before any cell's stripes, keeping same-colour neighbours adjacent in the
+/// stream regardless of which cells between them are patterned.
+///
+/// [`coalesce_abutting_rects`]: crate::render::layout::draw_command::coalesce_abutting_rects
+pub(super) fn emit_cell_background(
     commands: &mut Vec<DrawCommand>,
     rect: PtRect,
     shading: &ResolvedShading,
@@ -67,20 +80,35 @@ pub(super) fn emit_cell_shading(
     match *shading {
         ResolvedShading::Flat(color) => commands.push(DrawCommand::Rect { rect, color }),
         ResolvedShading::Pattern {
-            geometry,
-            foreground,
-            background,
-        } => {
-            if let Some(color) = background {
-                commands.push(DrawCommand::Rect { rect, color });
-            }
-            for (line, width) in stripe_lines(rect, geometry) {
-                commands.push(DrawCommand::Line {
-                    line,
-                    color: foreground,
-                    width,
-                });
-            }
+            background: Some(color),
+            ..
+        } => commands.push(DrawCommand::Rect { rect, color }),
+        ResolvedShading::Pattern {
+            background: None, ..
+        } => {}
+    }
+}
+
+/// The stripe half of a cell's shading — a flat colour has none. See
+/// [`emit_cell_background`] for why the two are emitted in separate passes
+/// over a row rather than together per cell.
+pub(super) fn emit_cell_stripes(
+    commands: &mut Vec<DrawCommand>,
+    rect: PtRect,
+    shading: &ResolvedShading,
+) {
+    if let ResolvedShading::Pattern {
+        geometry,
+        foreground,
+        ..
+    } = *shading
+    {
+        for (line, width) in stripe_lines(rect, geometry) {
+            commands.push(DrawCommand::Line {
+                line,
+                color: foreground,
+                width,
+            });
         }
     }
 }
@@ -325,27 +353,26 @@ mod tests {
         assert_eq!(dcross.len(), 2 * diag.len());
     }
 
-    /// A pattern is its background rect first, then only stripes — and no
-    /// rect at all over an `auto` fill, which shades like `clear`: stripes
-    /// over nothing.
+    /// Calling `emit_cell_background` then `emit_cell_stripes` — what
+    /// `emit.rs` does for one cell across its two row-wide passes — paints
+    /// the background rect first and only stripes after, and no rect at all
+    /// over an `auto` fill, which shades like `clear`: stripes over nothing.
     #[test]
-    fn emit_paints_background_then_stripes() {
+    fn background_then_stripes_matches_emit_rs_per_cell_order() {
         let fg = RgbColor { r: 1, g: 2, b: 3 };
         let bg = RgbColor {
             r: 250,
             g: 250,
             b: 250,
         };
+        let shading = ResolvedShading::Pattern {
+            geometry: geometry(PatternFamily::Horz, false),
+            foreground: fg,
+            background: Some(bg),
+        };
         let mut commands = Vec::new();
-        emit_cell_shading(
-            &mut commands,
-            rect(40.0, 13.0),
-            &ResolvedShading::Pattern {
-                geometry: geometry(PatternFamily::Horz, false),
-                foreground: fg,
-                background: Some(bg),
-            },
-        );
+        emit_cell_background(&mut commands, rect(40.0, 13.0), &shading);
+        emit_cell_stripes(&mut commands, rect(40.0, 13.0), &shading);
         assert!(
             matches!(&commands[0], DrawCommand::Rect { color, .. } if *color == bg),
             "background rect first"
@@ -355,16 +382,14 @@ mod tests {
             .iter()
             .all(|c| matches!(c, DrawCommand::Line { color, .. } if *color == fg)));
 
+        let transparent_shading = ResolvedShading::Pattern {
+            geometry: geometry(PatternFamily::Horz, false),
+            foreground: fg,
+            background: None,
+        };
         let mut transparent = Vec::new();
-        emit_cell_shading(
-            &mut transparent,
-            rect(40.0, 13.0),
-            &ResolvedShading::Pattern {
-                geometry: geometry(PatternFamily::Horz, false),
-                foreground: fg,
-                background: None,
-            },
-        );
+        emit_cell_background(&mut transparent, rect(40.0, 13.0), &transparent_shading);
+        emit_cell_stripes(&mut transparent, rect(40.0, 13.0), &transparent_shading);
         assert!(
             transparent
                 .iter()
