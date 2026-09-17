@@ -46,6 +46,16 @@ const THIN: f32 = 0.75;
 /// A diagonal stripe's width is measured along a pixel row, so its stroked
 /// width is the orthogonal one over √2.
 const SQRT2: f32 = std::f32::consts::SQRT_2;
+/// Hard cap on stripes emitted per pattern axis, independent of `rect`'s
+/// magnitude. `horizontal`/`vertical`/`diagonal` step a [`TILE`]-sized f32
+/// accumulator with no other bound: past roughly 2^25 pt the accumulator's
+/// own ULP exceeds the step, so `+= TILE` silently stalls and the loop never
+/// reaches its exit test; a `rect` dimension of `+Infinity` never satisfies
+/// that test in the first place. Both turn a single crafted
+/// `w:trHeight`/`w:tblW` into an unbounded loop. A 300,000 pt cell — over
+/// three thousand pages tall — still fits under this cap, so no real
+/// document's stripes are truncated by it.
+const MAX_STRIPES: u32 = 100_000;
 
 /// Emit one cell's shading: a flat colour is one rect; a pattern is its
 /// background rect (absent for an `auto` fill) plus its stripes.
@@ -119,9 +129,11 @@ fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
     let mut y = width / 2.0;
-    while y + width / 2.0 <= h {
+    let mut n = 0;
+    while y + width / 2.0 <= h && n < MAX_STRIPES {
         push(out, left, top + y, left + w, top + y, width);
         y += TILE;
+        n += 1;
     }
 }
 
@@ -130,9 +142,11 @@ fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
     let mut x = width / 2.0;
-    while x + width / 2.0 <= w {
+    let mut n = 0;
+    while x + width / 2.0 <= w && n < MAX_STRIPES {
         push(out, left + x, top, left + x, top + h, width);
         x += TILE;
+        n += 1;
     }
 }
 
@@ -149,7 +163,8 @@ fn diagonal(rect: PtRect, width: f32, falling: bool, out: &mut Vec<(PtLineSegmen
     // spine walks the family of lines y = ±x + c with c stepping one tile.
     let inset = width / 2.0;
     let mut c = -(((h - inset) / TILE).floor()) * TILE;
-    while c < w - inset {
+    let mut n = 0;
+    while c < w - inset && n < MAX_STRIPES {
         let x0 = c.max(inset);
         let y0 = (-c).max(inset);
         let run = (w - inset - x0).min(h - inset - y0);
@@ -175,6 +190,7 @@ fn diagonal(rect: PtRect, width: f32, falling: bool, out: &mut Vec<(PtLineSegmen
             }
         }
         c += TILE;
+        n += 1;
     }
 }
 
@@ -355,5 +371,57 @@ mod tests {
                 .all(|c| matches!(c, DrawCommand::Line { .. })),
             "an auto fill draws stripes over nothing"
         );
+    }
+
+    /// A cell dimension pathological enough to defeat f32 `TILE`
+    /// accumulation — either far past the ~2^25 pt point where its ULP
+    /// exceeds the step, or literal `+Infinity`, which never satisfies the
+    /// loop's own exit test at all — must still return in bounded time with
+    /// a bounded number of stripes, not hang the render thread. This is the
+    /// DoS `MAX_STRIPES` exists to close; each family and axis is checked
+    /// since `horizontal`/`vertical`/`diagonal` each accumulate separately.
+    #[test]
+    fn stripe_count_is_capped_for_pathological_rect_dimensions() {
+        use PatternFamily::*;
+        let with_height = |h: f32| PtRect {
+            origin: PtOffset {
+                x: Pt::new(0.0),
+                y: Pt::new(0.0),
+            },
+            size: PtSize {
+                width: Pt::new(40.0),
+                height: Pt::new(h),
+            },
+        };
+        let with_width = |w: f32| PtRect {
+            origin: PtOffset {
+                x: Pt::new(0.0),
+                y: Pt::new(0.0),
+            },
+            size: PtSize {
+                width: Pt::new(w),
+                height: Pt::new(40.0),
+            },
+        };
+        // The crosses union two independently capped loops, so their own
+        // bound is twice a single axis's.
+        let limit = |family: PatternFamily| match family {
+            HorzCross | DiagCross => 2 * MAX_STRIPES,
+            _ => MAX_STRIPES,
+        };
+        for h in [1e9_f32, f32::INFINITY] {
+            let r = with_height(h);
+            for family in [Horz, Vert, Diag, ReverseDiag, HorzCross, DiagCross] {
+                let n = stripe_lines(r, geometry(family, false)).len() as u32;
+                assert!(n <= limit(family), "{family:?} h={h}: {n} stripes");
+            }
+        }
+        for w in [1e9_f32, f32::INFINITY] {
+            let r = with_width(w);
+            for family in [Horz, Vert, Diag, ReverseDiag, HorzCross, DiagCross] {
+                let n = stripe_lines(r, geometry(family, false)).len() as u32;
+                assert!(n <= limit(family), "{family:?} w={w}: {n} stripes");
+            }
+        }
     }
 }
