@@ -115,20 +115,27 @@ pub(super) fn emit_segment_borders_and_shading(
         content_bottom
     };
 
-    // §17.3.1.31: render paragraph shading (fills the border area).
-    if let Some(bg_color) = style.shading {
-        commands.insert(
-            0,
-            DrawCommand::Rect {
-                rect: crate::render::geometry::PtRect::from_xywh(
-                    para_left,
-                    box_top,
-                    para_right - para_left,
-                    box_bottom - box_top,
-                ),
-                color: bg_color,
-            },
+    // §17.3.1.31: render paragraph shading (fills the border area) — a flat
+    // colour or a §17.18.78 pattern, both spliced ahead of everything already
+    // in `commands` (this segment's lines, run shading, run borders) so the
+    // paragraph background sits behind all of it. Background before stripes,
+    // same as `table::emit` and `line_emit`'s run shading — see
+    // `shading::emit_shading_background`'s doc for why the order matters.
+    if let Some(shading) = &style.shading {
+        let rect = crate::render::geometry::PtRect::from_xywh(
+            para_left,
+            box_top,
+            para_right - para_left,
+            box_bottom - box_top,
         );
+        let mut shading_commands = Vec::new();
+        crate::render::layout::shading::emit_shading_background(
+            &mut shading_commands,
+            rect,
+            shading,
+        );
+        crate::render::layout::shading::emit_shading_stripes(&mut shading_commands, rect, shading);
+        commands.splice(0..0, shading_commands);
     }
 
     // §17.3.1.24: render paragraph borders at the indent edges. Top/bottom only

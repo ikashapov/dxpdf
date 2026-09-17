@@ -18,7 +18,6 @@ pub(crate) mod borders;
 mod emit;
 mod grid;
 mod measure;
-mod shading;
 mod split;
 mod types;
 

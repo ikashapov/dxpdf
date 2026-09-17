@@ -595,10 +595,17 @@ pub(super) fn emit_line_commands(
         // content, then borders) and is independently the safer order — a run's
         // background can no longer be painted over its neighbour's glyphs.
         //
-        // It is spliced *after* the bar rules above rather than at the head of
-        // the line, so the existing bar-versus-shading order is unchanged.
+        // `line_stripes` is the same split `table::emit` makes for a patterned
+        // cell (`shading::emit_shading_background`'s doc): every run's
+        // background first, in `line_backgrounds`, then every run's stripes —
+        // a patterned run's stripe `Line`s would otherwise sit between two
+        // flat-shaded neighbours' `Rect`s and block their fusion the same way.
+        //
+        // Both are spliced *after* the bar rules above rather than at the head
+        // of the line, so the existing bar-versus-shading order is unchanged.
         let line_content_start = commands.len();
         let mut line_backgrounds: Vec<DrawCommand> = Vec::new();
+        let mut line_stripes: Vec<DrawCommand> = Vec::new();
 
         // Emit text commands for this line
         let mut x = x_start;
@@ -629,21 +636,30 @@ pub(super) fn emit_line_commands(
                         * distribution_gap_count_after(fragments, &order, pos) as f32;
                     let rendered_width = *width + extra_after + distributed_width;
 
-                    // §17.3.2.32: render run-level shading behind text.
-                    // Uses text bounds (ascent+descent), not full line height.
-                    // Held in `line_backgrounds` and spliced ahead of the
-                    // line's glyphs — see where that buffer is declared.
-                    if let Some(bg_color) = shading {
+                    // §17.3.2.32: render run-level shading behind text — a
+                    // flat colour or a §17.18.78 pattern. Uses text bounds
+                    // (ascent+descent), not full line height. Held in
+                    // `line_backgrounds`/`line_stripes` and spliced ahead of
+                    // the line's glyphs — see where those buffers are
+                    // declared.
+                    if let Some(shading) = shading {
                         let text_top = *cursor_y + line.ascent - metrics.ascent;
-                        line_backgrounds.push(DrawCommand::Rect {
-                            rect: crate::render::geometry::PtRect::from_xywh(
-                                x,
-                                text_top,
-                                rendered_width,
-                                metrics.height(),
-                            ),
-                            color: *bg_color,
-                        });
+                        let rect = crate::render::geometry::PtRect::from_xywh(
+                            x,
+                            text_top,
+                            rendered_width,
+                            metrics.height(),
+                        );
+                        crate::render::layout::shading::emit_shading_background(
+                            &mut line_backgrounds,
+                            rect,
+                            shading,
+                        );
+                        crate::render::layout::shading::emit_shading_stripes(
+                            &mut line_stripes,
+                            rect,
+                            shading,
+                        );
                     }
 
                     // §17.3.2.4: render run-level border (box around text).
@@ -1017,8 +1033,13 @@ pub(super) fn emit_line_commands(
             }
         }
 
-        // The line is walked; put its backgrounds under it.
-        if !line_backgrounds.is_empty() {
+        // The line is walked; put its backgrounds — and only then its
+        // stripes — under it. Appending onto `line_backgrounds` keeps every
+        // `Rect` ahead of every `Line` in one splice, so a run's background
+        // stays adjacent to a same-coloured neighbour's regardless of which
+        // runs between them are patterned.
+        if !line_backgrounds.is_empty() || !line_stripes.is_empty() {
+            line_backgrounds.append(&mut line_stripes);
             commands.splice(
                 line_content_start..line_content_start,
                 line_backgrounds.drain(..),

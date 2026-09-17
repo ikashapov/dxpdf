@@ -1,11 +1,15 @@
 //! §17.18.78 geometric shading patterns as draw commands (issue #149).
 //!
-//! A patterned cell is painted as its fill rect (when it has one) plus
-//! stripe **lines** in the pattern colour, clipped to the cell box here
-//! rather than by a clip state: every stripe reaches the page as an
-//! ordinary [`DrawCommand::Line`], so the painter needs no shader machinery
-//! and a test can assert the geometry command-by-command — the same
-//! reasoning that keeps borders as lines.
+//! One `ResolvedShading` reaches the page the same way at every level it can
+//! appear — cell (§17.4.33, `table::emit`), paragraph (§17.3.1.31,
+//! `paragraph::borders`) and run (§17.3.2.32, `paragraph::line_emit`): a
+//! patterned box is its fill rect (when it has one) plus stripe **lines** in
+//! the pattern colour, clipped to the box here rather than by a clip state —
+//! every stripe reaches the page as an ordinary [`DrawCommand::Line`], so the
+//! painter needs no shader machinery and a test can assert the geometry
+//! command-by-command — the same reasoning that keeps borders as lines. This
+//! module owns only the geometry; each caller supplies its own box and
+//! decides where the two halves land in its own command stream.
 //!
 //! # Tile geometry — Word 97's 8×8 tiles, in points
 //!
@@ -28,7 +32,7 @@
 //! [`PatternFamily::HorzCross`].
 //!
 //! Stripes are emitted only where they fit whole: a stripe whose width
-//! would cross the cell edge is dropped rather than half-painted, since a
+//! would cross the box edge is dropped rather than half-painted, since a
 //! `Line` is stroked symmetrically about its spine and cannot be clipped
 //! lengthwise. At most one stripe is lost at each edge, well under a tile.
 
@@ -57,22 +61,25 @@ const SQRT2: f32 = std::f32::consts::SQRT_2;
 /// document's stripes are truncated by it.
 const MAX_STRIPES: u32 = 100_000;
 
-/// The background half of a cell's shading: a flat colour's whole rect, or a
+/// The background half of a shaded box: a flat colour's whole rect, or a
 /// pattern's background rect (absent for an `auto` fill, which shades like
 /// `clear` — stripes over nothing).
 ///
 /// Split from the stripes deliberately: [`coalesce_abutting_rects`]
 /// (`draw_command.rs`) only fuses *consecutive* same-colour `Rect`s, which is
-/// what keeps a row of same-coloured cells from leaving a
-/// CoreGraphics-visible seam at each shared edge (`tests/table_shading_seams.rs`).
-/// A patterned cell's stripe `Line`s sit between its own background and the
-/// next cell's, which would block that fusion for every neighbour of a
-/// patterned cell — so `emit.rs` emits a whole row's backgrounds in one pass
-/// before any cell's stripes, keeping same-colour neighbours adjacent in the
-/// stream regardless of which cells between them are patterned.
+/// what keeps a run of same-coloured boxes — adjacent table cells
+/// (§17.4.33), adjacent runs sharing one paragraph line (§17.3.2.32) — from
+/// leaving a CoreGraphics-visible seam at each shared edge
+/// (`tests/table_shading_seams.rs`). A patterned box's stripe `Line`s sit
+/// between its own background and the next box's, which would block that
+/// fusion for every same-coloured neighbour — so every caller emits a whole
+/// run's backgrounds in one pass before any box's stripes, keeping
+/// same-colour neighbours adjacent in the stream regardless of which boxes
+/// between them are patterned. `table::emit` does this per row,
+/// `paragraph::line_emit` per line.
 ///
 /// [`coalesce_abutting_rects`]: crate::render::layout::draw_command::coalesce_abutting_rects
-pub(super) fn emit_cell_background(
+pub(super) fn emit_shading_background(
     commands: &mut Vec<DrawCommand>,
     rect: PtRect,
     shading: &ResolvedShading,
@@ -89,10 +96,10 @@ pub(super) fn emit_cell_background(
     }
 }
 
-/// The stripe half of a cell's shading — a flat colour has none. See
-/// [`emit_cell_background`] for why the two are emitted in separate passes
-/// over a row rather than together per cell.
-pub(super) fn emit_cell_stripes(
+/// The stripe half of a shaded box's shading — a flat colour has none. See
+/// [`emit_shading_background`] for why the two are emitted in separate
+/// passes over a run of boxes rather than together per box.
+pub(super) fn emit_shading_stripes(
     commands: &mut Vec<DrawCommand>,
     rect: PtRect,
     shading: &ResolvedShading,
@@ -353,12 +360,12 @@ mod tests {
         assert_eq!(dcross.len(), 2 * diag.len());
     }
 
-    /// Calling `emit_cell_background` then `emit_cell_stripes` — what
-    /// `emit.rs` does for one cell across its two row-wide passes — paints
+    /// Calling `emit_shading_background` then `emit_shading_stripes` — what
+    /// every caller does for one box across its two run-wide passes — paints
     /// the background rect first and only stripes after, and no rect at all
     /// over an `auto` fill, which shades like `clear`: stripes over nothing.
     #[test]
-    fn background_then_stripes_matches_emit_rs_per_cell_order() {
+    fn background_then_stripes_matches_caller_per_box_order() {
         let fg = RgbColor { r: 1, g: 2, b: 3 };
         let bg = RgbColor {
             r: 250,
@@ -371,8 +378,8 @@ mod tests {
             background: Some(bg),
         };
         let mut commands = Vec::new();
-        emit_cell_background(&mut commands, rect(40.0, 13.0), &shading);
-        emit_cell_stripes(&mut commands, rect(40.0, 13.0), &shading);
+        emit_shading_background(&mut commands, rect(40.0, 13.0), &shading);
+        emit_shading_stripes(&mut commands, rect(40.0, 13.0), &shading);
         assert!(
             matches!(&commands[0], DrawCommand::Rect { color, .. } if *color == bg),
             "background rect first"
@@ -388,8 +395,8 @@ mod tests {
             background: None,
         };
         let mut transparent = Vec::new();
-        emit_cell_background(&mut transparent, rect(40.0, 13.0), &transparent_shading);
-        emit_cell_stripes(&mut transparent, rect(40.0, 13.0), &transparent_shading);
+        emit_shading_background(&mut transparent, rect(40.0, 13.0), &transparent_shading);
+        emit_shading_stripes(&mut transparent, rect(40.0, 13.0), &transparent_shading);
         assert!(
             transparent
                 .iter()

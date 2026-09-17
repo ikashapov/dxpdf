@@ -6,6 +6,7 @@ use crate::render::emoji::cluster::{self, EmojiCluster, InlineCluster};
 use crate::render::emoji::resolve::{EmojiFamily, EmojiTypeface};
 use crate::render::layout::measurer::TextMeasurer;
 use crate::render::resolve::color::RgbColor;
+use crate::render::resolve::shading::ResolvedShading;
 
 use super::{BreakAfter, FontProps, Fragment, FragmentBorder, LinkTarget, TextMetrics};
 
@@ -78,7 +79,7 @@ pub(super) fn resolve_highlight_color(hl: crate::model::HighlightColor) -> Optio
 /// Resolved styling for a single text fragment.
 pub(super) struct TextRunStyle {
     pub color: RgbColor,
-    pub shading: Option<RgbColor>,
+    pub shading: Option<ResolvedShading>,
     pub border: Option<FragmentBorder>,
     pub baseline_offset: Pt,
 }

@@ -18,6 +18,7 @@ use crate::render::resolve::color::{resolve_color, ColorContext, RgbColor};
 use crate::render::resolve::fonts::effective_font;
 use crate::render::resolve::images::MediaEntry;
 use crate::render::resolve::properties::merge_paragraph_properties;
+use crate::render::resolve::shading::resolve_shading;
 use crate::render::resolve::ResolvedDocument;
 
 use super::{BuildContext, SPEC_DEFAULT_FONT_SIZE, SPEC_FALLBACK_FONT};
@@ -420,10 +421,7 @@ pub(super) fn paragraph_style_from_props(
         outline,
         drop_cap: None,
         borders: resolve_paragraph_borders(props),
-        shading: props
-            .shading
-            .get()
-            .map(|s| resolve_color(s.fill, ColorContext::Background)),
+        shading: props.shading.get().and_then(resolve_shading),
         keep_next: props.keep_next.unwrap_or(false),
         keep_lines: props.keep_lines.unwrap_or(false),
         // §17.3.1.44: Word enables widow/orphan control by default.

@@ -7,6 +7,7 @@ use crate::render::dimension::Pt;
 use crate::render::emoji::cluster::EmojiCluster;
 use crate::render::geometry::PtSize;
 use crate::render::resolve::color::RgbColor;
+use crate::render::resolve::shading::{resolve_shading, ResolvedShading};
 
 use super::segment::{build_inline_units, InlineUnit, SegmentPiece};
 use super::text::{
@@ -162,16 +163,13 @@ where
         })
         .cloned()
         .unwrap_or(default_color);
-    // §17.3.2.32 / §17.3.2.15: shading or highlight as background.
+    // §17.3.2.32 / §17.3.2.15: shading (flat or a §17.18.78 pattern) or
+    // highlight as background. A highlight has no pattern of its own — the
+    // fixed ST_HighlightColor palette — so it folds in as `Flat`.
     let shading = effective_props
         .shading
         .get()
-        .map(|s| {
-            crate::render::resolve::color::resolve_color(
-                s.fill,
-                crate::render::resolve::color::ColorContext::Background,
-            )
-        })
+        .and_then(resolve_shading)
         // §17.18.40: HighlightColor::None is the explicit "no highlight"
         // override and yields no fill, so use `and_then` to thread the
         // Option through.
@@ -180,6 +178,7 @@ where
                 .highlight
                 .cloned()
                 .and_then(resolve_highlight_color)
+                .map(ResolvedShading::Flat)
         });
 
     // §17.3.2.42: vertical alignment (super/sub).

@@ -231,7 +231,7 @@ fn emit_one_row(
         }
         if let Some(shading) = &cell_input.shading {
             let effective_h = effective_cell_height(row_ctx, entry, cell_input, row_height);
-            super::shading::emit_cell_background(
+            crate::render::layout::shading::emit_shading_background(
                 bufs.commands,
                 PtRect::from_xywh(entry.cell_x, row_top, entry.cell_w, effective_h),
                 shading,
@@ -244,7 +244,7 @@ fn emit_one_row(
         }
         if let Some(shading) = &cell_input.shading {
             let effective_h = effective_cell_height(row_ctx, entry, cell_input, row_height);
-            super::shading::emit_cell_stripes(
+            crate::render::layout::shading::emit_shading_stripes(
                 bufs.commands,
                 PtRect::from_xywh(entry.cell_x, row_top, entry.cell_w, effective_h),
                 shading,
