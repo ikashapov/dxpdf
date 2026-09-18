@@ -159,12 +159,25 @@ fn push(out: &mut Vec<(PtLineSegment, Pt)>, x0: f32, y0: f32, x1: f32, y1: f32, 
 }
 
 /// Horizontal stripes: spines every [`TILE`], on a lattice anchored at
-/// global `y = 0` rather than at this box's own top — `y = width/2 + k·TILE`
-/// for integer `k`, so two boxes at different `y` still land their spines on
-/// the same grid instead of each restarting flush with its own top edge (PR
-/// #180 review finding #4: two adjacent same-pattern cells otherwise tile
-/// independently and visibly mismatch at the shared edge — confirmed against
-/// a Word render, see `test-files/shading-phase-probe.docx`).
+/// `y = 0` in `rect`'s own coordinate space rather than at this box's own
+/// top — `y = width/2 + k·TILE` for integer `k`, so two boxes sharing that
+/// space still land their spines on the same grid instead of each
+/// restarting flush with its own top edge (PR #180 review finding #4: two
+/// adjacent same-pattern cells otherwise tile independently and visibly
+/// mismatch at the shared edge — confirmed against a Word render, see
+/// `test-files/shading-phase-probe.docx`).
+///
+/// "`rect`'s own coordinate space" is `layout::table::emit`'s table-local
+/// one, not the page's: cells in one row share it, which is what the fix
+/// above needs, but a page slice's own first row does not share it with the
+/// row above the page break — `table::emit::SliceCursor` starts every page
+/// slice fresh at table-local `y = 0`, split continuations included. The
+/// net effect, confirmed against the same Word render for finding #4's
+/// other half (`test-files/shading-phase-probe.docx`'s Table C, a row split
+/// across a page by a `cantSplit`-free overlong cell): a split row's
+/// continuation *restarts* its pattern flush with its own top rather than
+/// continuing the phase the first page's fragment was at, which is what
+/// that Word render showed. Pinned at `tests/table_shading_page_split.rs`.
 fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
@@ -181,7 +194,8 @@ fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
 }
 
 /// Vertical stripes: [`horizontal`] with the axes swapped, lattice anchored
-/// at global `x = 0`.
+/// at `x = 0` in the same coordinate space — see [`horizontal`]'s doc for
+/// what that space is and what it means at a page break.
 fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
@@ -204,11 +218,13 @@ fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
 ///
 /// The spine walks the family of lines `y_local = ±x_local + c` (c stepping
 /// one tile), same as [`horizontal`]/[`vertical`]: which `c` values are
-/// visited is anchored to a lattice fixed in *global* coordinates
+/// visited is anchored to a lattice fixed in `rect`'s own coordinate space
 /// (`c ≡ phase (mod TILE)`, `phase = top - left` for falling, `top + left`
 /// for rising — see the test module for the derivation) rather than
-/// restarting fresh at this box's own top-left, so two boxes at different
-/// positions land the bulk of their spines on one shared grid.
+/// restarting fresh at this box's own top-left, so two boxes sharing that
+/// space land the bulk of their spines on one shared grid — see
+/// [`horizontal`]'s doc for what that space is and what it means at a page
+/// break.
 ///
 /// "The bulk of" rather than "every": the `.max(inset)` clamps below keep a
 /// spine's drawn segment inside the box by sliding its start point along
