@@ -729,8 +729,22 @@ pub(super) fn build_table(
             // move it toward. **Word reference render needed**: a nested table
             // at `w:tblW w:type="pct" w:w="5000"` inside a half-width cell
             // separates the two readings in one measurement.
+            //
+            // # The cell-margin extension is full width's alone
+            //
+            // The extension above models Word's autofit-to-window: a table that
+            // fills the window is widened by its cell margins and pulled left by
+            // one, so the cell *text* lands on the body text's edge.
+            // `tests/table_geometry_sizing.rs` pins it at `w:w="5000"`.
+            //
+            // It fired for anything at or past full width, and Word does not
+            // extend a table that asks for *more* than the window: for a 104%
+            // table Word saves a `<w:tblGrid>` summing to 1.04 × the text
+            // extents, with no margin term — which is all §17.4.63 describes.
+            // The 2.3% of extra width stopped a header cell wrapping where Word
+            // wraps it and pushed the table past the right margin (issue #231).
             let ratio = pct.to_fraction();
-            let base = if *pct >= Dimension::FULL && extends_for_alignment {
+            let base = if *pct == Dimension::FULL && extends_for_alignment {
                 available_width + cell_margins_h
             } else {
                 available_width
