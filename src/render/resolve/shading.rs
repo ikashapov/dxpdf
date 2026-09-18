@@ -83,10 +83,18 @@ pub struct PatternGeometry {
 
 /// The six geometric families of §17.18.78.
 ///
-/// The diagonal directions are settled by [MS-DOC]'s Ipat names and the
-/// spec's own Word-rendered swatches: `diagStripe` is `ipatDkBackDiag`,
-/// stripes rising to the right (`/`); `reverseDiagStripe` is
-/// `ipatDkForeDiag`, falling to the right (`\`).
+/// The diagonal directions were first settled by [MS-DOC]'s Ipat names and
+/// the spec's own Word-rendered swatches alone: `diagStripe` is
+/// `ipatDkBackDiag`, stripes rising to the right (`/`); `reverseDiagStripe`
+/// is `ipatDkForeDiag`, falling to the right (`\`). Unlike this module's
+/// other choices (pct values, `solid`, `nil`, blend truncation), that had
+/// no second, independent source cross-checking it (ONLYOFFICE/
+/// LibreOffice name neither direction explicitly) — until PR #180 review
+/// finding #6 asked for one. **Confirmed against a real Word render**:
+/// `test-files/shading-patterns.docx`'s `diagStripe` cell (row 4, col 1)
+/// renders `/`, and `reverseDiagStripe` (row 4, col 2) renders `\`, exactly
+/// as named below. Pinned by `diagonal_stripes_slope_and_mirror_each_other`
+/// in `tests/shading_patterns.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PatternFamily {
     /// `horzStripe` — horizontal stripes.

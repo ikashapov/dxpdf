@@ -145,9 +145,17 @@ fn vert_stripes_are_vertical() {
     );
 }
 
-/// The two diagonal families slope, and mirror each other — asserted as a
-/// relation so no slope-sign convention is pinned here; the unit tests
-/// record which of the two Word calls `diagStripe`.
+/// The two diagonal families slope, and mirror each other.
+///
+/// Which specific slope `diagStripe` gets was, for a while, settled only by
+/// [MS-DOC]'s Ipat naming and the spec's own swatches — no independent
+/// second source, unlike this module's other choices (see
+/// `PatternFamily`'s doc). **Confirmed against a real Word render** (PR
+/// #180 review finding #6): `diagStripe` renders `/` (rising to the
+/// right), `reverseDiagStripe` renders `\` (falling to the right) — a line
+/// segment's `(dx, dy)` in this coordinate system (`y` grows downward) has
+/// opposite-signed components for `/` and same-signed for `\`, so `/` is
+/// `dx * dy < 0`.
 #[test]
 fn diagonal_stripes_slope_and_mirror_each_other() {
     let pages = pages();
@@ -163,16 +171,13 @@ fn diagonal_stripes_slope_and_mirror_each_other() {
         "reverseDiagStripe slopes: {reverse:?}"
     );
     let sign = |v: f32| v.signum();
-    let diag_sign = sign(diag[0].0 * diag[0].1);
     assert!(
-        diag.iter().all(|&(dx, dy, _)| sign(dx * dy) == diag_sign),
-        "one family, one slope: {diag:?}"
+        diag.iter().all(|&(dx, dy, _)| sign(dx * dy) < 0.0),
+        "diagStripe should slope '/' (dx * dy < 0): {diag:?}"
     );
     assert!(
-        reverse
-            .iter()
-            .all(|&(dx, dy, _)| sign(dx * dy) == -diag_sign),
-        "…and the reverse family slopes the other way: {reverse:?}"
+        reverse.iter().all(|&(dx, dy, _)| sign(dx * dy) > 0.0),
+        "reverseDiagStripe should slope '\\' (dx * dy > 0): {reverse:?}"
     );
 }
 
