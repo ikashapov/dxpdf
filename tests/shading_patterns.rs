@@ -178,6 +178,13 @@ fn diagonal_stripes_slope_and_mirror_each_other() {
 
 /// `horzCross` draws both horizontals and verticals; `diagCross` both
 /// diagonal directions — each in its own colour.
+///
+/// `horzCross`'s axis-aligned (not diagonal) reading was, for a while, a
+/// judgment call against conflicting spec evidence — see
+/// `PatternFamily::HorzCross`'s doc for the full story. **Confirmed against
+/// a real Word render** (PR #180 review finding #5): this cell renders as
+/// straight crossing lines, not a tilted diamond lattice, so this
+/// assertion is no longer just pinning an implementation choice.
 #[test]
 fn crosses_draw_both_directions() {
     let pages = pages();
