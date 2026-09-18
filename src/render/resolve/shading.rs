@@ -106,8 +106,16 @@ pub enum PatternFamily {
     /// swatch alone shows a diagonal diamond lattice instead; in an image
     /// set that demonstrably misplaces at least one tile (`pct10` and
     /// `pct12` share one image), a lone anomaly against the value's own
-    /// name is not followed. A **Word reference render** of the fixture's
-    /// `horzCross` cell would settle it.
+    /// name was not followed, on the strength of that pattern alone.
+    ///
+    /// **Confirmed against a real Word render** (PR #180 review finding
+    /// #5): `test-files/shading-patterns.docx`'s `horzCross` cell renders
+    /// as straight horizontal and vertical lines crossing — not tilted,
+    /// not a diamond lattice. The spec's dark `horzCross` swatch was the
+    /// anomaly, as suspected; the union reading here was right all along.
+    /// Pinned by `crosses_draw_both_directions` in `tests/shading_patterns.rs`,
+    /// which already asserted axis-aligned (not diagonal) lines for this
+    /// family before this was confirmed.
     HorzCross,
     /// `diagCross` — both diagonal directions together.
     DiagCross,
