@@ -325,7 +325,7 @@ fn build_non_story_content(
                 });
             }
             Block::Table(t) => {
-                let built = build_table(t, available_width, ctx, state);
+                let built = build_table(t, available_width, None, ctx, state);
                 layout_blocks.push(LayoutBlock::Table {
                     rows: built.rows,
                     col_widths: built.col_widths,
