@@ -325,12 +325,27 @@ struct LinePen {
 }
 
 impl LinePen {
-    fn place(&mut self, advance: Pt) -> Pt {
+    /// Reserves `total_advance` of line space and returns the physical left x
+    /// at which a fragment of `content_width` should be drawn — `total_advance`
+    /// may exceed `content_width` when justification (§17.3.1.13 `both`) or
+    /// distribution has baked trailing padding into the fragment's advance.
+    ///
+    /// An unmirrored pen enters a block at its own left edge, so content sits
+    /// flush there and the padding trails to the right, ahead of the pen — ordinary
+    /// reading order. A mirrored pen enters a block from its *right* edge (see
+    /// the struct doc), so content must sit flush there instead: using
+    /// `total_advance` in place of `content_width` here (as a single-parameter
+    /// `place` once did) flushes the content against the block's far edge and
+    /// strands the padding on the wrong side, between the glyph and whatever
+    /// was placed immediately before it, rather than ahead of the pen where a
+    /// stretched gap belongs. When `content_width == total_advance` (no
+    /// padding) the two formulations agree.
+    fn place(&mut self, content_width: Pt, total_advance: Pt) -> Pt {
         let x = match self.mirror_edge {
             None => self.cursor,
-            Some(right) => right - self.cursor - advance,
+            Some(right) => right - self.cursor - content_width,
         };
-        self.cursor += advance;
+        self.cursor += total_advance;
         x
     }
 
@@ -718,7 +733,17 @@ pub(super) fn emit_line_commands(
                     let distributed_width = distribution_extra
                         * distribution_gap_count_after(fragments, &order, pos) as f32;
                     let rendered_width = *width + extra_after + distributed_width;
-                    let x = pen.place(rendered_width);
+                    let x = pen.place(*width, rendered_width);
+                    // The padded box's own left edge, for the decorations
+                    // below that span the padding along with the glyph
+                    // (shading, run border, underline, link rect) — distinct
+                    // from `x` only when mirrored, where the glyph sits flush
+                    // at the box's *right* edge and the padding trails left.
+                    let box_left = if mirrored {
+                        x - (rendered_width - *width)
+                    } else {
+                        x
+                    };
 
                     // §17.3.2.32: render run-level shading behind text — a
                     // flat colour or a §17.18.78 pattern. Uses text bounds
@@ -729,7 +754,7 @@ pub(super) fn emit_line_commands(
                     if let Some(shading) = shading {
                         let text_top = *cursor_y + line.ascent - metrics.ascent;
                         let rect = crate::render::geometry::PtRect::from_xywh(
-                            x,
+                            box_left,
                             text_top,
                             rendered_width,
                             metrics.height(),
@@ -750,7 +775,7 @@ pub(super) fn emit_line_commands(
                     // Uses text bounds, not full line height.
                     if let Some(bdr) = border {
                         let text_top = *cursor_y + line.ascent - metrics.ascent;
-                        let bx = x - bdr.space;
+                        let bx = box_left - bdr.space;
                         let by = text_top;
                         let bw = rendered_width + bdr.space * 2.0;
                         let bh = metrics.height();
@@ -809,7 +834,7 @@ pub(super) fn emit_line_commands(
 
                     if let Some(link) = hyperlink_url {
                         let rect = crate::render::geometry::PtRect::from_xywh(
-                            x,
+                            box_left,
                             *cursor_y,
                             rendered_width,
                             line_height,
@@ -840,8 +865,8 @@ pub(super) fn emit_line_commands(
                         let stroke_width = font.underline_thickness;
                         commands.push(DrawCommand::Underline {
                             line: crate::render::geometry::PtLineSegment::new(
-                                PtOffset::new(x, underline_y),
-                                PtOffset::new(x + rendered_width, underline_y),
+                                PtOffset::new(box_left, underline_y),
+                                PtOffset::new(box_left + rendered_width, underline_y),
                             ),
                             color: *color,
                             width: stroke_width,
@@ -857,7 +882,7 @@ pub(super) fn emit_line_commands(
                     let advance = size.width
                         + distribution_extra
                             * distribution_gap_count_after(fragments, &order, pos) as f32;
-                    let x = pen.place(advance);
+                    let x = pen.place(size.width, advance);
                     if let Some(data) = image_data {
                         commands.push(DrawCommand::Image {
                             rect: crate::render::geometry::PtRect::from_xywh(
@@ -899,6 +924,7 @@ pub(super) fn emit_line_commands(
                         den.metrics,
                     );
                     let x = pen.place(
+                        *width,
                         *width
                             + distribution_extra
                                 * distribution_gap_count_after(fragments, &order, pos) as f32,
@@ -974,7 +1000,7 @@ pub(super) fn emit_line_commands(
                     let pen_advance = *advance
                         + distribution_extra
                             * distribution_gap_count_after(fragments, &order, pos) as f32;
-                    let x = pen.place(pen_advance);
+                    let x = pen.place(*advance, pen_advance);
                     // Place the cluster's box so its top sits at the line
                     // baseline minus the typeface ascent, matching where text
                     // glyphs at the same baseline would sit.
@@ -1678,13 +1704,76 @@ pub(super) fn resolve_line_height(
 #[cfg(test)]
 mod tests {
     use super::{
-        find_next_tab_stop, resolve_ptab, resolve_zone_anchor, Fragment, PTabGeometry,
+        find_next_tab_stop, resolve_ptab, resolve_zone_anchor, Fragment, LinePen, PTabGeometry,
         PTabPlacement, ZoneAnchor,
     };
     use crate::model;
     use crate::render::dimension::Pt;
     use crate::render::fonts::Toggle;
     use crate::render::layout::paragraph::TabStopDef;
+
+    // ── LinePen ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mirrored_pen_flushes_padded_content_at_its_entry_edge() {
+        // A 50pt mirrored line: a 10pt glyph carrying 5pt of trailing
+        // justification/distribution padding, then a plain 10pt glyph.
+        let mut pen = LinePen {
+            mirror_edge: Some(Pt::new(50.0)),
+            cursor: Pt::ZERO,
+        };
+        let x1 = pen.place(Pt::new(10.0), Pt::new(15.0));
+        // Flush at the pen's entry edge (right(50) - cursor(0)), not the far
+        // edge of the padded block (which would be 50 - 15 = 35).
+        assert_eq!(
+            x1.raw(),
+            40.0,
+            "glyph must sit flush at the near/entry edge, not the far one"
+        );
+        let x2 = pen.place(Pt::new(10.0), Pt::new(10.0));
+        assert_eq!(x2.raw(), 25.0);
+        // The 5pt of padding now sits at [35, 40], between the two glyphs —
+        // i.e. after the first glyph in the pen's own direction of travel —
+        // rather than at [45, 50], stranded before it, off the line's edge.
+    }
+
+    #[test]
+    fn mirrored_and_unmirrored_pens_place_padded_content_as_true_mirror_images() {
+        // Two 10pt fragments on a 50pt line, the first carrying 5pt of
+        // padding. The mirrored pen's layout must be the exact physical
+        // mirror image of the unmirrored pen's, about the line's own right
+        // edge — not merely a layout with the fragments' visit order swapped.
+        let mut ltr = LinePen {
+            mirror_edge: None,
+            cursor: Pt::ZERO,
+        };
+        let x1 = ltr.place(Pt::new(10.0), Pt::new(15.0));
+        let x2 = ltr.place(Pt::new(10.0), Pt::new(10.0));
+
+        let mut rtl = LinePen {
+            mirror_edge: Some(Pt::new(50.0)),
+            cursor: Pt::ZERO,
+        };
+        let mx1 = rtl.place(Pt::new(10.0), Pt::new(15.0));
+        let mx2 = rtl.place(Pt::new(10.0), Pt::new(10.0));
+
+        // A box [l, l+10] on the LTR line reflects to [50-(l+10), 50-l].
+        assert_eq!(mx1.raw(), 50.0 - (x1.raw() + 10.0));
+        assert_eq!(mx2.raw(), 50.0 - (x2.raw() + 10.0));
+    }
+
+    #[test]
+    fn mirrored_pen_with_no_padding_is_unaffected() {
+        // content_width == total_advance is the common case (no justification
+        // or distribution slack on the line): the two-argument formula must
+        // agree with the single-argument one it replaced.
+        let mut pen = LinePen {
+            mirror_edge: Some(Pt::new(50.0)),
+            cursor: Pt::ZERO,
+        };
+        let x = pen.place(Pt::new(10.0), Pt::new(10.0));
+        assert_eq!(x.raw(), 40.0);
+    }
 
     // ── find_next_tab_stop ────────────────────────────────────────────────────
 
