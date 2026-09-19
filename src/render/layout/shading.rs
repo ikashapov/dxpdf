@@ -39,6 +39,7 @@
 use crate::render::dimension::Pt;
 use crate::render::geometry::{PtLineSegment, PtOffset, PtRect};
 use crate::render::layout::draw_command::DrawCommand;
+use crate::render::resolve::color::RgbColor;
 use crate::render::resolve::shading::{PatternFamily, PatternGeometry, ResolvedShading};
 
 /// One Word pattern period: 4 px at 96 dpi.
@@ -99,6 +100,10 @@ pub(super) fn emit_shading_background(
 /// The stripe half of a shaded box's shading — a flat colour has none. See
 /// [`emit_shading_background`] for why the two are emitted in separate
 /// passes over a run of boxes rather than together per box.
+///
+/// Pushes straight into `commands` — no intermediate `Vec` is built and
+/// copied. `stripe_lines` (test-only) is the collect-into-a-`Vec` shape the
+/// geometry unit tests below want; production has never needed it.
 pub(super) fn emit_shading_stripes(
     commands: &mut Vec<DrawCommand>,
     rect: PtRect,
@@ -110,52 +115,68 @@ pub(super) fn emit_shading_stripes(
         ..
     } = *shading
     {
-        for (line, width) in stripe_lines(rect, geometry) {
-            commands.push(DrawCommand::Line {
-                line,
-                color: foreground,
-                width,
-            });
-        }
+        push_pattern_lines(rect, geometry, foreground, commands);
     }
 }
 
-/// The stripes of one pattern over one box, as `(segment, stroke width)` —
-/// every segment lies inside `rect`, pre-clipped.
-pub(super) fn stripe_lines(rect: PtRect, geometry: PatternGeometry) -> Vec<(PtLineSegment, Pt)> {
+/// The stripes of one pattern over one box, pushed as [`DrawCommand::Line`]s
+/// in `color` — every segment lies inside `rect`, pre-clipped.
+fn push_pattern_lines(
+    rect: PtRect,
+    geometry: PatternGeometry,
+    color: RgbColor,
+    out: &mut Vec<DrawCommand>,
+) {
     let width = if geometry.thin { THIN } else { THICK };
-    let mut out = Vec::new();
+    // Hoisted once rather than recomputed at each of its four call sites
+    // below (both `diagonal` calls in `DiagCross`, one each in `Diag`/
+    // `ReverseDiag`).
+    let diag_width = width / SQRT2;
     match geometry.family {
-        PatternFamily::Horz => horizontal(rect, width, &mut out),
-        PatternFamily::Vert => vertical(rect, width, &mut out),
-        PatternFamily::Diag => diagonal(rect, width / SQRT2, false, &mut out),
-        PatternFamily::ReverseDiag => diagonal(rect, width / SQRT2, true, &mut out),
+        PatternFamily::Horz => horizontal(rect, width, color, out),
+        PatternFamily::Vert => vertical(rect, width, color, out),
+        PatternFamily::Diag => diagonal(rect, diag_width, false, color, out),
+        PatternFamily::ReverseDiag => diagonal(rect, diag_width, true, color, out),
         PatternFamily::HorzCross => {
-            horizontal(rect, width, &mut out);
-            vertical(rect, width, &mut out);
+            horizontal(rect, width, color, out);
+            vertical(rect, width, color, out);
         }
         PatternFamily::DiagCross => {
-            diagonal(rect, width / SQRT2, false, &mut out);
-            diagonal(rect, width / SQRT2, true, &mut out);
+            diagonal(rect, diag_width, false, color, out);
+            diagonal(rect, diag_width, true, color, out);
         }
     }
-    out
 }
 
-fn push(out: &mut Vec<(PtLineSegment, Pt)>, x0: f32, y0: f32, x1: f32, y1: f32, width: f32) {
-    out.push((
-        PtLineSegment {
-            start: PtOffset {
-                x: Pt::new(x0),
-                y: Pt::new(y0),
-            },
-            end: PtOffset {
-                x: Pt::new(x1),
-                y: Pt::new(y1),
-            },
-        },
-        Pt::new(width),
-    ));
+#[cfg(test)]
+fn stripe_lines(rect: PtRect, geometry: PatternGeometry) -> Vec<(PtLineSegment, Pt)> {
+    let mut out = Vec::new();
+    push_pattern_lines(rect, geometry, RgbColor { r: 0, g: 0, b: 0 }, &mut out);
+    out.into_iter()
+        .map(|c| match c {
+            DrawCommand::Line { line, width, .. } => (line, width),
+            _ => unreachable!("push_pattern_lines only pushes DrawCommand::Line"),
+        })
+        .collect()
+}
+
+fn push(
+    out: &mut Vec<DrawCommand>,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    color: RgbColor,
+) {
+    out.push(DrawCommand::Line {
+        line: PtLineSegment::new(
+            PtOffset::new(Pt::new(x0), Pt::new(y0)),
+            PtOffset::new(Pt::new(x1), Pt::new(y1)),
+        ),
+        color,
+        width: Pt::new(width),
+    });
 }
 
 /// Horizontal stripes: spines every [`TILE`], on a lattice anchored at
@@ -178,7 +199,7 @@ fn push(out: &mut Vec<(PtLineSegment, Pt)>, x0: f32, y0: f32, x1: f32, y1: f32, 
 /// continuation *restarts* its pattern flush with its own top rather than
 /// continuing the phase the first page's fragment was at, which is what
 /// that Word render showed. Pinned at `tests/table_shading_page_split.rs`.
-fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
+fn horizontal(rect: PtRect, width: f32, color: RgbColor, out: &mut Vec<DrawCommand>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
     let bottom = top + h;
@@ -187,7 +208,7 @@ fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let mut y = half + TILE * ((top - half) / TILE).ceil();
     let mut n = 0;
     while y + half <= bottom && n < MAX_STRIPES {
-        push(out, left, y, left + w, y, width);
+        push(out, left, y, left + w, y, width, color);
         y += TILE;
         n += 1;
     }
@@ -196,7 +217,7 @@ fn horizontal(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
 /// Vertical stripes: [`horizontal`] with the axes swapped, lattice anchored
 /// at `x = 0` in the same coordinate space — see [`horizontal`]'s doc for
 /// what that space is and what it means at a page break.
-fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
+fn vertical(rect: PtRect, width: f32, color: RgbColor, out: &mut Vec<DrawCommand>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
     let right = left + w;
@@ -204,7 +225,7 @@ fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
     let mut x = half + TILE * ((left - half) / TILE).ceil();
     let mut n = 0;
     while x + half <= right && n < MAX_STRIPES {
-        push(out, x, top, x, top + h, width);
+        push(out, x, top, x, top + h, width, color);
         x += TILE;
         n += 1;
     }
@@ -235,7 +256,7 @@ fn vertical(rect: PtRect, width: f32, out: &mut Vec<(PtLineSegment, Pt)>) {
 /// algorithm, not something the lattice anchoring can close — it is also far
 /// smaller than the multi-point misalignment this anchoring fixes, and
 /// occurs at most once per box.
-fn diagonal(rect: PtRect, width: f32, falling: bool, out: &mut Vec<(PtLineSegment, Pt)>) {
+fn diagonal(rect: PtRect, width: f32, falling: bool, color: RgbColor, out: &mut Vec<DrawCommand>) {
     let (left, top) = (rect.origin.x.raw(), rect.origin.y.raw());
     let (w, h) = (rect.size.width.raw(), rect.size.height.raw());
     // Inset so a stripe's stroked width stays inside the box (a 45° stroke
@@ -252,25 +273,15 @@ fn diagonal(rect: PtRect, width: f32, falling: bool, out: &mut Vec<(PtLineSegmen
         let y0 = (-c).max(inset);
         let run = (w - inset - x0).min(h - inset - y0);
         if run > 0.0 {
-            if falling {
-                push(
-                    out,
-                    left + x0,
-                    top + y0,
-                    left + x0 + run,
-                    top + y0 + run,
-                    width,
-                );
+            // The two directions differ only in which x-endpoint the run
+            // starts from and which way it moves — compute both endpoints
+            // first rather than a whole separate `push` call per branch.
+            let (x_start, x_end) = if falling {
+                (left + x0, left + x0 + run)
             } else {
-                push(
-                    out,
-                    left + w - x0,
-                    top + y0,
-                    left + w - x0 - run,
-                    top + y0 + run,
-                    width,
-                );
-            }
+                (left + w - x0, left + w - x0 - run)
+            };
+            push(out, x_start, top + y0, x_end, top + y0 + run, width, color);
         }
         c += TILE;
         n += 1;

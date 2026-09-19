@@ -136,24 +136,26 @@ pub fn resolve_shading(s: &Shading) -> Option<ResolvedShading> {
     let fill = || resolve_color(s.fill, ColorContext::Background);
     let ink = || resolve_color(s.color, ColorContext::Text);
     let tint = |tenths| Some(ResolvedShading::Flat(blend(ink(), fill(), tenths)));
+    // `auto` on the fill side means "no shading at all" (see the module
+    // doc) rather than the white it resolves to everywhere else — a `clear`
+    // over it and a geometric pattern's background both need this same
+    // exception, so it is spelled out once rather than at each call site.
+    let resolved_fill = || match s.fill {
+        Color::Auto => None,
+        _ => Some(fill()),
+    };
     let pattern = |family, thin| {
         Some(ResolvedShading::Pattern {
             geometry: PatternGeometry { family, thin },
             foreground: ink(),
-            background: match s.fill {
-                Color::Auto => None,
-                _ => Some(fill()),
-            },
+            background: resolved_fill(),
         })
     };
     match s.pattern {
         ShadingPattern::Nil => None,
         // A clear shading over an auto fill states no colour at all —
         // FillStyle_NONE, not white. See the module doc.
-        ShadingPattern::Clear => match s.fill {
-            Color::Auto => None,
-            _ => Some(ResolvedShading::Flat(fill())),
-        },
+        ShadingPattern::Clear => resolved_fill().map(ResolvedShading::Flat),
         // 100% pattern colour: the fill is fully covered, so `solid` *is*
         // `w:color` — painting the fill here is the bug this module replaces.
         ShadingPattern::Solid => Some(ResolvedShading::Flat(ink())),
