@@ -198,8 +198,18 @@ pub fn resolve_shading(s: &Shading) -> Option<ResolvedShading> {
 /// The §17.18.78 blend: `fg` at `tenths` tenths of a percent over `bg`,
 /// per channel. Truncating integer arithmetic — see the module doc for why
 /// truncation and not rounding.
+///
+/// `tenths` is documented ≤ 1000 (every call site today passes a hardcoded
+/// literal from the closed `ShadingPattern` match, so this is provably true
+/// now), but a `debug_assert!` alone compiles to nothing in release, and
+/// `1000 - tenths` would wrap rather than panic if that guard were the only
+/// thing standing between an out-of-range value and this arithmetic. The
+/// `.min(1000)` below costs nothing on every path that already respects the
+/// bound and saturates rather than wraps on every path that doesn't, in
+/// every build profile — so this function needs no debug/release split to
+/// stay correct if its contract ever widens.
 fn blend(fg: RgbColor, bg: RgbColor, tenths: u32) -> RgbColor {
-    debug_assert!(tenths <= 1000);
+    let tenths = tenths.min(1000);
     let mix = |f: u8, b: u8| -> u8 {
         ((u32::from(f) * tenths + u32::from(b) * (1000 - tenths)) / 1000) as u8
     };
@@ -280,6 +290,25 @@ mod tests {
                 b: 0
             }
         );
+    }
+
+    /// `blend`'s `tenths` is documented ≤ 1000 and every call site today
+    /// passes a hardcoded literal from the closed `ShadingPattern` match, so
+    /// this can't happen through `resolve_shading` — but the bound was only
+    /// a `debug_assert!`, which compiles to nothing in release, and
+    /// `1000 - tenths` (`u32`) wraps rather than panics if that guard is
+    /// gone. Calls `blend` directly (bypassing `resolve_shading`, which
+    /// cannot produce an out-of-range `tenths`) to pin that an over-range
+    /// value saturates instead of wrapping, in every build profile.
+    #[test]
+    fn blend_saturates_a_tenths_value_above_the_documented_bound() {
+        let black = RgbColor { r: 0, g: 0, b: 0 };
+        let white = RgbColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        assert_eq!(blend(black, white, 1500), blend(black, white, 1000));
     }
 
     /// The blend interpolates each channel: 25% of blue over white leaves
