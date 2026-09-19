@@ -1,7 +1,6 @@
-//! §17.4.6 row split × §17.18.78 pattern phase — PR #180 review finding #4,
-//! part (a): the cross-page half `tests/paragraph_run_shading.rs` and
-//! `layout::shading`'s own unit tests don't cover (those pin part (b), two
-//! adjacent *cells in one row* sharing one lattice).
+//! §17.4.6 row split × §17.18.78 pattern phase: the cross-page half
+//! `layout::shading`'s own unit tests don't cover (those pin the cross-cell
+//! half — two adjacent *cells in one row* sharing one lattice).
 //!
 //! `test-files/shading-phase-probe.docx`'s Table C is one cell, stuffed with
 //! filler paragraphs so its row splits across a page. The reporter's own

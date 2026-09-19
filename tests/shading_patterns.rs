@@ -150,9 +150,9 @@ fn vert_stripes_are_vertical() {
 /// Which specific slope `diagStripe` gets was, for a while, settled only by
 /// [MS-DOC]'s Ipat naming and the spec's own swatches — no independent
 /// second source, unlike this module's other choices (see
-/// `PatternFamily`'s doc). **Confirmed against a real Word render** (PR
-/// #180 review finding #6): `diagStripe` renders `/` (rising to the
-/// right), `reverseDiagStripe` renders `\` (falling to the right) — a line
+/// `PatternFamily`'s doc). **Confirmed against a real Word render**:
+/// `diagStripe` renders `/` (rising to the right), `reverseDiagStripe`
+/// renders `\` (falling to the right) — a line
 /// segment's `(dx, dy)` in this coordinate system (`y` grows downward) has
 /// opposite-signed components for `/` and same-signed for `\`, so `/` is
 /// `dx * dy < 0`.
@@ -187,9 +187,9 @@ fn diagonal_stripes_slope_and_mirror_each_other() {
 /// `horzCross`'s axis-aligned (not diagonal) reading was, for a while, a
 /// judgment call against conflicting spec evidence — see
 /// `PatternFamily::HorzCross`'s doc for the full story. **Confirmed against
-/// a real Word render** (PR #180 review finding #5): this cell renders as
-/// straight crossing lines, not a tilted diamond lattice, so this
-/// assertion is no longer just pinning an implementation choice.
+/// a real Word render**: this cell renders as straight crossing lines, not
+/// a tilted diamond lattice, so this assertion is no longer just pinning an
+/// implementation choice.
 #[test]
 fn crosses_draw_both_directions() {
     let pages = pages();

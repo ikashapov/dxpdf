@@ -183,18 +183,17 @@ fn push(
 /// `y = 0` in `rect`'s own coordinate space rather than at this box's own
 /// top — `y = width/2 + k·TILE` for integer `k`, so two boxes sharing that
 /// space still land their spines on the same grid instead of each
-/// restarting flush with its own top edge (PR #180 review finding #4: two
-/// adjacent same-pattern cells otherwise tile independently and visibly
-/// mismatch at the shared edge — confirmed against a Word render, see
-/// `test-files/shading-phase-probe.docx`).
+/// restarting flush with its own top edge: two adjacent same-pattern cells
+/// otherwise tile independently and visibly mismatch at the shared edge —
+/// confirmed against a Word render, see `test-files/shading-phase-probe.docx`.
 ///
 /// "`rect`'s own coordinate space" is `layout::table::emit`'s table-local
 /// one, not the page's: cells in one row share it, which is what the fix
 /// above needs, but a page slice's own first row does not share it with the
 /// row above the page break — `table::emit::SliceCursor` starts every page
 /// slice fresh at table-local `y = 0`, split continuations included. The
-/// net effect, confirmed against the same Word render for finding #4's
-/// other half (`test-files/shading-phase-probe.docx`'s Table C, a row split
+/// net effect, confirmed against a Word render of the cross-page half
+/// (`test-files/shading-phase-probe.docx`'s Table C, a row split
 /// across a page by a `cantSplit`-free overlong cell): a split row's
 /// continuation *restarts* its pattern flush with its own top rather than
 /// continuing the phase the first page's fragment was at, which is what
@@ -383,10 +382,10 @@ mod tests {
     /// The property [`horizontal_stripes_step_one_tile`] pins with one box:
     /// two boxes offset from each other by a **non-multiple** of [`TILE`]
     /// still land their spines on one shared lattice, rather than each
-    /// restarting flush with its own top edge — PR #180 review finding #4,
-    /// confirmed against a Word render (`test-files/shading-phase-probe.docx`:
-    /// four identically-shaded cells in one row show one continuous grid,
-    /// not four independently-phased patches).
+    /// restarting flush with its own top edge — confirmed against a Word
+    /// render (`test-files/shading-phase-probe.docx`: four identically-shaded
+    /// cells in one row show one continuous grid, not four
+    /// independently-phased patches).
     #[test]
     fn two_boxes_offset_by_a_non_multiple_of_tile_share_one_lattice() {
         let a = rect(40.0, 40.0);

@@ -11,10 +11,10 @@ alone — no coordinates, no draw order:
 - each geometric family (horz/vert/diag/reverseDiag stripes, horz/diag cross)
   renders as its background fill plus stripe lines in its foreground colour,
   identifiable by that foreground — both the thick and thin variant of every
-  one of the twelve stripe/cross values (PR #180 review, minor finding: 5 of
-  the 6 `thin*` variants used to be unit-tested only against synthetic
-  `PatternGeometry` values, never through the full `w:shd` XML → cascade →
-  `resolve_shading` → `emit_cell_shading` path a real document takes);
+  one of the twelve stripe/cross values, so every one is exercised through
+  the full `w:shd` XML → cascade → `resolve_shading` → `emit_cell_shading`
+  path a real document takes, not just unit-tested against a synthetic
+  `PatternGeometry`;
 - `nil` must paint nothing, and `solid` must paint its *pattern* colour, not
   its fill — the two colours no cell may produce.
 """
