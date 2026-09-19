@@ -2,15 +2,19 @@
 """Build test-files/shading-patterns.docx — §17.18.78 ST_Shd cell shading
 patterns (issue #149).
 
-One borderless 3x5 table, one `w:shd` value per cell. Every cell's colours are
+One borderless 3x7 table, one `w:shd` value per cell. Every cell's colours are
 unique across the fixture, so a test can identify each cell's output by colour
 alone — no coordinates, no draw order:
 
 - the percentage tints and `solid`/`clear` render as one flat colour each,
   identifiable as an exact blended RGB;
-- each geometric family (horz/vert/diag/reverseDiag stripes, horz/diag cross,
-  one thin variant) renders as its background fill plus stripe lines in its
-  foreground colour, identifiable by that foreground;
+- each geometric family (horz/vert/diag/reverseDiag stripes, horz/diag cross)
+  renders as its background fill plus stripe lines in its foreground colour,
+  identifiable by that foreground — both the thick and thin variant of every
+  one of the twelve stripe/cross values (PR #180 review, minor finding: 5 of
+  the 6 `thin*` variants used to be unit-tested only against synthetic
+  `PatternGeometry` values, never through the full `w:shd` XML → cascade →
+  `resolve_shading` → `emit_cell_shading` path a real document takes);
 - `nil` must paint nothing, and `solid` must paint its *pattern* colour, not
   its fill — the two colours no cell may produce.
 """
@@ -52,10 +56,17 @@ CELLS = [
     ("reverseDiagStripe", "660066", "FFEEDD"),
     ("horzCross", "770077", "FFEEEE"),
     ("diagCross", "880088", "FFDDEE"),
-    # Padding to complete the 3x5 grid; one carries the document's only text
+    # The 5 thin variants no earlier fixture exercised end to end.
+    ("thinVertStripe", "990099", "FFEEFF"),
+    ("thinDiagStripe", "AA00AA", "EEDDFF"),
+    ("thinReverseDiagStripe", "BB00BB", "DDEEFF"),
+    ("thinHorzCross", "CC00CC", "EEFFFF"),
+    ("thinDiagCross", "DD00DD", "FFFFEE"),
+    # Padding to complete the 3x7 grid; one carries the document's only text
     # so the fixture parses as a document with body content.
     ("clear", "auto", "F0F0F1"),
     ("clear", "auto", "F0F0F2", "shading"),
+    ("clear", "auto", "F0F0F3"),
 ]
 
 

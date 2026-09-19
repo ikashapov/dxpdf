@@ -206,3 +206,92 @@ fn crosses_draw_both_directions() {
         "diagCross draws both diagonal directions: {diag_cross:?}"
     );
 }
+
+/// The 5 `thin*` variants no earlier version of this fixture carried (PR
+/// #180 review, minor finding): `thinVertStripe`, `thinDiagStripe`,
+/// `thinReverseDiagStripe`, `thinHorzCross`, `thinDiagCross` used to be
+/// exercised only against a synthetic `PatternGeometry` in
+/// `layout::shading`'s own unit tests, never through the full `w:shd` XML →
+/// cascade → `resolve_shading` → `emit_cell_shading` path a real document
+/// takes. Each is shaped like its already-pinned thick sibling, plus
+/// thinner — the same "thin thinner than thick" property
+/// `horz_stripes_are_horizontal_and_thin_is_thinner` pins for the one thin
+/// variant (`thinHorzStripe`) the fixture already had.
+#[test]
+fn the_five_previously_untested_thin_variants_render_end_to_end() {
+    let pages = pages();
+    let colors = rect_colors(&pages);
+
+    assert_rect(&colors, (0xFF, 0xEE, 0xFF), "thinVertStripe fill");
+    let thin_vert = lines_of(&pages, (0x99, 0x00, 0x99));
+    assert!(!thin_vert.is_empty(), "thinVertStripe draws stripes");
+    assert!(
+        thin_vert.iter().all(|&(dx, _, _)| dx == 0.0),
+        "…all vertical: {thin_vert:?}"
+    );
+
+    assert_rect(&colors, (0xEE, 0xDD, 0xFF), "thinDiagStripe fill");
+    let thin_diag = lines_of(&pages, (0xAA, 0x00, 0xAA));
+    assert!(!thin_diag.is_empty(), "thinDiagStripe draws stripes");
+    assert!(
+        thin_diag.iter().all(|&(dx, dy, _)| dx != 0.0 && dy != 0.0),
+        "…all diagonal: {thin_diag:?}"
+    );
+
+    assert_rect(&colors, (0xDD, 0xEE, 0xFF), "thinReverseDiagStripe fill");
+    let thin_reverse = lines_of(&pages, (0xBB, 0x00, 0xBB));
+    assert!(
+        !thin_reverse.is_empty(),
+        "thinReverseDiagStripe draws stripes"
+    );
+    assert!(
+        thin_reverse
+            .iter()
+            .all(|&(dx, dy, _)| dx != 0.0 && dy != 0.0),
+        "…all diagonal: {thin_reverse:?}"
+    );
+
+    assert_rect(&colors, (0xEE, 0xFF, 0xFF), "thinHorzCross fill");
+    let thin_horz_cross = lines_of(&pages, (0xCC, 0x00, 0xCC));
+    assert!(
+        thin_horz_cross.iter().any(|&(_, dy, _)| dy == 0.0)
+            && thin_horz_cross.iter().any(|&(dx, _, _)| dx == 0.0),
+        "thinHorzCross draws horizontals and verticals: {thin_horz_cross:?}"
+    );
+
+    assert_rect(&colors, (0xFF, 0xFF, 0xEE), "thinDiagCross fill");
+    let thin_diag_cross = lines_of(&pages, (0xDD, 0x00, 0xDD));
+    assert!(
+        thin_diag_cross.iter().any(|&(dx, dy, _)| dx * dy > 0.0)
+            && thin_diag_cross.iter().any(|&(dx, dy, _)| dx * dy < 0.0),
+        "thinDiagCross draws both diagonal directions: {thin_diag_cross:?}"
+    );
+
+    // Every one thinner than its already-pinned thick sibling.
+    let max_width = |rgb| -> f32 {
+        lines_of(&pages, rgb)
+            .iter()
+            .map(|&(_, _, w)| w)
+            .fold(0.0_f32, f32::max)
+    };
+    let min_width = |rgb| -> f32 {
+        lines_of(&pages, rgb)
+            .iter()
+            .map(|&(_, _, w)| w)
+            .fold(f32::MAX, f32::min)
+    };
+    for (thick_rgb, thin_rgb, what) in [
+        ((0x44, 0x00, 0x44), (0x99, 0x00, 0x99), "vertStripe"),
+        ((0x55, 0x00, 0x55), (0xAA, 0x00, 0xAA), "diagStripe"),
+        ((0x66, 0x00, 0x66), (0xBB, 0x00, 0xBB), "reverseDiagStripe"),
+        ((0x77, 0x00, 0x77), (0xCC, 0x00, 0xCC), "horzCross"),
+        ((0x88, 0x00, 0x88), (0xDD, 0x00, 0xDD), "diagCross"),
+    ] {
+        let thick_w = min_width(thick_rgb);
+        let thin_w = max_width(thin_rgb);
+        assert!(
+            thin_w < thick_w,
+            "{what}: thin should be thinner than thick: thin {thin_w} vs thick {thick_w}"
+        );
+    }
+}
