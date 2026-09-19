@@ -89,8 +89,8 @@ pub struct PatternGeometry {
 /// is `ipatDkForeDiag`, falling to the right (`\`). Unlike this module's
 /// other choices (pct values, `solid`, `nil`, blend truncation), that had
 /// no second, independent source cross-checking it (ONLYOFFICE/
-/// LibreOffice name neither direction explicitly) — until PR #180 review
-/// finding #6 asked for one. **Confirmed against a real Word render**:
+/// LibreOffice name neither direction explicitly), until asked for one.
+/// **Confirmed against a real Word render**:
 /// `test-files/shading-patterns.docx`'s `diagStripe` cell (row 4, col 1)
 /// renders `/`, and `reverseDiagStripe` (row 4, col 2) renders `\`, exactly
 /// as named below. Pinned by `diagonal_stripes_slope_and_mirror_each_other`
@@ -116,8 +116,8 @@ pub enum PatternFamily {
     /// `pct12` share one image), a lone anomaly against the value's own
     /// name was not followed, on the strength of that pattern alone.
     ///
-    /// **Confirmed against a real Word render** (PR #180 review finding
-    /// #5): `test-files/shading-patterns.docx`'s `horzCross` cell renders
+    /// **Confirmed against a real Word render**:
+    /// `test-files/shading-patterns.docx`'s `horzCross` cell renders
     /// as straight horizontal and vertical lines crossing — not tilted,
     /// not a diamond lattice. The spec's dark `horzCross` swatch was the
     /// anomaly, as suspected; the union reading here was right all along.

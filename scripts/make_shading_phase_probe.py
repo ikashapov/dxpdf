@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
-"""Build test-files/shading-phase-probe.docx — a probe, not a fixture.
-
-PR #180's review flagged §17.18.78 pattern geometry as phase-*local*: every
-stripe/cross family anchors its tile to the shaded box's own top-left corner
-(`layout::shading::horizontal`/`vertical`/`diagonal`), never to anything wider.
-Two open questions follow, and this file asks both without answering either:
+"""Build test-files/shading-phase-probe.docx — §17.18.78 pattern tile phase,
+now a fixture rather than a probe: both questions it asks have been measured
+against a real Word render and answered (see AGENTS.md's fixture table entry
+and `layout::shading`'s doc comments for the full detail).
 
 - **Table A** (`vertStripe`) and **Table B** (`diagCross`), four identically
-  shaded cells in one row each — does Word tile the pattern as one continuous
-  grid across the row, or does each cell restart its own tile at its own left
-  edge?
+  shaded cells in one row each — asked whether Word tiles a pattern as one
+  continuous grid across the row, or restarts it per cell. **Continuous**:
+  `layout::shading::horizontal`/`vertical`/`diagonal` anchor their tile phase
+  to a lattice fixed in the shaded box's own coordinate space rather than
+  restarting at each box's own top-left, pinned by the `*_share_one_lattice`
+  tests beside them.
 - **Table C** (`horzStripe`, one cell stuffed with 70 filler paragraphs) —
-  forces a §17.4.6 row split across a page boundary. At the cut, does the
-  tile's phase continue from where the first page left off, or restart flush
-  with the continuation's own top?
+  forces a §17.4.6 row split across a page boundary, asking whether the
+  tile's phase continues from where the first page left off, or restarts
+  flush with the continuation's own top. **Restarts** — and needed no new
+  code: `layout::table::emit::SliceCursor` already starts every page slice of
+  a table at its own table-local origin, so a split row's continuation is
+  indistinguishable, from the tile geometry's point of view, from an
+  unrelated box starting at that same origin. Pinned by
+  `tests/table_shading_page_split.rs`.
 
-**Not yet measured.** No Word render has answered either question, so nothing
-in `layout::shading` assumes a fixed origin — it stays box-local until one
-does. Answering this needs a real Word render, not reasoning from the spec:
-ECMA-376 says nothing about pattern-fill phase at all, and this codebase's own
-convention (see the border-geometry and diagonal-slope entries in AGENTS.md)
-is to pin tile/stroke geometry only from measured Word output. Once measured,
-fold the answer into `layout::shading`, add the assertions this file is
-missing, and update its entry in AGENTS.md's fixture table to say what was
-found instead of "not yet measured".
+Measured, not reasoned from the spec: ECMA-376 says nothing about
+pattern-fill phase at all, and this codebase's own convention (see the
+border-geometry and diagonal-slope entries in AGENTS.md) is to pin
+tile/stroke geometry only from measured Word output.
 """
 
 import pathlib
