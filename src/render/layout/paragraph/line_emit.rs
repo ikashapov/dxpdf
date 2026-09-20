@@ -290,10 +290,16 @@ fn visual_order(
         .collect();
     // Rule L2 reverses from the highest level down to the lowest *odd* one, so
     // a line with no odd level anywhere reorders to itself — including one
-    // holding an even-level run such as Western digits inside Arabic. A
-    // mirrored line never takes this out: its all-LTR segments still need
-    // reversing for the right-to-left pen.
-    if !mirrored && levels.iter().all(|l| l.is_ltr()) {
+    // holding an even-level run such as Western digits inside Arabic. No
+    // `!mirrored` guard is needed on this check: `mirrored` requires
+    // `base_direction == Rtl` and a tab-like fragment on the line
+    // (`line_has_tab_placement`), and a non-`Text` fragment's own
+    // `bidi_level` falls back to `base` — odd whenever the paragraph is RTL —
+    // so a mirrored line's tab always fails `is_ltr()` on its own and this
+    // check is already false before `mirrored` could matter (PR #181 review,
+    // finding #6; mutation-verified — removing a `!mirrored &&` prefix here
+    // changed no test's outcome).
+    if levels.iter().all(|l| l.is_ltr()) {
         return logical;
     }
 
@@ -2328,11 +2334,18 @@ mod tests {
             );
         }
 
-        /// An all-LTR line under a mirrored walk must not take the
-        /// no-allocation fast path: its segments still need reversing for
-        /// the right-to-left pen.
+        /// A mirrored line's left-to-right *content* still needs its
+        /// segment reversed for the right-to-left pen — despite the
+        /// fragments themselves all being level 0, this is not the
+        /// no-allocation fast path above: `mirrored` requires
+        /// `base_direction == Rtl`, and the tab's own level then falls back
+        /// to that (odd) base regardless of what the text around it is, so
+        /// `levels.iter().all(is_ltr)` is already false on the tab alone
+        /// (PR #181 review, finding #6). What this actually pins is that the
+        /// reorder-and-reverse path handles all-LTR content correctly, not
+        /// that it was ever at risk of being skipped.
         #[test]
-        fn a_mirrored_all_ltr_line_still_reverses_its_segments() {
+        fn a_mirrored_line_reverses_all_ltr_segments_too() {
             let frags = [at(0, "a"), at(0, "b"), tab(), at(0, "c")];
             assert_eq!(
                 mirrored_order(&frags, BaseDirection::Rtl),
