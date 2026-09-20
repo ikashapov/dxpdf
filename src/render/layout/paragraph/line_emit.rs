@@ -709,7 +709,14 @@ pub(super) fn emit_line_commands(
                 // The first-line indent is already inside `line_available` —
                 // §17.3.1.12 applies it at the start edge, which is why
                 // `physical_left_inset` does not add it under Rtl.
-                cursor: (params.max_width - indent - line_available).max(Pt::ZERO),
+                //
+                // Unclamped, matching the unmirrored branch below: a negative
+                // `indent` (§17.3.1.12 outdent) legitimately pushes this past
+                // the margin, and `indent + align_offset` two lines down has
+                // no floor either. Flooring only here (PR #181 review,
+                // finding #4) silently ate the outdent under `w:bidi` instead
+                // of mirroring it (`a_negative_start_indent_outdents_a_mirrored_line_past_the_margin`).
+                cursor: params.max_width - indent - line_available,
             }
         } else {
             LinePen {
@@ -1714,8 +1721,9 @@ pub(super) fn resolve_line_height(
 #[cfg(test)]
 mod tests {
     use super::{
-        find_next_tab_stop, resolve_ptab, resolve_zone_anchor, Fragment, LinePen, PTabGeometry,
-        PTabPlacement, ZoneAnchor,
+        compute_line_placements, emit_line_commands, find_next_tab_stop, resolve_ptab,
+        resolve_zone_anchor, DrawCommand, Fragment, LineLayoutParams, LinePen, PTabGeometry,
+        PTabPlacement, ParagraphStyle, ZoneAnchor,
     };
     use crate::model;
     use crate::render::dimension::Pt;
@@ -1783,6 +1791,95 @@ mod tests {
         };
         let x = pen.place(Pt::new(10.0), Pt::new(10.0));
         assert_eq!(x.raw(), 40.0);
+    }
+
+    // ── mirrored initial cursor (PR #181 review, finding #4) ─────────────────
+
+    /// A tab-like fragment, just to make a line "tab-bearing" so a `w:bidi`
+    /// paragraph mirrors it (§17.3.1.37) — its own placement is irrelevant to
+    /// the tests below, which only check where the pen *starts*.
+    fn plain_tab() -> Fragment {
+        Fragment::Tab {
+            line_height: Pt::new(12.0),
+            font: match &text_fragment("x", 1.0) {
+                Fragment::Text { font, .. } => font.clone(),
+                _ => unreachable!(),
+            },
+            color: crate::render::resolve::color::RgbColor::BLACK,
+            fitting_width: None,
+        }
+    }
+
+    /// Renders one tab-bearing paragraph and returns the x of its first
+    /// fragment's `DrawCommand::Text`.
+    fn first_glyph_x(style: &ParagraphStyle) -> f32 {
+        let fragments = vec![
+            text_fragment("A", 10.0),
+            plain_tab(),
+            text_fragment("B", 10.0),
+        ];
+        let params = LineLayoutParams {
+            content_width: Pt::new(118.0), // max_width(100) - indent_left(-18) - indent_right(0)
+            max_width: Pt::new(100.0),
+            first_line_adjustment: Pt::ZERO,
+            drop_cap_indent: Pt::ZERO,
+            drop_cap_lines: 0,
+            default_line_height: Pt::new(14.0),
+        };
+        let placements = compute_line_placements(&fragments, style, &params);
+        let mut commands = Vec::new();
+        let mut cursor_y = Pt::ZERO;
+        emit_line_commands(
+            &mut commands,
+            &mut cursor_y,
+            &placements,
+            0..placements.len(),
+            &fragments,
+            style,
+            &params,
+            None,
+            true,
+        );
+        commands
+            .iter()
+            .find_map(|c| match c {
+                DrawCommand::Text { text, position, .. } if text.as_ref() == "A" => {
+                    Some(position.x.raw())
+                }
+                _ => None,
+            })
+            .expect("the 'A' fragment should have drawn a Text command")
+    }
+
+    #[test]
+    fn a_negative_start_indent_outdents_an_unmirrored_line_past_the_margin() {
+        // The LTR control: `indent_left` (§17.3.1.12 `w:ind/@start`) is
+        // unclamped, so an 18pt outdent moves the pen 18pt past the margin.
+        let style = ParagraphStyle {
+            base_direction: crate::i18n::bidi::BaseDirection::Ltr,
+            indent_left: Pt::new(-18.0),
+            ..ParagraphStyle::default()
+        };
+        assert_eq!(first_glyph_x(&style), -18.0);
+    }
+
+    #[test]
+    fn a_negative_start_indent_outdents_a_mirrored_line_past_the_margin() {
+        // The same paragraph configuration under `w:bidi`: `indent_left`
+        // holds the same *logical* start value regardless of direction (see
+        // its own doc comment). Mirroring the unmirrored case above about the
+        // line's own right edge (max_width=100): the LTR glyph's box
+        // [-18, -8] reflects to [108, 118], so the glyph — drawn at a box's
+        // *left* edge either way — must land at x=108, 18pt past the right
+        // margin. A pen that clamps its start at the margin instead draws it
+        // flush against x=100 with no protrusion at all (90, checked in the
+        // mutation test below).
+        let style = ParagraphStyle {
+            base_direction: crate::i18n::bidi::BaseDirection::Rtl,
+            indent_left: Pt::new(-18.0),
+            ..ParagraphStyle::default()
+        };
+        assert_eq!(first_glyph_x(&style), 108.0);
     }
 
     // ── find_next_tab_stop ────────────────────────────────────────────────────
