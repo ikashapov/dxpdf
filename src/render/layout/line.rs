@@ -47,6 +47,7 @@ pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
             float_left: Pt::ZERO,
             float_right: Pt::ZERO,
         },
+        false,
     )
 }
 
@@ -55,11 +56,23 @@ pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
 /// `ptab_geometry` is the paragraph geometry §17.3.1.30 position tabs resolve
 /// against. Fitting needs it because a tab whose alignment point lies behind
 /// the pen advances to the next line, and only fitting can create one.
+///
+/// `bidi_rtl`: whether the paragraph's base direction is right-to-left.
+/// Emission mirrors a tab-bearing RTL line (§17.3.1.37 under `w:bidi`) and, in
+/// that mirrored frame, swaps which physical side each float narrows before
+/// resolving a `<w:ptab>` — fitting has to swap the same way, or the two can
+/// reach different Placed/AdvancesToNextLine verdicts for the same tab (PR
+/// #181 review, finding #2). A line's tab-placement precondition for
+/// mirroring is already guaranteed once fitting has *reached* a `PTab`
+/// fragment — whatever line ends up holding it will satisfy `w:bidi`'s other
+/// half — so `bidi_rtl` alone is the right test here, without also threading
+/// a per-line "has a tab" flag fitting cannot know in advance.
 pub fn fit_lines_with_first(
     fragments: &[Fragment],
     first_line_width: Pt,
     remaining_width: Pt,
     ptab_geometry: crate::render::layout::paragraph::PTabGeometry,
+    bidi_rtl: bool,
 ) -> Vec<FittedLine> {
     if fragments.is_empty() {
         return Vec::new();
@@ -136,10 +149,25 @@ pub fn fit_lines_with_first(
             // for width) emission is authoritative for the final x; this only
             // decides whether the tab can be honoured on this line.
             let end = crate::render::layout::paragraph::zone_end(fragments, i, fragments.len());
+            // Emission mirrors a tab-bearing RTL line and swaps which
+            // physical side each float narrows before resolving this same
+            // tab (`line_emit.rs`'s `Fragment::PTab` arm) — matched here so
+            // the two agree on whether the anchor is behind the pen. See
+            // `bidi_rtl`'s doc for why that flag alone is the right test.
+            let (geo_float_left, geo_float_right) = if bidi_rtl {
+                (ptab_geometry.float_right, ptab_geometry.float_left)
+            } else {
+                (ptab_geometry.float_left, ptab_geometry.float_right)
+            };
+            let geometry = crate::render::layout::paragraph::PTabGeometry {
+                float_left: geo_float_left,
+                float_right: geo_float_right,
+                ..ptab_geometry
+            };
             let placement = crate::render::layout::paragraph::resolve_ptab(
                 *align,
                 *relative_to,
-                ptab_geometry,
+                geometry,
                 pen_x,
                 || crate::render::layout::paragraph::zone_width(fragments, i + 1, end),
             );
@@ -431,6 +459,31 @@ mod tests {
             baseline_offset: Pt::ZERO,
             text_offset: Pt::ZERO,
             is_footnote_ref: false,
+        }
+    }
+
+    /// A `<w:ptab>` fragment — `line_height`/`leader`/`color` are irrelevant
+    /// to fitting, which only reads `align`/`relative_to` (plus the nominal
+    /// `MIN_TAB_WIDTH` `.width()` contributes to `line_width`).
+    fn ptab_frag(align: crate::model::PTabAlignment) -> Fragment {
+        Fragment::PTab {
+            align,
+            relative_to: crate::model::PTabRelativeTo::Indent,
+            leader: crate::model::TabLeader::None,
+            line_height: Pt::ZERO,
+            font: Rc::new(FontProps {
+                rtl: crate::render::fonts::Toggle::Absent,
+                family: Rc::from("Test"),
+                size: Pt::new(12.0),
+                bold: Toggle::Absent,
+                italic: Toggle::Absent,
+                underline: false,
+                char_spacing: Pt::ZERO,
+                text_scale: 1.0,
+                underline_position: Pt::ZERO,
+                underline_thickness: Pt::ZERO,
+            }),
+            color: RgbColor::BLACK,
         }
     }
 
@@ -775,6 +828,7 @@ mod tests {
                 float_left: Pt::ZERO,
                 float_right: Pt::ZERO,
             },
+            false,
         );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].end, 1, "only 'a ' fits the narrow first line");
@@ -783,5 +837,66 @@ mod tests {
             lines[1].end, 3,
             "'b ' + 'c' both fit on the full second line"
         );
+    }
+
+    // ── PTab mirroring under `w:bidi` (PR #181 review, finding #2) ──────────
+
+    #[test]
+    fn bidi_rtl_ptab_swaps_floats_the_same_way_emission_does() {
+        // A 60pt float narrows the line's physical left; under `w:bidi` that
+        // is the line's *trailing* edge, so a `Left`/`Indent` ptab's anchor
+        // must be measured from the physical *right* (an unnarrowed 0), not
+        // the physical left (60) — exactly the swap emission's mirrored pen
+        // already applies. Getting this wrong is invisible unless the swap
+        // actually changes which line the tab lands on, which is why the
+        // anchor is placed behind a 10pt fragment: 0 is behind it, 60 is not.
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(crate::model::PTabAlignment::Left),
+            text_frag("B", 10.0),
+        ];
+        let geometry = crate::render::layout::paragraph::PTabGeometry {
+            max_width: Pt::new(100.0),
+            indent_left: Pt::ZERO,
+            indent_first_line: Pt::ZERO,
+            content_width: Pt::new(100.0),
+            float_left: Pt::new(60.0),
+            float_right: Pt::ZERO,
+        };
+        let lines = fit_lines_with_first(&frags, Pt::new(100.0), Pt::new(100.0), geometry, true);
+        assert_eq!(
+            lines.len(),
+            2,
+            "the ptab's anchor (0, after the float swap) is behind the pen \
+             (10, after 'A'), so fitting must break before it — matching \
+             emission's own mirrored verdict for the same tab"
+        );
+        assert_eq!(lines[0].end, 1, "'A' alone, then the line breaks");
+        assert_eq!(lines[1].start, 1, "the ptab restarts the next line");
+        assert_eq!(lines[1].end, 3, "'B' joins the ptab on that line");
+    }
+
+    #[test]
+    fn ltr_ptab_is_unaffected_by_bidi_rtl() {
+        // The same fragments and geometry as the mirrored case above, but
+        // `bidi_rtl: false` — the float swap must not fire, so the anchor
+        // (60, unswapped) sits ahead of the pen (10) and the whole paragraph
+        // fits on one line, as it always did before this fix.
+        let frags = vec![
+            text_frag("A", 10.0),
+            ptab_frag(crate::model::PTabAlignment::Left),
+            text_frag("B", 10.0),
+        ];
+        let geometry = crate::render::layout::paragraph::PTabGeometry {
+            max_width: Pt::new(100.0),
+            indent_left: Pt::ZERO,
+            indent_first_line: Pt::ZERO,
+            content_width: Pt::new(100.0),
+            float_left: Pt::new(60.0),
+            float_right: Pt::ZERO,
+        };
+        let lines = fit_lines_with_first(&frags, Pt::new(100.0), Pt::new(100.0), geometry, false);
+        assert_eq!(lines.len(), 1, "no break: the anchor is ahead of the pen");
+        assert_eq!(lines[0].end, 3);
     }
 }

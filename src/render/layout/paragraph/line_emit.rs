@@ -25,6 +25,14 @@ pub(super) fn compute_line_placements(
     let drop_cap_indent = params.drop_cap_indent;
     let drop_cap_lines = params.drop_cap_lines;
     let default_line_height = params.default_line_height;
+    // §17.3.1.37 under `w:bidi`: emission mirrors a tab-bearing RTL line and
+    // swaps which physical side each float narrows before resolving a
+    // `<w:ptab>` (`Fragment::PTab`'s emission arm) — fitting's own ptab
+    // resolution has to swap the same way, or the two can reach different
+    // Placed/AdvancesToNextLine verdicts for the same tab (PR #181 review,
+    // finding #2). See `fit_lines_with_first`'s `bidi_rtl` doc for why the
+    // paragraph's base direction alone is the right test here.
+    let bidi_rtl = style.base_direction == crate::i18n::bidi::BaseDirection::Rtl;
     let ptab_geometry = PTabGeometry {
         max_width: params.max_width,
         indent_left: style.indent_left,
@@ -46,6 +54,7 @@ pub(super) fn compute_line_placements(
             first_line_width,
             remaining_width,
             ptab_geometry,
+            bidi_rtl,
         )
         .into_iter()
         .map(|line| LinePlacement {
@@ -104,6 +113,7 @@ pub(super) fn compute_line_placements(
             line_width,
             line_width,
             line_geometry,
+            bidi_rtl,
         );
         let fitted_line = if let Some(first) = fitted.into_iter().next() {
             super::super::line::FittedLine {
