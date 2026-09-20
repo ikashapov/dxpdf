@@ -1067,6 +1067,7 @@ pub(super) fn emit_line_commands(
                             zone,
                             measure_text,
                             style.decimal_separator,
+                            style.base_direction,
                         );
                         let offset = if mirrored {
                             anchor.offset_mirrored(|| zone_width(fragments, frag_idx + 1, end))
@@ -1535,6 +1536,7 @@ fn resolve_zone_anchor(
     zone: &[Fragment],
     measure_text: MeasureTextFn<'_>,
     separator: char,
+    base_direction: crate::i18n::bidi::BaseDirection,
 ) -> ZoneAnchor {
     use crate::model::TabAlignment;
     match alignment {
@@ -1543,7 +1545,7 @@ fn resolve_zone_anchor(
         TabAlignment::Left | TabAlignment::Clear => ZoneAnchor::Start,
         TabAlignment::Right => ZoneAnchor::End,
         TabAlignment::Center => ZoneAnchor::Middle,
-        TabAlignment::Decimal => decimal_anchor(zone, measure_text, separator),
+        TabAlignment::Decimal => decimal_anchor(zone, measure_text, separator, base_direction),
         // Unreachable in practice: `find_next_tab_stop` never hands back a
         // rule stop, so no zone is ever anchored against one. Kept so the
         // match stays total, and answering `Start` is the harmless reading if
@@ -1552,8 +1554,20 @@ fn resolve_zone_anchor(
     }
 }
 
-/// Offset of the first `separator` in `zone` — the paragraph's decimal
-/// character, per §17.3.2.20 `w:lang`, not a constant.
+/// Offset of the first `separator` in `zone`'s own **visual** order — the
+/// paragraph's decimal character, per §17.3.2.20 `w:lang`, not a constant.
+///
+/// A zone is exactly the segment [`visual_order`] reorders between two tabs
+/// (`zone_end`'s doc), so summing widths in *document* order — as if a zone's
+/// layout were always its own read order — puts the separator at the wrong
+/// physical offset the moment the zone isn't uniformly left-to-right. That
+/// includes a zone that is uniformly right-to-left: rule L2 reverses it
+/// whole, the same way `visual_order` reverses a uniformly right-to-left line
+/// (PR #181 review, finding #5 named only the mixed-level case, but a
+/// same-level right-to-left zone hits the identical bug). Reordering here
+/// mirrors `visual_order`'s own per-segment reorder, minus its mirrored-pen
+/// reversal: that reversal exists for `LinePen`'s walk direction, not for
+/// where content visually sits, and this function answers the latter.
 ///
 /// Falls back to [`ZoneAnchor::End`] when the zone contains none: Word
 /// right-aligns a separator-less decimal zone, which is what keeps a column of
@@ -1563,9 +1577,21 @@ fn decimal_anchor(
     zone: &[Fragment],
     measure_text: MeasureTextFn<'_>,
     separator: char,
+    base_direction: crate::i18n::bidi::BaseDirection,
 ) -> ZoneAnchor {
+    let base = base_direction.level();
+    let levels: Vec<_> = zone.iter().map(|f| f.bidi_level(base)).collect();
+    // The common case — no right-to-left content in the zone at all — never
+    // pays for the reorder: its document order already is its visual order.
+    let visual: Vec<usize> = if levels.iter().all(|l| l.is_ltr()) {
+        (0..zone.len()).collect()
+    } else {
+        crate::i18n::bidi::reorder(&levels)
+    };
+
     let mut before = Pt::ZERO;
-    for fragment in zone {
+    for &idx in &visual {
+        let fragment = &zone[idx];
         if let Fragment::Text {
             text, font, width, ..
         } = fragment
@@ -1991,7 +2017,13 @@ mod tests {
             (Center, ZoneAnchor::Middle),
         ] {
             assert_eq!(
-                resolve_zone_anchor(alignment, &[], None, '.'),
+                resolve_zone_anchor(
+                    alignment,
+                    &[],
+                    None,
+                    '.',
+                    crate::i18n::bidi::BaseDirection::Ltr
+                ),
                 expected,
                 "{alignment:?}"
             );
@@ -2035,7 +2067,13 @@ mod tests {
     fn a_decimal_zone_with_no_separator_anchors_at_its_end() {
         let zone = [text_fragment("1234", 40.0)];
         assert_eq!(
-            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None, '.'),
+            resolve_zone_anchor(
+                model::TabAlignment::Decimal,
+                &zone,
+                None,
+                '.',
+                crate::i18n::bidi::BaseDirection::Ltr
+            ),
             ZoneAnchor::End,
             "right-align rather than left-align, so a whole number stays flush"
         );
@@ -2046,7 +2084,13 @@ mod tests {
         // "12.5" is 4 chars, 40pt wide; the 2-char prefix is half of it.
         let zone = [text_fragment("12.5", 40.0)];
         assert_eq!(
-            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None, '.'),
+            resolve_zone_anchor(
+                model::TabAlignment::Decimal,
+                &zone,
+                None,
+                '.',
+                crate::i18n::bidi::BaseDirection::Ltr
+            ),
             ZoneAnchor::At(Pt::new(20.0))
         );
     }
@@ -2057,9 +2101,50 @@ mod tests {
         // still counts toward the offset.
         let zone = [text_fragment("12", 20.0), text_fragment(".5", 20.0)];
         assert_eq!(
-            resolve_zone_anchor(model::TabAlignment::Decimal, &zone, None, '.'),
+            resolve_zone_anchor(
+                model::TabAlignment::Decimal,
+                &zone,
+                None,
+                '.',
+                crate::i18n::bidi::BaseDirection::Ltr
+            ),
             ZoneAnchor::At(Pt::new(20.0)),
             "20pt of leading fragment + 0pt before the separator in the second"
+        );
+    }
+
+    /// The finding this fixes: a decimal zone whose fragments carry
+    /// right-to-left levels must be walked in *visual* order, not document
+    /// order — including when the zone is uniformly right-to-left, which
+    /// rule L2 reverses whole (`i18n::bidi::reorder`), not just when levels
+    /// mix. Two 20pt right-to-left fragments, document order [no separator,
+    /// separator] — visual order reverses that to [separator, no separator],
+    /// so the separator's own fragment is visually *first*, at the zone's
+    /// own left edge, not preceded by the other fragment's 20pt.
+    #[test]
+    fn a_decimal_anchor_walks_a_right_to_left_zone_in_visual_not_document_order() {
+        let mut no_separator = text_fragment("AB", 20.0);
+        // "1.23" is 4 chars/20pt; the 1-char prefix "1" is a quarter of it —
+        // an exact binary fraction, so the assertion below needs no tolerance.
+        let mut with_separator = text_fragment("1.23", 20.0);
+        for frag in [&mut no_separator, &mut with_separator] {
+            if let Fragment::Text { level, .. } = frag {
+                *level = crate::i18n::bidi::BidiLevel::RTL;
+            }
+        }
+        let zone = [no_separator, with_separator];
+        assert_eq!(
+            resolve_zone_anchor(
+                model::TabAlignment::Decimal,
+                &zone,
+                None,
+                '.',
+                crate::i18n::bidi::BaseDirection::Rtl
+            ),
+            ZoneAnchor::At(Pt::new(5.0)),
+            "the separator's fragment is visually first in a right-to-left \
+             zone, so nothing precedes it — document order would wrongly add \
+             the full 20pt of the other fragment first"
         );
     }
 
