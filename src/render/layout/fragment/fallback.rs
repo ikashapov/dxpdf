@@ -445,7 +445,6 @@ fn split_at_coverage_boundaries<F>(
         let piece = &text[start..end];
         let piece_font = match family {
             Some(name) => Rc::new(FontProps {
-                effects: Default::default(),
                 family: name,
                 ..(*font).clone()
             }),
@@ -590,6 +589,7 @@ where
 mod tests {
     use super::*;
     use crate::i18n::bidi::BidiLevel;
+    use crate::render::layout::fragment::TextEffects;
     use crate::render::resolve::color::RgbColor;
     use std::collections::HashMap;
 
@@ -639,10 +639,10 @@ mod tests {
         })
     }
 
-    fn frag(text: &str) -> Fragment {
+    fn frag_with_font(text: &str, font: Rc<FontProps>) -> Fragment {
         Fragment::Text {
             text: Rc::from(text),
-            font: font("Base"),
+            font,
             color: RgbColor::BLACK,
             shading: None,
             border: None,
@@ -661,6 +661,10 @@ mod tests {
             text_offset: Pt::ZERO,
             is_footnote_ref: false,
         }
+    }
+
+    fn frag(text: &str) -> Fragment {
+        frag_with_font(text, font("Base"))
     }
 
     /// One `Pt` per character, so a split's re-measurement is checkable.
@@ -715,6 +719,34 @@ mod tests {
                 ("b".into(), "Base".into()),
             ]
         );
+    }
+
+    /// A coverage split changes only `family` — every other property of the
+    /// original font, `effects` (§17.3.2.13/.18/.23/.31, issue #148) included,
+    /// must survive on every piece, not just the one that keeps the original
+    /// family.
+    #[test]
+    fn a_coverage_split_keeps_the_original_fonts_effects() {
+        let lookup = FakeLookup::new("ab", &[('ア', "CJK")]);
+        let effects = TextEffects {
+            shadow: true,
+            outline: false,
+            relief: None,
+        };
+        let shadowed = Rc::new(FontProps {
+            effects,
+            ..(*font("Base")).clone()
+        });
+        let mut frags = vec![frag_with_font("aアb", shadowed)];
+        apply_font_fallback(&mut frags, &lookup, &measure);
+        for f in &frags {
+            match f {
+                Fragment::Text { text, font, .. } => {
+                    assert_eq!(font.effects, effects, "piece {text:?} lost its effects")
+                }
+                _ => panic!("expected text"),
+            }
+        }
     }
 
     /// Every piece is re-measured against the font it ends up with — the
