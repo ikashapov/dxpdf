@@ -474,6 +474,7 @@ mod tests {
             leader: crate::model::TabLeader::None,
             line_height: Pt::ZERO,
             font: Rc::new(FontProps {
+                effects: Default::default(),
                 rtl: crate::render::fonts::Toggle::Absent,
                 family: Rc::from("Test"),
                 size: Pt::new(12.0),

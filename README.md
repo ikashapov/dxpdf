@@ -288,7 +288,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **81 entries fully implemented, 12 partial, 7 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 12 partial, 6 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
