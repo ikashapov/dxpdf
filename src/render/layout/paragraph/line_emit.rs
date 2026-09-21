@@ -393,6 +393,19 @@ impl LinePen {
             Some(right) => right - self.cursor,
         }
     }
+
+    /// Jumps the cursor to `new_cursor` (as a `Fragment::Tab`/`Fragment::PTab`
+    /// stop resolution does) and returns the physical span the pen crossed,
+    /// normalized so a leader can be drawn across it without caring which way
+    /// the pen walks. Shared by both fragment kinds' emission arms, which
+    /// otherwise duplicated this exact three-line sequence (PR #181 review,
+    /// finding #8).
+    fn advance_to(&mut self, new_cursor: Pt) -> (Pt, Pt) {
+        let from = self.position();
+        self.cursor = new_cursor;
+        let to = self.position();
+        (from.min(to), from.max(to))
+    }
 }
 
 /// §17.3.1.13: whether the gap after the fragment at visual position `pos`
@@ -1096,11 +1109,8 @@ pub(super) fn emit_line_commands(
                             style.decimal_separator,
                             style.base_direction,
                         );
-                        let offset = if mirrored {
-                            anchor.offset_mirrored(|| zone_width(fragments, frag_idx + 1, end))
-                        } else {
-                            anchor.offset(|| zone_width(fragments, frag_idx + 1, end))
-                        };
+                        let offset =
+                            anchor.offset(mirrored, || zone_width(fragments, frag_idx + 1, end));
                         // Never move the pen backwards: a zone wider than the
                         // space before its stop overflows past the stop rather
                         // than overprinting what precedes it.
@@ -1111,9 +1121,7 @@ pub(super) fn emit_line_commands(
 
                     // Emit leader characters over the span the tab jumped —
                     // physical, left of right, whichever way the pen walks.
-                    let from = pen.position();
-                    pen.cursor = new_cursor;
-                    let to = pen.position();
+                    let (from, to) = pen.advance_to(new_cursor);
                     if let Some(ts) = tab_stop {
                         emit_tab_leader(
                             commands,
@@ -1122,8 +1130,8 @@ pub(super) fn emit_line_commands(
                                 font: tab_font,
                                 color: *tab_color,
                             },
-                            from.min(to),
-                            from.max(to),
+                            from,
+                            to,
                             *cursor_y + line.ascent,
                             measure_text,
                         );
@@ -1191,9 +1199,7 @@ pub(super) fn emit_line_commands(
                             }
                         };
 
-                    let from = pen.position();
-                    pen.cursor = new_cursor;
-                    let to = pen.position();
+                    let (from, to) = pen.advance_to(new_cursor);
                     emit_tab_leader(
                         commands,
                         LeaderStyle {
@@ -1201,8 +1207,8 @@ pub(super) fn emit_line_commands(
                             font: tab_font,
                             color: *tab_color,
                         },
-                        from.min(to),
-                        from.max(to),
+                        from,
+                        to,
                         *cursor_y + line.ascent,
                         measure_text,
                     );
@@ -1414,34 +1420,27 @@ enum ZoneAnchor {
 }
 
 impl ZoneAnchor {
-    /// Distance from the zone's start to its anchor point. `zone_width` is a
-    /// thunk so a `Start` anchor — the overwhelmingly common case — never pays
-    /// for the O(zone) width sum.
-    fn offset(self, zone_width: impl FnOnce() -> Pt) -> Pt {
-        match self {
-            ZoneAnchor::Start => Pt::ZERO,
-            ZoneAnchor::End => zone_width(),
-            ZoneAnchor::Middle => zone_width() * 0.5,
-            ZoneAnchor::At(offset) => offset,
-        }
-    }
-
-    /// [`ZoneAnchor::offset`] for a mirrored line: the distance from the
-    /// zone's *start-relative* start — its right edge — to the anchor point.
+    /// Distance from the zone's start to its anchor point — the zone's own
+    /// left edge when `mirrored` is false, or its start-relative start (its
+    /// *right* edge) when true, per §17.3.1.37 under `w:bidi`. `zone_width`
+    /// is a thunk so a `Start` anchor — the overwhelmingly common case —
+    /// never pays for the O(zone) width sum, in either frame.
     ///
     /// `Start`, `End` and `Middle` are logical, so they read identically in
     /// either frame: a `start` stop anchors the zone's first-read edge and a
     /// mirrored zone is read from the right. `At` is the one physical case —
     /// [`decimal_anchor`] measures to the separator from the zone's *left*
     /// edge, and the separator does not move when the zone is walked from
-    /// the other end, hence the complement. This is also why `Start` still
-    /// never pays for the zone-width sum.
-    fn offset_mirrored(self, zone_width: impl FnOnce() -> Pt) -> Pt {
+    /// the other end, hence the complement (PR #181 review, finding #8:
+    /// `offset`/`offset_mirrored` used to be two methods differing only in
+    /// this one arm).
+    fn offset(self, mirrored: bool, zone_width: impl FnOnce() -> Pt) -> Pt {
         match self {
             ZoneAnchor::Start => Pt::ZERO,
             ZoneAnchor::End => zone_width(),
             ZoneAnchor::Middle => zone_width() * 0.5,
-            ZoneAnchor::At(offset) => zone_width() - offset,
+            ZoneAnchor::At(offset) if mirrored => zone_width() - offset,
+            ZoneAnchor::At(offset) => offset,
         }
     }
 }
@@ -2060,17 +2059,24 @@ mod tests {
     #[test]
     fn a_start_anchor_never_sums_the_zone_width() {
         // The thunk exists so the common case skips an O(zone) walk; if it is
-        // ever called for `Start` this panics.
-        let offset = ZoneAnchor::Start.offset(|| panic!("zone width computed for a Start anchor"));
-        assert_eq!(offset, Pt::ZERO);
+        // ever called for `Start` this panics. Checked in both frames — the
+        // guard applies before `mirrored` is even consulted.
+        for mirrored in [false, true] {
+            let offset =
+                ZoneAnchor::Start.offset(mirrored, || panic!("zone width computed for Start"));
+            assert_eq!(offset, Pt::ZERO, "mirrored={mirrored}");
+        }
     }
 
     #[test]
     fn zone_anchor_offsets_are_measured_from_the_zone_start() {
         let width = || Pt::new(80.0);
-        assert_eq!(ZoneAnchor::End.offset(width).raw(), 80.0);
-        assert_eq!(ZoneAnchor::Middle.offset(width).raw(), 40.0);
-        assert_eq!(ZoneAnchor::At(Pt::new(12.5)).offset(width).raw(), 12.5);
+        assert_eq!(ZoneAnchor::End.offset(false, width).raw(), 80.0);
+        assert_eq!(ZoneAnchor::Middle.offset(false, width).raw(), 40.0);
+        assert_eq!(
+            ZoneAnchor::At(Pt::new(12.5)).offset(false, width).raw(),
+            12.5
+        );
     }
 
     /// §17.3.1.37 under `w:bidi`: the mirrored offsets. `Start`, `End` and
@@ -2081,11 +2087,11 @@ mod tests {
     #[test]
     fn mirrored_zone_anchor_offsets_complement_only_the_decimal() {
         let width = || Pt::new(80.0);
-        assert_eq!(ZoneAnchor::Start.offset_mirrored(width), Pt::ZERO);
-        assert_eq!(ZoneAnchor::End.offset_mirrored(width).raw(), 80.0);
-        assert_eq!(ZoneAnchor::Middle.offset_mirrored(width).raw(), 40.0);
+        assert_eq!(ZoneAnchor::Start.offset(true, width), Pt::ZERO);
+        assert_eq!(ZoneAnchor::End.offset(true, width).raw(), 80.0);
+        assert_eq!(ZoneAnchor::Middle.offset(true, width).raw(), 40.0);
         assert_eq!(
-            ZoneAnchor::At(Pt::new(12.5)).offset_mirrored(width).raw(),
+            ZoneAnchor::At(Pt::new(12.5)).offset(true, width).raw(),
             67.5
         );
     }
