@@ -2,11 +2,11 @@
 //!
 //! Nobody re-reads the whole table on every PR, so a feature added twice — once
 //! under its old, superseded status and once under its new one — is invisible
-//! in a diff that only shows the lines it touches. PR #181 appended two rows
-//! without removing the ones they superseded, leaving "Bidirectional tab stops
-//! and numbering labels" and "`w:bidiVisual` (mirrored table columns)" each
-//! listed twice with contradictory ✅/❌ statuses, and desyncing the heading's
-//! own count of how many rows say what.
+//! in a diff that only shows the lines it touches. That happened here: two
+//! rows were appended without removing the ones they superseded, leaving
+//! "Bidirectional tab stops and numbering labels" and "`w:bidiVisual`
+//! (mirrored table columns)" each listed twice with contradictory ✅/❌
+//! statuses, and desyncing the heading's own count of how many rows say what.
 
 use std::path::PathBuf;
 

@@ -61,12 +61,12 @@ pub fn fit_lines(fragments: &[Fragment], max_width: Pt) -> Vec<FittedLine> {
 /// Emission mirrors a tab-bearing RTL line (§17.3.1.37 under `w:bidi`) and, in
 /// that mirrored frame, swaps which physical side each float narrows before
 /// resolving a `<w:ptab>` — fitting has to swap the same way, or the two can
-/// reach different Placed/AdvancesToNextLine verdicts for the same tab (PR
-/// #181 review, finding #2). A line's tab-placement precondition for
-/// mirroring is already guaranteed once fitting has *reached* a `PTab`
-/// fragment — whatever line ends up holding it will satisfy `w:bidi`'s other
-/// half — so `bidi_rtl` alone is the right test here, without also threading
-/// a per-line "has a tab" flag fitting cannot know in advance.
+/// reach different Placed/AdvancesToNextLine verdicts for the same tab. A
+/// line's tab-placement precondition for mirroring is already guaranteed
+/// once fitting has *reached* a `PTab` fragment — whatever line ends up
+/// holding it will satisfy `w:bidi`'s other half — so `bidi_rtl` alone is the
+/// right test here, without also threading a per-line "has a tab" flag
+/// fitting cannot know in advance.
 pub fn fit_lines_with_first(
     fragments: &[Fragment],
     first_line_width: Pt,
@@ -839,7 +839,7 @@ mod tests {
         );
     }
 
-    // ── PTab mirroring under `w:bidi` (PR #181 review, finding #2) ──────────
+    // ── PTab mirroring under `w:bidi` ────────────────────────────────────────
 
     #[test]
     fn bidi_rtl_ptab_swaps_floats_the_same_way_emission_does() {

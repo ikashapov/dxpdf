@@ -29,9 +29,9 @@ pub(super) fn compute_line_placements(
     // swaps which physical side each float narrows before resolving a
     // `<w:ptab>` (`Fragment::PTab`'s emission arm) — fitting's own ptab
     // resolution has to swap the same way, or the two can reach different
-    // Placed/AdvancesToNextLine verdicts for the same tab (PR #181 review,
-    // finding #2). See `fit_lines_with_first`'s `bidi_rtl` doc for why the
-    // paragraph's base direction alone is the right test here.
+    // Placed/AdvancesToNextLine verdicts for the same tab. See
+    // `fit_lines_with_first`'s `bidi_rtl` doc for why the paragraph's base
+    // direction alone is the right test here.
     let bidi_rtl = style.base_direction == crate::i18n::bidi::BaseDirection::Rtl;
     let ptab_geometry = PTabGeometry {
         max_width: params.max_width,
@@ -296,9 +296,8 @@ fn visual_order(
     // (`line_has_tab_placement`), and a non-`Text` fragment's own
     // `bidi_level` falls back to `base` — odd whenever the paragraph is RTL —
     // so a mirrored line's tab always fails `is_ltr()` on its own and this
-    // check is already false before `mirrored` could matter (PR #181 review,
-    // finding #6; mutation-verified — removing a `!mirrored &&` prefix here
-    // changed no test's outcome).
+    // check is already false before `mirrored` could matter (mutation-verified
+    // — removing a `!mirrored &&` prefix here changed no test's outcome).
     if levels.iter().all(|l| l.is_ltr()) {
         return logical;
     }
@@ -316,10 +315,10 @@ fn visual_order(
         // reverses again on top, so the net answer is "reversed iff exactly
         // one of the two is true". This is the common case (a tab-delimited
         // column of plain text) that a mirrored line forces through this
-        // function at all (PR #181 review, finding #7): `reorder` costs two
-        // heap allocations regardless of its own input — converting to
-        // `unicode_bidi::Level` and its own returned `Vec<usize>` — worth
-        // skipping when nothing about the call was needed.
+        // function at all: `reorder` costs two heap allocations regardless of
+        // its own input — converting to `unicode_bidi::Level` and its own
+        // returned `Vec<usize>` — worth skipping when nothing about the call
+        // was needed.
         if levels[from..to].iter().all(|&l| l == levels[from]) {
             let indices = from..to;
             if levels[from].is_rtl() != mirrored {
@@ -351,8 +350,8 @@ fn visual_order(
 ///
 /// The one arithmetic primitive behind every mirrored position this file
 /// computes — a mirrored [`LinePen`]'s own position and a mirrored bar
-/// rule's column both reduce to this (PR #181 review, finding #9: the two
-/// used to reimplement it independently).
+/// rule's column both reduce to this, rather than each reimplementing it
+/// independently.
 fn mirror_x(mirror_edge: Option<Pt>, x: Pt) -> Pt {
     match mirror_edge {
         None => x,
@@ -409,8 +408,7 @@ impl LinePen {
     /// stop resolution does) and returns the physical span the pen crossed,
     /// normalized so a leader can be drawn across it without caring which way
     /// the pen walks. Shared by both fragment kinds' emission arms, which
-    /// otherwise duplicated this exact three-line sequence (PR #181 review,
-    /// finding #8).
+    /// otherwise duplicated this exact three-line sequence.
     fn advance_to(&mut self, new_cursor: Pt) -> (Pt, Pt) {
         let from = self.position();
         self.cursor = new_cursor;
@@ -764,9 +762,9 @@ pub(super) fn emit_line_commands(
                 // Unclamped, matching the unmirrored branch below: a negative
                 // `indent` (§17.3.1.12 outdent) legitimately pushes this past
                 // the margin, and `indent + align_offset` two lines down has
-                // no floor either. Flooring only here (PR #181 review,
-                // finding #4) silently ate the outdent under `w:bidi` instead
-                // of mirroring it (`a_negative_start_indent_outdents_a_mirrored_line_past_the_margin`).
+                // no floor either. Flooring only here silently ate the outdent
+                // under `w:bidi` instead of mirroring it
+                // (`a_negative_start_indent_outdents_a_mirrored_line_past_the_margin`).
                 cursor: params.max_width - indent - line_available,
             }
         } else {
@@ -1442,9 +1440,8 @@ impl ZoneAnchor {
     /// mirrored zone is read from the right. `At` is the one physical case —
     /// [`decimal_anchor`] measures to the separator from the zone's *left*
     /// edge, and the separator does not move when the zone is walked from
-    /// the other end, hence the complement (PR #181 review, finding #8:
-    /// `offset`/`offset_mirrored` used to be two methods differing only in
-    /// this one arm).
+    /// the other end, hence the complement — the one arm that used to make
+    /// this two separate methods rather than one taking `mirrored`.
     fn offset(self, mirrored: bool, zone_width: impl FnOnce() -> Pt) -> Pt {
         match self {
             ZoneAnchor::Start => Pt::ZERO,
@@ -1595,10 +1592,9 @@ fn resolve_zone_anchor(
 /// (`zone_end`'s doc), so summing widths in *document* order — as if a zone's
 /// layout were always its own read order — puts the separator at the wrong
 /// physical offset the moment the zone isn't uniformly left-to-right. That
-/// includes a zone that is uniformly right-to-left: rule L2 reverses it
-/// whole, the same way `visual_order` reverses a uniformly right-to-left line
-/// (PR #181 review, finding #5 named only the mixed-level case, but a
-/// same-level right-to-left zone hits the identical bug). Reordering here
+/// includes a zone that is uniformly right-to-left, not only one that mixes
+/// levels: rule L2 reverses a uniform right-to-left run whole, the same way
+/// `visual_order` reverses a uniformly right-to-left line. Reordering here
 /// mirrors `visual_order`'s own per-segment reorder, minus its mirrored-pen
 /// reversal: that reversal exists for `LinePen`'s walk direction, not for
 /// where content visually sits, and this function answers the latter.
@@ -1853,7 +1849,7 @@ mod tests {
         assert_eq!(x.raw(), 40.0);
     }
 
-    // ── mirrored initial cursor (PR #181 review, finding #4) ─────────────────
+    // ── mirrored initial cursor ───────────────────────────────────────────────
 
     /// A tab-like fragment, just to make a line "tab-bearing" so a `w:bidi`
     /// paragraph mirrors it (§17.3.1.37) — its own placement is irrelevant to
@@ -2375,10 +2371,10 @@ mod tests {
         /// no-allocation fast path above: `mirrored` requires
         /// `base_direction == Rtl`, and the tab's own level then falls back
         /// to that (odd) base regardless of what the text around it is, so
-        /// `levels.iter().all(is_ltr)` is already false on the tab alone
-        /// (PR #181 review, finding #6). What this actually pins is that the
-        /// reorder-and-reverse path handles all-LTR content correctly, not
-        /// that it was ever at risk of being skipped.
+        /// `levels.iter().all(is_ltr)` is already false on the tab alone.
+        /// What this actually pins is that the reorder-and-reverse path
+        /// handles all-LTR content correctly, not that it was ever at risk
+        /// of being skipped.
         #[test]
         fn a_mirrored_line_reverses_all_ltr_segments_too() {
             let frags = [at(0, "a"), at(0, "b"), tab(), at(0, "c")];
