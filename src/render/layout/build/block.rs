@@ -382,7 +382,6 @@ fn build_note_blocks(
                 let ref_size =
                     font.size * crate::render::layout::fragment::SUPERSCRIPT_FONT_SIZE_RATIO;
                 let ref_font = FontProps {
-                    effects: Default::default(),
                     size: ref_size,
                     ..font
                 };
@@ -720,6 +719,42 @@ mod tests {
                 &*font.family,
                 model::DEFAULT_MATH_FONT,
                 "prefix should read the opening equation's font, not fall back to the spec default"
+            );
+        });
+    }
+
+    /// §17.3.2.13/.18/.23/.31 (issue #148): the display-number prefix's font
+    /// is built from the note body's own first-run font via `..font`, which
+    /// should carry the run's legacy text effects the same way it carries
+    /// bold/italic/underline — not reset them.
+    #[test]
+    fn footnote_number_prefix_inherits_the_bodys_text_effects() {
+        let resolved = empty_resolved();
+        with_ctx(&resolved, |ctx, state| {
+            let shadowed = model::RunProperties {
+                shadow: Some(true),
+                ..Default::default()
+            };
+            let run = model::Inline::TextRun(Box::new(model::TextRun {
+                style_id: None,
+                properties: shadowed,
+                content: vec![model::RunElement::Text("body".to_string())],
+                rsids: model::RevisionIds::default(),
+            }));
+            let content = vec![Block::Paragraph(Box::new(para(vec![run])))];
+            let notes = build_note_content("1", &content, ctx, state);
+            let (_, frags, _) = &notes[0];
+            let Fragment::Text { font, .. } = &frags[0] else {
+                panic!("expected the display-number prefix as the first fragment");
+            };
+            assert_eq!(
+                font.effects,
+                crate::render::layout::fragment::TextEffects {
+                    shadow: true,
+                    outline: false,
+                    relief: None,
+                },
+                "the prefix should carry the note body's own shadow effect"
             );
         });
     }
