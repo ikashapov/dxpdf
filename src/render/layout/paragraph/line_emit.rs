@@ -346,6 +346,20 @@ fn visual_order(
     VisualOrder::Reordered(order)
 }
 
+/// Mirrors `x` about `mirror_edge`'s right side when mirroring is active
+/// (§17.3.1.37 under `w:bidi`), or leaves it physical when not.
+///
+/// The one arithmetic primitive behind every mirrored position this file
+/// computes — a mirrored [`LinePen`]'s own position and a mirrored bar
+/// rule's column both reduce to this (PR #181 review, finding #9: the two
+/// used to reimplement it independently).
+fn mirror_x(mirror_edge: Option<Pt>, x: Pt) -> Pt {
+    match mirror_edge {
+        None => x,
+        Some(right) => right - x,
+    }
+}
+
 /// The running pen of one line's emission.
 ///
 /// A left-to-right line walks a physical left cursor rightward. A *mirrored*
@@ -388,10 +402,7 @@ impl LinePen {
 
     /// The pen's physical position, for zero-width marks and leader spans.
     fn position(&self) -> Pt {
-        match self.mirror_edge {
-            None => self.cursor,
-            Some(right) => right - self.cursor,
-        }
+        mirror_x(self.mirror_edge, self.cursor)
     }
 
     /// Jumps the cursor to `new_cursor` (as a `Fragment::Tab`/`Fragment::PTab`
@@ -1538,10 +1549,7 @@ fn emit_bar_rules(
         .iter()
         .filter(|ts| TabStopRole::of(ts.alignment) == TabStopRole::DrawsRule)
     {
-        let x = match mirror_edge {
-            Some(right) => right - ts.position,
-            None => ts.position,
-        };
+        let x = mirror_x(mirror_edge, ts.position);
         commands.push(DrawCommand::Line {
             line: crate::render::geometry::PtLineSegment::new(
                 PtOffset::new(x, line_top),
