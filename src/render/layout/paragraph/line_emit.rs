@@ -306,13 +306,34 @@ fn visual_order(
     let mut order = Vec::with_capacity(levels.len());
     let mut segment_start = 0;
     let flush = |order: &mut Vec<usize>, from: usize, to: usize| {
-        if from < to {
-            let mut permutation = crate::i18n::bidi::reorder(&levels[from..to]);
-            if mirrored {
-                permutation.reverse();
-            }
-            order.extend(permutation.into_iter().map(|p| line.start + from + p));
+        if from >= to {
+            return;
         }
+        // A segment carrying one exact level throughout needs no bidi-library
+        // call at all: rule L2's passes from the highest level down to the
+        // lowest odd one all act on that one run, which collapses to a flat
+        // reversal (odd — right-to-left) or none (even) — then `mirrored`
+        // reverses again on top, so the net answer is "reversed iff exactly
+        // one of the two is true". This is the common case (a tab-delimited
+        // column of plain text) that a mirrored line forces through this
+        // function at all (PR #181 review, finding #7): `reorder` costs two
+        // heap allocations regardless of its own input — converting to
+        // `unicode_bidi::Level` and its own returned `Vec<usize>` — worth
+        // skipping when nothing about the call was needed.
+        if levels[from..to].iter().all(|&l| l == levels[from]) {
+            let indices = from..to;
+            if levels[from].is_rtl() != mirrored {
+                order.extend(indices.rev().map(|p| line.start + p));
+            } else {
+                order.extend(indices.map(|p| line.start + p));
+            }
+            return;
+        }
+        let mut permutation = crate::i18n::bidi::reorder(&levels[from..to]);
+        if mirrored {
+            permutation.reverse();
+        }
+        order.extend(permutation.into_iter().map(|p| line.start + from + p));
     };
     for (offset, fragment) in fragments[line.start..line.end].iter().enumerate() {
         if is_tab_like(fragment) {
