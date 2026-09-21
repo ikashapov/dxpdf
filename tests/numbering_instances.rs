@@ -298,3 +298,30 @@ fn a_multilevel_label_reads_the_shared_ancestor_counter() {
 
     assert_eq!(label_of(&pages, "nested"), "2.1.");
 }
+
+/// §17.9.28, the case a real Word-rendered fixture settles: instantiating a
+/// level as an *ancestor* consumes that instance's restart for it.
+///
+/// `test-files/numbering-direct-indent.docx` opens with an `ilvl=2` item on an
+/// instance that overrides level 0, and Word continues 2. 3. 4. at the top level
+/// afterwards — it does not restart when the top level is finally used
+/// directly. So the one-shot is spent the first time the instance touches the
+/// level, whichever way it touches it.
+#[test]
+fn a_deep_item_consumes_its_instances_restart_for_the_ancestor() {
+    let body = format!(
+        "{}{}{}",
+        item(2, 1, "deep"),  // instantiates level 0 of numId 2's abstract
+        item(2, 0, "after"), // …so the override must not fire here
+        item(2, 0, "next"),
+    );
+    let pages = layout(&make_docx(
+        &body,
+        &instances(r#"<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>"#),
+    ));
+
+    assert_eq!(
+        ["deep", "after", "next"].map(|t| label_of(&pages, t)),
+        ["1.1.", "2.", "3."],
+    );
+}

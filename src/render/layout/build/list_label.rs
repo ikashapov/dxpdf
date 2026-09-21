@@ -70,14 +70,23 @@ pub(super) fn inject_list_label(
     let levels = &resolved_num.levels;
 
     // §17.9.28: a `w:startOverride` on this instance's level restarts the
-    // shared sequence — once, at the instance's first use. Word 16.0 numbers
-    // 1, 2, 8, 9, 10, 11 for items alternating between an instance and an
-    // overriding one, so the restart neither repeats nor is inherited by the
-    // other instances afterwards.
-    let restart = levels
-        .get(level as usize)
-        .and_then(|l| l.start_override)
-        .filter(|_| state.started_overrides.insert((num_id, level)));
+    // shared sequence — once, the first time this instance touches that level.
+    // Word 16.0 numbers 1, 2, 8, 9, 10, 11 for items alternating between an
+    // instance and an overriding one, so the restart neither repeats nor is
+    // inherited by the other instances afterwards.
+    //
+    // "Touches" includes instantiating the level as an *ancestor*: in
+    // `test-files/numbering-direct-indent.docx` the first item is `ilvl=2` on an
+    // instance that overrides level 0, and Word's render continues 2. 3. 4.
+    // afterwards rather than restarting at 1. The ancestor seeding below
+    // consumes the restart for exactly that reason.
+    let start_override = |lvl: u8| levels.get(lvl as usize).and_then(|l| l.start_override);
+    let restart = start_override(level).filter(|_| state.started_overrides.insert((num_id, level)));
+    let ancestor_restarts: Vec<Option<u32>> = (0..level)
+        .map(|ancestor| {
+            start_override(ancestor).filter(|_| state.started_overrides.insert((num_id, ancestor)))
+        })
+        .collect();
 
     // Update counters: increment this level, reset deeper levels.
     //
@@ -96,9 +105,9 @@ pub(super) fn inject_list_label(
         // "1.1.1"-style items, the next top-level item continues as "2.", not
         // "1.". Only ancestors missing from the map are touched.
         for ancestor in 0..level {
-            counters
-                .entry((abstract_num_id, ancestor))
-                .or_insert_with(|| level_start(ancestor));
+            let seed =
+                ancestor_restarts[ancestor as usize].unwrap_or_else(|| level_start(ancestor));
+            counters.entry((abstract_num_id, ancestor)).or_insert(seed);
         }
         match counters.entry((abstract_num_id, level)) {
             Entry::Vacant(slot) => {
