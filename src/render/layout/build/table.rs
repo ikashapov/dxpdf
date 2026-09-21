@@ -474,6 +474,43 @@ fn dxa_twips(m: &model::TableMeasure) -> Option<Dimension<Twips>> {
     }
 }
 
+/// §17.4.71: the width every column is *preferred* to have, when each of them
+/// says so in `w:tcW` — the input Word's §17.4.52 autofit resolves a table from.
+///
+/// # Why this outranks `w:tblGrid`
+///
+/// §17.4.63 and §17.4.71 carry the same paragraph verbatim — all widths are
+/// "preferred", the table "shall satisfy the shared columns as specified by the
+/// tblGrid", and "the table layout algorithm can require a preference to be
+/// overridden" — so the spec states the conflict without resolving it. Word
+/// resolves it toward the preferences whenever the layout is autofit, which
+/// §17.4.52 makes the default. Measured on Word 16.0 with a 2000/4000/4080
+/// grid, `tcW` 1000/3000/6080 and a 504 pt text column: 50 / 150 / 304 pt — the
+/// preferences exactly, with the grid discarded (issue #231).
+///
+/// `None` unless every column has a `dxa` preference of its own. A spanned
+/// cell states one width for several columns and says nothing about how to
+/// divide it, so a table containing one keeps its grid rather than being
+/// resolved from a guess.
+fn tcw_preferred_grid(rows: &[model::TableRow], num_cols: usize) -> Option<Vec<Pt>> {
+    let mut preferred: Vec<Option<Pt>> = vec![None; num_cols];
+    for row in rows {
+        let mut col = row.properties.grid_before as usize;
+        for cell in &row.cells {
+            let span = (*cell.properties.grid_span.get().unwrap_or(&1)).max(1) as usize;
+            if span == 1 && col < num_cols {
+                if let Some(Some(tcw)) = cell.properties.width.get().map(dxa_twips) {
+                    // First row that states one wins, matching the way the
+                    // grid itself is read top-down.
+                    preferred[col].get_or_insert(Pt::from(tcw));
+                }
+            }
+            col = col.saturating_add(span);
+        }
+    }
+    preferred.into_iter().collect()
+}
+
 /// Recursively build a table: resolve styles, conditional formatting, and
 /// recurse into each cell's content blocks.
 pub(super) fn build_table(
@@ -778,7 +815,34 @@ pub(super) fn build_table(
     // confines one nested in a cell is unmeasured — so it keeps the page limit
     // and this change moves only the tables the defect was reported against.
     let container_ceiling = container_ceiling.filter(|_| positioning.is_none());
-    let col_widths = if is_auto_width && !grid_cols.is_empty() {
+    // §17.4.52: `autofit` is the default, and it is the mode in which Word
+    // re-derives the columns from the cells' §17.4.71 preferences. `fixed` is
+    // the instruction to use the declared widths instead, so such a table keeps
+    // its grid — which is what the 39 tables of `KAB_2026-03-25` and the rest
+    // of the corpus evidence in `clamp_auto_grid`'s comment rely on. Read at
+    // the direct level only: §2.1.250(a) lists `tblLayout` among the elements a
+    // style may not contribute, and two corpus documents ship a default
+    // `TableNormal` declaring `fixed` that Word ignores.
+    let autofit_layout = !matches!(t.properties.layout.get(), Some(model::TableLayout::Fixed));
+    let preferred = if is_auto_width && autofit_layout {
+        tcw_preferred_grid(&t.rows, num_cols)
+    } else {
+        None
+    };
+    let col_widths = if let Some(preferred) = preferred {
+        // The preferences are drawn as asked when they fit — Word does not
+        // stretch an autofit table to its container — and scaled down
+        // proportionally when they do not. The container is the text column for
+        // a top-level table and the host cell for a nested one, never the paper:
+        // a table resolved from preferences has no declared grid to defend.
+        clamp_auto_grid(
+            &preferred,
+            num_cols,
+            available_width,
+            Some(container_ceiling.unwrap_or(available_width)),
+            &state.page_config,
+        )
+    } else if is_auto_width && !grid_cols.is_empty() {
         clamp_auto_grid(
             &grid_cols,
             num_cols,
