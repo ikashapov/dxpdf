@@ -635,31 +635,33 @@ mod tests {
         )
     }
 
-    /// `the hyphenation` as two words of an `en-US` run, measured by
-    /// `six_per_char`: 24 pt (18 visible) and 66 pt. Both carry
-    /// [`BreakAfter::Opportunity`], as `crate::i18n::segment` gives a word
+    /// A word of an `en-US` run measured by `six_per_char` (a trailing space
+    /// counts in `width`, not in `trimmed_width`), carrying
+    /// [`BreakAfter::Opportunity`] as `crate::i18n::segment` gives a word
     /// followed by a space and the last word of a paragraph alike —
-    /// `fixture_break_after`'s character sniff would call the bare final word
+    /// `fixture_break_after`'s character sniff would call a bare final word
     /// glued, which is the one thing the fitter must never hyphenate.
+    fn hyphenating_word(text: &str) -> Fragment {
+        let mut f = text_frag(text, 6.0 * text.chars().count() as f32);
+        if let Fragment::Text {
+            font,
+            trimmed_width,
+            break_after,
+            ..
+        } = &mut f
+        {
+            *break_after = BreakAfter::Opportunity;
+            *trimmed_width = Pt::new(6.0 * text.trim_end().chars().count() as f32);
+            let mut props = (**font).clone();
+            props.hyphenation = Some(crate::i18n::hyphenate::HyphenLanguage::EnUs);
+            *font = Rc::new(props);
+        }
+        f
+    }
+
+    /// `the hyphenation` as two words: 24 pt (18 visible) and 66 pt.
     fn hyphenating_paragraph() -> Vec<Fragment> {
-        let tagged = |text: &str| {
-            let mut f = text_frag(text, 6.0 * text.chars().count() as f32);
-            if let Fragment::Text {
-                font,
-                trimmed_width,
-                break_after,
-                ..
-            } = &mut f
-            {
-                *break_after = BreakAfter::Opportunity;
-                *trimmed_width = Pt::new(6.0 * text.trim_end().chars().count() as f32);
-                let mut props = (**font).clone();
-                props.hyphenation = Some(crate::i18n::hyphenate::HyphenLanguage::EnUs);
-                *font = Rc::new(props);
-            }
-            f
-        };
-        vec![tagged("the "), tagged("hyphenation")]
+        vec![hyphenating_word("the "), hyphenating_word("hyphenation")]
     }
 
     fn hyphenating_style() -> ParagraphStyle {
@@ -784,6 +786,81 @@ mod tests {
             painted_texts(&placed.emit_full().commands),
             ["the ", "hyphenation"]
         );
+    }
+
+    /// The floats path (`line_emit::compute_line_placements` with
+    /// `page_floats`) fits one line per call, each at its own width, through
+    /// the same `fit_lines_in`. A float narrows the first three 14 pt lines of
+    /// a 126 pt paragraph to 66 pt; below it the full width returns. The
+    /// narrow lines must hyphenate, and no inserted hyphen may ever be
+    /// followed by anything on its line: a word cut while fitting one line
+    /// must not be left spliced for a later call to re-fit at another width,
+    /// which is what `FitWindow::max_lines` is for. Mutation: `max_lines:
+    /// None` at that call site fits every remaining line at 66 pt on the
+    /// first call, and the fourth line, back at 126 pt, then paints
+    /// `the hyphen- ation the ` as one line.
+    #[test]
+    fn the_floats_path_hyphenates_each_line_at_its_own_width() {
+        use crate::render::layout::float::{ActiveFloat, FloatSource, WrapTextSide};
+        let float = ActiveFloat {
+            page_x: Pt::ZERO,
+            page_y_start: Pt::ZERO,
+            page_y_end: Pt::new(30.0),
+            width: Pt::new(60.0),
+            source: FloatSource::Image,
+            wrap_text: WrapTextSide::BothSides,
+        };
+        let style = ParagraphStyle {
+            page_floats: vec![float],
+            page_x: Pt::ZERO,
+            page_content_width: Pt::new(126.0),
+            ..hyphenating_style()
+        };
+        let mut frags = Vec::new();
+        for _ in 0..6 {
+            frags.push(hyphenating_word("the "));
+            frags.push(hyphenating_word("hyphenation "));
+        }
+        let constraints = body_constraints(126.0);
+        let placed = place_paragraph(
+            &frags,
+            &constraints,
+            &style,
+            Pt::new(14.0),
+            Some(&six_per_char),
+        );
+        assert!(placed.line_count() > 3, "the paragraph clears the float");
+
+        let commands = placed.emit_full().commands;
+        // The first, narrowed line is `the hyphen-`, exactly as the no-floats
+        // fixture above lays out at 66 pt.
+        assert_eq!(painted_texts(&commands)[..2], ["the ", "hyphen-"]);
+
+        let mut lines: std::collections::BTreeMap<i64, Vec<(i64, String)>> =
+            std::collections::BTreeMap::new();
+        for c in &commands {
+            if let DrawCommand::Text { position, text, .. } = c {
+                lines
+                    .entry(position.y.raw().round() as i64)
+                    .or_default()
+                    .push((position.x.raw().round() as i64, text.to_string()));
+            }
+        }
+        let mut hyphenated = 0;
+        for (y, mut pieces) in lines {
+            pieces.sort_by_key(|(x, _)| *x);
+            for (idx, (_, text)) in pieces.iter().enumerate() {
+                if text.ends_with('-') {
+                    hyphenated += 1;
+                    assert_eq!(
+                        idx + 1,
+                        pieces.len(),
+                        "y={y}: an inserted hyphen inside a line — {pieces:?}"
+                    );
+                }
+            }
+        }
+        assert!(hyphenated >= 2, "both widths hyphenate: {hyphenated} lines");
     }
 
     /// The control for the test above it: the same fragments and measurer
