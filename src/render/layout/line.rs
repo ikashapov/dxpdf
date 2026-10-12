@@ -652,6 +652,102 @@ fn hyphenate_at(
     None
 }
 
+/// Undo what [`fit_lines_in`] hyphenated in `fragments`: every
+/// [`BreakAfter::Hyphenated`] head is rejoined with the tail after it — the
+/// inserted U+002D dropped, the text concatenated, the width re-measured (or
+/// summed, when no measurer is at hand) and the tail's own `break_after`
+/// restored — so the vector reads as the paragraph's words again.
+///
+/// For the §4 continuation re-fit (`PlacedParagraph::fragments_from_line`):
+/// the remainder of a split paragraph is re-placed at the next page's or
+/// column's width, around that page's floats, and a word cut for *this*
+/// width may fit whole there. Re-fitting the cut fragments would put
+/// `hyphen-` and `ation` side by side on one line and paint a hyphen
+/// mid-word. The `Hyphenated` marker is what makes the undo possible, which
+/// is why the head carries a variant of its own rather than a flag on the
+/// line.
+pub(crate) fn rejoin_hyphenated(
+    fragments: &mut Vec<Fragment>,
+    measure: crate::render::layout::paragraph::MeasureTextFn<'_>,
+) {
+    let mut i = 0;
+    while i + 1 < fragments.len() {
+        let joined = match (&fragments[i], &fragments[i + 1]) {
+            (
+                Fragment::Text {
+                    text: head,
+                    break_after: BreakAfter::Hyphenated,
+                    font,
+                    color,
+                    shading,
+                    border,
+                    level,
+                    hyperlink_url,
+                    baseline_offset,
+                    text_offset,
+                    metrics,
+                    width: head_width,
+                    ..
+                },
+                Fragment::Text {
+                    text: tail,
+                    break_after,
+                    width: tail_width,
+                    trimmed_width: tail_trimmed,
+                    ..
+                },
+            ) => {
+                let text = format!("{}{tail}", head.strip_suffix('-').unwrap_or(head));
+                let (width, trimmed_width, metrics) = match measure {
+                    Some(measure) => {
+                        let (width, metrics) = measure(&text, font);
+                        let trimmed = text.trim_end();
+                        let trimmed_width = if trimmed.len() < text.len() {
+                            measure(trimmed, font).0
+                        } else {
+                            width
+                        };
+                        (width, trimmed_width, metrics)
+                    }
+                    // Only reachable if a head was made without a measurer,
+                    // which `place_paragraph` never does; the sum keeps the
+                    // line arithmetic sane rather than exact.
+                    None => (
+                        *head_width + *tail_width,
+                        *head_width + *tail_trimmed,
+                        *metrics,
+                    ),
+                };
+                Fragment::Text {
+                    text: text.into(),
+                    font: font.clone(),
+                    color: *color,
+                    shading: *shading,
+                    border: *border,
+                    break_after: *break_after,
+                    level: *level,
+                    shaped: None,
+                    width,
+                    trimmed_width,
+                    metrics,
+                    hyperlink_url: hyperlink_url.clone(),
+                    baseline_offset: *baseline_offset,
+                    text_offset: *text_offset,
+                    is_footnote_ref: false,
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        fragments[i] = joined;
+        fragments.remove(i + 1);
+        // Not advanced: the joined fragment is re-examined, so a chain of
+        // heads would fold completely.
+    }
+}
+
 /// Whether `fragment` glues the fragment after it to itself — the
 /// [`BreakAfter::Prohibited`] half of the "whole word" test in
 /// [`hyphenate_at`]. Only text and math fragments carry the state; every
@@ -1753,6 +1849,31 @@ mod tests {
             assert_eq!(a.text_height.raw(), b.text_height.raw());
             assert_eq!(a.ascent.raw(), b.ascent.raw());
             assert_eq!(a.has_break, b.has_break);
+        }
+    }
+
+    /// The inverse of the splice: after fitting has cut two words, rejoining
+    /// gives back the words that went in — text, break status, measured
+    /// width and hanging space alike.
+    #[test]
+    fn rejoin_hyphenated_restores_the_words_the_fitter_cut() {
+        let original = vec![
+            word("the ", BreakAfter::Opportunity),
+            word("hyphenation ", BreakAfter::Opportunity),
+            word("hyphenation", BreakAfter::Opportunity),
+        ];
+        let (lines, mut cut) = fit(original.clone(), 66.0, Some(&ctx(0.0, 0, false)));
+        assert_eq!(lines.len(), 3, "both words were cut: {lines:?}");
+        assert_eq!(cut.len(), 5);
+
+        rejoin_hyphenated(&mut cut, Some(&six_per_char));
+
+        assert_eq!(cut.len(), original.len());
+        for (a, b) in cut.iter().zip(&original) {
+            assert_eq!(text_of(a), text_of(b));
+            assert_eq!(break_after_of(a), break_after_of(b));
+            assert_eq!(a.width().raw(), b.width().raw());
+            assert_eq!(a.trimmed_width().raw(), b.trimmed_width().raw());
         }
     }
 

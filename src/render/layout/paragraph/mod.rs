@@ -345,9 +345,17 @@ impl PlacedParagraph<'_> {
     /// cloned so the stacker can re-place the remainder against the next page's
     /// floats and width (instead of reusing this page's placement). `from` must
     /// be a valid line index (`< line_count()`).
+    ///
+    /// §17.15.1.10: with every word this placement hyphenated inside the
+    /// remainder made whole again (`line::rejoin_hyphenated`) — the next
+    /// page's width is not this one's, and a head re-fitted beside its own
+    /// tail would paint a hyphen mid-word. A tail whose head ended the
+    /// emitted segment is left as it is: its head has been painted.
     pub(crate) fn fragments_from_line(&self, from: usize) -> Vec<Fragment> {
         let start = self.line_placements[from].line.start;
-        self.fragments[start..].to_vec()
+        let mut rest = self.fragments[start..].to_vec();
+        super::line::rejoin_hyphenated(&mut rest, self.measure_text);
+        rest
     }
 
     /// §17.11.12: number of footnote reference marks in lines `[first, last)`.
@@ -695,6 +703,70 @@ mod tests {
         assert_eq!(
             painted_texts(&placed.emit_full().commands),
             ["the ", "hyphen-", "ation"]
+        );
+    }
+
+    fn text_and_break(f: &Fragment) -> (String, BreakAfter) {
+        match f {
+            Fragment::Text {
+                text, break_after, ..
+            } => (text.to_string(), *break_after),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    /// §4 continuation re-fit: the remainder handed to the next page or
+    /// column is re-placed at *that* page's width, and a word this placement
+    /// cut may fit whole there. A head still reading `hyphen-` beside its
+    /// tail `ation` on one line would paint a hyphen mid-word, so the
+    /// remainder must be the paragraph's text as it was before this
+    /// placement hyphenated it: every head rejoined with its tail, the
+    /// inserted hyphen gone, the width re-measured and the tail's own
+    /// `break_after` restored.
+    #[test]
+    fn fragments_from_line_rejoins_a_hyphenated_head_with_its_tail() {
+        let frags = hyphenating_paragraph();
+        let style = hyphenating_style();
+        let constraints = body_constraints(66.0);
+        let placed = place_paragraph(
+            &frags,
+            &constraints,
+            &style,
+            Pt::new(14.0),
+            Some(&six_per_char),
+        );
+        assert_eq!(placed.line_count(), 2, "the fixture hyphenates");
+
+        let remainder = placed.fragments_from_line(0);
+        assert_eq!(
+            remainder.iter().map(text_and_break).collect::<Vec<_>>(),
+            [
+                ("the ".to_string(), BreakAfter::Opportunity),
+                ("hyphenation".to_string(), BreakAfter::Opportunity),
+            ]
+        );
+        assert_eq!(remainder[1].width().raw(), 66.0, "re-measured whole");
+        assert_eq!(remainder[1].trimmed_width().raw(), 66.0);
+    }
+
+    /// The head of a word cut at the *end of the emitted segment* has been
+    /// painted; only its tail travels, and it travels as it is.
+    #[test]
+    fn fragments_from_line_keeps_a_tail_whose_head_was_already_emitted() {
+        let frags = hyphenating_paragraph();
+        let style = hyphenating_style();
+        let constraints = body_constraints(66.0);
+        let placed = place_paragraph(
+            &frags,
+            &constraints,
+            &style,
+            Pt::new(14.0),
+            Some(&six_per_char),
+        );
+        let remainder = placed.fragments_from_line(1);
+        assert_eq!(
+            remainder.iter().map(text_and_break).collect::<Vec<_>>(),
+            [("ation".to_string(), BreakAfter::Opportunity)]
         );
     }
 
