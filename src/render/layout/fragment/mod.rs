@@ -348,10 +348,12 @@ pub enum LinkTarget {
 /// character list did not include it. [`crate::i18n::segment`] is the one
 /// place that answers the question now; this enum is how the answer travels.
 ///
-/// Two states, not three. UAX #14 also has *mandatory* breaks ([LB4]/[LB5]),
-/// and none can reach a fragment: CR, LF and every other C0 control but TAB
-/// are stripped while the text is collected, and an authored `<w:br/>`
-/// (§17.3.3.1) becomes [`Fragment::LineBreak`] instead of text.
+/// Two UAX #14 states, not three. UAX #14 also has *mandatory* breaks
+/// ([LB4]/[LB5]), and none can reach a fragment: CR, LF and every other C0
+/// control but TAB are stripped while the text is collected, and an authored
+/// `<w:br/>` (§17.3.3.1) becomes [`Fragment::LineBreak`] instead of text.
+/// The third variant is not UAX #14's at all — it is the engine's own, and
+/// exists only after line fitting has run.
 ///
 /// [LB4]: https://www.unicode.org/reports/tr14/#LB4
 /// [LB5]: https://www.unicode.org/reports/tr14/#LB5
@@ -366,6 +368,15 @@ pub enum BreakAfter {
     /// `0`), or the fragment ends at a `<w:r>` boundary that falls inside a
     /// token and the run after it carries the rest.
     Prohibited,
+    /// §17.15.1.10 (issue #158): an opportunity this engine *created* by
+    /// cutting a word at a hyphenation point. The fragment is the head of
+    /// that word and its text already ends in the U+002D it inserted, so
+    /// emission paints it as ordinary text; the fragment after it is the
+    /// word's tail. Only `layout::line` produces this, only at the end of a
+    /// fitted line, and `PlacedParagraph::fragments_from_line` rejoins such a
+    /// pair before any fragment is re-fitted at another width — a head whose
+    /// tail fits beside it again would otherwise paint a hyphen mid-word.
+    Hyphenated,
 }
 
 /// A measured fragment — the atomic unit for line fitting.
