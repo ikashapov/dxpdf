@@ -261,6 +261,7 @@ pub(super) fn build_paragraph_block(
         state.shape_auto_fit,
         super::convert::paragraph_locale(p, ctx.resolved),
         outline,
+        &ctx.resolved.hyphenation,
     );
     style.style_id = p.style_id.clone();
 
@@ -424,6 +425,7 @@ fn build_note_blocks(
                 // this whole call. Asking rather than passing `None` keeps the
                 // heading decision in one place for every path.
                 super::convert::paragraph_outline(p, &merged_props, state),
+                &ctx.resolved.hyphenation,
             );
             results.push((display_num.to_string(), frags, style));
         }

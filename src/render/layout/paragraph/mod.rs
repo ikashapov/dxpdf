@@ -204,7 +204,7 @@ pub(crate) fn place_paragraph<'a>(
     // breaking. `Cow` so the common path (nothing over-wide) borrows the input
     // without cloning; only an actual transform materializes an owned `Vec`.
     let min_avail = (content_width - first_line_adjustment).max(Pt::ZERO);
-    let effective: Cow<'a, [Fragment]> = {
+    let mut effective: Cow<'a, [Fragment]> = {
         let clipped: Cow<'a, [Fragment]> = match clip_oversized_images(fragments, content_width) {
             Some(v) => Cow::Owned(v),
             None => Cow::Borrowed(fragments),
@@ -226,9 +226,27 @@ pub(crate) fn place_paragraph<'a>(
         drop_cap_lines,
         default_line_height,
     };
+    // §17.15.1.10 (issue #158): the fitter's hyphenation context, when the
+    // style carries the setting *and* a measurer exists to re-measure a cut
+    // word's head. Without a measurer (registry-less tests) nothing is
+    // hyphenated, the same way `split_oversized_fragments` degrades. Built
+    // per `place_paragraph`, so the §17.15.1.22 count starts at 0 for every
+    // placement — `HyphenationCtx::consecutive` says why that is accepted.
+    let hyphenation = match (style.hyphenation, measure_text) {
+        (Some(h), Some(measure)) => Some(super::line::HyphenationCtx {
+            zone: h.zone,
+            consecutive_limit: h.consecutive_limit,
+            no_caps: h.no_caps,
+            measure,
+            opportunities: &crate::i18n::hyphenate::opportunities,
+            consecutive: std::cell::Cell::new(0),
+        }),
+        _ => None,
+    };
     // Per-line float adjustment: fit one line at a time, computing the available
     // width for each line based on its absolute y position on the page.
-    let line_placements = compute_line_placements(&effective, style, &params);
+    let line_placements =
+        compute_line_placements(&mut effective, style, &params, hyphenation.as_ref());
 
     // §17.3.1.11: compute the drop cap baseline.
     // When frame_height is set (lineRule="exact"):
@@ -589,6 +607,131 @@ mod tests {
             *hyperlink_url = Some(LinkTarget::External(std::rc::Rc::from(url)));
         }
         fragment
+    }
+
+    // ── §17.15.1.10 automatic hyphenation (issue #158) ─────────────────────
+    //
+    // The unit tests in `layout::line` prove the fitter's rules against a
+    // table of opportunities; these prove the paragraph layer wires the
+    // style, the measurer and the real en-US patterns to it.
+
+    /// 6 pt per character, hyphen included.
+    fn six_per_char(text: &str, _: &FontProps) -> (Pt, TextMetrics) {
+        (
+            Pt::new(6.0 * text.chars().count() as f32),
+            TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+        )
+    }
+
+    /// `the hyphenation` as two words of an `en-US` run, measured by
+    /// `six_per_char`: 24 pt (18 visible) and 66 pt. Both carry
+    /// [`BreakAfter::Opportunity`], as `crate::i18n::segment` gives a word
+    /// followed by a space and the last word of a paragraph alike —
+    /// `fixture_break_after`'s character sniff would call the bare final word
+    /// glued, which is the one thing the fitter must never hyphenate.
+    fn hyphenating_paragraph() -> Vec<Fragment> {
+        let tagged = |text: &str| {
+            let mut f = text_frag(text, 6.0 * text.chars().count() as f32);
+            if let Fragment::Text {
+                font,
+                trimmed_width,
+                break_after,
+                ..
+            } = &mut f
+            {
+                *break_after = BreakAfter::Opportunity;
+                *trimmed_width = Pt::new(6.0 * text.trim_end().chars().count() as f32);
+                let mut props = (**font).clone();
+                props.hyphenation = Some(crate::i18n::hyphenate::HyphenLanguage::EnUs);
+                *font = Rc::new(props);
+            }
+            f
+        };
+        vec![tagged("the "), tagged("hyphenation")]
+    }
+
+    fn hyphenating_style() -> ParagraphStyle {
+        ParagraphStyle {
+            hyphenation: Some(AutoHyphenation {
+                zone: Pt::ZERO,
+                consecutive_limit: 0,
+                no_caps: false,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn painted_texts(commands: &[DrawCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCommand::Text { text, .. } => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// End to end at this layer: the style carries the setting, a measurer
+    /// is at hand, the vendored en-US patterns say `hy-phen-ation`, and the
+    /// painted commands are `hyphen-` on the first line and `ation` on the
+    /// second — `hyphena-` (48 pt) would not fit beside `the ` in 66 pt.
+    #[test]
+    fn the_setting_and_a_measurer_hyphenate_the_overflowing_word() {
+        let frags = hyphenating_paragraph();
+        let style = hyphenating_style();
+        let constraints = body_constraints(66.0);
+        let placed = place_paragraph(
+            &frags,
+            &constraints,
+            &style,
+            Pt::new(14.0),
+            Some(&six_per_char),
+        );
+        assert_eq!(placed.line_count(), 2);
+        assert_eq!(
+            painted_texts(&placed.emit_full().commands),
+            ["the ", "hyphen-", "ation"]
+        );
+    }
+
+    /// Registry-less layout has no measurer, so a head's width cannot be
+    /// known and nothing is cut, however the style is set — the same way
+    /// `split_oversized_fragments` degrades without one.
+    #[test]
+    fn without_a_measurer_nothing_is_hyphenated() {
+        let frags = hyphenating_paragraph();
+        let style = hyphenating_style();
+        let constraints = body_constraints(66.0);
+        let placed = place_paragraph(&frags, &constraints, &style, Pt::new(14.0), None);
+        assert_eq!(placed.line_count(), 2);
+        assert_eq!(
+            painted_texts(&placed.emit_full().commands),
+            ["the ", "hyphenation"]
+        );
+    }
+
+    /// The control for the test above it: the same fragments and measurer
+    /// under a style without the setting are never hyphenated.
+    #[test]
+    fn without_the_setting_a_measurer_changes_nothing() {
+        let frags = hyphenating_paragraph();
+        let style = ParagraphStyle::default();
+        let constraints = body_constraints(66.0);
+        let placed = place_paragraph(
+            &frags,
+            &constraints,
+            &style,
+            Pt::new(14.0),
+            Some(&six_per_char),
+        );
+        assert_eq!(
+            painted_texts(&placed.emit_full().commands),
+            ["the ", "hyphenation"]
+        );
     }
 
     /// A minimal `§22.1` fraction fragment, for testing the paint side of

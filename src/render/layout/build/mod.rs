@@ -239,6 +239,7 @@ fn build_non_story_content(
                     // `None` keeps one rule: whether a paragraph is a heading is
                     // decided in one place, for every path.
                     convert::paragraph_outline(p, &props, state),
+                    &ctx.resolved.hyphenation,
                 );
 
                 // Check for VML absolute positioning in Pict inlines.

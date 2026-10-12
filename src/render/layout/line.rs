@@ -1602,7 +1602,9 @@ mod tests {
         ];
         let (lines, frags) = fit(frags, 66.0, Some(&ctx(0.0, 0, false)));
         assert_eq!(lines, [vec!["the "], vec!["hyphenation"], vec!["s"]]);
-        assert!(frags.iter().all(|f| break_after_of(f) != BreakAfter::Hyphenated));
+        assert!(frags
+            .iter()
+            .all(|f| break_after_of(f) != BreakAfter::Hyphenated));
     }
 
     /// A run with no `w:lang` this engine has patterns for is never
