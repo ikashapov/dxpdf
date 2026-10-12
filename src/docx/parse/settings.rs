@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::docx::dimension::{Dimension, Twips};
 use crate::docx::error::Result;
-use crate::docx::model::{DocumentSettings, HyphenationSettings, RevisionSaveId};
+use crate::docx::model::{DocumentSettings, RevisionSaveId};
 use crate::docx::parse::primitives::units::deserialize_nonnegative_dimension;
 use crate::docx::parse::primitives::OnOff;
 use crate::docx::parse::serde_xml::from_xml;
@@ -117,6 +117,7 @@ impl From<SettingsXml> for DocumentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docx::model::HyphenationSettings;
 
     const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
