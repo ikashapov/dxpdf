@@ -564,6 +564,7 @@ mod tests {
                 text_scale: 1.0,
                 underline_position: Pt::ZERO,
                 underline_thickness: Pt::ZERO,
+                hyphenation: None,
             }),
             color: RgbColor::BLACK,
             width: Pt::new(width),
@@ -605,6 +606,7 @@ mod tests {
             text_scale: 1.0,
             underline_position: Pt::ZERO,
             underline_thickness: Pt::ZERO,
+            hyphenation: None,
         });
         let metrics = TextMetrics {
             ascent: Pt::new(10.0),
@@ -2418,6 +2420,7 @@ mod tests {
             text_scale: 1.0,
             underline_position: Pt::ZERO,
             underline_thickness: Pt::ZERO,
+            hyphenation: None,
         })
     }
 
