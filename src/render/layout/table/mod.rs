@@ -21,6 +21,7 @@ mod measure;
 mod split;
 mod types;
 
+pub(crate) use borders::emit_border_rect;
 pub use grid::compute_column_widths;
 pub use types::*;
 
@@ -603,6 +604,10 @@ mod tests {
                 text_scale: 1.0,
                 underline_position: Pt::ZERO,
                 underline_thickness: Pt::ZERO,
+                strike_lines: 0,
+                strike_position: Pt::ZERO,
+                strike_thickness: Pt::ZERO,
+                hyphenation: None,
             }),
             color: RgbColor::BLACK,
             width: Pt::new(width),

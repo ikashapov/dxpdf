@@ -327,12 +327,20 @@ pub(super) fn base_direction(props: &model::ParagraphProperties) -> BaseDirectio
     }
 }
 
+/// `hyphenation` is the document's §17.15.1.10 setting
+/// (`ResolvedDocument::hyphenation`); it is combined here with the
+/// paragraph's cascaded §17.3.1.34 `w:suppressAutoHyphens`, because the
+/// clause makes the paragraph's exemption a §17.7.2 property — "determined by
+/// the setting previously set at any level of the style hierarchy" — and
+/// `props` is that cascade's result. A document with the setting off
+/// hyphenates nothing regardless of what any paragraph says.
 pub(super) fn paragraph_style_from_props(
     props: &model::ParagraphProperties,
     default_tab_stop: Pt,
     auto_fit: crate::render::layout::ShapeAutoFit,
     (locale, decimal_separator): (crate::render::resolve::locale::Locale, char),
     outline: Option<crate::render::layout::draw_command::OutlineHeading>,
+    hyphenation: &crate::model::HyphenationSettings,
 ) -> ParagraphStyle {
     let indent_left = props
         .indentation
@@ -426,12 +434,26 @@ pub(super) fn paragraph_style_from_props(
         keep_lines: props.keep_lines.unwrap_or(false),
         // §17.3.1.44: Word enables widow/orphan control by default.
         widow_control: props.widow_control.unwrap_or(true),
+        // §17.3.1.32: never specified in the hierarchy = snap. Whether a grid
+        // exists to snap to is the section's business — the body page layout
+        // stamps `line_grid` at placement time (see the field docs).
+        snap_to_grid: props.snap_to_grid.unwrap_or(true),
+        line_grid: None,
         contextual_spacing: props.contextual_spacing.unwrap_or(false),
         style_id: None, // set by caller when available
         page_floats: Vec::new(),
         page_y: crate::render::dimension::Pt::ZERO,
         page_x: crate::render::dimension::Pt::ZERO,
         page_content_width: crate::render::dimension::Pt::ZERO,
+        // §17.15.1.10 and §17.3.1.34 (issue #158). `Some(true)` is the
+        // exemption; `None` and `Some(false)` both inherit the document.
+        hyphenation: (hyphenation.enabled && props.suppress_auto_hyphens != Some(true)).then(
+            || crate::render::layout::paragraph::AutoHyphenation {
+                zone: Pt::from(hyphenation.zone),
+                consecutive_limit: hyphenation.consecutive_limit,
+                no_caps: hyphenation.no_caps,
+            },
+        ),
     }
 }
 
@@ -487,7 +509,7 @@ pub(super) fn resolve_paragraph_borders(
 /// bounded (position, thickness and colour are all preserved; only the stroke
 /// pattern is lost) but it is not free, so each distinct style is reported once
 /// per render via `state.warned_border_styles`.
-fn convert_model_border(b: &model::Border, state: &mut BuildState) -> TableBorderLine {
+pub(crate) fn convert_model_border(b: &model::Border, state: &mut BuildState) -> TableBorderLine {
     let style = match b.style {
         model::BorderStyle::Double => TableBorderStyle::Double,
         model::BorderStyle::Single => TableBorderStyle::Single,
@@ -595,6 +617,55 @@ pub(super) fn populate_image_data(
                     *image_data = Some(entry.clone());
                 }
             }
+        }
+    }
+}
+
+/// Issue #155: render each collected [`Fragment::Scene`]'s commands. Runs
+/// beside `populate_image_data`, and for the same reason media population
+/// does: the payload (here the resolved theme and measurer, there the media
+/// map) is not available during fragment collection.
+pub(super) fn populate_scenes(
+    fragments: &mut [Fragment],
+    ctx: &super::BuildContext,
+    state: &super::BuildState,
+) {
+    for frag in fragments.iter_mut() {
+        if let Fragment::Scene {
+            size,
+            source,
+            commands,
+        } = frag
+        {
+            if !commands.is_empty() {
+                continue;
+            }
+            let extent = *size;
+            let built = match source {
+                crate::render::layout::fragment::SceneSource::Diagram(id) => {
+                    match ctx.resolved.diagrams.get(id) {
+                        Some(d) => super::graphic_scene::build_diagram_scene(d, extent, ctx, state),
+                        None => {
+                            log::warn!(
+                                "[build] diagram payload {id:?} missing from Document::diagrams"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                crate::render::layout::fragment::SceneSource::Chart(id) => {
+                    match ctx.resolved.charts.get(id) {
+                        Some(c) => super::chart_scene::build_chart_scene(c, extent, ctx, state),
+                        None => {
+                            log::warn!(
+                                "[build] chart payload {id:?} missing from Document::charts"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+            *commands = std::rc::Rc::new(built);
         }
     }
 }
@@ -887,17 +958,24 @@ fn wingdings_pua_to_unicode(code: u32) -> Option<char> {
     })
 }
 
-/// Populate underline position/thickness from Skia font metrics.
+/// Populate underline and strike position/thickness from Skia font metrics.
 pub(super) fn populate_underline_metrics(fragments: &mut [Fragment], measurer: &TextMeasurer) {
     for frag in fragments.iter_mut() {
         if let Fragment::Text { font, .. } = frag {
-            if font.underline {
-                // Underlined runs only; `make_mut` clones the shared font so
+            if font.underline || font.strike_lines > 0 {
+                // Decorated runs only; `make_mut` clones the shared font so
                 // the metrics can be written back.
                 let fp = std::rc::Rc::make_mut(font);
-                let (pos, thickness) = measurer.underline_metrics(fp);
-                fp.underline_position = pos;
-                fp.underline_thickness = thickness;
+                if fp.underline {
+                    let (pos, thickness) = measurer.underline_metrics(fp);
+                    fp.underline_position = pos;
+                    fp.underline_thickness = thickness;
+                }
+                if fp.strike_lines > 0 {
+                    let (pos, thickness) = measurer.strike_metrics(fp);
+                    fp.strike_position = pos;
+                    fp.strike_thickness = thickness;
+                }
             }
         }
     }
@@ -965,6 +1043,49 @@ mod tests {
     use crate::model::{Border, BorderStyle, Color, ParagraphBorders, ParagraphProperties};
     use crate::render::resolve::color::rgb_from_u32;
 
+    /// §17.3.1.34 against §17.15.1.10 (issue #158): the document turns
+    /// hyphenation on, and a paragraph may exempt itself — "If omitted on a
+    /// given paragraph, its value is determined by the setting previously set
+    /// at any level of the style hierarchy … If never specified … the default
+    /// hyphenation settings for the document, as specified in
+    /// autoHyphenation, shall apply." So on the cascaded properties:
+    /// `Some(true)` is exempt, `None` and `Some(false)` inherit the document,
+    /// and a document with the setting off hyphenates nothing regardless.
+    #[test]
+    fn suppress_auto_hyphens_exempts_the_paragraph() {
+        use crate::model::HyphenationSettings;
+        let style = |suppress: Option<bool>, enabled: bool| {
+            paragraph_style_from_props(
+                &ParagraphProperties {
+                    suppress_auto_hyphens: suppress,
+                    ..Default::default()
+                },
+                Pt::new(36.0),
+                crate::render::layout::ShapeAutoFit::NONE,
+                (crate::render::resolve::locale::Locale::English, '.'),
+                None,
+                &HyphenationSettings {
+                    enabled,
+                    zone: Dimension::new(425),
+                    consecutive_limit: 2,
+                    no_caps: true,
+                },
+            )
+            .hyphenation
+        };
+        let on = style(None, true).expect("the document setting reaches the paragraph");
+        assert_eq!(on.zone.raw(), 425.0 / 20.0, "twips to points");
+        assert_eq!(on.consecutive_limit, 2);
+        assert!(on.no_caps);
+        assert!(
+            style(Some(false), true).is_some(),
+            "an explicit `0` inherits"
+        );
+        assert!(style(Some(true), true).is_none(), "§17.3.1.34 exempts");
+        assert!(style(None, false).is_none(), "§17.15.1.10 omitted: off");
+        assert!(style(Some(false), false).is_none());
+    }
+
     /// An all-empty ResolvedDocument for exercising `resolve_paragraph_defaults`.
     fn empty_resolved() -> ResolvedDocument {
         use std::collections::HashMap;
@@ -974,6 +1095,8 @@ mod tests {
             numbering: HashMap::new(),
             font_families: Vec::new(),
             media: HashMap::new(),
+            diagrams: Default::default(),
+            charts: Default::default(),
             embedded_fonts: Vec::new(),
             pic_bullets: HashMap::new(),
             theme: None,
@@ -985,6 +1108,11 @@ mod tests {
             endnotes: HashMap::new(),
             even_and_odd_headers: false,
             default_tab_stop: Dimension::new(720),
+            show_ins_del_marks: true,
+            show_comment_marks: true,
+            revision_colors: Default::default(),
+            comments: Default::default(),
+            hyphenation: Default::default(),
         }
     }
 
@@ -995,6 +1123,7 @@ mod tests {
             mark_run_properties: None,
             content: Vec::new(),
             rsids: model::ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }
     }
 
@@ -1006,6 +1135,8 @@ mod tests {
             properties: model::RunProperties::default(),
             content: vec![model::RunElement::Text(text.to_string())],
             rsids: model::RevisionIds::default(),
+            revision: None,
+            comment: None,
         }))
     }
 

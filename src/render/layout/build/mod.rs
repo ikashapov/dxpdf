@@ -5,8 +5,10 @@
 //! content, which may contain nested tables.
 
 pub(super) mod block;
+pub(super) mod chart_scene;
 pub(super) mod convert;
 pub(super) mod floating;
+pub(super) mod graphic_scene;
 pub(super) mod list_label;
 pub(super) mod table;
 
@@ -61,8 +63,14 @@ pub struct BuildState {
     pub footnotes: crate::render::layout::fragment::FootnoteTracker,
     /// Sequential endnote display number (i, ii, iii...).
     pub endnote_counter: u32,
-    /// Per-(numId, level) running counters for list labels.
-    pub list_counters: HashMap<(model::NumId, u8), u32>,
+    /// §17.9.2: per-(abstractNumId, level) running counters for list labels.
+    /// The counter belongs to the *abstract* definition, so every `w:num`
+    /// instance over one `w:abstractNum` advances the same sequence.
+    pub list_counters: HashMap<(model::AbstractNumId, u8), u32>,
+    /// §17.9.28: the (numId, level) pairs whose `w:startOverride` has already
+    /// fired. The restart happens once, when the instance is first used; after
+    /// that the instance simply continues the shared sequence.
+    pub started_overrides: std::collections::HashSet<(model::NumId, u8)>,
     /// §17.3.1.19: the document outline being accumulated.
     pub outline: OutlineCollector,
     /// Field evaluation context (page number, total pages).
@@ -94,6 +102,10 @@ pub struct BuildState {
     /// layout applies per *table*, not per row. Reported once per render for
     /// the same reason as `warned_border_styles`.
     pub warned_row_cell_spacing: bool,
+    /// §17.6.10: the section asked for an art page border, which is declined
+    /// (drawn as nothing, like LibreOffice). Once per render — a document
+    /// with an art border has it on up to four edges of every section.
+    pub warned_art_page_border: bool,
     /// §17.4.85: a `w:vMerge w:val="continue"` cell had no `restart` above it
     /// and was rendered as an ordinary cell. Malformed input, so it is worth a
     /// `RUST_LOG=warn` line — but once per render, not once per cell: a table
@@ -147,6 +159,42 @@ pub fn build_document_endnotes(
     let mut endnotes = Vec::new();
     collect_endnotes(ctx, state, &mut endnotes);
     endnotes
+}
+
+/// Issue #154: build every comment's body once, for the balloon pass — the
+/// same shape as the endnote prebuild above. Keyed by comment id; paragraphs
+/// come back as (fragments, style) pairs ready for `layout_paragraph` at
+/// balloon width. Ids are processed in order so any shared build state stays
+/// deterministic.
+pub fn build_comment_bodies(
+    ctx: &BuildContext,
+    state: &mut BuildState,
+) -> std::collections::HashMap<crate::model::CommentId, Vec<(Vec<Fragment>, ParagraphStyle)>> {
+    let mut out = std::collections::HashMap::new();
+    let mut ids: Vec<_> = ctx.resolved.comments.keys().copied().collect();
+    ids.sort();
+    for id in ids {
+        let comment = &ctx.resolved.comments[&id];
+        // The note builder lays out paragraphs only; a table in a comment
+        // body is dropped, like a table in a footnote. Say so rather than
+        // silently shrinking the balloon.
+        if comment
+            .content
+            .iter()
+            .any(|b| !matches!(b, crate::model::Block::Paragraph(_)))
+        {
+            log::warn!(
+                "comment {:?}: non-paragraph content (a table?) is not rendered in the balloon",
+                id
+            );
+        }
+        let paras = block::build_note_content("", &comment.content, ctx, state)
+            .into_iter()
+            .map(|(_, frags, style)| (frags, style))
+            .collect();
+        out.insert(id, paras);
+    }
+    out
 }
 
 /// Collected header/footer content with layout metadata.
@@ -239,6 +287,7 @@ fn build_non_story_content(
                     // `None` keeps one rule: whether a paragraph is a heading is
                     // decided in one place, for every path.
                     convert::paragraph_outline(p, &props, state),
+                    &ctx.resolved.hyphenation,
                 );
 
                 // Check for VML absolute positioning in Pict inlines.
@@ -325,7 +374,7 @@ fn build_non_story_content(
                 });
             }
             Block::Table(t) => {
-                let built = build_table(t, available_width, ctx, state);
+                let built = build_table(t, available_width, None, ctx, state);
                 layout_blocks.push(LayoutBlock::Table {
                     rows: built.rows,
                     col_widths: built.col_widths,
@@ -371,6 +420,8 @@ mod tests {
             numbering: HashMap::new(),
             font_families: Vec::new(),
             media: HashMap::new(),
+            diagrams: Default::default(),
+            charts: Default::default(),
             embedded_fonts: Vec::new(),
             pic_bullets: HashMap::new(),
             theme: None,
@@ -382,6 +433,11 @@ mod tests {
             endnotes: HashMap::new(),
             even_and_odd_headers: false,
             default_tab_stop: Dimension::new(720),
+            show_ins_del_marks: true,
+            show_comment_marks: true,
+            revision_colors: Default::default(),
+            comments: Default::default(),
+            hyphenation: Default::default(),
         }
     }
 
@@ -392,6 +448,7 @@ mod tests {
             mark_run_properties: None,
             content: Vec::new(),
             rsids: model::ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))
     }
 
@@ -459,7 +516,7 @@ mod tests {
     #[test]
     fn speculatively_rolls_back_document_order_counters() {
         let mut state = BuildState::default();
-        let num = (model::NumId::new(1), 0u8);
+        let num = (model::AbstractNumId::new(1), 0u8);
         state.endnote_counter = 7;
         state.list_counters.insert(num, 3);
         state.outline = OutlineCollector::Collecting(5);
@@ -468,7 +525,8 @@ mod tests {
         state.speculatively(|s| {
             s.endnote_counter += 1;
             *s.list_counters.entry(num).or_default() += 1;
-            s.list_counters.insert((model::NumId::new(99), 0), 42);
+            s.list_counters
+                .insert((model::AbstractNumId::new(99), 0), 42);
             s.next_outline_node_id();
             s.page_config = crate::render::layout::page::PageConfig::default();
             s.page_config.margins.left = Pt::new(999.0);
@@ -483,7 +541,7 @@ mod tests {
         assert!(
             !state
                 .list_counters
-                .contains_key(&(model::NumId::new(99), 0)),
+                .contains_key(&(model::AbstractNumId::new(99), 0)),
             "a counter the speculative build *created* must not survive it"
         );
         assert_eq!(
@@ -586,7 +644,8 @@ struct DocumentPosition {
     page_config: crate::render::layout::page::PageConfig,
     footnotes: crate::render::layout::fragment::FootnoteTracker,
     endnote_counter: u32,
-    list_counters: HashMap<(model::NumId, u8), u32>,
+    list_counters: HashMap<(model::AbstractNumId, u8), u32>,
+    started_overrides: std::collections::HashSet<(model::NumId, u8)>,
     outline: OutlineCollector,
     field_ctx: crate::render::layout::fragment::FieldContext,
     shape_default_text_color: Option<crate::render::resolve::color::RgbColor>,
@@ -601,6 +660,7 @@ impl DocumentPosition {
             footnotes,
             endnote_counter,
             list_counters,
+            started_overrides,
             outline,
             field_ctx,
             shape_default_text_color,
@@ -610,6 +670,7 @@ impl DocumentPosition {
             // `BuildState::speculatively` for why it is not rolled back.
             warned_border_styles: _,
             warned_row_cell_spacing: _,
+            warned_art_page_border: _,
             warned_orphan_vmerge: _,
         } = state;
         Self {
@@ -617,6 +678,7 @@ impl DocumentPosition {
             footnotes: footnotes.clone(),
             endnote_counter: *endnote_counter,
             list_counters: list_counters.clone(),
+            started_overrides: started_overrides.clone(),
             outline: *outline,
             field_ctx: *field_ctx,
             shape_default_text_color: *shape_default_text_color,
@@ -630,6 +692,10 @@ impl DocumentPosition {
         state.footnotes = self.footnotes;
         state.endnote_counter = self.endnote_counter;
         state.list_counters = self.list_counters;
+        // §17.9.28: a speculative pass that consumed an instance's one-shot
+        // restart must give it back, or the real pass would renumber from the
+        // shared counter instead of from the override.
+        state.started_overrides = self.started_overrides;
         state.outline = self.outline;
         state.field_ctx = self.field_ctx;
         state.shape_default_text_color = self.shape_default_text_color;

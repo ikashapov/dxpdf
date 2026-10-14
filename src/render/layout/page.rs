@@ -30,6 +30,10 @@ pub struct PageConfig {
     pub footer_margin: Pt,
     /// §17.6.4: column layout. Single-element vec for normal single-column.
     pub columns: Vec<ColumnGeometry>,
+    /// §17.6.4 `w:sep`: draw a vertical rule down each gutter. Word draws it
+    /// only between columns that actually received content, and only for the
+    /// height those columns used — see `paint_column_separators`.
+    pub column_separator: bool,
     /// §17.6.6 `w:bidi`: which side of the content area is the section's
     /// **leading** margin.
     ///
@@ -48,6 +52,13 @@ pub struct PageConfig {
     /// table placement — §17.4.28 `jc` and §17.4.50 `tblInd` — consults this
     /// today.
     pub base_direction: crate::i18n::bidi::BaseDirection,
+    /// §17.6.5: the section's applied line grid, as the pitch each body line's
+    /// advance is quantized to. `None` for the overwhelmingly common case —
+    /// every Word document carries `<w:docGrid w:linePitch="360"/>`, and it is
+    /// the `@w:type` that decides whether that pitch *applies*: absent or
+    /// `default` means "no document grid" (§17.18.14 spells it out: the
+    /// element is kept so the settings survive the grid being re-enabled).
+    pub line_grid: Option<Pt>,
 }
 
 impl Default for PageConfig {
@@ -63,11 +74,13 @@ impl Default for PageConfig {
             ),
             header_margin: SPEC_DEFAULT_MARGIN / 2.0,
             footer_margin: SPEC_DEFAULT_MARGIN / 2.0,
+            column_separator: false,
             columns: vec![ColumnGeometry {
                 x_offset: Pt::ZERO,
                 width: content_width,
             }],
             base_direction: crate::i18n::bidi::BaseDirection::Ltr,
+            line_grid: None,
         }
     }
 }
@@ -111,13 +124,38 @@ impl PageConfig {
         // page whose margins exceed its width yields zero-width columns rather
         // than negative ones.
         cfg.columns = compute_columns(cfg.content_width(), sect.columns.get());
+        cfg.column_separator = sect
+            .columns
+            .get()
+            .and_then(|c| c.separator)
+            .unwrap_or(false);
 
         // §17.6.6: absent or `w:val="0"` leaves the section left-to-right.
         if sect.bidi == Some(true) {
             cfg.base_direction = crate::i18n::bidi::BaseDirection::Rtl;
         }
+        cfg.line_grid = sect.doc_grid.get().and_then(Self::applied_line_pitch);
 
         cfg
+    }
+
+    /// §17.6.5 / §17.18.14: the line pitch this grid actually applies, if any.
+    ///
+    /// `lines`, `linesAndChars` and `snapToChars` all snap lines to the pitch
+    /// (they differ in the *character* grid, which is not implemented — see
+    /// `render::layout::paragraph::line_emit::resolve_line_metrics`). `default`
+    /// and an absent type carry the pitch without applying it. A pitch under
+    /// one twip cannot grid anything and reads as no grid, matching
+    /// LibreOffice's Word-compat fallback (tdf#149089: "if line pitch is not
+    /// defined → fallback to none").
+    fn applied_line_pitch(grid: &crate::model::DocGrid) -> Option<Pt> {
+        use crate::model::DocGridType;
+        match grid.grid_type {
+            Some(DocGridType::Lines | DocGridType::LinesAndChars | DocGridType::SnapToChars) => {
+                grid.line_pitch.filter(|p| p.raw() >= 1).map(Pt::from)
+            }
+            Some(DocGridType::Default) | None => None,
+        }
     }
 
     /// Available width for body content (page width minus left and right
@@ -201,9 +239,8 @@ fn clamp_column_count(requested: u32, content_width: Pt, space: Pt) -> usize {
 /// present — Word writes `equalWidth="0"` whenever it means the individual
 /// definitions to win.
 ///
-/// **Tier 0:** §17.6.4 `w:sep` — the vertical rule drawn between columns — is
-/// parsed onto `model::Columns::separator` but never drawn. Position and width
-/// of the columns themselves are unaffected; only the divider line is missing.
+/// §17.6.4 `w:sep` does not affect the geometry here — it is carried on
+/// [`PageConfig::column_separator`] and drawn by `paint_column_separators`.
 fn compute_columns(content_width: Pt, columns: Option<&Columns>) -> Vec<ColumnGeometry> {
     let single = || {
         vec![ColumnGeometry {
@@ -274,6 +311,42 @@ mod tests {
     use super::*;
     use crate::model::dimension::{Dimension, Twips};
     use crate::model::{Dup, PageMargins, PageSize};
+
+    /// §17.18.14: `type` decides whether the pitch applies. Every Word
+    /// document carries `<w:docGrid w:linePitch="360"/>` with no type — that
+    /// must never grid a page.
+    #[test]
+    fn line_grid_applies_only_for_applied_grid_types() {
+        use crate::model::{DocGrid, DocGridType};
+        let sect = |ty: Option<DocGridType>, pitch: Option<i64>| {
+            let s = crate::model::SectionProperties {
+                doc_grid: Dup::from(Some(DocGrid {
+                    grid_type: ty,
+                    line_pitch: pitch.map(Dimension::new),
+                    char_space: None,
+                })),
+                ..Default::default()
+            };
+            PageConfig::from_section(&s).line_grid
+        };
+        assert_eq!(sect(None, Some(360)), None, "type absent = grid off");
+        assert_eq!(sect(Some(DocGridType::Default), Some(360)), None);
+        assert_eq!(
+            sect(Some(DocGridType::Lines), Some(360)),
+            Some(Pt::new(18.0))
+        );
+        assert_eq!(
+            sect(Some(DocGridType::LinesAndChars), Some(312)),
+            Some(Pt::new(15.6))
+        );
+        assert_eq!(
+            sect(Some(DocGridType::SnapToChars), Some(360)),
+            Some(Pt::new(18.0))
+        );
+        assert_eq!(sect(Some(DocGridType::Lines), None), None, "no pitch");
+        assert_eq!(sect(Some(DocGridType::Lines), Some(0)), None);
+        assert_eq!(sect(Some(DocGridType::Lines), Some(-360)), None);
+    }
 
     #[test]
     fn default_is_us_letter() {

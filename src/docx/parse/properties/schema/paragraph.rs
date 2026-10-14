@@ -35,6 +35,9 @@ pub(crate) struct ParsedPPr {
     pub style_id: Option<StyleId>,
     pub run_properties: Option<RunProperties>,
     pub section_properties: Option<crate::docx::model::SectionProperties>,
+    /// §17.13.5.15: the paragraph mark itself is tracked-deleted — how Word
+    /// spells a whole-paragraph delete (issue #154).
+    pub mark_deleted: bool,
 }
 
 /// Schema for the `<w:pPr>` element (§17.3.1).
@@ -86,6 +89,8 @@ pub(crate) struct PPrXml {
     keep_lines: Vec<OnOff>,
     #[serde(rename = "widowControl", default)]
     widow_control: Vec<OnOff>,
+    #[serde(rename = "snapToGrid", default)]
+    snap_to_grid: Vec<OnOff>,
     #[serde(rename = "pageBreakBefore", default)]
     page_break_before: Vec<OnOff>,
     #[serde(rename = "suppressAutoHyphens", default)]
@@ -296,12 +301,15 @@ impl PPrXml {
             .into_value()
             .map(|v| StyleId::new(v.val));
 
-        let (run_properties, _run_style_id) = match Dup::from(self.r_pr).into_value() {
+        let (run_properties, mark_deleted) = match Dup::from(self.r_pr).into_value() {
             Some(r) => {
-                let (rp, sid) = r.split();
-                (Some(rp), sid)
+                // §17.13.5.15: read the mark deletion before `split` consumes
+                // the bag.
+                let mark_deleted = r.mark_deleted();
+                let (rp, _sid) = r.split();
+                (Some(rp), mark_deleted)
             }
-            None => (None, None),
+            None => (None, false),
         };
         // rStyle inside pPr/rPr applies to the paragraph mark only; the
         // legacy parser discards this style id too.
@@ -324,6 +332,7 @@ impl PPrXml {
             keep_next: last_toggle(self.keep_next),
             keep_lines: last_toggle(self.keep_lines),
             widow_control: last_toggle(self.widow_control),
+            snap_to_grid: last_toggle(self.snap_to_grid),
             page_break_before: last_toggle(self.page_break_before),
             suppress_auto_hyphens: last_toggle(self.suppress_auto_hyphens),
             contextual_spacing: last_toggle(self.contextual_spacing),
@@ -343,6 +352,7 @@ impl PPrXml {
             style_id,
             run_properties,
             section_properties,
+            mark_deleted,
         }
     }
 }
@@ -528,6 +538,18 @@ mod tests {
         assert_eq!(p.word_wrap, Some(true));
         assert_eq!(p.auto_space_de, Some(true));
         assert_eq!(p.auto_space_dn, Some(true));
+    }
+
+    /// §17.3.1.32: the grid opt-out is `<w:snapToGrid w:val="0"/>`; a bare
+    /// element re-asserts the default (on).
+    #[test]
+    fn snap_to_grid_toggle() {
+        let r = parse(r#"<pPr><snapToGrid val="0"/></pPr>"#);
+        assert_eq!(r.properties.snap_to_grid, Some(false));
+        let r = parse(r#"<pPr><snapToGrid/></pPr>"#);
+        assert_eq!(r.properties.snap_to_grid, Some(true));
+        let r = parse(r#"<pPr/>"#);
+        assert_eq!(r.properties.snap_to_grid, None);
     }
 
     #[test]

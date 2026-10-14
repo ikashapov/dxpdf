@@ -150,12 +150,15 @@ fn build_analysis(fragments: &[Fragment]) -> (String, Vec<Option<std::ops::Range
                 match other {
                     Fragment::Tab { .. } | Fragment::PTab { .. } => text.push('\t'),
                     Fragment::Image { .. }
+                    | Fragment::Scene { .. }
                     | Fragment::Emoji { .. }
                     | Fragment::MathFraction { .. } => text.push(OBJECT),
                     Fragment::LineBreak { .. }
                     | Fragment::PageBreak { .. }
                     | Fragment::ColumnBreak => text.push('\n'),
-                    Fragment::Bookmark { .. } | Fragment::Text { .. } => {}
+                    Fragment::Bookmark { .. }
+                    | Fragment::CommentAnchor(_)
+                    | Fragment::Text { .. } => {}
                 }
                 ranges.push(None);
             }
@@ -317,6 +320,10 @@ mod tests {
             text_scale: 1.0,
             underline_position: Pt::ZERO,
             underline_thickness: Pt::ZERO,
+            strike_lines: 0,
+            strike_position: Pt::ZERO,
+            strike_thickness: Pt::ZERO,
+            hyphenation: None,
         })
     }
 

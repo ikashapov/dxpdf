@@ -14,11 +14,18 @@ use crate::render::geometry::PtOffset;
 ///
 /// When `style.page_floats` is non-empty each line is fitted individually so
 /// the available width can vary depending on the line's absolute y position.
-/// When there are no floats a single call to `fit_lines_with_first` is used.
+/// When there are no floats a single call to `fit_lines_in` is used.
+///
+/// `fragments` is the paragraph's effective vector, mutable because
+/// §17.15.1.10 hyphenation splices a cut word into it (see
+/// `line::fit_lines_in`); the placements index the vector as it is *after*
+/// this returns. `hyphenation` is `None` for every paragraph the setting does
+/// not reach, and then nothing here differs from before issue #158.
 pub(super) fn compute_line_placements(
-    fragments: &[Fragment],
+    fragments: &mut std::borrow::Cow<'_, [Fragment]>,
     style: &ParagraphStyle,
     params: &LineLayoutParams,
+    hyphenation: Option<&super::super::line::HyphenationCtx<'_>>,
 ) -> Vec<LinePlacement> {
     let content_width = params.content_width;
     let first_line_adjustment = params.first_line_adjustment;
@@ -49,12 +56,14 @@ pub(super) fn compute_line_placements(
         } else {
             content_width
         };
-        return super::super::line::fit_lines_with_first(
+        return super::super::line::fit_lines_in(
             fragments,
+            super::super::line::FitWindow::ALL,
             first_line_width,
             remaining_width,
             ptab_geometry,
             bidi_rtl,
+            hyphenation,
         )
         .into_iter()
         .map(|line| LinePlacement {
@@ -96,8 +105,11 @@ pub(super) fn compute_line_placements(
 
         // Fit one line at this width. Each call fits exactly one line, so the
         // geometry is *this* line's: its own float narrowing, and the
-        // first-line indent only when it really is the first.
-        let remaining = &fragments[frag_idx..];
+        // first-line indent only when it really is the first. The window
+        // starts at `frag_idx` in the whole vector rather than slicing it,
+        // because a hyphenated word is spliced into that vector, and it stops
+        // after one line so nothing beyond this line is cut at a width the
+        // next iteration will not use.
         let line_geometry = PTabGeometry {
             indent_first_line: if is_first {
                 ptab_geometry.indent_first_line
@@ -108,24 +120,19 @@ pub(super) fn compute_line_placements(
             float_right: fr,
             ..ptab_geometry
         };
-        let fitted = super::super::line::fit_lines_with_first(
-            remaining,
+        let fitted = super::super::line::fit_lines_in(
+            fragments,
+            super::super::line::FitWindow {
+                start: frag_idx,
+                max_lines: Some(1),
+            },
             line_width,
             line_width,
             line_geometry,
             bidi_rtl,
+            hyphenation,
         );
-        let fitted_line = if let Some(first) = fitted.into_iter().next() {
-            super::super::line::FittedLine {
-                start: first.start + frag_idx,
-                end: first.end + frag_idx,
-                width: first.width,
-                height: first.height,
-                text_height: first.text_height,
-                ascent: first.ascent,
-                has_break: first.has_break,
-            }
-        } else {
+        let Some(fitted_line) = fitted.into_iter().next() else {
             break;
         };
 
@@ -139,7 +146,7 @@ pub(super) fn compute_line_placements(
         } else {
             default_line_height
         };
-        let lh = resolve_line_height(natural, text_h, &style.line_spacing, style.auto_fit);
+        let lh = resolve_line_metrics(natural, text_h, style).advance;
 
         frag_idx = fitted_line.end;
         placements.push(LinePlacement {
@@ -494,17 +501,31 @@ fn justification_extra_after(
 ///
 /// The unit is a grapheme cluster, shared with the painter and with `w:spacing`
 /// measurement — see [`crate::render::spacing`], which explains why it is a
-/// cluster and not a scalar (nor, yet, a shaped cluster). Counting scalars
-/// would allocate a gap between a letter and its own combining mark.
+/// cluster and not a scalar. Counting scalars would allocate a gap between a
+/// letter and its own combining mark.
+///
+/// For a **shaped** fragment the unit is the shaped cluster (issue #153),
+/// read from the count `layout::fragment::shape` measured and stored — this
+/// function has fragments, not a measurer. A terminal fragment's trailing
+/// whitespace is subtracted per grapheme cluster, which for whitespace is the
+/// same count the shaper would report: a space neither joins nor merges into
+/// a neighbouring shaped cluster.
 ///
 /// An image or emoji cluster is one indivisible unit; everything else — tabs,
 /// breaks, bookmarks — contributes none, so a line of them has nothing to
 /// distribute between.
 fn distribution_unit_count(fragment: &Fragment, terminal: bool) -> usize {
     match fragment {
-        Fragment::Text { text, .. } => {
-            let text = if terminal { text.trim_end() } else { text };
-            crate::render::spacing::unit_count(text)
+        Fragment::Text { text, shaped, .. } => {
+            let counted = if terminal { text.trim_end() } else { text };
+            match shaped {
+                Some(s) => {
+                    let trailing_ws = &text[counted.len()..];
+                    s.unit_count
+                        .saturating_sub(crate::render::spacing::unit_count(trailing_ws))
+                }
+                None => crate::render::spacing::unit_count(counted),
+            }
         }
         Fragment::Image { .. } | Fragment::Emoji { .. } | Fragment::MathFraction { .. } => 1,
         _ => 0,
@@ -644,12 +665,8 @@ pub(super) fn emit_line_commands(
         } else {
             default_line_height
         };
-        let line_height = resolve_line_height(
-            natural_height,
-            text_height,
-            &style.line_spacing,
-            style.auto_fit,
-        );
+        let line_metrics = resolve_line_metrics(natural_height, text_height, style);
+        let line_height = line_metrics.advance;
 
         // Alignment offset — computed relative to the line's available width.
         let float_reduction = lp.float_left + lp.float_right;
@@ -747,6 +764,15 @@ pub(super) fn emit_line_commands(
         let line_content_start = commands.len();
         let mut line_backgrounds: Vec<DrawCommand> = Vec::new();
         let mut line_stripes: Vec<DrawCommand> = Vec::new();
+        // §17.6.5: center the line's natural box inside its grid slot(s) by
+        // walking the cursor down to the box top before anything of the line
+        // is emitted — every per-line y below (baseline, run shading and
+        // borders, underlines, images) derives from `cursor_y`, so one shift
+        // moves the whole box coherently. The advance at the loop's end pays
+        // the remainder, keeping the full slot consumed. Bar rules stay above:
+        // a §17.18.85 rule spans the line's whole vertical extent, not the
+        // centered box. Zero when no grid applies.
+        *cursor_y += line_metrics.baseline_shift;
 
         // Emit text commands for this line.
         let mut pen = if mirrored {
@@ -929,7 +955,7 @@ pub(super) fn emit_line_commands(
                             italic: font.italic,
                             color: copy_color,
                             text_scale: font.text_scale,
-                            shaped: *shaped,
+                            shaped: shaped.map(|s| s.direction),
                             // LibreOffice VCL's `ImplDrawSpecialText` (the
                             // reference this module follows) always draws
                             // the shadow/relief copy as a solid filled
@@ -951,7 +977,7 @@ pub(super) fn emit_line_commands(
                         italic: font.italic,
                         color: paint_color,
                         text_scale: font.text_scale,
-                        shaped: *shaped,
+                        shaped: shaped.map(|s| s.direction),
                         outline: effects.outline,
                     });
 
@@ -997,11 +1023,43 @@ pub(super) fn emit_line_commands(
                             width: stroke_width,
                         });
                     }
+
+                    // §17.3.2.37 / §17.3.2.9: one line through the run, or two
+                    // for `w:dstrike` straddling the single-strike position a
+                    // thickness apart — in the run's own color, like the
+                    // underline above. Emitted as `DrawCommand::Line`: the
+                    // painter already draws Underline and Line identically.
+                    //
+                    // Measured from `box_left`, not from a running `x`: the
+                    // pen owns the advance now, and the underline above takes
+                    // its extent from the same pair.
+                    if font.strike_lines > 0 {
+                        let strike_y = y - font.strike_position;
+                        let offsets: &[f32] = if font.strike_lines >= 2 {
+                            &[-1.0, 1.0]
+                        } else {
+                            &[0.0]
+                        };
+                        for off in offsets {
+                            let line_y = strike_y + font.strike_thickness * *off;
+                            commands.push(DrawCommand::Line {
+                                line: crate::render::geometry::PtLineSegment::new(
+                                    PtOffset::new(box_left, line_y),
+                                    PtOffset::new(box_left + rendered_width, line_y),
+                                ),
+                                // The relief-substituted colour, for the same
+                                // reason the underline uses it.
+                                color: paint_color,
+                                width: font.strike_thickness,
+                            });
+                        }
+                    }
                 }
                 Fragment::Image {
                     size,
                     image_data,
                     src_rect,
+                    hyperlink_url: image_link,
                     ..
                 } => {
                     let advance = size.width
@@ -1009,13 +1067,16 @@ pub(super) fn emit_line_commands(
                             * distribution_gap_count_after(fragments, &order, pos) as f32;
                     let x = pen.place(size.width, advance);
                     if let Some(data) = image_data {
+                        let rect = crate::render::geometry::PtRect::from_xywh(
+                            x,
+                            *cursor_y,
+                            size.width,
+                            size.height,
+                        );
+                        // §21.1.2.3.5: the picture is the hotspot (issue #250).
+                        push_link_over(commands, image_link.as_ref(), rect);
                         commands.push(DrawCommand::Image {
-                            rect: crate::render::geometry::PtRect::from_xywh(
-                                x,
-                                *cursor_y,
-                                size.width,
-                                size.height,
-                            ),
+                            rect,
                             image_data: data.clone(),
                             src_rect: *src_rect,
                         });
@@ -1112,6 +1173,25 @@ pub(super) fn emit_line_commands(
                                 })
                             }
                         }
+                    }
+                }
+                Fragment::Scene {
+                    size,
+                    commands: scene,
+                    ..
+                } => {
+                    // Issue #155: a SmartArt/chart scene sits in the line
+                    // like an image — its commands are scene-local, shifted
+                    // to the pen here, and it takes its advance from the pen
+                    // for the same reason the image arm above does.
+                    let advance = size.width
+                        + distribution_extra
+                            * distribution_gap_count_after(fragments, &order, pos) as f32;
+                    let x = pen.place(size.width, advance);
+                    for cmd in scene.iter() {
+                        let mut cmd = cmd.clone();
+                        cmd.shift(x, *cursor_y);
+                        commands.push(cmd);
                     }
                 }
                 Fragment::Emoji {
@@ -1292,6 +1372,15 @@ pub(super) fn emit_line_commands(
                         name: name.clone(),
                     });
                 }
+                Fragment::CommentAnchor(id) => {
+                    commands.push(DrawCommand::CommentAnchor {
+                        // The pen owns the cursor now, as the bookmark arm above
+                        // already does: an anchor draws nothing and takes no
+                        // advance, so it marks the pen's current position.
+                        position: PtOffset::new(pen.position(), *cursor_y + line.ascent),
+                        id: *id,
+                    });
+                }
             }
         }
 
@@ -1308,7 +1397,7 @@ pub(super) fn emit_line_commands(
             );
         }
 
-        *cursor_y += line_height;
+        *cursor_y += line_height - line_metrics.baseline_shift;
     }
 
     if outline.is_some() {
@@ -1691,7 +1780,7 @@ fn decimal_anchor(
             if let Some(byte_idx) = text.find(separator) {
                 let prefix = &text[..byte_idx];
                 let prefix_width = match measure_text {
-                    Some(measure) => measure(prefix, font).0,
+                    Some(measure) => measure.measure(prefix, font).0,
                     // No measurer (fitting-only paths): apportion the
                     // fragment's known width by character share. Approximate
                     // for proportional faces, but the alternative is ignoring
@@ -1769,7 +1858,7 @@ pub(super) fn emit_tab_leader(
     };
 
     let char_width = if let Some(m) = measure_text {
-        m(leader_char, &leader_font).0
+        m.measure(leader_char, &leader_font).0
     } else {
         LEADER_CHAR_WIDTH_FALLBACK
     };
@@ -1840,12 +1929,110 @@ pub(super) fn resolve_line_height(
     auto_fit.scale_line_height(resolved)
 }
 
+/// A line's resolved vertical footprint: how far the cursor advances past it,
+/// and where its natural box sits inside that advance.
+///
+/// `baseline_shift` is zero for every ungridded line, which is what keeps
+/// [`resolve_line_metrics`] a drop-in at the four agreeing sites.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct LineAdvance {
+    pub advance: Pt,
+    /// Distance from the top of the advance to the top of the line's natural
+    /// box — the §17.6.5 centering inside a grid slot.
+    pub baseline_shift: Pt,
+}
+
+/// §17.6.5 on top of §17.3.1.33: [`resolve_line_height`], then the section's
+/// document grid.
+///
+/// A gridded line consumes a whole number of grid slots — `ceil(h / pitch)`
+/// of them, so text taller than one pitch jumps to two, which is Word's
+/// signature "line spacing suddenly doubles" behavior — and its natural box
+/// is vertically centered in them (the visible half-gap above the first line
+/// of a Japanese page). Registration comes from the quantized *heights*
+/// alone: lines stack, so text stays in phase from the top margin, and
+/// nothing re-snaps to absolute grid coordinates after paragraph spacing.
+/// That makes the advance position-independent, which is what lets
+/// pagination sum precomputed heights and still agree with emission.
+///
+/// The spacing-rule interactions follow §17.6.5's own text where it speaks
+/// and Word's observed behavior (via LibreOffice's Word-conformed
+/// `SwTextFormatter::CalcRealHeight`, tdf#164871) where it does not:
+///
+/// - `lineRule="exact"` escapes the grid — the one override §17.6.5 names;
+/// - `lineRule="atLeast"` takes `max(slot, minimum)`, except a minimum of
+///   **zero**, which Word treats as "grid off" for the line rather than as a
+///   vacuous minimum;
+/// - `lineRule="auto"` applies its multiplier *on top of* the slotted height,
+///   clamped below at 1.0 — under a grid, "1.5 lines" means 1.5 grid slots.
+///
+/// The epsilon absorbs f32 division noise: a line exactly one pitch tall is
+/// one slot, not two. Word does this arithmetic in integer twips where the
+/// question cannot arise; the 1e-4 is subtracted from the *slot ratio*, so
+/// it forgives up to a ten-thousandth of a pitch — 1.8mpt on the default
+/// 18pt grid — which no real line height meaningfully occupies.
+pub(super) fn resolve_line_metrics(
+    natural: Pt,
+    text_height: Pt,
+    style: &ParagraphStyle,
+) -> LineAdvance {
+    let ungridded = || LineAdvance {
+        advance: resolve_line_height(natural, text_height, &style.line_spacing, style.auto_fit),
+        baseline_shift: Pt::ZERO,
+    };
+    let Some(pitch) = style.line_grid.filter(|p| p.raw() > 0.0) else {
+        return ungridded();
+    };
+    // The slot base is the *single-spaced* line height — `max(text, natural)`,
+    // exactly what `resolve_line_height` gives `Auto(1.0)` — so a grid over
+    // default spacing quantizes the very height the ungridded path would have
+    // advanced by, leading included, and the centering below is measured
+    // against the same box a control render draws.
+    let base = natural.max(text_height);
+    let slot = match style.line_spacing {
+        LineSpacingRule::Exact(_) => return ungridded(),
+        LineSpacingRule::AtLeast(min) if min == Pt::ZERO => return ungridded(),
+        _ => {
+            let slots = (base.raw() / pitch.raw() - 1e-4).ceil().max(1.0);
+            pitch * slots
+        }
+    };
+    let advance = match style.line_spacing {
+        LineSpacingRule::Auto(multiplier) => slot * multiplier.max(1.0),
+        LineSpacingRule::AtLeast(min) => slot.max(min),
+        LineSpacingRule::Exact(_) => unreachable!("exact escaped above"),
+    };
+    LineAdvance {
+        advance: style.auto_fit.scale_line_height(advance),
+        baseline_shift: (slot - base).max(Pt::ZERO) * 0.5,
+    }
+}
+
+/// §17.16.22: one link annotation over `rect`, routed by the target's kind.
+pub(crate) fn push_link_over(
+    commands: &mut Vec<DrawCommand>,
+    link: Option<&LinkTarget>,
+    rect: crate::render::geometry::PtRect,
+) {
+    match link {
+        Some(LinkTarget::External(url)) => commands.push(DrawCommand::LinkAnnotation {
+            rect,
+            url: url.clone(),
+        }),
+        Some(LinkTarget::Internal(dest)) => commands.push(DrawCommand::InternalLink {
+            rect,
+            destination: dest.clone(),
+        }),
+        None => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_line_placements, emit_line_commands, find_next_tab_stop, resolve_ptab,
-        resolve_zone_anchor, DrawCommand, Fragment, LineLayoutParams, LinePen, PTabGeometry,
-        PTabPlacement, ParagraphStyle, ZoneAnchor,
+        compute_line_placements, distribution_unit_count, emit_line_commands, find_next_tab_stop,
+        resolve_ptab, resolve_zone_anchor, DrawCommand, Fragment, LineLayoutParams, LinePen,
+        PTabGeometry, PTabPlacement, ParagraphStyle, ZoneAnchor,
     };
     use crate::model;
     use crate::render::dimension::Pt;
@@ -1948,7 +2135,12 @@ mod tests {
             drop_cap_lines: 0,
             default_line_height: Pt::new(14.0),
         };
-        let placements = compute_line_placements(&fragments, style, &params);
+        let placements = compute_line_placements(
+            &mut std::borrow::Cow::Borrowed(&fragments[..]),
+            style,
+            &params,
+            None,
+        );
         let mut commands = Vec::new();
         let mut cursor_y = Pt::ZERO;
         emit_line_commands(
@@ -2002,6 +2194,106 @@ mod tests {
             ..ParagraphStyle::default()
         };
         assert_eq!(first_glyph_x(&style), 108.0);
+    }
+
+    // ── resolve_line_metrics: §17.6.5 document grid ──────────────────────────
+
+    use super::{resolve_line_metrics, LineSpacingRule};
+
+    fn gridded(pitch: f32, spacing: LineSpacingRule) -> ParagraphStyle {
+        ParagraphStyle {
+            line_grid: Some(Pt::new(pitch)),
+            line_spacing: spacing,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_grid_is_a_passthrough_with_zero_shift() {
+        let style = ParagraphStyle::default();
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(14.0));
+        assert_eq!(m.baseline_shift, Pt::ZERO);
+    }
+
+    /// The Japanese-Word default: 10.5pt text (~14pt natural) on an 18pt grid
+    /// takes one slot, centered — the visible half-gap above every line.
+    #[test]
+    fn grid_rounds_up_to_one_slot_and_centers() {
+        let style = gridded(18.0, LineSpacingRule::Auto(1.0));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(18.0));
+        assert_eq!(m.baseline_shift, Pt::new(2.0));
+    }
+
+    /// The slot base is the single-spaced height `max(text, natural)`, so a
+    /// face whose leading exceeds its glyph box grids the same height the
+    /// ungridded path would have advanced by.
+    #[test]
+    fn grid_slot_base_includes_the_text_leading() {
+        let style = gridded(18.0, LineSpacingRule::Auto(1.0));
+        let m = resolve_line_metrics(Pt::new(11.0), Pt::new(12.0), &style);
+        assert_eq!(m.advance, Pt::new(18.0));
+        assert_eq!(
+            m.baseline_shift,
+            Pt::new(3.0),
+            "centered against 12, not 11"
+        );
+    }
+
+    /// A line minutely taller than a slot takes two — Word's "spacing
+    /// suddenly doubles" jump — while one exactly a slot tall must not.
+    #[test]
+    fn grid_slot_boundary_rounds_exact_down_and_over_up() {
+        let style = gridded(18.0, LineSpacingRule::Auto(1.0));
+        let exact = resolve_line_metrics(Pt::new(18.0), Pt::new(18.0), &style);
+        assert_eq!(exact.advance, Pt::new(18.0), "one pitch = one slot");
+        assert_eq!(exact.baseline_shift, Pt::ZERO);
+        let over = resolve_line_metrics(Pt::new(18.2), Pt::new(18.2), &style);
+        assert_eq!(over.advance, Pt::new(36.0), "18.2pt takes two slots");
+        assert!((over.baseline_shift.raw() - 8.9).abs() < 1e-3);
+    }
+
+    /// §17.6.5's own override: `lineRule="exact"` escapes the grid.
+    #[test]
+    fn grid_exact_spacing_escapes() {
+        let style = gridded(18.0, LineSpacingRule::Exact(Pt::new(25.0)));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(25.0));
+        assert_eq!(m.baseline_shift, Pt::ZERO);
+    }
+
+    /// Word idiosyncrasy (LO tdf#164871): `atLeast` with a zero minimum
+    /// disables the grid's extra space rather than acting as a vacuous
+    /// minimum.
+    #[test]
+    fn grid_at_least_zero_disables_the_grid() {
+        let style = gridded(18.0, LineSpacingRule::AtLeast(Pt::ZERO));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(14.0));
+        assert_eq!(m.baseline_shift, Pt::ZERO);
+    }
+
+    #[test]
+    fn grid_at_least_takes_the_larger_of_slot_and_minimum() {
+        let style = gridded(18.0, LineSpacingRule::AtLeast(Pt::new(30.0)));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(30.0));
+        let style = gridded(18.0, LineSpacingRule::AtLeast(Pt::new(10.0)));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(18.0), "slot outweighs a small minimum");
+    }
+
+    /// Under a grid, a proportional multiplier scales *slots*: "1.5 lines" is
+    /// 1.5 grid pitches. Below 1.0 it clamps — the grid is the floor.
+    #[test]
+    fn grid_auto_multiplier_scales_the_slot_and_clamps_below_one() {
+        let style = gridded(18.0, LineSpacingRule::Auto(1.5));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(27.0));
+        let style = gridded(18.0, LineSpacingRule::Auto(0.8));
+        let m = resolve_line_metrics(Pt::new(14.0), Pt::new(14.0), &style);
+        assert_eq!(m.advance, Pt::new(18.0));
     }
 
     // ── find_next_tab_stop ────────────────────────────────────────────────────
@@ -2082,6 +2374,10 @@ mod tests {
                 text_scale: 1.0,
                 underline_position: Pt::ZERO,
                 underline_thickness: Pt::ZERO,
+                strike_lines: 0,
+                strike_position: Pt::ZERO,
+                strike_thickness: Pt::ZERO,
+                hyphenation: None,
             }),
             color: crate::render::resolve::color::RgbColor::BLACK,
             shading: None,
@@ -2098,6 +2394,50 @@ mod tests {
             text_offset: Pt::ZERO,
             is_footnote_ref: false,
         }
+    }
+
+    // ── §17.3.1.13 distribution units on shaped runs (issue #153) ─────────
+
+    /// A shaped fragment contributes the shaped-cluster count the shaping pass
+    /// stored, not a grapheme count of its text — the two differ exactly when
+    /// shaping merged clusters, which is the case the unit exists for.
+    #[test]
+    fn a_shaped_fragment_contributes_its_stored_unit_count() {
+        let mut frag = text_fragment("क्षमता", 40.0);
+        assert_eq!(
+            crate::render::spacing::unit_count("क्षमता"),
+            3,
+            "premise: counting this text's graphemes would give 3"
+        );
+        if let Fragment::Text { shaped, .. } = &mut frag {
+            *shaped = Some(crate::render::layout::fragment::Shaping {
+                direction: crate::render::shape::RunDirection::LeftToRight,
+                // Deliberately not the grapheme count: what shaping stored
+                // must win over anything re-derived from the text.
+                unit_count: 2,
+            });
+        }
+        assert_eq!(distribution_unit_count(&frag, false), 2);
+    }
+
+    /// A terminal shaped fragment sheds its trailing whitespace per grapheme
+    /// cluster — the same count the shaper reports for whitespace, since a
+    /// space never merges into a neighbouring shaped cluster.
+    #[test]
+    fn a_terminal_shaped_fragment_sheds_trailing_whitespace_units() {
+        let mut frag = text_fragment("मत  ", 40.0);
+        if let Fragment::Text { shaped, .. } = &mut frag {
+            *shaped = Some(crate::render::layout::fragment::Shaping {
+                direction: crate::render::shape::RunDirection::LeftToRight,
+                unit_count: 4,
+            });
+        }
+        assert_eq!(distribution_unit_count(&frag, false), 4);
+        assert_eq!(
+            distribution_unit_count(&frag, true),
+            2,
+            "two trailing spaces are two of the four stored units"
+        );
     }
 
     #[test]

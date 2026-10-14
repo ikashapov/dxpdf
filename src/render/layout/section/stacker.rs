@@ -145,13 +145,19 @@ pub fn stack_blocks(
                                 None => y_start,
                             },
                         };
+                        let rect = PtRect::from_xywh(
+                            fi.x.resolve(parity),
+                            img_y,
+                            fi.size.width,
+                            fi.size.height,
+                        );
+                        crate::render::layout::paragraph::push_link_over(
+                            &mut commands,
+                            fi.hyperlink.as_ref(),
+                            rect,
+                        );
                         commands.push(DrawCommand::Image {
-                            rect: PtRect::from_xywh(
-                                fi.x.resolve(parity),
-                                img_y,
-                                fi.size.width,
-                                fi.size.height,
-                            ),
+                            rect,
                             image_data: fi.image_data.clone(),
                             src_rect: fi.src_rect,
                         });
@@ -210,6 +216,15 @@ pub fn stack_blocks(
                             stroke: fs.stroke.clone(),
                             effects: fs.effects.clone(),
                         });
+                        // Text (and issue #155 scene commands) over the fill —
+                        // the page-level twin calls `emit_shape_text` here;
+                        // dropping them made a topAndBottom shape in a cell or
+                        // header lose its text, and a chart/SmartArt scene
+                        // lose everything.
+                        for mut cmd in fs.text_commands.iter().cloned() {
+                            cmd.shift(fs.x.resolve(parity), shape_y);
+                            commands.push(cmd);
+                        }
                         let bottom = shape_y + fs.size.height;
                         band_bottom = Some(match band_bottom {
                             Some(prev) => prev.max(bottom),
@@ -301,13 +316,19 @@ pub fn stack_blocks(
                         continue;
                     }
                     let img_y = fi.y.at(parity, para_content_top);
+                    let rect = PtRect::from_xywh(
+                        fi.x.resolve(parity),
+                        img_y,
+                        fi.size.width,
+                        fi.size.height,
+                    );
+                    crate::render::layout::paragraph::push_link_over(
+                        &mut commands,
+                        fi.hyperlink.as_ref(),
+                        rect,
+                    );
                     commands.push(DrawCommand::Image {
-                        rect: PtRect::from_xywh(
-                            fi.x.resolve(parity),
-                            img_y,
-                            fi.size.width,
-                            fi.size.height,
-                        ),
+                        rect,
                         image_data: fi.image_data.clone(),
                         src_rect: fi.src_rect,
                     });
@@ -449,6 +470,7 @@ mod tests {
             dist_left: Pt::ZERO,
             dist_right: Pt::ZERO,
             behind_doc: false,
+            hyperlink: None,
         }
     }
 
@@ -480,6 +502,10 @@ mod tests {
                 text_scale: 1.0,
                 underline_position: Pt::ZERO,
                 underline_thickness: Pt::ZERO,
+                strike_lines: 0,
+                strike_position: Pt::ZERO,
+                strike_thickness: Pt::ZERO,
+                hyphenation: None,
             }),
             color: crate::render::resolve::color::RgbColor::BLACK,
             width: Pt::new(40.0),

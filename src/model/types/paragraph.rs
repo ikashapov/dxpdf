@@ -21,6 +21,11 @@ pub struct Paragraph {
     pub mark_run_properties: Option<RunProperties>,
     pub content: Vec<Inline>,
     pub rsids: ParagraphRevisionIds,
+    /// §17.13.5.15 (issue #154): the paragraph *mark* is tracked-deleted —
+    /// `<w:del>` inside `pPr/rPr`, Word's spelling of a whole-paragraph
+    /// delete. In the final view a paragraph whose mark and content are both
+    /// deleted merges away instead of leaving a blank line.
+    pub mark_deleted: bool,
 }
 
 /// Paragraph properties — only fields explicitly present in the XML are set.
@@ -56,6 +61,10 @@ pub struct ParagraphProperties {
     pub keep_next: Option<bool>,
     pub keep_lines: Option<bool>,
     pub widow_control: Option<bool>,
+    /// §17.3.1.32: use the section's document grid for inter-line spacing.
+    /// Absent everywhere in the style hierarchy means *on* — the paragraph
+    /// snaps whenever its section defines an applied grid.
+    pub snap_to_grid: Option<bool>,
     pub page_break_before: Option<bool>,
     pub suppress_auto_hyphens: Option<bool>,
     /// §17.3.1.9: suppress spacing when adjacent paragraph has same style.

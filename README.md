@@ -172,11 +172,11 @@ dxpdf handles the most common DOCX features found in real-world business documen
 | **Text formatting** | Bold, italic, underline, highlighting, font size/family/color, character spacing, character scaling, superscript/subscript, run shading, run borders |
 | **Paragraphs** | Alignment (left/center/right/justify/distribute), spacing (before/after/line with auto/exact/atLeast), indentation, tab stops (left/center/right/decimal/bar) incl. absolute-position tabs, paragraph borders, paragraph shading |
 | **Tables** | Column widths, cell margins (3-level cascade), merged cells (gridSpan + vMerge), row heights, borders (single and double), cell shading, table styles with conditional formatting, nested tables, floating tables, row splitting across pages |
-| **Images** | Inline images (PNG, JPEG, GIF, BMP, WebP, and single-bitmap EMF), floating/anchored images with alignment, wrapping, cropping and percentage-based positioning |
+| **Images** | Inline images (PNG, JPEG, GIF, BMP, WebP, SVG, and single-bitmap EMF/WMF), floating/anchored images with alignment, wrapping, cropping and percentage-based positioning |
 | **Styles** | Paragraph and character styles, `basedOn` inheritance, document defaults, theme fonts |
 | **Fonts** | Embedded DOCX fonts, metric-compatible substitution, and subsetting so only used glyphs are embedded |
 | **Text & emoji** | Grapheme-correct segmentation; full-color emoji including ZWJ, modifier, keycap and flag sequences, GSUB-shaped through Skia's HarfBuzz |
-| **Shapes & text boxes** | DrawingML and VML shapes, shape text bodies with insets, anchoring and autofit, custom geometry with guide formulas |
+| **Shapes & text boxes** | DrawingML and VML shapes, shape text bodies with insets, anchoring and autofit, custom geometry with guide formulas, SmartArt (via the baked drawing part) and 2D charts drawn from their cached data |
 | **Headers & footers** | Text, images, page numbers via PAGE/NUMPAGES field codes |
 | **Lists** | Multi-level numbering — bullets, decimal, lower/upper letter, lower/upper roman, ordinal and spelled-out text — with counter tracking and picture bullets |
 | **Navigation** | Clickable PDF link annotations with URL resolution, bookmarks and internal cross-references as named destinations, and a PDF outline built from heading levels |
@@ -288,7 +288,7 @@ Type-safe dimensions flow through the entire pipeline: OOXML units (`Twips`, `Em
 
 ## OOXML Feature Coverage
 
-Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 12 partial, 6 not yet supported.**
+Validated against ISO 29500 (Office Open XML). **90 entries fully implemented, 13 partial, 1 not yet supported.**
 
 <details>
 <summary>Full feature matrix (click to expand)</summary>
@@ -301,10 +301,10 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 | Underline | ✅ font-proportional stroke width |
 | Font size, family, color | ✅ |
 | Superscript/subscript | ✅ |
-| Character spacing | ✅ §17.3.2.35 applied per UAX #29 grapheme cluster, so a combining mark is never separated from its base |
+| Character spacing | ✅ §17.3.2.35 applied per UAX #29 grapheme cluster — per *shaped* cluster on a shaped run — so spacing never lands inside a cluster: not between a mark and its base, nor inside a conjunct or ligature |
 | Character scaling (`w:w` horizontal compression/expansion) | ✅ |
 | Run shading | ✅ |
-| Strikethrough | ⚠️ parsed, not yet rendered |
+| Strikethrough | ✅ §17.3.2.37 / §17.3.2.9 — single and double strike from font strikeout metrics, in the run's color |
 | Highlighting | ✅ full ST_HighlightColor palette |
 | Caps, smallCaps | ⚠️ parsed, not applied at layout |
 | Shadow, outline, emboss, imprint | ✅ §17.3.2.31/.23/.13/.18 shadow as a hard offset copy (light gray under dark text, black otherwise), outline as stroked glyphs, emboss/imprint as a diagonal relief copy with black text lifted to white; shadow+outline — the one combination the spec permits — composes |
@@ -317,7 +317,7 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 |---|---|
 | Alignment (left, center, right) | ✅ |
 | Alignment (justify) | ✅ |
-| Alignment (distribute) | ✅ §17.3.1.13 spare width shared between UAX #29 grapheme clusters, never inside one; not applied to a run that is shaped (see *Complex-script shaping*) |
+| Alignment (distribute) | ✅ §17.3.1.13 spare width shared between clusters — grapheme clusters on the cmap path, shaped clusters on a shaped run — never inside one |
 | Spacing before/after, line spacing | ✅ auto/exact/atLeast |
 | Indentation (left, right, first-line, hanging) | ✅ |
 | Tab stops (left) | ✅ |
@@ -367,8 +367,9 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 | Feature | Status |
 |---|---|
 | Inline images | ✅ PNG, JPEG, GIF, BMP, WebP via Skia |
-| EMF images | ⚠️ single embedded bitmap (`EMR_STRETCHDIBITS`/`EMR_BITBLT`); full GDI record replay unsupported |
-| WMF, SVG images | ❌ detected, not decoded |
+| EMF images | ⚠️ single embedded bitmap (`EMR_STRETCHDIBITS`/`EMR_BITBLT`), incl. paletted and `BI_JPEG`/`BI_PNG` DIBs; full GDI record replay unsupported |
+| WMF images | ⚠️ single embedded bitmap (`META_DIBSTRETCHBLT`/`META_DIBBITBLT`/`META_STRETCHDIB`/`META_SETDIBTODEV`, placeable or bare), same DIB support as EMF; full GDI record replay unsupported |
+| SVG images | ✅ rasterized at the display target via resvg — both Word's `svgBlip`-plus-PNG-fallback pair (the SVG wins) and a direct `image/svg+xml` blip; `<text>` inside an SVG is not rendered |
 | Image cropping (`a:srcRect`) | ✅ §20.1.10.48 |
 | Floating images | ✅ offset, align, wp14:pctPos, page-parity mirroring |
 | Wrap modes (none, square, topAndBottom) | ✅ |
@@ -385,8 +386,10 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 | Section breaks (nextPage) | ✅ |
 | Section breaks (continuous) | ✅ continues on current page |
 | Section breaks (even, odd, nextColumn) | ⚠️ treated as nextPage |
-| Multi-column sections | ✅ incl. splitting across unequal-width columns |
+| Multi-column sections | ✅ incl. splitting across unequal-width columns, balancing at a continuous break, and the `w:sep` rule |
 | Page borders, doc grid | ❌ doc grid parsed, not applied |
+| Page borders (`w:pgBorders`) | ✅ line styles (single/double, others approximated solid), `offsetFrom`, `display`, `zOrder`; art borders declined |
+| Document grid (`w:docGrid`) | ✅ line pitch for `lines`/`linesAndChars`/`snapToChars` — lines snap to whole grid slots, centered; `default`/absent type stays off; character pitch not applied |
 
 ### Headers & Footers
 
@@ -412,7 +415,7 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 |---|---|
 | PAGE, NUMPAGES | ✅ evaluated per page |
 | DATE, TIME | ✅ §17.16.4.2 evaluated against the `\@` picture at the moment of the render, with month, weekday and AM/PM names taken from the paragraph's own `w:lang`; a field naming no picture gets that locale's short date or time |
-| Hyperlinks | ✅ clickable PDF annotations |
+| Hyperlinks | ✅ clickable PDF annotations — on text, and on pictures via `a:hlinkClick` or a `w:hyperlink` around the drawing (§21.1.2.3.5) |
 | All other fields | ✅ Word's cached result text is rendered, so a TOC or MERGEFIELD written by Word displays correctly but is not recomputed |
 | Field instruction parser (`dxpdf::field`) | ✅ ~20 instructions parsed and evaluable as a library — REF, PAGEREF, SEQ, IF, MERGEFIELD, DOCPROPERTY, SYMBOL and more — but only PAGE, NUMPAGES, DATE and TIME are wired into rendering |
 
@@ -423,16 +426,17 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 | Footnotes | ✅ §17.11.23 separator, per-page reservation, split-aware |
 | Endnotes | ✅ §17.11.2 roman superscript marks, collected at document end |
 | Color emoji (ZWJ, modifier, keycap, flag sequences) | ✅ host-resolved color typeface, cross-run cluster reassembly, GSUB-shaped via Skia's HarfBuzz |
-| Complex-script shaping — cursive joining | ✅ §17.3.2.30 a run whose script has positional forms (Unicode `Joining_Type` — Arabic, Syriac, N'Ko, Mongolian, Adlam …) is shaped through Skia's HarfBuzz; everything else keeps the cmap path unchanged |
-| Complex-script shaping — Indic reordering | ❌ needs the spacing unit to become the shaped cluster, not just a new call site |
+| Complex-script shaping — cursive joining | ✅ §17.3.2.30 a run whose script has positional forms (Unicode `Joining_Type` — Arabic, Syriac, N'Ko, Mongolian, Adlam …) is shaped through Skia's HarfBuzz, as is any run at a right-to-left level (Hebrew included — its glyph order needs it); Latin, Cyrillic, Greek, CJK and Thai keep the cmap path unchanged |
+| Complex-script shaping — Indic reordering | ✅ Brahmic scripts (Devanagari, Bengali, Tamil, Sinhala, Khmer, Myanmar …) shape through the same path, and the spacing unit for a shaped run is the shaped cluster — a prebase matra reorders, and neither `w:spacing` nor `distribute` can open a conjunct |
 | Language (`w:lang`) | ⚠️ §17.3.2.20 drives the decimal-tab separator, the DATE/TIME picture names and the picture-less date and time defaults (all from CLDR, region-aware — `de-CH` and `de-DE` disagree correctly) and number-word spelling (English, German, French, Spanish; every other language gets digits) |
 | Font subsetting | ✅ codepoint-driven, with shapeability validation |
 | Per-glyph font fallback | ⚠️ a codepoint the resolved face cannot draw is drawn from a host face that can, chosen per UAX #29 grapheme cluster and carried through subsetting, so `ASCII ① ア` renders in full. Which face the host offers is its choice, so output is host-dependent (as color emoji already is), and no `w:lang` hint is passed yet — Han text may be given a face for the wrong language's glyph shapes. A codepoint no host face covers still draws nothing |
-| Comments, tracked changes | ❌ |
+| Comments, tracked changes | ✅ tracked changes render per the document's own `w:revisionView`: struck-through deletions and underlined insertions in per-author colors (authors collected from the body; a revision elsewhere gets the first palette color), or the final text with deletions suppressed. Run-level: a tracked row deletion always renders as final, and deleted content a run cannot express (pictures, fields, note references) stays dropped in both views. Comments render as a shaded range plus a margin balloon (author + text) with a connector line |
 | DrawingML fills, strokes, outer shadow | ⚠️ solid fills, strokes incl. dash patterns, and outer shadow; gradient and blip fills, blur, glow, reflection and soft edge are not rendered |
-| DrawingML preset geometry | ⚠️ `line` and `rect`; `custGeom` fully evaluated incl. guide formulas |
+| DrawingML preset geometry | ⚠️ `line`, `rect`, `roundRect`, `ellipse`, the four block arrows, `chevron`, `homePlate`, `diamond`, `triangle`; `custGeom` fully evaluated incl. guide formulas |
 | Text boxes (shape text bodies) | ✅ insets, vertical anchoring, `vertOverflow` clipping, `normAutofit` shrink |
-| SmartArt, charts | ❌ |
+| SmartArt | ✅ the pre-laid-out `dsp:` drawing part Word ≥2007 SP2 writes — literal shapes, baked fills, fitted text; the §21.4 layout algorithm itself is not run, so a diagram without that part (pre-SP2/third-party) draws nothing |
+| Charts | ⚠️ 2D bar/column (clustered/stacked/percentStacked), line, pie/doughnut, area, scatter from the part's cached data, with axes, gridlines, legend and title; 3D kinds flatten to their 2D twins; radar/surface/bubble/stock are declined |
 | Bookmarks and internal cross-references | ✅ `w:bookmarkStart` → PDF named destinations; internal hyperlinks → GoTo link annotations |
 | PDF outline sidebar (`/Outlines`) | ✅ §17.3.1.19 `w:outlineLvl` → structure-element headers; levels 7–9 clamp to `H6` (ISO 32000-1 stops there) and headings in headers, footers and notes are excluded |
 | Line breaking | ✅ UAX #14 via ICU4X, per paragraph rather than per run, so a token split across `<w:r>` boundaries still breaks where the algorithm says. The four scripts UAX #14 hands to "complex context analysis" (Thai, Lao, Khmer, Burmese) get LSTM word boundaries; a token no rule may break is cut at the container edge rather than overflowing it |
@@ -441,7 +445,7 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 | `w:bidiVisual` (mirrored table columns) | ✅ §17.4.1 columns run right to left — the layout input is rewritten into visual order once, so `w:gridSpan`, `w:gridBefore` and `w:vMerge` mirror with them, and `w:left`/`w:right` on cell margins and borders swap as the logical `start`/`end` edges they are. The element makes the *table* right-to-left, so it also decides which margin §17.4.28 `w:jc` and §17.4.50 `tblInd` measure from — a `bidiVisual` table with no `w:jc` sits at the right margin, as Word renders it. Read from the `<w:tbl>` alone per [MS-OI29500] §2.1.250(a); `w:tblPrEx/w:bidiVisual` is parsed but not acted on |
 | Row gaps at a table edge (§17.4.15/§17.4.14) | ✅ a row's first `<w:tc>` takes the table's `w:left` and its last takes `w:right`, wherever across the grid `gridBefore`/`gridAfter` put those edges — §17.4.66 resolves an edge against cell borders and outer table borders, and a gapped row's first cell has no cell facing it. Verified against a Word render of `test-files/grid-gap-borders.docx`. The run of a row boundary that neither adjoining row can paint is drawn in the boundary strip so the line stays at one y |
 | Bidirectional tab stops and numbering labels | ✅ §17.3.1.37 a `w:bidi` paragraph measures its stops — including `bar` rules and the numbering label's implicit stop — from the right margin and walks its tab-delimited segments right to left; ISO Strict `start`/`end` stop spellings parse |
-| Automatic hyphenation | ❌ |
+| Automatic hyphenation | ✅ §17.15.1.10/.53/.22/.27 and §17.3.1.34 — `w:autoHyphenation` with the hyphenation zone (normative reading: a word is cut only when the gap it would leave exceeds the zone; Word's native layout may hyphenate more), `consecutiveHyphenLimit`, `doNotHyphenateCaps` and the paragraph-level `suppressAutoHyphens` cascade. Knuth–Liang **TeX patterns**, not Word's dictionary, so a word's cut points can differ from Word's; patterns are vendored for `en-US`, `en-GB`, German (every `de-*` → reformed orthography) and Russian, and a run in any other language, or with no `w:lang`, is never hyphenated. `w:softHyphen` is still dropped, and a word already cut per cluster for being wider than its line is not hyphenated |
 
 </details>
 
@@ -454,7 +458,9 @@ Validated against ISO 29500 (Office Open XML). **82 entries fully implemented, 1
 | [`skia-safe`](https://crates.io/crates/skia-safe) | PDF rendering, text measurement, link annotations, and HarfBuzz emoji shaping via the `textlayout` feature |
 | [`unicode-segmentation`](https://crates.io/crates/unicode-segmentation), [`unicode-properties`](https://crates.io/crates/unicode-properties), [`unicode-normalization`](https://crates.io/crates/unicode-normalization) | Grapheme clusters, emoji properties, NFC normalization |
 | [`unicode-bidi`](https://crates.io/crates/unicode-bidi) + [`unicode-bidi-mirroring`](https://crates.io/crates/unicode-bidi-mirroring) | UAX #9 embedding levels and rule L4 mirroring. Their Unicode tables are compiled in, so they add no locale data |
+| [`unicode-joining-type`](https://crates.io/crates/unicode-joining-type) + [`unicode-script`](https://crates.io/crates/unicode-script) | Which runs need shaping to be legible at all — positional forms per `Joining_Type`, glyph reordering per Script — the two-property predicate that keeps HarfBuzz off Latin |
 | [`unicode-joining-type`](https://crates.io/crates/unicode-joining-type) | Which scripts need shaping to be legible at all — the predicate that keeps HarfBuzz off Latin |
+| [`hyphenation`](https://crates.io/crates/hyphenation) | §17.15.1.10 automatic hyphenation: Knuth–Liang pattern hyphenation over the TeX hyph-utf8 pattern sets. Only four dictionaries are vendored (`src/i18n/data/hyph/`, regenerated by `scripts/make_hyphenation_data.sh`), not the crate's `embed_all`; their pattern licences are in `ATTRIBUTION.md` beside them |
 | `icu_*` ([`icu_segmenter`](https://crates.io/crates/icu_segmenter), [`icu_decimal`](https://crates.io/crates/icu_decimal), [`icu_datetime`](https://crates.io/crates/icu_datetime), [`icu_calendar`](https://crates.io/crates/icu_calendar), …) | ICU4X: UAX #14 line breaking, region-aware decimal separators, and localized date/time picture names. Locale data ships as one trimmed blob loaded through [`icu_provider_blob`](https://crates.io/crates/icu_provider_blob), not as each crate's built-in `compiled_data` |
 | [`fontcull`](https://crates.io/crates/fontcull) (optional) | Font subsetting — `subset-fonts` feature, on by default |
 | `fontcull-skrifa`, `fontcull-write-fonts`, `fontcull-read-fonts` + [`kurbo`](https://crates.io/crates/kurbo) | OpenType table reading and writing — baking a variable-font instance's coordinates into the bytes the PDF embeds |
@@ -484,6 +490,10 @@ Yes. In Rust, add `dxpdf` as a dependency and call `dxpdf::convert(&docx_bytes)`
 dxpdf supports text formatting, paragraphs, tables (including nested, merged and floating tables with conditional formatting), inline and floating images, shapes and text boxes, styles with inheritance, headers/footers, multi-level lists, hyperlinks and a navigable PDF outline, footnotes and endnotes, section breaks, and automatic pagination. See the full [feature matrix](#ooxml-feature-coverage) above.
 
 Notable gaps: Indic reordering, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
+Notable gaps: Indic reordering, mirrored tab stops under `w:bidi`, automatic hyphenation, and SmartArt and charts.
+Notable gaps: Indic reordering, mirrored tab stops under `w:bidi`, automatic hyphenation, and tracked changes and comments.
+Notable gaps: mirrored tab stops under `w:bidi`, automatic hyphenation, tracked changes and comments, and SmartArt and charts.
+Notable gaps: Indic reordering, tracked changes and comments, and SmartArt and charts.
 
 ### How fast is dxpdf?
 

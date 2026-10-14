@@ -10,6 +10,7 @@ pub mod images;
 pub mod locale;
 pub mod numbering;
 pub mod properties;
+pub mod revision;
 pub mod sections;
 pub mod shading;
 pub mod shape_geometry;
@@ -21,12 +22,11 @@ use std::collections::HashMap;
 
 use crate::model::dimension::{Dimension, Twips};
 use crate::model::{
-    Block, Document, EmbeddedFont, NoteId, NumId, NumPicBullet, NumPicBulletId,
-    ParagraphProperties, RelId, RunProperties, StyleId, Theme,
+    Block, Document, EmbeddedFont, HyphenationSettings, NoteId, NumId, NumPicBullet,
+    NumPicBulletId, ParagraphProperties, RelId, RunProperties, StyleId, Theme,
 };
 
 use self::images::MediaEntry;
-use self::numbering::ResolvedNumberingLevel;
 use self::sections::ResolvedSection;
 use self::styles::ResolvedStyle;
 
@@ -39,12 +39,18 @@ pub struct ResolvedDocument {
     pub sections: Vec<ResolvedSection>,
     /// Fully resolved styles (basedOn chains walked, doc defaults applied).
     pub styles: HashMap<StyleId, ResolvedStyle>,
-    /// Flattened numbering definitions.
-    pub numbering: HashMap<NumId, Vec<ResolvedNumberingLevel>>,
+    /// Flattened numbering definitions, instance by instance — each carrying
+    /// the abstract definition its counter belongs to (§17.9.2).
+    pub numbering: HashMap<NumId, numbering::ResolvedNumbering>,
     /// All unique font families referenced in the document.
     pub font_families: Vec<String>,
     /// Embedded media (images) — shared bytes with detected format, keyed by relationship ID.
     pub media: HashMap<RelId, MediaEntry>,
+    /// SmartArt drawings (issue #155), keyed like `media` (body rel ids
+    /// plain, header/footer ids `<part>::<rId>`-synthesized).
+    pub diagrams: HashMap<RelId, crate::model::DiagramDrawing>,
+    /// Chart parts (issue #155), keyed like `media`.
+    pub charts: HashMap<RelId, crate::model::ChartSpace>,
     /// §17.8.3: embedded fonts, carried through so the font registry can be
     /// built from the resolved document alone. They belong here rather than
     /// being read back off the `Document` because [`resolve`] consumes it.
@@ -77,6 +83,21 @@ pub struct ResolvedDocument {
     /// §17.15.1.25: the document's default tab-stop interval (`w:defaultTabStop`,
     /// spec default 720 twips). Consumed by paragraph tab layout.
     pub default_tab_stop: Dimension<Twips>,
+    /// Issue #154: whether tracked-change marks are drawn (`w:revisionView`).
+    /// When false the final text renders — deletions suppressed, insertions
+    /// plain.
+    pub show_ins_del_marks: bool,
+    /// Issue #154: whether comment anchors and balloons are drawn.
+    pub show_comment_marks: bool,
+    /// Issue #154: revision-mark color per author, in first-appearance order
+    /// — see `resolve::revision`.
+    pub revision_colors: std::collections::HashMap<String, crate::render::resolve::color::RgbColor>,
+    /// Issue #154: comment content keyed by comment ID, for the balloon pass.
+    pub comments: HashMap<crate::model::CommentId, crate::model::Comment>,
+    /// §17.15.1.10 / .53 / .22 / .27 (issue #158): the document-wide automatic
+    /// hyphenation settings, consumed by `build::convert::paragraph_style_from_props`
+    /// together with each paragraph's cascaded §17.3.1.34 `w:suppressAutoHyphens`.
+    pub hyphenation: HyphenationSettings,
 }
 
 /// Transform a raw parsed Document into a layout-ready ResolvedDocument.
@@ -123,9 +144,32 @@ pub fn resolve(doc: Document) -> ResolvedDocument {
         footers,
         footnotes,
         endnotes,
+        comments,
         media,
+        diagrams,
+        charts,
         embedded_fonts,
     } = doc;
+
+    // Before `resolve_sections` consumes the body: the palette walk needs it
+    // borrowed. Headers, footers and notes are not walked — a revision there
+    // still gets a mark, in the fallback color (see `resolve::revision`).
+    // Comment authors join the same numbering, in id order (deterministic
+    // where map iteration is not), so a person who both edited and commented
+    // keeps one color.
+    let mut revision_colors = revision::collect_revision_colors(&body);
+    // Issue #154: a range marker whose id the comments part never defined
+    // must not wash anything — Word ignores such orphans. Cleared here, where
+    // both sides are in hand, so layout can trust every stamp it sees.
+    let mut body = body;
+    revision::clear_orphan_comment_stamps(&mut body, &comments);
+    {
+        let mut ids: Vec<_> = comments.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            revision::register(&comments[&id].author, &mut revision_colors);
+        }
+    }
 
     let resolved_styles = styles::resolve_styles(&styles, theme.as_ref());
     let resolved_numbering = numbering::resolve_numbering(&numbering);
@@ -140,6 +184,8 @@ pub fn resolve(doc: Document) -> ResolvedDocument {
             .into_iter()
             .map(|(id, (data, format))| (id, MediaEntry { data, format }))
             .collect(),
+        diagrams,
+        charts,
         pic_bullets: numbering.pic_bullets,
         doc_defaults_paragraph: styles.doc_defaults_paragraph,
         doc_defaults_run: styles.doc_defaults_run,
@@ -151,6 +197,11 @@ pub fn resolve(doc: Document) -> ResolvedDocument {
         embedded_fonts,
         even_and_odd_headers: settings.even_and_odd_headers,
         default_tab_stop: settings.default_tab_stop,
+        show_ins_del_marks: settings.show_ins_del_marks,
+        show_comment_marks: settings.show_comment_marks,
+        revision_colors,
+        comments,
+        hyphenation: settings.hyphenation,
     }
 }
 
@@ -172,7 +223,10 @@ mod tests {
             footers: HashMap::new(),
             footnotes: HashMap::new(),
             endnotes: HashMap::new(),
+            comments: Default::default(),
             media: HashMap::new(),
+            diagrams: HashMap::new(),
+            charts: HashMap::new(),
             embedded_fonts: vec![],
         }
     }
@@ -193,8 +247,11 @@ mod tests {
                 },
                 content: vec![RunElement::Text(text.to_string())],
                 rsids: RevisionIds::default(),
+                revision: None,
+                comment: None,
             }))],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))
     }
 
@@ -210,6 +267,24 @@ mod tests {
         assert!(resolved.font_families.is_empty());
         assert!(resolved.media.is_empty());
         assert!(resolved.theme.is_none());
+    }
+
+    /// §17.15.1.10 and companions (issue #158): the document's hyphenation
+    /// settings reach layout unchanged. Every field is set to a non-default
+    /// value, so a `ResolvedDocument` built from `Default` could not pass.
+    #[test]
+    fn resolve_carries_the_hyphenation_settings() {
+        let mut doc = empty_doc();
+        let declared = HyphenationSettings {
+            enabled: true,
+            zone: Dimension::new(425),
+            consecutive_limit: 2,
+            no_caps: true,
+        };
+        doc.settings.hyphenation = declared;
+
+        let resolved = resolve(doc);
+        assert_eq!(resolved.hyphenation, declared);
     }
 
     #[test]
@@ -312,7 +387,7 @@ mod tests {
         );
 
         let resolved = resolve(doc);
-        let levels = resolved.numbering.get(&NumId::new(1)).unwrap();
+        let levels = &resolved.numbering.get(&NumId::new(1)).unwrap().levels;
         assert_eq!(levels.len(), 1);
         assert_eq!(levels[0].format, NumberFormat::Decimal);
     }

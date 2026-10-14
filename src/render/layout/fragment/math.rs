@@ -59,6 +59,10 @@ fn math_font(size: Pt) -> FontProps {
         text_scale: 1.0,
         underline_position: Pt::ZERO,
         underline_thickness: Pt::ZERO,
+        strike_lines: 0,
+        strike_position: Pt::ZERO,
+        strike_thickness: Pt::ZERO,
+        hyphenation: None,
     }
 }
 
@@ -335,6 +339,8 @@ mod tests {
             measurer: None,
             auto_fit: crate::render::layout::ShapeAutoFit::NONE,
             locale_tag: None,
+            revision_palette: None,
+            comment_marks: false,
         }
     }
 

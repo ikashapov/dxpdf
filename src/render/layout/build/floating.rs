@@ -79,7 +79,14 @@ fn find_anchor_images<'a>(
             // branch owns their layout path end-to-end.
             Inline::Image(img)
                 if matches!(img.placement, ImagePlacement::Anchor(_))
-                    && !matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_))) =>
+                    && !matches!(
+                        img.graphic,
+                        Some(
+                            GraphicContent::WordProcessingShape(_)
+                                | GraphicContent::Diagram(_)
+                                | GraphicContent::Chart(_)
+                        )
+                    ) =>
             {
                 out.push(img);
             }
@@ -135,6 +142,13 @@ pub(super) fn extract_floating_images(
             image_data,
             size: PtSize::new(w, h),
             src_rect: crate::render::resolve::images::extract_src_rect(img),
+            // §21.1.2.3.5: the picture's link follows it to wherever the
+            // anchor puts it (issue #250).
+            hyperlink: img
+                .doc_properties
+                .hyperlink
+                .as_ref()
+                .and_then(crate::render::layout::fragment::link_target_of),
             x,
             y,
             wrap_mode: crate::render::layout::section::WrapMode::from_model(&anchor.wrap),
@@ -168,7 +182,14 @@ fn find_anchor_shapes<'a>(
         match inline {
             Inline::Image(img)
                 if matches!(img.placement, ImagePlacement::Anchor(_))
-                    && matches!(img.graphic, Some(GraphicContent::WordProcessingShape(_))) =>
+                    && matches!(
+                        img.graphic,
+                        Some(
+                            GraphicContent::WordProcessingShape(_)
+                                | GraphicContent::Diagram(_)
+                                | GraphicContent::Chart(_)
+                        )
+                    ) =>
             {
                 out.push(img);
             }
@@ -218,6 +239,52 @@ pub(super) fn extract_floating_shapes(
             ShapeAnchorClass::PageAnchored => !anchors_to_paragraph(anchor),
         };
         if !class_match {
+            continue;
+        }
+        // Issue #155: an anchored SmartArt/chart rides the shape channel as
+        // a pre-built scene — an empty geometry with the scene's commands in
+        // `text_commands`, which the emitters already shift to the anchor
+        // origin. Wrapping, distances and behind-text come along for free.
+        let scene = match img.graphic.as_ref() {
+            Some(GraphicContent::Diagram(d)) => ctx.resolved.diagrams.get(&d.data).map(|dd| {
+                super::graphic_scene::build_diagram_scene(
+                    dd,
+                    PtSize::new(Pt::from(img.extent.width), Pt::from(img.extent.height)),
+                    ctx,
+                    state,
+                )
+            }),
+            Some(GraphicContent::Chart(c)) => ctx.resolved.charts.get(&c.part).map(|cs| {
+                super::chart_scene::build_chart_scene(
+                    cs,
+                    PtSize::new(Pt::from(img.extent.width), Pt::from(img.extent.height)),
+                    ctx,
+                    state,
+                )
+            }),
+            _ => None,
+        };
+        if let Some(commands) = scene {
+            let w = Pt::from(img.extent.width);
+            let h = Pt::from(img.extent.height);
+            let (x, y) = resolve_anchor_position(anchor, w, h, state, frame);
+            shapes.push(FloatingShape {
+                x,
+                y,
+                size: PtSize::new(w, h),
+                rotation: Default::default(),
+                flip_h: false,
+                flip_v: false,
+                wrap_mode: crate::render::layout::section::WrapMode::from_model(&anchor.wrap),
+                dist_left: Pt::from(anchor.distance.left),
+                dist_right: Pt::from(anchor.distance.right),
+                behind_doc: anchor.behind_text,
+                paths: Vec::new(),
+                fill: crate::render::layout::draw_command::ResolvedFill::None,
+                stroke: None,
+                effects: Vec::new(),
+                text_commands: commands,
+            });
             continue;
         }
         let wsp = match img.graphic.as_ref() {
@@ -413,6 +480,9 @@ fn build_vml_floating_image(
     Some(FloatingImage {
         image_data,
         size: PtSize::new(width, height),
+        // §14.1.2.19 `v:shape/@href` is the VML spelling of a picture link;
+        // not read here.
+        hyperlink: None,
         // VML crops (`v:imagedata` crop*) are a separate mechanism; not modelled.
         src_rect: None,
         x,
@@ -1330,6 +1400,9 @@ pub(super) fn build_shape_text_commands(
         footnotes: Default::default(),
         endnote_counter: 0,
         list_counters: std::collections::HashMap::new(),
+        // §17.9.28: its own set too — a shape body is a separate story, so an
+        // override fired inside it must not be remembered for the main flow.
+        started_overrides: std::collections::HashSet::new(),
         field_ctx: state.field_ctx,
         shape_default_text_color,
         shape_default_font_family,
@@ -1340,6 +1413,7 @@ pub(super) fn build_shape_text_commands(
         // preferred over making `state` mutable through ten signatures.
         warned_border_styles: std::collections::HashSet::new(),
         warned_row_cell_spacing: false,
+        warned_art_page_border: false,
         warned_orphan_vmerge: false,
     };
 
@@ -1447,6 +1521,7 @@ mod tests {
                 description: None,
                 hidden: None,
                 title: None,
+                hyperlink: None,
             },
             graphic_frame_locks: None,
             graphic: Some(GraphicContent::WordProcessingShape(WordProcessingShape {
@@ -1680,9 +1755,11 @@ mod tests {
             footnotes: Default::default(),
             endnote_counter: 0,
             list_counters: Default::default(),
+            started_overrides: Default::default(),
             field_ctx: Default::default(),
             warned_border_styles: Default::default(),
             warned_row_cell_spacing: false,
+            warned_art_page_border: false,
             warned_orphan_vmerge: false,
             shape_default_text_color: None,
             shape_default_font_family: None,
@@ -1986,6 +2063,8 @@ mod tests {
             numbering: HashMap::new(),
             font_families: Vec::new(),
             media: HashMap::new(),
+            diagrams: Default::default(),
+            charts: Default::default(),
             embedded_fonts: Vec::new(),
             pic_bullets: HashMap::new(),
             theme: None,
@@ -1997,6 +2076,11 @@ mod tests {
             endnotes: HashMap::new(),
             even_and_odd_headers: false,
             default_tab_stop: Dimension::new(720),
+            show_ins_del_marks: true,
+            show_comment_marks: true,
+            revision_colors: Default::default(),
+            comments: Default::default(),
+            hyphenation: Default::default(),
         }
     }
 
@@ -2019,8 +2103,11 @@ mod tests {
                     properties: RunProperties::default(),
                     content: vec![RunElement::Text("hi".into())],
                     rsids: crate::model::RevisionIds::default(),
+                    revision: None,
+                    comment: None,
                 }))],
                 rsids: crate::model::ParagraphRevisionIds::default(),
+                mark_deleted: false,
             }))],
         }
     }
@@ -2193,6 +2280,7 @@ mod tests {
                     description: None,
                     hidden: None,
                     title: None,
+                    hyperlink: None,
                 },
                 cnv_pic_pr: None,
             },
@@ -2200,6 +2288,7 @@ mod tests {
                 rotate_with_shape: None,
                 dpi: None,
                 blip: Some(Blip {
+                    svg_embed: None,
                     embed: Some(RelId::new("rId7")),
                     link: None,
                     compression: None,

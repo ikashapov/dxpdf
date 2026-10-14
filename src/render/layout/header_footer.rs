@@ -558,6 +558,10 @@ mod tests {
             text_scale: 1.0,
             underline_position: Pt::ZERO,
             underline_thickness: Pt::ZERO,
+            strike_lines: 0,
+            strike_position: Pt::ZERO,
+            strike_thickness: Pt::ZERO,
+            hyphenation: None,
         };
         Fragment::Text {
             shaped: None,
@@ -585,6 +589,7 @@ mod tests {
     fn test_config() -> PageConfig {
         use crate::render::layout::page::ColumnGeometry;
         PageConfig {
+            column_separator: false,
             base_direction: Default::default(),
             page_size: PtSize::new(Pt::new(612.0), Pt::new(792.0)),
             margins: PtEdgeInsets::new(Pt::new(72.0), Pt::new(72.0), Pt::new(72.0), Pt::new(72.0)),
@@ -594,6 +599,7 @@ mod tests {
                 x_offset: Pt::ZERO,
                 width: Pt::new(468.0),
             }],
+            line_grid: None,
         }
     }
 

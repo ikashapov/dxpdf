@@ -102,6 +102,19 @@ pub struct ParagraphStyle {
     /// §17.3.1.44: when the paragraph *does* split, forbid a single line stranded
     /// at the bottom (orphan) or top (widow) of a page. Word's default is on.
     pub widow_control: bool,
+    /// §17.3.1.32 `w:snapToGrid` as the style cascade resolved it (absent =
+    /// on). Whether it *matters* is [`ParagraphStyle::line_grid`]'s question;
+    /// the two are separate because this one is a property of the paragraph
+    /// and that one a property of where the paragraph is being placed.
+    pub snap_to_grid: bool,
+    /// §17.6.5: the section's applied line-grid pitch, stamped by the body
+    /// page layout at placement time and `None` everywhere else — table
+    /// cells (§17.6.5 excludes them without the unimplemented legacy
+    /// `w:adjustLineHeightInTable`), headers/footers, footnotes and shape
+    /// text never snap, and they stay off this field by never setting it
+    /// rather than by a flag each would have to remember to clear. See
+    /// `line_emit::resolve_line_metrics` for what the pitch does.
+    pub line_grid: Option<Pt>,
     /// §17.3.1.9: suppress spacing between paragraphs of the same style.
     pub contextual_spacing: bool,
     /// Style ID for contextual spacing comparison.
@@ -114,6 +127,29 @@ pub struct ParagraphStyle {
     pub page_x: Pt,
     /// Total content width (for float_adjustments computation).
     pub page_content_width: Pt,
+    /// §17.15.1.10 (issue #158): automatic hyphenation as it applies to this
+    /// paragraph — `Some` when the document turns it on *and* the §17.7.2
+    /// cascade did not set §17.3.1.34 `w:suppressAutoHyphens` on it. `None`
+    /// is the whole of "do not hyphenate", for either reason; see
+    /// `build::convert::paragraph_style_from_props`.
+    pub hyphenation: Option<AutoHyphenation>,
+}
+
+/// §17.15.1.10 / .53 / .22 / .27: the document's hyphenation controls in
+/// layout units — [`HyphenationSettings`](crate::model::HyphenationSettings)
+/// with the zone in points. Carried on [`ParagraphStyle`] so every
+/// `place_paragraph` caller (body, cells, continuation re-fits) inherits it
+/// without per-caller plumbing; `place_paragraph` turns it into the fitter's
+/// `HyphenationCtx` when a measurer is at hand.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutoHyphenation {
+    /// §17.15.1.53: the gap a line may leave before its next word is cut.
+    pub zone: Pt,
+    /// §17.15.1.22: lines in a row that may end in an inserted hyphen; `0`
+    /// is no limit.
+    pub consecutive_limit: u32,
+    /// §17.15.1.27 `w:doNotHyphenateCaps`.
+    pub no_caps: bool,
 }
 
 /// Resolved paragraph border style for rendering.
@@ -186,6 +222,8 @@ impl ParagraphStyle {
             keep_next: self.keep_next,
             keep_lines: self.keep_lines,
             widow_control: self.widow_control,
+            snap_to_grid: self.snap_to_grid,
+            line_grid: self.line_grid,
             contextual_spacing: self.contextual_spacing,
             style_id: self.style_id.clone(),
             // Caller will replace these — skip cloning the vec.
@@ -193,6 +231,7 @@ impl ParagraphStyle {
             page_y: Pt::ZERO,
             page_x: Pt::ZERO,
             page_content_width: Pt::ZERO,
+            hyphenation: self.hyphenation,
         }
     }
 }
@@ -222,12 +261,17 @@ impl Default for ParagraphStyle {
             keep_lines: false,
             // §17.3.1.44: Word enables widow/orphan control by default.
             widow_control: true,
+            // §17.3.1.32: absent in the whole hierarchy means "use the grid".
+            snap_to_grid: true,
+            line_grid: None,
             contextual_spacing: false,
             style_id: None,
             page_floats: Vec::new(),
             page_y: Pt::ZERO,
             page_x: Pt::ZERO,
             page_content_width: Pt::ZERO,
+            // §17.15.1.10: omitted means off.
+            hyphenation: None,
         }
     }
 }
@@ -256,10 +300,10 @@ pub struct ParagraphLayout {
     pub size: PtSize,
 }
 
-/// Optional text measurement callback for accurate per-character splitting.
-pub type MeasureTextFn<'a> = Option<
-    &'a dyn Fn(
-        &str,
-        &super::super::fragment::FontProps,
-    ) -> (Pt, super::super::fragment::TextMetrics),
->;
+/// Optional measuring capability for accurate per-character splitting — the
+/// same trait object as `fragment::split::MeasureFn`, aliased so the two
+/// layers keep passing one value. See [`SplitMeasure`] for the two
+/// operations and why a shaped piece needs the second.
+pub type MeasureTextFn<'a> = Option<&'a dyn SplitMeasure>;
+
+pub use super::super::fragment::SplitMeasure;

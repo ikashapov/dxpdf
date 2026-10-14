@@ -78,6 +78,7 @@ fn rewrite_in_inlines(inlines: &mut [Inline], remap: &HashMap<RelId, RelId>) {
                 rewrite_in_inlines(&mut h.content, remap);
             }
             Inline::Field(f) => rewrite_in_inlines(&mut f.content, remap),
+            Inline::CommentRef(_) => {}
             Inline::AlternateContent(ac) => {
                 // §M.2.2: the renderer prefers a supported `<mc:Choice>` over
                 // `<mc:Fallback>` (see `layout::live_mc_branch`), so rIds
@@ -108,6 +109,11 @@ fn rewrite_in_inlines(inlines: &mut [Inline], remap: &HashMap<RelId, RelId>) {
 }
 
 fn rewrite_in_image(image: &mut Image, remap: &HashMap<RelId, RelId>) {
+    // §21.1.2.3.5: the picture's own hyperlink resolves through the part's
+    // rels like a `w:hyperlink` does.
+    if let Some(ref mut target) = image.doc_properties.hyperlink {
+        rewrite_in_hyperlink_target(target, remap);
+    }
     if let Some(ref mut graphic) = image.graphic {
         match graphic {
             GraphicContent::Picture(pic) => {
@@ -120,6 +126,19 @@ fn rewrite_in_image(image: &mut Image, remap: &HashMap<RelId, RelId>) {
             }
             GraphicContent::WordProcessingShape(wsp) => {
                 rewrite_in_word_processing_shape(wsp, remap);
+            }
+            // Issue #155: the payloads these reference live in document-level
+            // maps keyed by the (possibly synthesized) rel id, so the id on
+            // the element must follow the same remap the media keys do.
+            GraphicContent::Diagram(d) => {
+                if let Some(new) = remap.get(&d.data) {
+                    d.data = new.clone();
+                }
+            }
+            GraphicContent::Chart(c) => {
+                if let Some(new) = remap.get(&c.part) {
+                    c.part = new.clone();
+                }
             }
         }
     }
@@ -173,6 +192,17 @@ fn rewrite_blip(blip: &mut Blip, remap: &HashMap<RelId, RelId>) {
     }
     if let Some(new) = blip.link.as_ref().and_then(|id| remap.get(id)).cloned() {
         blip.link = Some(new);
+    }
+    // The svgBlip extension's relationship lives in the same part-local
+    // namespace as the blip's own — a header's SVG must follow its part's
+    // remap or it resolves against the body's rels.
+    if let Some(new) = blip
+        .svg_embed
+        .as_ref()
+        .and_then(|id| remap.get(id))
+        .cloned()
+    {
+        blip.svg_embed = Some(new);
     }
 }
 
@@ -283,6 +313,7 @@ mod tests {
                 description: None,
                 hidden: None,
                 title: None,
+                hyperlink: None,
             },
             graphic_frame_locks: None,
             graphic: Some(GraphicContent::Picture(Picture {
@@ -293,6 +324,7 @@ mod tests {
                         description: None,
                         hidden: None,
                         title: None,
+                        hyperlink: None,
                     },
                     cnv_pic_pr: None,
                 },
@@ -300,6 +332,7 @@ mod tests {
                     rotate_with_shape: None,
                     dpi: None,
                     blip: Some(Blip {
+                        svg_embed: None,
                         embed: Some(RelId::new(rel_id)),
                         link: None,
                         compression: None,
@@ -327,6 +360,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::Image(Box::new(image))],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))
     }
 
@@ -383,6 +417,7 @@ mod tests {
     #[test]
     fn rewrites_blip_link_too() {
         let mut blip = Blip {
+            svg_embed: None,
             embed: None,
             link: Some(RelId::new("rId7")),
             compression: None,
@@ -390,6 +425,23 @@ mod tests {
         let remap = remap_one("rId7", "linked");
         rewrite_blip(&mut blip, &remap);
         assert_eq!(blip.link.unwrap().as_str(), "linked");
+    }
+
+    /// The svgBlip extension's relationship is part-local like the blip's
+    /// own — a header's SVG that kept its raw id would resolve against the
+    /// body's rels (issue #150).
+    #[test]
+    fn rewrites_the_svg_blip_rel_id() {
+        let mut blip = Blip {
+            svg_embed: Some(RelId::new("rId9")),
+            embed: Some(RelId::new("rId8")),
+            link: None,
+            compression: None,
+        };
+        let remap = remap_one("rId9", "header::rId9");
+        rewrite_blip(&mut blip, &remap);
+        assert_eq!(blip.svg_embed.unwrap().as_str(), "header::rId9");
+        assert_eq!(blip.embed.unwrap().as_str(), "rId8", "untouched");
     }
 
     #[test]
@@ -455,6 +507,7 @@ mod tests {
                 description: None,
                 hidden: None,
                 title: None,
+                hyperlink: None,
             },
             graphic_frame_locks: None,
             graphic: Some(GraphicContent::WordProcessingShape(WordProcessingShape {
@@ -525,6 +578,7 @@ mod tests {
                 rotate_with_shape: None,
                 dpi: None,
                 blip: Some(Blip {
+                    svg_embed: None,
                     embed: Some(RelId::new(rel_id)),
                     link: None,
                     compression: None,
@@ -581,6 +635,7 @@ mod tests {
                 rotate_with_shape: None,
                 dpi: None,
                 blip: Some(Blip {
+                    svg_embed: None,
                     embed: Some(RelId::new("rId7")),
                     link: None,
                     compression: None,
@@ -656,6 +711,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::Pict(pict)],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId1", "synth_vml_box");
 
@@ -692,6 +748,7 @@ mod tests {
                 content: vec![],
             })],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId7", "https://example.com");
         rewrite_part_rels_in_blocks(&mut blocks, &remap);
@@ -728,6 +785,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::AlternateContent(ac)],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId1", "header3.xml::rId1");
         rewrite_part_rels_in_blocks(&mut blocks, &remap);
@@ -775,6 +833,7 @@ mod tests {
             mark_run_properties: None,
             content: vec![Inline::Pict(pict)],
             rsids: ParagraphRevisionIds::default(),
+            mark_deleted: false,
         }))];
         let remap = remap_one("rId1", "grouped");
         rewrite_part_rels_in_blocks(&mut blocks, &remap);

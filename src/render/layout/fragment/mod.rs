@@ -19,6 +19,7 @@ use crate::render::shape::RunDirection;
 
 mod bidi;
 mod collect;
+pub(crate) use collect::link_target_of;
 mod fallback;
 mod math;
 mod segment;
@@ -33,7 +34,7 @@ pub use collect::{
 pub use fallback::{apply_font_fallback, FallbackLookup, RegistryFallback};
 pub(crate) use math::fraction_geometry;
 pub use shape::shape_complex_scripts;
-pub use split::split_oversized_fragments;
+pub use split::{split_oversized_fragments, MeasureWith, SplitMeasure};
 
 // ── Superscript / subscript rendering constants ───────────────────────────────
 // §17.3.2.42: these ratios are "application-defined" per the spec; the values
@@ -262,6 +263,28 @@ pub struct FontProps {
     pub underline_position: Pt,
     /// Underline thickness from font metrics.
     pub underline_thickness: Pt,
+    /// §17.3.2.37 `w:strike` / §17.3.2.9 `w:dstrike`: how many lines to draw
+    /// through the run — 0, 1, or 2. The model's tri-state (`None` inherit,
+    /// `Some(StrikeStyle::None)` explicit off, `Some(Single | Double)`)
+    /// collapses here into a count, exactly as `underline` collapses into a
+    /// bool above: by this seam the cascade has already answered.
+    pub strike_lines: u8,
+    /// Strike position from font metrics (positive = above baseline — the
+    /// opposite sign of `underline_position`, matching where each line goes).
+    pub strike_position: Pt,
+    /// Strike thickness from font metrics.
+    pub strike_thickness: Pt,
+    /// §17.3.2.20 `w:lang/@w:val` as the §17.7.2 cascade left it, reduced to
+    /// the hyphenation dictionary this engine has for it (issue #158), or
+    /// `None` for an untagged run or a language with no vendored patterns —
+    /// either of which the line fitter never hyphenates.
+    ///
+    /// On `FontProps` rather than on the fragment for the reason `rtl` is: it
+    /// is per *run*, and this is the per-run resolved presentation every text
+    /// fragment already shares by `Rc`. Resolved from the run's own cascade,
+    /// not from the paragraph mark `ParagraphStyle::locale` reads — a German
+    /// quotation inside an English paragraph hyphenates as German.
+    pub hyphenation: Option<crate::i18n::hyphenate::HyphenLanguage>,
 }
 
 /// Font metrics for a specific font at a specific size.
@@ -337,10 +360,12 @@ pub enum LinkTarget {
 /// character list did not include it. [`crate::i18n::segment`] is the one
 /// place that answers the question now; this enum is how the answer travels.
 ///
-/// Two states, not three. UAX #14 also has *mandatory* breaks ([LB4]/[LB5]),
-/// and none can reach a fragment: CR, LF and every other C0 control but TAB
-/// are stripped while the text is collected, and an authored `<w:br/>`
-/// (§17.3.3.1) becomes [`Fragment::LineBreak`] instead of text.
+/// Two UAX #14 states, not three. UAX #14 also has *mandatory* breaks
+/// ([LB4]/[LB5]), and none can reach a fragment: CR, LF and every other C0
+/// control but TAB are stripped while the text is collected, and an authored
+/// `<w:br/>` (§17.3.3.1) becomes [`Fragment::LineBreak`] instead of text.
+/// The third variant is not UAX #14's at all — it is the engine's own, and
+/// exists only after line fitting has run.
 ///
 /// [LB4]: https://www.unicode.org/reports/tr14/#LB4
 /// [LB5]: https://www.unicode.org/reports/tr14/#LB5
@@ -355,6 +380,30 @@ pub enum BreakAfter {
     /// `0`), or the fragment ends at a `<w:r>` boundary that falls inside a
     /// token and the run after it carries the rest.
     Prohibited,
+    /// §17.15.1.10 (issue #158): an opportunity this engine *created* by
+    /// cutting a word at a hyphenation point. The fragment is the head of
+    /// that word and its text already ends in the U+002D it inserted, so
+    /// emission paints it as ordinary text; the fragment after it is the
+    /// word's tail. Only `layout::line` produces this, only at the end of a
+    /// fitted line, and `PlacedParagraph::fragments_from_line` rejoins such a
+    /// pair before any fragment is re-fitted at another width — a head whose
+    /// tail fits beside it again would otherwise paint a hyphen mid-word.
+    Hyphenated,
+}
+
+/// How a shaped run is laid out and painted: which way HarfBuzz orders its
+/// glyphs, and how many shaped clusters it holds.
+///
+/// `unit_count` is the §17.3.2.35 / §17.3.1.13 spacing unit count for a
+/// shaped run — the shaped-cluster counterpart of
+/// [`crate::render::spacing::unit_count`] (issue #153; that module's doc owns
+/// the story). It is measured once, by the same HarfBuzz pass that re-measures
+/// the fragment's width, and carried here because the caller that needs it —
+/// `line_emit`'s distribution counting — has fragments and no measurer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shaping {
+    pub direction: RunDirection,
+    pub unit_count: usize,
 }
 
 /// A measured fragment — the atomic unit for line fitting.
@@ -396,10 +445,11 @@ pub enum Fragment {
         /// bidirectional text, which is what lets the reorder be skipped
         /// outright there.
         level: BidiLevel,
-        /// Whether this run must be shaped to be legible, and which way round
-        /// — `None` for every run in a script that a cmap lookup renders
-        /// correctly, which is all of Latin, Cyrillic, Greek, CJK, Hebrew and
-        /// Thai.
+        /// Whether this run must be shaped to be legible — `None` for every
+        /// run that both a cmap lookup renders correctly (all of Latin,
+        /// Cyrillic, Greek, CJK, Hebrew and Thai) and that sits at a
+        /// left-to-right level (ordinary Hebrew does not, and is shaped for
+        /// glyph order).
         ///
         /// Set by `layout::fragment::shape`, which is also what re-measures
         /// the fragment against the shaped advance, so `width` below and what
@@ -407,7 +457,7 @@ pub enum Fragment {
         /// at paint from the text, because a second copy of
         /// [`needs_shaping`](crate::render::shape::needs_shaping) is the kind
         /// of duplicate rule issue #130 was spent removing.
-        shaped: Option<RunDirection>,
+        shaped: Option<Shaping>,
         /// Full width including trailing whitespace (used for positioning).
         width: Pt,
         /// Width excluding trailing whitespace (used for line-break overflow checking).
@@ -436,6 +486,9 @@ pub enum Fragment {
         image_data: Option<MediaEntry>,
         /// §20.1.10.48 `a:srcRect` — fractional source crop in `[0, 1]`.
         src_rect: Option<PtRect>,
+        /// §21.1.2.3.5 / §17.16.22: the picture's own `a:hlinkClick`, or the
+        /// `w:hyperlink` enclosing it — the hotspot is the drawn image.
+        hyperlink_url: Option<LinkTarget>,
     },
     /// §22.1 `m:f` — a numerator / rule / denominator stack, pre-measured so
     /// line fitting sees one atom. `metrics` is synthesized: the ascent
@@ -455,6 +508,19 @@ pub enum Fragment {
         /// covers the whole fraction rather than per-row, matching how a
         /// fraction is one atom everywhere else in this pipeline.
         hyperlink_url: Option<LinkTarget>,
+    },
+    /// An inline vector scene — a SmartArt diagram or a chart (issue #155),
+    /// occupying its `wp:extent` box like an image but carrying pre-built
+    /// draw commands in scene-local coordinates. Collection records the
+    /// source; `build::convert::populate_scenes` renders it, because the
+    /// scene needs the resolved theme and the measurer, which fragment
+    /// collection does not carry.
+    Scene {
+        size: PtSize,
+        source: SceneSource,
+        /// Scene-local commands, `(0,0)`–`size`; emission shifts them to the
+        /// pen. Empty until populated.
+        commands: std::rc::Rc<Vec<crate::render::layout::draw_command::DrawCommand>>,
     },
     /// One emoji grapheme cluster (UAX #29) classified as an emoji sequence
     /// (UTS #51), to be rasterized at paint time via Skia's raster backend
@@ -537,20 +603,33 @@ pub enum Fragment {
     Bookmark {
         name: String,
     },
+    /// Issue #154: a comment's anchor (`w:commentReference`) — zero-width
+    /// marker the balloon pass attaches the connector to.
+    CommentAnchor(crate::model::CommentId),
+}
+
+/// What an inline [`Fragment::Scene`] renders, by payload key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SceneSource {
+    /// `Document::diagrams` key.
+    Diagram(crate::model::RelId),
+    /// `Document::charts` key.
+    Chart(crate::model::RelId),
 }
 
 impl Fragment {
     pub fn width(&self) -> Pt {
         match self {
             Fragment::Text { width, .. } | Fragment::MathFraction { width, .. } => *width,
-            Fragment::Image { size, .. } => size.width,
+            Fragment::Image { size, .. } | Fragment::Scene { size, .. } => size.width,
             Fragment::Emoji { advance, .. } => *advance,
             Fragment::Tab { fitting_width, .. } => fitting_width.unwrap_or(MIN_TAB_WIDTH),
             Fragment::PTab { .. } => MIN_TAB_WIDTH,
             Fragment::LineBreak { .. }
             | Fragment::ColumnBreak
             | Fragment::PageBreak { .. }
-            | Fragment::Bookmark { .. } => Pt::ZERO,
+            | Fragment::Bookmark { .. }
+            | Fragment::CommentAnchor(_) => Pt::ZERO,
         }
     }
 
@@ -567,13 +646,15 @@ impl Fragment {
             Fragment::Text { metrics, .. } | Fragment::MathFraction { metrics, .. } => {
                 metrics.height()
             }
-            Fragment::Image { size, .. } => size.height,
+            Fragment::Image { size, .. } | Fragment::Scene { size, .. } => size.height,
             Fragment::Emoji { line_metrics, .. } => line_metrics.height(),
             Fragment::Tab { line_height, .. }
             | Fragment::PTab { line_height, .. }
             | Fragment::LineBreak { line_height }
             | Fragment::PageBreak { line_height } => *line_height,
-            Fragment::ColumnBreak | Fragment::Bookmark { .. } => Pt::ZERO,
+            Fragment::ColumnBreak | Fragment::Bookmark { .. } | Fragment::CommentAnchor(_) => {
+                Pt::ZERO
+            }
         }
     }
 
@@ -619,9 +700,13 @@ impl Fragment {
     /// holding nothing but bookmarks still shows nothing.
     pub fn occupies_line(&self) -> bool {
         match self {
-            Fragment::PageBreak { .. } | Fragment::ColumnBreak | Fragment::Bookmark { .. } => false,
+            Fragment::PageBreak { .. }
+            | Fragment::ColumnBreak
+            | Fragment::Bookmark { .. }
+            | Fragment::CommentAnchor(_) => false,
             Fragment::Text { .. }
             | Fragment::Image { .. }
+            | Fragment::Scene { .. }
             | Fragment::Emoji { .. }
             | Fragment::Tab { .. }
             | Fragment::PTab { .. }
@@ -756,9 +841,31 @@ pub fn font_props_from_run(
         rtl: Toggle::from_option(rp.rtl),
         char_spacing,
         text_scale,
+        // §17.3.2.37 / §17.3.2.9: `w:dstrike` already won over `w:strike` at
+        // parse (`resolve_strike`), so the cascade hands one answer here;
+        // `Some(StrikeStyle::None)` is the explicit "no strike" override and
+        // draws nothing, mirroring `UnderlineStyle::None` above.
+        strike_lines: match rp.strike {
+            Some(crate::model::StrikeStyle::Single) => 1,
+            Some(crate::model::StrikeStyle::Double) => 2,
+            Some(crate::model::StrikeStyle::None) | None => 0,
+        },
         // Populated by the measurer from Skia font metrics.
         underline_position: Pt::ZERO,
         underline_thickness: Pt::ZERO,
+        strike_position: Pt::ZERO,
+        strike_thickness: Pt::ZERO,
+        // §17.3.2.20 → §17.15.1.10 (issue #158). `Locale::first_tag`'s
+        // emptiness rule applies: an empty `@w:val` sets nothing. Only the
+        // Latin-script `@w:val` is consulted — `@w:eastAsia`/`@w:bidi` name
+        // scripts whose text is either never hyphenated (CJK) or shaped
+        // (Arabic), both of which the fitter excludes before asking.
+        hyphenation: rp
+            .lang
+            .get()
+            .and_then(|l| l.val.as_deref())
+            .filter(|tag| !tag.is_empty())
+            .and_then(crate::i18n::hyphenate::HyphenLanguage::from_tag),
     }
 }
 
@@ -819,6 +926,7 @@ mod mark_line_tests {
             rel_id: "rId1".into(),
             image_data: None,
             src_rect: None,
+            hyperlink_url: None,
         }
     }
 
@@ -924,6 +1032,10 @@ mod tests {
             text_scale: 1.0,
             underline_position: Pt::ZERO,
             underline_thickness: Pt::ZERO,
+            strike_lines: 0,
+            strike_position: Pt::ZERO,
+            strike_thickness: Pt::ZERO,
+            hyphenation: None,
         });
         let zero_metrics = TextMetrics {
             ascent: Pt::ZERO,
@@ -965,6 +1077,52 @@ mod tests {
         assert_eq!(fp.size.raw(), 12.0);
         assert_eq!(fp.bold, Toggle::Absent);
         assert_eq!(fp.italic, Toggle::Absent);
+    }
+
+    // ── §17.3.2.20 language → hyphenation dictionary (issue #158) ──────────
+
+    /// `w:lang/@w:val` as the §17.7.2 cascade left it on the run becomes the
+    /// run's hyphenation dictionary. It is `rp.lang` — the *run's* cascaded
+    /// value — not the paragraph mark's: a German quotation inside an English
+    /// paragraph is a run-level fact. Absent, empty and unknown tags all mean
+    /// "never hyphenate this run".
+    #[test]
+    fn the_runs_cascaded_lang_picks_its_hyphenation_dictionary() {
+        use crate::i18n::hyphenate::HyphenLanguage;
+        let at = |val: Option<&str>| {
+            font_props_from_run(
+                &RunProperties {
+                    lang: Dup::from(Some(crate::model::Lang {
+                        val: val.map(str::to_string),
+                        east_asia: None,
+                        bidi: None,
+                    })),
+                    ..RunProperties::default()
+                },
+                "Helvetica",
+                Pt::new(12.0),
+                crate::render::layout::ShapeAutoFit::NONE,
+            )
+            .hyphenation
+        };
+        assert_eq!(at(Some("de-DE")), Some(HyphenLanguage::De1996));
+        assert_eq!(at(Some("en-GB")), Some(HyphenLanguage::EnGb));
+        assert_eq!(at(Some("en-US")), Some(HyphenLanguage::EnUs));
+        assert_eq!(at(Some("ru-RU")), Some(HyphenLanguage::Ru));
+        assert_eq!(at(Some("fr-FR")), None, "no vendored dictionary");
+        assert_eq!(at(Some("")), None, "an empty @w:val sets nothing");
+        assert_eq!(at(None), None, "no tag on the run");
+        assert_eq!(
+            font_props_from_run(
+                &RunProperties::default(),
+                "Helvetica",
+                Pt::new(12.0),
+                crate::render::layout::ShapeAutoFit::NONE,
+            )
+            .hyphenation,
+            None,
+            "no w:lang at all"
+        );
     }
 
     // ── §17.3.2.1 / §17.3.2.16 bold and italic tri-state ───────────────────

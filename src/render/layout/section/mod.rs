@@ -68,6 +68,7 @@ mod types;
 pub use layout::layout_section;
 pub(crate) use layout::layout_section_with_clearance;
 pub(crate) use layout::SectionStart;
+pub(crate) use layout::{BalanceProbe, BalanceTarget};
 pub(crate) use layout::{FinalPageBounds, LastPageOwner, SectionLayout, SectionTail};
 pub use stacker::{stack_blocks, CellLine, StackResult};
 pub use types::*;
@@ -175,6 +176,10 @@ mod tests {
                 text_scale: 1.0,
                 underline_position: Pt::ZERO,
                 underline_thickness: Pt::ZERO,
+                strike_lines: 0,
+                strike_position: Pt::ZERO,
+                strike_thickness: Pt::ZERO,
+                hyphenation: None,
             }),
             color: RgbColor::BLACK,
             width: Pt::new(width),
@@ -218,6 +223,7 @@ mod tests {
             dist_left: Pt::ZERO,
             dist_right: Pt::ZERO,
             behind_doc: false,
+            hyperlink: None,
         }
     }
 
@@ -278,6 +284,7 @@ mod tests {
     fn small_config() -> PageConfig {
         use crate::render::layout::page::ColumnGeometry;
         PageConfig {
+            column_separator: false,
             base_direction: Default::default(),
             page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
             margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
@@ -287,6 +294,7 @@ mod tests {
                 x_offset: Pt::ZERO,
                 width: Pt::new(180.0),
             }],
+            line_grid: None,
         }
     }
 
@@ -380,6 +388,7 @@ mod tests {
                 last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 2,
+                balance: None,
             },
         )
         .pages;
@@ -553,6 +562,7 @@ mod tests {
     fn two_column_config() -> PageConfig {
         use crate::render::layout::page::ColumnGeometry;
         PageConfig {
+            column_separator: false,
             base_direction: Default::default(),
             page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
             margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
@@ -568,6 +578,7 @@ mod tests {
                     width: Pt::new(85.0),
                 },
             ],
+            line_grid: None,
         }
     }
 
@@ -1034,6 +1045,7 @@ mod tests {
                 last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
+                balance: None,
             },
         )
         .pages;
@@ -1110,6 +1122,7 @@ mod tests {
                 last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
+                balance: None,
             },
         )
         .pages;
@@ -1187,6 +1200,7 @@ mod tests {
                 last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
+                balance: None,
             },
         )
         .pages;
@@ -1917,6 +1931,7 @@ mod tests {
                 last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
+                balance: None,
             },
         )
         .pages;
@@ -1991,6 +2006,7 @@ mod tests {
                 last_page: super::layout::LastPageOwner::Own,
                 clearance: &clearance,
                 logical_page_base: 1,
+                balance: None,
             },
         )
         .pages;
@@ -2903,6 +2919,7 @@ mod tests {
     fn tall_config() -> PageConfig {
         use crate::render::layout::page::ColumnGeometry;
         PageConfig {
+            column_separator: false,
             base_direction: Default::default(),
             page_size: PtSize::new(Pt::new(200.0), Pt::new(160.0)),
             margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
@@ -2912,6 +2929,7 @@ mod tests {
                 x_offset: Pt::ZERO,
                 width: Pt::new(180.0),
             }],
+            line_grid: None,
         }
     }
 
@@ -3558,6 +3576,7 @@ mod tests {
                 dist_left: Pt::ZERO,
                 dist_right: Pt::ZERO,
                 behind_doc: false,
+                hyperlink: None,
             }],
             floating_shapes: vec![],
         }
@@ -3612,6 +3631,152 @@ mod tests {
         );
     }
 
+    // ── §17.15.1.10 across a continuation re-fit (issue #158) ─────────────
+
+    /// 6 pt per character, hyphen included.
+    fn six_per_char(
+        text: &str,
+        _: &FontProps,
+    ) -> (Pt, crate::render::layout::fragment::TextMetrics) {
+        (
+            Pt::new(6.0 * text.chars().count() as f32),
+            crate::render::layout::fragment::TextMetrics {
+                ascent: Pt::new(10.0),
+                descent: Pt::new(4.0),
+                leading: Pt::ZERO,
+            },
+        )
+    }
+
+    /// A word of an `en-US` run measured by `six_per_char`, with the break
+    /// status the production segmenter gives a word followed by a space.
+    fn hyphenating_word(text: &str) -> Fragment {
+        let mut f = text_frag(text, 6.0 * text.chars().count() as f32, 14.0);
+        if let Fragment::Text {
+            font,
+            trimmed_width,
+            break_after,
+            ..
+        } = &mut f
+        {
+            *break_after = crate::render::layout::fragment::BreakAfter::Opportunity;
+            *trimmed_width = Pt::new(6.0 * text.trim_end().chars().count() as f32);
+            let mut props = (**font).clone();
+            props.hyphenation = Some(crate::i18n::hyphenate::HyphenLanguage::EnUs);
+            *font = Rc::new(props);
+        }
+        f
+    }
+
+    /// A 66 pt column followed by a 200 pt one, each three 14 pt lines tall.
+    fn narrow_then_wide_column_config() -> PageConfig {
+        use crate::render::layout::page::ColumnGeometry;
+        PageConfig {
+            base_direction: Default::default(),
+            page_size: PtSize::new(Pt::new(300.0), Pt::new(64.0)),
+            margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
+            header_margin: Pt::new(5.0),
+            footer_margin: Pt::new(5.0),
+            columns: vec![
+                ColumnGeometry {
+                    x_offset: Pt::ZERO,
+                    width: Pt::new(66.0),
+                },
+                ColumnGeometry {
+                    x_offset: Pt::new(80.0),
+                    width: Pt::new(200.0),
+                },
+            ],
+            column_separator: false,
+            line_grid: None,
+        }
+    }
+
+    /// The §4 continuation re-fit against hyphenation. In the 66 pt column
+    /// `the hyphenation` lays out as `the hyphen-` / `ation the ` /
+    /// `hyphenation`, and three lines fill the column, so the fourth —
+    /// which again ends in `hyphen-` — is carried to the 200 pt column and
+    /// re-fitted there. Re-fitting the already-cut fragments would put
+    /// `hyphen-` and `ation` side by side on one wide line, painting a
+    /// hyphen in the middle of a word. The remainder has to be the
+    /// paragraph's own words again, so that at 200 pt `hyphenation` is
+    /// simply whole. The property: an inserted hyphen is only ever the last
+    /// thing on its line (the text has no hyphen of its own), and the
+    /// fixture does hyphenate somewhere, so the property is not vacuous.
+    #[test]
+    fn a_word_cut_in_a_narrow_column_is_whole_again_in_the_wide_one() {
+        let mut fragments = Vec::new();
+        for _ in 0..6 {
+            fragments.push(hyphenating_word("the "));
+            fragments.push(hyphenating_word("hyphenation "));
+        }
+        let block = LayoutBlock::Paragraph {
+            fragments,
+            style: ParagraphStyle {
+                hyphenation: Some(crate::render::layout::paragraph::AutoHyphenation {
+                    zone: Pt::ZERO,
+                    consecutive_limit: 0,
+                    no_caps: false,
+                }),
+                ..ParagraphStyle::default()
+            },
+            page_break_before: false,
+            footnotes: vec![],
+            floating_images: vec![],
+            floating_shapes: vec![],
+        };
+
+        let pages = layout_section(
+            &[block],
+            &narrow_then_wide_column_config(),
+            Some(&crate::render::layout::fragment::MeasureWith(six_per_char)),
+            Pt::ZERO,
+            Pt::new(14.0),
+            None,
+        );
+
+        // Every line, as (page, column, baseline) → the texts on it in x
+        // order. The two columns share baselines, so the column (x past the
+        // wide column's left edge at 10 + 80) is part of the key.
+        let mut lines: std::collections::BTreeMap<(usize, bool, i64), Vec<(i64, String)>> =
+            std::collections::BTreeMap::new();
+        for (page_idx, page) in pages.iter().enumerate() {
+            for c in &page.commands {
+                if let DrawCommand::Text { position, text, .. } = c {
+                    let x = position.x.raw().round() as i64;
+                    lines
+                        .entry((page_idx, x >= 90, position.y.raw().round() as i64))
+                        .or_default()
+                        .push((x, text.to_string()));
+                }
+            }
+        }
+        let mut hyphenated_lines = 0;
+        let mut wide_column_lines = 0;
+        for ((page, wide, y), mut pieces) in lines {
+            pieces.sort_by_key(|(x, _)| *x);
+            if wide {
+                wide_column_lines += 1;
+            }
+            for (idx, (_, text)) in pieces.iter().enumerate() {
+                if text.ends_with('-') {
+                    hyphenated_lines += 1;
+                    assert_eq!(
+                        idx + 1,
+                        pieces.len(),
+                        "page {page} y={y}: an inserted hyphen inside a line — \
+                         {pieces:?}"
+                    );
+                }
+            }
+        }
+        assert!(hyphenated_lines >= 1, "the narrow column hyphenates");
+        assert!(
+            wide_column_lines >= 1,
+            "the paragraph reaches the wide column"
+        );
+    }
+
     // ── §17.6.4 splitting across unequal-width columns (plan §11.4) ──────
 
     /// Two columns of *unequal* width sharing one 200×100 page: col 0 is 100pt
@@ -3619,6 +3784,7 @@ mod tests {
     fn unequal_two_column_config() -> PageConfig {
         use crate::render::layout::page::ColumnGeometry;
         PageConfig {
+            column_separator: false,
             base_direction: Default::default(),
             page_size: PtSize::new(Pt::new(200.0), Pt::new(100.0)),
             margins: PtEdgeInsets::new(Pt::new(10.0), Pt::new(10.0), Pt::new(10.0), Pt::new(10.0)),
@@ -3634,6 +3800,7 @@ mod tests {
                     width: Pt::new(70.0),
                 },
             ],
+            line_grid: None,
         }
     }
 

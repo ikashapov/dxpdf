@@ -28,6 +28,15 @@ struct FontMeasureCache {
     widths: FxHashMap<Box<str>, f32>,
 }
 
+/// What [`TextMeasurer::shaped_measurement`] learns from one HarfBuzz pass:
+/// the run's advance (already `text_scale`-multiplied) and how many shaped
+/// clusters it holds — the spacing units `layout::fragment::shape` stores on
+/// the fragment so that distribution can count them without a measurer.
+pub struct ShapedMeasurement {
+    pub advance: Pt,
+    pub unit_count: usize,
+}
+
 /// Measures text using Skia fonts resolved through a [`FontRegistry`].
 /// Holds a per-instance `FontCache` for `Font` reuse across measurements.
 ///
@@ -153,8 +162,8 @@ impl<'r> TextMeasurer<'r> {
         (scaled_width + spacing_extra, text_metrics)
     }
 
-    /// The advance of `text` **shaped** through HarfBuzz, for a run in a
-    /// script that a cmap lookup renders wrongly.
+    /// The advance and spacing-unit count of `text` **shaped** through
+    /// HarfBuzz, for a run in a script that a cmap lookup renders wrongly.
     ///
     /// Separate from [`TextMeasurer::measure`] rather than a branch inside it,
     /// so that the hot path every Latin document takes keeps exactly the shape
@@ -167,14 +176,17 @@ impl<'r> TextMeasurer<'r> {
     /// is what the engine did before issue #131 and is wrong in the same way
     /// rather than in a new one.
     ///
-    /// §17.3.2.35 `w:spacing` is deliberately *not* added here, and
-    /// `layout::fragment::shape` states why at the call site.
-    pub fn shaped_advance(
+    /// `unit_count` is the run's shaped-cluster count — the §17.3.2.35 /
+    /// §17.3.1.13 spacing unit for a shaped run (issue #153; see
+    /// [`crate::render::spacing`] for the seam). §17.3.2.35 `w:spacing` itself
+    /// is deliberately *not* added to `advance` here: the caller owns the
+    /// spacing formula, and states it where it re-measures the fragment.
+    pub fn shaped_measurement(
         &self,
         text: &str,
         font_props: &FontProps,
         direction: crate::render::shape::RunDirection,
-    ) -> Option<Pt> {
+    ) -> Option<ShapedMeasurement> {
         let shaper = self.cluster_shaper.as_ref()?;
         let mut font_cache = self.font_cache.borrow_mut();
         let font = font_cache.get(
@@ -192,8 +204,11 @@ impl<'r> TextMeasurer<'r> {
                 direction,
             )
             .ok()?;
-        // §17.3.2.45 applies to glyph advances however they were obtained.
-        Some(run.total_advance * font_props.text_scale)
+        Some(ShapedMeasurement {
+            // §17.3.2.45 applies to glyph advances however they were obtained.
+            advance: run.total_advance * font_props.text_scale,
+            unit_count: run.unit_count(),
+        })
     }
 
     /// Query font metrics for underline positioning.
@@ -223,6 +238,40 @@ impl<'r> TextMeasurer<'r> {
         }
         let position = Pt::new(-raw_pos.unwrap_or(metrics.descent));
         // Thickness fallback: 1pt (smallest visible line at 72dpi).
+        let thickness = Pt::new(raw_thick.unwrap_or(1.0));
+        (position, thickness)
+    }
+
+    /// §17.3.2.37: strike position/thickness from font metrics.
+    /// Returns (strike_position, strike_thickness) in points; position is
+    /// positive **above** the baseline, because that is where the line goes:
+    /// emission draws at `baseline − position`, the same formula the
+    /// underline uses. Skia reports the raw value y-down (negative above),
+    /// so one negation yields the positive-above convention.
+    pub fn strike_metrics(&self, font_props: &FontProps) -> (Pt, Pt) {
+        let mut cache = self.font_cache.borrow_mut();
+        let font = cache.get(
+            self.registry,
+            &font_props.family,
+            font_props.size,
+            font_props.bold,
+            font_props.italic,
+        );
+        let (_, metrics) = font.metrics();
+        // Fallback when the face carries no OS/2 strikeout values: 30% of the
+        // ascent above the baseline — roughly where lowercase letters center —
+        // spelled in Skia's y-down terms (ascent is negative) so one negation
+        // serves both sources.
+        let raw_pos = metrics.strikeout_position();
+        let raw_thick = metrics.strikeout_thickness();
+        if raw_pos.is_none() || raw_thick.is_none() {
+            log::warn!(
+                "font '{}' ({:?}) missing strikeout metrics, using 0.3×ascent as fallback",
+                font_props.family,
+                font_props.size
+            );
+        }
+        let position = Pt::new(-raw_pos.unwrap_or(metrics.ascent * 0.3));
         let thickness = Pt::new(raw_thick.unwrap_or(1.0));
         (position, thickness)
     }
@@ -325,11 +374,57 @@ impl<'r> TextMeasurer<'r> {
     }
 }
 
+/// The measuring capability the split path and the paragraph layer's tab
+/// machinery are handed — see `fragment::split::SplitMeasure` for why a
+/// piece of a shaped fragment needs the second operation.
+impl super::fragment::SplitMeasure for TextMeasurer<'_> {
+    fn measure(&self, text: &str, font: &FontProps) -> (Pt, TextMetrics) {
+        TextMeasurer::measure(self, text, font)
+    }
+
+    fn shaped_piece(
+        &self,
+        text: &str,
+        font: &FontProps,
+        direction: crate::render::shape::RunDirection,
+    ) -> Option<(Pt, usize)> {
+        self.shaped_measurement(text, font, direction)
+            .map(|m| (m.advance, m.unit_count))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::render::fonts::Toggle;
     use std::rc::Rc;
+
+    /// §17.3.2.37: the strike line sits between the baseline and the top of
+    /// the glyphs — the opposite side from the underline. Structural over a
+    /// host face: no metric literal is pinned, only the two signs and the
+    /// ordering that puts each line where it belongs.
+    #[test]
+    fn strike_sits_above_the_baseline_and_underline_below() {
+        let registry = FontRegistry::new(skia_safe::FontMgr::new());
+        let measurer = TextMeasurer::new(&registry);
+        let fp = fp_at_scale(1.0);
+        let (_, metrics) = measurer.measure("x", &fp);
+        let (strike_pos, strike_thick) = measurer.strike_metrics(&fp);
+        let (under_pos, _) = measurer.underline_metrics(&fp);
+        assert!(
+            strike_pos > Pt::ZERO && strike_pos < metrics.ascent,
+            "strike position {strike_pos:?} must fall inside the ascent {:?}",
+            metrics.ascent,
+        );
+        assert!(strike_thick > Pt::ZERO);
+        // Both emit at `baseline − position`, so a larger stored value draws
+        // higher: the strike must land strictly above the underline.
+        assert!(
+            under_pos < strike_pos,
+            "underline (stored {under_pos:?}) must draw below the strike \
+             (stored {strike_pos:?})"
+        );
+    }
 
     fn fp_at_scale(scale: f32) -> FontProps {
         FontProps {
@@ -344,6 +439,10 @@ mod tests {
             text_scale: scale,
             underline_position: Pt::ZERO,
             underline_thickness: Pt::ZERO,
+            strike_lines: 0,
+            strike_position: Pt::ZERO,
+            strike_thickness: Pt::ZERO,
+            hyphenation: None,
         }
     }
 
